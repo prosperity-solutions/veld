@@ -945,7 +945,22 @@ Minimal by design. Main process only does:
 2. If the daemon isn't reachable, show a local retry page (embedded data URL —
    install/start instructions) and poll until it appears.
 3. macOS tray (template icon): shows running-run count, per-run stop/restart
-   later; click focuses the window.
+   later; click focuses the window. **Optional, and the switch is the daemon's**
+   — `desktop.menuBarIcon` (on) in the settings document every client shares, not
+   a preference of this shell's own, so it can be flipped from a browser tab or
+   `veld settings set`. The main process therefore re-reads it on the same 10s
+   tick that rebuilds the menu, and the renderer nudges it over
+   `veld:app:settings-changed` so a toggle in the dialog is not a ten-second
+   wait. The nudge carries **no value**: a page's copy of the document can be a
+   stale `localStorage` mirror, and acting on that would put back an icon the
+   daemon says is off — so the renderer says only *when*. That sync is
+   **serialised** (`src/trayVisibility.js`), because the tick and a nudge
+   overlapping across the read's own `await` both saw "no tray yet" and both
+   created one. A failed read keeps the last answer: only an explicit `false`
+   from a daemon that replied takes the icon away, so a daemon that is down or
+   older than the key cannot. Hiding it costs ambient status, not access — `window-all-closed`
+   keeps the app alive on macOS regardless of the tray, and the Dock icon is
+   still there to bring a window back.
 4. `contextIsolation: true`, `nodeIntegration: false`, preload exposing
    `veldDesktop.shell` metadata, `veldDesktop.window` (open, detach, snapshot,
    title, close, adopt) and `veldDesktop.browser` — the embedded browser panes

@@ -19,6 +19,7 @@ const {
 const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
+const { menuBarIconFrom, serialize } = require("./trayVisibility");
 const {
   focusPrimary,
   initWindows,
@@ -67,6 +68,7 @@ const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
 const REPOS_URL = `${BASE_URL}/api/repos`;
+const SETTINGS_URL = `${BASE_URL}/api/settings`;
 
 /**
  * Height of the UI's top bar in the Electron build (`.topbar.electron` in
@@ -90,7 +92,12 @@ const TRAFFIC_LIGHT_SIZE = 14;
 
 /** @type {Tray | null} */
 let tray = null;
-/** Set once the tray exists; the updater calls it when the skew notice changes. */
+/**
+ * Rebuilds the tray's menu; the updater calls it when the skew notice changes.
+ *
+ * Tracks the tray's lifecycle rather than being set once: `desktop.menuBarIcon`
+ * can be turned off, and `destroyTray` nulls this with the tray it belongs to.
+ */
 /** @type {(() => Promise<void>) | null} */
 let refreshTray = null;
 
@@ -473,13 +480,99 @@ function newWindowOrSayWhyNot() {
   });
 }
 
+/** How often the tray's menu is rebuilt — and `desktop.menuBarIcon` re-read. */
+const TRAY_TICK_MS = 10_000;
+
+/**
+ * Whether the menu-bar icon is wanted (`desktop.menuBarIcon`, on by default).
+ *
+ * Cached rather than read at the point of use, and that is the load-bearing part:
+ * a daemon that is down, starting, or older than the key must not make the icon
+ * *disappear*. Only a boolean `false` from a daemon that answered moves this off
+ * its default, so every failure mode keeps the icon the user already has.
+ */
+let menuBarIcon = true;
+
+/**
+ * Re-read `desktop.menuBarIcon` from the daemon.
+ *
+ * The shell polls rather than waiting to be told because the setting is one
+ * document shared by every client (`crates/veld-daemon/src/settings.rs`): it can
+ * be changed from a plain browser tab, or from `veld settings set`, with no window
+ * of this app open to forward it. The renderer's nudge
+ * (`veld:app:settings-changed`) is what makes the *common* case immediate; this
+ * is what makes it correct.
+ */
+async function readMenuBarIconSetting() {
+  try {
+    const res = await fetch(SETTINGS_URL, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return;
+    menuBarIcon = menuBarIconFrom(await res.json(), menuBarIcon);
+  } catch {
+    // Unreachable or older daemon — keep the last answer. See `menuBarIcon`.
+  }
+}
+
 function createTray() {
   tray = new Tray(trayIcon());
   tray.setToolTip("Veld");
-  refreshTray = async () => tray?.setContextMenu(await trayMenu());
+  // The global is re-read **after** the await, deliberately. `tray?.setContextMenu(
+  // await trayMenu())` reads as safe and is not: `tray` is evaluated before the
+  // argument, so the reference survives a `destroyTray()` that lands during the
+  // menu build — `trayMenu()` fetches /api/environments, up to 2s — and Electron
+  // throws on a destroyed Tray. Clearing `refreshTray` in `destroyTray` does not
+  // help an invocation already in flight.
+  refreshTray = async () => {
+    const menu = await trayMenu();
+    tray?.setContextMenu(menu);
+  };
   void refreshTray();
-  setInterval(() => void refreshTray?.(), 10_000);
 }
+
+/**
+ * Take the icon out of the menu bar.
+ *
+ * `refreshTray` is cleared with it because the updater calls it on every skew
+ * change: left pointing at a destroyed `Tray` it would throw from a code path
+ * whose whole job is to report a version mismatch. Every caller already spells it
+ * `refreshTray?.()`.
+ */
+function destroyTray() {
+  tray?.destroy();
+  tray = null;
+  refreshTray = null;
+}
+
+/**
+ * Bring the menu bar in line with `menuBarIcon` — the only place a `Tray` is
+ * created or destroyed, so "is there an icon" has one answer.
+ */
+async function applyMenuBarIcon() {
+  if (process.platform !== "darwin") return;
+  if (!menuBarIcon) {
+    destroyTray();
+    return;
+  }
+  // `createTray` builds the first menu itself, so this is not an else-branch that
+  // skips a refresh — it is the refresh, for a tray that already exists.
+  if (!tray) createTray();
+  else await refreshTray?.();
+}
+
+/**
+ * The 10s tick, and every nudge: what the setting says, then what the menu says.
+ *
+ * **Serialised**, because there is an `await` between the two halves and the two
+ * callers can overlap (the tick landing on a window's nudge, or two windows
+ * nudging at once). Two overlapping runs both saw `tray === null` and both called
+ * `createTray` — two icons in the menu bar, the first one orphaned beyond the
+ * reach of the variable that tracks it. `serialize` chains rather than coalesces,
+ * so a nudge is still always followed by a fresh read; see its docstring.
+ */
+const syncTray = serialize(async () => {
+  await readMenuBarIconSetting();
+  await applyMenuBarIcon();
+});
 
 /**
  * The application menu.
@@ -670,6 +763,18 @@ app.whenReady().then(async () => {
     permissionsFile: path.join(app.getPath("userData"), "permissions.json"),
   });
   registerWindowIpc(ipcMain);
+  // A renderer saw the settings document change. The tick below would converge on
+  // its own within ten seconds; this is what makes a toggle in the settings dialog
+  // land while the user is still looking at it.
+  //
+  // The nudge carries **no value** (see `settingsChanged` in `ui/src/shell.ts`):
+  // the document is the daemon's, a page's copy can be a stale `localStorage`
+  // mirror, and taking the page's word for it would put an icon back that the
+  // daemon says is off. So this re-reads, exactly like the tick.
+  ipcMain.handle("veld:app:settings-changed", async () => {
+    if (process.platform !== "darwin") return;
+    await syncTray();
+  });
   buildAppMenu();
   app.setAboutPanelOptions({
     applicationName: "Veld",
@@ -699,7 +804,14 @@ app.whenReady().then(async () => {
   // live shells, and reopening only the main window would leave them running,
   // unreachable, until the detach grace hangs them up.
   restoreWindows();
-  if (process.platform === "darwin") createTray();
+  if (process.platform === "darwin") {
+    // The icon now appears after one settings read rather than immediately, and
+    // that order is deliberate: creating it first would flash an icon in the menu
+    // bar of the very user who turned it off, then take it away. The read is a
+    // loopback GET capped at 2s, and it fails to "keep the icon".
+    void syncTray();
+    setInterval(() => void syncTray(), TRAY_TICK_MS);
+  }
   app.on("activate", () => {
     setQuitting(false);
     if (BrowserWindow.getAllWindows().length === 0) focusPrimary();

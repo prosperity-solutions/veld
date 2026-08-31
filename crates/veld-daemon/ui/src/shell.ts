@@ -348,6 +348,24 @@ export interface DesktopAppApi {
    * shell so the handler needs no other state. Returns its own unsubscribe.
    */
   onNotifyClick(fn: (p: { worktreeId: number; sessionId: string }) => void): () => void;
+  /**
+   * The settings document changed — re-read whatever you act on.
+   *
+   * Today that is `desktop.menuBarIcon`, which decides whether the shell keeps
+   * its macOS menu-bar icon; only the main process can create or destroy a
+   * `Tray`, so a page cannot do this for itself.
+   *
+   * **A nudge, deliberately carrying no value.** The document is the daemon's and
+   * the shell reads it directly — including on its own timer, for a change made
+   * from a browser tab with no window of the app open. Sending the value instead
+   * would make this page a second source of truth for it, and the page's own copy
+   * can be a stale `localStorage` mirror one frame before the daemon's answer
+   * arrives; the shell would then act on the stale one. So this only says *when*.
+   *
+   * Optional: an older shell has no such channel and simply converges on its next
+   * poll.
+   */
+  settingsChanged?(): Promise<void>;
 }
 
 export const desktopApp: DesktopAppApi | null =
