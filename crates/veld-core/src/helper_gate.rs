@@ -5,8 +5,12 @@
 //! two crates must agree. The helper *decides* the gate at startup; `veld
 //! doctor` *reports* it from the helper's `status` response, and the wire values
 //! it matches on are [`GateSource::as_str`]. One definition, parsed back with
-//! [`GateSource::from_wire`], so the CLI's rendering is a compiler-checked match
-//! over the same enum rather than a second list of strings to drift from.
+//! [`GateSource::from_wire`], so the CLI renders by matching this enum rather
+//! than a second list of strings to drift from — and every one of those matches
+//! (`as_str` here, `gate_source_label` and `ungated_reason` in `veld doctor`) is
+//! deliberately wildcard-free, so a new variant fails to build until each side
+//! has said what to do with it. The field *names* are constants below for the
+//! same reason; the values alone were not the whole contract.
 
 use std::path::Path;
 
@@ -51,6 +55,11 @@ pub enum GateSource {
     UnreadableLibDir,
     /// Not the privileged system daemon. Its `0o700` owner-only socket is the
     /// restriction; there is nothing for a peer gate to add.
+    ///
+    /// Benign where it belongs — on the user helper — but an **anomaly** coming
+    /// back over the *system* socket, which is the only place `veld doctor`
+    /// reads it: a helper answering there while believing itself unprivileged
+    /// was given a `--socket-path` that does not match what setup writes.
     Unprivileged,
 }
 
@@ -66,19 +75,28 @@ impl GateSource {
         }
     }
 
+    /// Every variant, so [`Self::from_wire`] and the round-trip test share one
+    /// list instead of two.
+    ///
+    /// The one thing here a compiler cannot check: adding a variant and
+    /// forgetting this array. `as_str` and both of `veld doctor`'s rendering
+    /// functions are wildcard-free and *will* fail to build, so the omission
+    /// cannot escape a `cargo build` — but if it somehow did, the effect is the
+    /// designed degrade path (an unrecognised source reads as unknown), never a
+    /// wrong claim.
+    pub const ALL: [GateSource; 5] = [
+        GateSource::Flag,
+        GateSource::LibDirOwner,
+        GateSource::RefusedRootLibDir,
+        GateSource::UnreadableLibDir,
+        GateSource::Unprivileged,
+    ];
+
     /// Parse a wire value back. `None` for a value this build does not know —
     /// a helper newer than the CLI reading it, which must degrade to a vaguer
     /// message rather than to a wrong one.
     pub fn from_wire(value: &str) -> Option<Self> {
-        [
-            GateSource::Flag,
-            GateSource::LibDirOwner,
-            GateSource::RefusedRootLibDir,
-            GateSource::UnreadableLibDir,
-            GateSource::Unprivileged,
-        ]
-        .into_iter()
-        .find(|s| s.as_str() == value)
+        Self::ALL.into_iter().find(|s| s.as_str() == value)
     }
 }
 
@@ -276,6 +294,9 @@ mod tests {
     /// matching. Round-tripping every variant is what catches that.
     #[test]
     fn every_gate_source_round_trips_through_the_wire() {
+        // Driven off `ALL`, so a variant missing from it fails here rather than
+        // in a caller — and the literal pairs still pin the exact bytes, which
+        // is what `veld doctor` actually matches on.
         for (source, wire) in [
             (GateSource::Flag, "flag"),
             (GateSource::LibDirOwner, "lib-dir-owner"),
@@ -285,6 +306,14 @@ mod tests {
         ] {
             assert_eq!(source.as_str(), wire);
             assert_eq!(GateSource::from_wire(wire), Some(source));
+            assert!(GateSource::ALL.contains(&source));
+        }
+        for source in GateSource::ALL {
+            assert_eq!(
+                GateSource::from_wire(source.as_str()),
+                Some(source),
+                "{source:?} is in ALL but does not round-trip"
+            );
         }
         // A helper newer than this build is "unknown", never a wrong match.
         assert_eq!(GateSource::from_wire("invented-later"), None);

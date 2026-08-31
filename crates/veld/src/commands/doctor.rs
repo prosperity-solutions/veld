@@ -543,7 +543,7 @@ impl Diagnostics {
             // (every other uid is refused before it can ask), which is exactly
             // when it is worth saying: `sudo veld doctor` is where somebody
             // investigating a locked-out CLI ends up.
-            Some(uid) if invoking_uid().is_some_and(|me| me != 0 && me != uid) => Check {
+            Some(uid) if gate_locks_out(uid, invoking_uid()) => Check {
                 pass: false,
                 label: format!(
                     "Helper socket gated to uid {uid}, but you are uid {} — your `veld` commands \
@@ -1556,10 +1556,31 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
     match source {
         Some(GateSource::Flag) => "from the service definition",
         Some(GateSource::LibDirOwner) => "derived from the install directory's owner",
-        // The other variants cannot accompany a uid, and `None` is a helper
-        // newer than this CLI. Say nothing rather than guess.
-        _ => "source unknown",
+        // Spelled out rather than a `_` arm, so a new `GateSource` fails to
+        // build here until somebody decides how a gated helper reporting it
+        // should read. The three below cannot accompany a uid, and `None` is a
+        // source only a newer helper knows — both say nothing rather than guess.
+        Some(
+            GateSource::RefusedRootLibDir | GateSource::UnreadableLibDir | GateSource::Unprivileged,
+        )
+        | None => "source unknown",
     }
+}
+
+/// Whether a helper gated to `reported` locks out the user running this CLI.
+///
+/// A free function with its own test because the `invoking == Some(0)` escape is
+/// the part somebody will "simplify". A **plain root shell** answers 0 here and
+/// is not a claim about which user the install belongs to — root is admitted by
+/// every gate anyway (`peer_allowed`), so treating 0 as a uid to match against
+/// would have bare `sudo veld doctor` report itself locked out of a perfectly
+/// healthy helper. `SUDO_UID` is what lets a root invocation know who it stands
+/// in for, and [`invoking_uid`] prefers it.
+///
+/// A `reported` of 0 is not this function's business — it fails the row on its
+/// own, before this is reached.
+fn gate_locks_out(reported: u64, invoking: Option<u64>) -> bool {
+    invoking.is_some_and(|me| me != 0 && me != reported)
 }
 
 /// Why an *ungated* privileged helper has no uid, and what to do about it.
@@ -2469,6 +2490,31 @@ mod tests {
     /// can actually run. A red row with no exit is a row people learn to skip —
     /// and this particular row is the only place an exposed root socket shows up
     /// at all.
+    /// The uid-match rule, isolated from the socket call so the `root` escape
+    /// cannot be "simplified" away without a red test.
+    ///
+    /// Dropping `me != 0` is the natural edit — the guard looks redundant — and
+    /// it silently makes bare `sudo veld doctor` (uid 0, no `SUDO_UID`) accuse a
+    /// perfectly healthy helper of locking the user out.
+    #[test]
+    fn a_gate_only_locks_out_a_user_it_could_actually_refuse() {
+        use super::gate_locks_out;
+
+        // The ordinary healthy case.
+        assert!(!gate_locks_out(501, Some(501)));
+
+        // A real mismatch. Only ever visible to root, because every other uid is
+        // refused before it can ask — which is exactly why the row matters.
+        assert!(gate_locks_out(999, Some(501)));
+
+        // A plain root shell has no opinion about which user the install belongs
+        // to, and root is admitted by every gate. Not a lockout.
+        assert!(!gate_locks_out(501, Some(0)));
+
+        // Uid unresolvable — say nothing rather than accuse.
+        assert!(!gate_locks_out(501, None));
+    }
+
     #[test]
     fn every_ungated_state_names_a_remedy() {
         use super::{GateSource, gate_source_label, ungated_reason, unreportable_gate_reason};
