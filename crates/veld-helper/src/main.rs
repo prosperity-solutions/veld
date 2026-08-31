@@ -480,18 +480,23 @@ fn peer_uid_fd(fd: i32) -> Option<u32> {
 async fn reject_connection(stream: tokio::net::UnixStream) {
     use tokio::io::AsyncWriteExt;
     let mut stream = stream;
-    let _ = stream
-        .write_all(
-            format!(
-                "{}\n",
-                serde_json::json!({
-                    "ok": false,
-                    "error": veld_core::helper_gate::REJECTED_PEER_ERROR,
-                })
-            )
-            .as_bytes(),
-        )
-        .await;
+    let _ = stream.write_all(rejection_bytes().as_bytes()).await;
+}
+
+/// The exact bytes [`reject_connection`] writes.
+///
+/// Built from [`crate::protocol::Response`] rather than a hand-written literal
+/// so the shared [`veld_core::helper_gate::REJECTED_PEER_ERROR`] is escaped by
+/// the same serializer as every other reply — and so the field order stays the
+/// one a struct gives (`ok` then `error`), which a `serde_json::json!` map would
+/// have sorted alphabetically instead. Separate from the writer so a test can
+/// read it without a socket.
+fn rejection_bytes() -> String {
+    let response = protocol::Response::err(veld_core::helper_gate::REJECTED_PEER_ERROR);
+    format!(
+        "{}\n",
+        serde_json::to_string(&response).expect("response serialization cannot fail")
+    )
 }
 
 /// Poll the helper's own executable; when its size/mtime changes and settles,
@@ -752,6 +757,24 @@ mod tests {
         assert!(!peer_allowed(502, INSTALLING));
         // A root helper whose --allow-uid is root-only still allows root.
         assert!(peer_allowed(0, 0));
+    }
+
+    /// The refusal a gated socket writes back is a wire contract in two
+    /// directions: `veld doctor` matches its text to say "the gate refused you"
+    /// rather than "helper down", and it must stay the shape every other reply
+    /// has. Pinned to the exact bytes `origin/main` sent, since a client reading
+    /// it is by definition one the helper cannot negotiate with.
+    #[test]
+    fn a_refused_peer_gets_the_same_bytes_it_always_did() {
+        assert_eq!(
+            super::rejection_bytes(),
+            "{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n"
+        );
+        // And the text `veld doctor` keys off is really in there.
+        assert!(
+            super::rejection_bytes().contains(veld_core::helper_gate::REJECTED_PEER_ERROR),
+            "doctor's refusal detection matches on this string"
+        );
     }
 
     /// `is_system_socket` is the switch deciding whether a root helper gates its
