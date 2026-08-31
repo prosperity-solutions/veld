@@ -1534,9 +1534,21 @@ fn gate_source_label(source: Option<GateSource>) -> &'static str {
 ///   prevent, arriving through the more likely door.
 fn gate_report_for_error(error: &veld_core::helper::HelperError) -> Option<GateReport> {
     match error {
-        veld_core::helper::HelperError::ConnectionFailed { source, .. } => {
-            (source.kind() == std::io::ErrorKind::TimedOut).then_some(GateReport::Unreadable)
-        }
+        veld_core::helper::HelperError::ConnectionFailed { source, .. } => match source.kind() {
+            // The only two kinds that actually mean "nothing is listening".
+            // Named explicitly, rather than treating silence as the default and
+            // listing the exceptions: every bug this row has had came from a
+            // state falling into "say nothing", so the fall-through must be the
+            // safe direction. A `PermissionDenied`, say, means something is
+            // there and we could not reach it — a row, not silence.
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => None,
+            _ => Some(GateReport::Unreadable),
+        },
+        // Every other variant reached a helper that answered: `SendFailed` /
+        // `ReadFailed` (the refusal without its message, above), `ParseError` (a
+        // reply this build cannot parse), and a `CommandError` that is not the
+        // refusal (an older helper answering "unknown command"). All of them are
+        // the same fact — a helper answered, the gate could not be read.
         _ => Some(GateReport::Unreadable),
     }
 }
@@ -2789,6 +2801,29 @@ mod tests {
             gate_report_for_error(&HelperError::CommandError("unknown command".into())),
             Some(GateReport::Unreadable)
         ));
+        assert!(matches!(
+            gate_report_for_error(&HelperError::ParseError(
+                serde_json::from_str::<serde_json::Value>("{").unwrap_err()
+            )),
+            Some(GateReport::Unreadable)
+        ));
+
+        // Any OTHER connect failure reached something. Silence is reserved for
+        // the two kinds above, so a kind nobody anticipated errs toward saying
+        // so — the direction every earlier bug in this row got backwards.
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::WouldBlock,
+            ErrorKind::AddrInUse,
+        ] {
+            assert!(
+                matches!(
+                    gate_report_for_error(&connection_failed(kind)),
+                    Some(GateReport::Unreadable)
+                ),
+                "{kind:?} must not be mistaken for an absent helper"
+            );
+        }
     }
 
     /// No failing gate row may hand a reader a remedy without saying it might
