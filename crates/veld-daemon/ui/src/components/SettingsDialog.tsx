@@ -1240,6 +1240,22 @@ const HARDWARE_GATES: Record<string, (m: Machine) => boolean> = {
   "keepAwake.sharingOnBattery": (m) => m.hasBattery,
   "keepAwake.sharingOnBatteryMinutes": (m) => m.hasBattery,
   "keepAwake.manualOnBattery": (m) => m.hasBattery && m.platform === "macos",
+  // The menu bar is macOS's. On Windows and Linux the shell creates no tray at
+  // all (`desktop/src/main.js` gates on `process.platform === "darwin"`), so the
+  // question has nowhere to land — the case above this comment's rule.
+  //
+  // Gated on the **machine**, not on whether this client is the app: a macOS
+  // browser tab has no menu bar of its own either, but it is configuring the same
+  // machine's Veld Desktop, and hiding the row there would leave the setting
+  // reachable only from the app whose icon it removes. The help text already says
+  // only the desktop app reads it.
+  //
+  // `null` — the probe has not answered yet, or failed — **shows** the row, which
+  // is why this is not spelled `m.platform === "macos"`. That is the same
+  // direction `hasBattery`'s `?? true` fallback takes below: unknown must not hide
+  // a control, or a macOS user whose one `/api/caffeinate` request failed loses
+  // the setting entirely, and every open flickers the row in as the probe lands.
+  "desktop.menuBarIcon": (m) => m.platform === null || m.platform === "macos",
 };
 
 /**

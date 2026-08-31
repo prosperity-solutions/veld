@@ -81,3 +81,34 @@ test("a rejection does not stop later calls", async () => {
   await assert.doesNotReject(() => Promise.all([run(1), run(2)]));
   assert.deepEqual(seen, [2]);
 });
+
+/**
+ * The shape `main.js`'s `refreshTray` must have, pinned here because the wrong
+ * one reads as correct.
+ *
+ * `tray?.setContextMenu(await trayMenu())` evaluates `tray` **before** the
+ * argument, so the reference outlives a `destroyTray()` landing during the menu
+ * build and Electron throws on the destroyed Tray. Reading the global after the
+ * await is what makes the destroy win. This test is the executable statement of
+ * that difference — it does not import `main.js` (it cannot, outside Electron).
+ */
+test("a destroyed tray must not be called after the menu resolves", async () => {
+  const buildMenu = () => new Promise((resolve) => setTimeout(() => resolve("menu"), 5));
+
+  // The wrong shape, for contrast: the reference is captured up front.
+  let tray = { setContextMenu: () => "called" };
+  const wrong = async () => tray?.setContextMenu(await buildMenu());
+  const wrongRun = wrong();
+  tray = null;
+  assert.equal(await wrongRun, "called", "captured-before-await is the trap being avoided");
+
+  // The shape main.js uses: the global is re-read once the menu is ready.
+  tray = { setContextMenu: () => "called" };
+  const right = async () => {
+    const menu = await buildMenu();
+    return tray?.setContextMenu(menu);
+  };
+  const rightRun = right();
+  tray = null;
+  assert.equal(await rightRun, undefined, "a destroyed tray was still called");
+});

@@ -92,7 +92,12 @@ const TRAFFIC_LIGHT_SIZE = 14;
 
 /** @type {Tray | null} */
 let tray = null;
-/** Set once the tray exists; the updater calls it when the skew notice changes. */
+/**
+ * Rebuilds the tray's menu; the updater calls it when the skew notice changes.
+ *
+ * Tracks the tray's lifecycle rather than being set once: `desktop.menuBarIcon`
+ * can be turned off, and `destroyTray` nulls this with the tray it belongs to.
+ */
 /** @type {(() => Promise<void>) | null} */
 let refreshTray = null;
 
@@ -511,7 +516,16 @@ async function readMenuBarIconSetting() {
 function createTray() {
   tray = new Tray(trayIcon());
   tray.setToolTip("Veld");
-  refreshTray = async () => tray?.setContextMenu(await trayMenu());
+  // The global is re-read **after** the await, deliberately. `tray?.setContextMenu(
+  // await trayMenu())` reads as safe and is not: `tray` is evaluated before the
+  // argument, so the reference survives a `destroyTray()` that lands during the
+  // menu build — `trayMenu()` fetches /api/environments, up to 2s — and Electron
+  // throws on a destroyed Tray. Clearing `refreshTray` in `destroyTray` does not
+  // help an invocation already in flight.
+  refreshTray = async () => {
+    const menu = await trayMenu();
+    tray?.setContextMenu(menu);
+  };
   void refreshTray();
 }
 
