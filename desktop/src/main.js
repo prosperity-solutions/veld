@@ -19,6 +19,7 @@ const {
 const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
+const { menuBarIconFrom, serialize } = require("./trayVisibility");
 const {
   focusPrimary,
   initWindows,
@@ -493,17 +494,15 @@ let menuBarIcon = true;
  * The shell polls rather than waiting to be told because the setting is one
  * document shared by every client (`crates/veld-daemon/src/settings.rs`): it can
  * be changed from a plain browser tab, or from `veld settings set`, with no window
- * of this app open to forward it. The renderer's push
- * (`veld:app:menu-bar-icon`) is what makes the *common* case immediate; this is
- * what makes it correct.
+ * of this app open to forward it. The renderer's nudge
+ * (`veld:app:settings-changed`) is what makes the *common* case immediate; this
+ * is what makes it correct.
  */
 async function readMenuBarIconSetting() {
   try {
     const res = await fetch(SETTINGS_URL, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return;
-    const data = await res.json();
-    const value = data?.settings?.["desktop.menuBarIcon"];
-    if (typeof value === "boolean") menuBarIcon = value;
+    menuBarIcon = menuBarIconFrom(await res.json(), menuBarIcon);
   } catch {
     // Unreachable or older daemon — keep the last answer. See `menuBarIcon`.
   }
@@ -546,11 +545,20 @@ async function applyMenuBarIcon() {
   else await refreshTray?.();
 }
 
-/** The 10s tick: what the setting says, then what the menu says. */
-async function syncTray() {
+/**
+ * The 10s tick, and every nudge: what the setting says, then what the menu says.
+ *
+ * **Serialised**, because there is an `await` between the two halves and the two
+ * callers can overlap (the tick landing on a window's nudge, or two windows
+ * nudging at once). Two overlapping runs both saw `tray === null` and both called
+ * `createTray` — two icons in the menu bar, the first one orphaned beyond the
+ * reach of the variable that tracks it. `serialize` chains rather than coalesces,
+ * so a nudge is still always followed by a fresh read; see its docstring.
+ */
+const syncTray = serialize(async () => {
   await readMenuBarIconSetting();
   await applyMenuBarIcon();
-}
+});
 
 /**
  * The application menu.
