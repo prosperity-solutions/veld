@@ -188,6 +188,129 @@ jobs:
         run: |
           chmod +x tests/validate-topbar-height.sh
           ./tests/validate-topbar-height.sh
+      # The macOS half of the signing smoke test (issue #339) has exactly one
+      # executing home: the `signing-smoke` job. Its ad-hoc-resign case is
+      # `#[cfg(target_os = "macos")]`, and `signing-smoke` is the only job in
+      # this workflow that runs `cargo test` on macOS — `integration`,
+      # `injection-test` and `release-build`'s darwin legs are Rust jobs on
+      # macOS too, but they build and run the CLI rather than the test suite.
+      # So deleting or renaming `signing-smoke` leaves CI fully green with zero
+      # coverage of the ordering install.sh's re-sign depends on — a silent
+      # reopening of the exact gap this issue closed. Nothing else notices:
+      # `validate-workflow-gates.py` reads jobs only to check their draft guard,
+      # never that a given job exists.
+      # Structural rather than grep: `grep runs-on: macos-latest` over the whole
+      # file passes on `integration` and `injection-test` too, so it would stay
+      # green with `signing-smoke` deleted — a gate that cannot fail.
+      - name: The macOS signing smoke job still exists
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys, yaml
+          ci = yaml.safe_load(open(".github/workflows/ci.yml"))
+          job = ci["jobs"].get("signing-smoke")
+          if job is None:
+              sys.exit("ci.yml: the `signing-smoke` job is gone; the macOS "
+                       "ad-hoc-resign test has no other executing home (issue #339)")
+          if job.get("runs-on") != "macos-latest":
+              sys.exit(f"ci.yml: signing-smoke runs on {job.get('runs-on')!r}; the "
+                       "test it exists for is #[cfg(target_os = \"macos\")]")
+          runs = " ".join(str(s.get("run", "")) for s in job["steps"])
+          if "cargo test -p veld-sign" not in runs:
+              sys.exit("ci.yml: signing-smoke no longer runs `cargo test -p veld-sign`")
+          smoke = open("crates/veld-sign/tests/smoke.rs").read()
+          if "fn adhoc_resign_after_ed25519_signing_is_byte_idempotent" not in smoke:
+              sys.exit("crates/veld-sign/tests/smoke.rs: the ad-hoc resign "
+                       "idempotency test is gone; install.sh's re-sign assumption "
+                       "would be unverified again (issue #339)")
+          # A name-only check would still pass with the case marked `#[ignore]`,
+          # which is the normal reaction to a flake and leaves the ordering
+          # unexercised with every check green.
+          if "#[ignore]" in smoke:
+              sys.exit("crates/veld-sign/tests/smoke.rs: an #[ignore] here means a "
+                       "signing case silently stops running; delete the test or fix "
+                       "it rather than skipping it (issue #339)")
+
+          # No job that a pull request can start may reach the org signing
+          # secret. Checking every workflow, and checking the *guard* rather than
+          # the filename, because release.yml is itself `pull_request`-triggered
+          # (it previews the next version on a PR) — the only thing keeping the
+          # key off those runs is the `push`-only `if:` on its `build` job, and
+          # exempting the file by name would leave exactly that guard unchecked.
+          #
+          # Walking the parsed YAML rather than grepping means the comments above
+          # — which do name the secret — are already gone, and dict keys are
+          # walked too, so naming it as a bare `env:` key is caught as well.
+          # Two forms never spell the name and so must be refused by shape: a
+          # bulk reference to the whole secrets context, and a dynamic index into
+          # it. Neither has a legitimate use here.
+          #
+          # All three needles are assembled at runtime so this check cannot match
+          # itself: its own `run:` block is a string in the very documents it
+          # walks. (Writing them literally made the gate fail on a clean tree —
+          # once per needle.)
+          secret = "SIGNING_" + "PRIVATE_KEY"
+          bulk_ref = "toJSON(" + "secrets)"
+          dynamic_ref = "secrets" + "["
+          def strings(node):
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      yield from strings(k)
+                      yield from strings(v)
+              elif isinstance(node, list):
+                  for v in node:
+                      yield from strings(v)
+              elif isinstance(node, str):
+                  yield node
+          def uses_secret(node):
+              for s in strings(node):
+                  packed = s.replace(" ", "")
+                  if secret in s:
+                      return secret
+                  if bulk_ref in packed:
+                      return "the whole secrets context"
+                  if dynamic_ref in packed:
+                      return "a dynamic index into the secrets context"
+              return None
+          # `on:` parses as the boolean True under YAML 1.1, so accept both keys.
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              doc = yaml.safe_load(path.read_text())
+              triggers = doc.get("on", doc.get(True)) or {}
+              if isinstance(triggers, str):
+                  triggers = {triggers: None}
+              if isinstance(triggers, list):
+                  triggers = dict.fromkeys(triggers)
+              # `workflow_call` counts as PR-reachable: a reusable workflow
+              # never carries `pull_request` in its own `on:`, but a caller that
+              # does can invoke it, so judging it by its own triggers alone is a
+              # blind spot rather than an exemption.
+              pr_triggered = any(
+                  t in triggers
+                  for t in ("pull_request", "pull_request_target", "workflow_call")
+              )
+              for job_name, job in (doc.get("jobs") or {}).items():
+                  what = uses_secret(job)
+                  # `secrets: inherit` hands the callee every secret this repo
+                  # has without naming one, so it reaches the signing key just
+                  # as surely as spelling it out.
+                  if what is None and str(job.get("secrets", "")).strip() == "inherit":
+                      what = "every secret, via `secrets: inherit`"
+                  if what is None:
+                      continue
+                  # Quote style is not meaning: `== 'push'` and `== "push"` are
+                  # the same guard, and matching only one spelling would fail a
+                  # legitimate reformat of release.yml.
+                  guard = str(job.get("if", "")).replace(" ", "").replace('"', "'")
+                  push_only = "github.event_name=='push'" in guard
+                  if pr_triggered and not push_only:
+                      sys.exit(
+                          f"{path}: job {job_name!r} references {what}, but a "
+                          "pull request can start that workflow and the job is "
+                          "not guarded `github.event_name == 'push'`. The signing "
+                          "key must never be reachable from a PR run (issue #339)"
+                      )
+          print("signing-smoke intact")
+          PY
+
       # `install.sh` is the largest program in this repo that nothing checked.
       # It is what `curl | bash` runs, what `veld update` runs, and now what
       # Veld Desktop's own updater ends up in — and until this step it was
@@ -1091,3 +1214,45 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
 
+
+  # ── Helper signing smoke test (issue #339) ────────────────────────
+  #
+  # `release.yml`'s `Package client binaries` step is the only place `veld-sign`
+  # and the macOS ad-hoc-then-ed25519 ordering ever run — and it runs only on a
+  # tagged release, so the first execution of a change to that path used to be
+  # the release itself. v16.58.1 failed there because the `SIGNING_PRIVATE_KEY`
+  # secret held a PEM of the wrong kind, and nothing before the release could
+  # have said so. `release-build` above compiles the workspace; it never
+  # packages, which is the same gap that hid the `veld-sign` cross-compile bug
+  # found in #253's review.
+  #
+  # Linux coverage is already free: `check` runs `cargo test --workspace` on
+  # ubuntu, which includes `crates/veld-sign/tests/smoke.rs`. This job exists
+  # for the macOS half — `codesign` is what install.sh's re-sign idempotency
+  # rests on, and nothing else in CI can exercise it.
+  #
+  # The test generates a throwaway ed25519 key per run from /dev/urandom and
+  # hands it over as `VELD_SIGN_SMOKE_KEY`. `SIGNING_PRIVATE_KEY` is never
+  # referenced here, so the org key stays out of PR-triggered jobs entirely.
+  #
+  # What this still does NOT cover, so nobody reads the job name as more than it
+  # is. Both are in `Package client binaries` and both first run at a release:
+  #
+  #   * The `macos-amd64` leg ad-hoc signs a **cross-compiled** `x86_64-apple-darwin`
+  #     binary on an arm64 runner. The idempotency test signs a host-native
+  #     Mach-O, so the cross-arch case is unexercised.
+  #   * Nothing asserts `veld-helper.sig` actually lands in the tarball that
+  #     `tar -czf ... -C dist .` produces.
+  signing-smoke:
+    permissions:
+      contents: read
+    name: Helper Signing Smoke (macOS)
+    runs-on: macos-latest
+    needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
+      - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
+      - name: Sign a dummy binary end to end
+        run: cargo test -p veld-sign
