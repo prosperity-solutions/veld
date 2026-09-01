@@ -63,24 +63,28 @@ fn find_and_query_version(binary_name: &str) -> VersionResult {
 
 /// Build list of candidate paths for a binary.
 ///
-/// The privileged helper's root-owned directory comes **first** (#262). On a
-/// migrated install that is the only copy: the inert one in the lib dir is
-/// deleted once the real one is in the store, so without this entry
-/// `find_and_query_version("veld-helper")` answers `NotFound`, `veld version`
-/// prints "assumed", and [`check_version_mismatch`] can never report the helper
-/// again — silently switching off skew detection for the one binary in the
-/// install that runs as root and is hardest to update.
-///
-/// Harmless for every other binary and for unprivileged installs: the path
-/// simply does not exist and the next candidate is tried.
+/// The privileged helper's root-owned directory comes **first** (#262), because
+/// on a migrated install that is the copy the service actually runs. The lib-dir
+/// copy is left in place (see `helper_install`), but it is the one an update
+/// stops advancing — so reading it here would report a version that drifts
+/// further from the truth with every release, and `check_version_mismatch` would
+/// warn about a binary nothing runs.
 fn binary_candidates(binary_name: &str) -> Vec<String> {
     let mut paths = Vec::new();
-    paths.push(
-        veld_core::paths::privileged_helper_dir()
-            .join(binary_name)
-            .to_string_lossy()
-            .into_owned(),
-    );
+    // **Privileged installs only.** A machine that was once privileged and is
+    // now unprivileged still has the root-owned store on disk, and an
+    // unconditional candidate would have `veld version` report that stale root
+    // helper as this install's — which nothing updates any more, so
+    // `check_version_mismatch` would print a permanent, false skew warning after
+    // every update.
+    if crate::commands::read_setup_mode().as_deref() == Some("privileged") {
+        paths.push(
+            veld_core::paths::privileged_helper_dir()
+                .join(binary_name)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
     if let Some(home) = dirs::home_dir() {
         paths.push(
             home.join(".local")

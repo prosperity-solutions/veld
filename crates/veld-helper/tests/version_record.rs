@@ -49,10 +49,12 @@ fn a_built_helper_carries_exactly_one_version_record() {
 /// beyond the record itself.
 ///
 /// A helper is both scanner and scanned: it links `version_in_signed_bytes`, and
-/// it is the thing a *newer* helper will scan. If the two 8-byte halves ever end
-/// up contiguous outside the record — an inline literal, or a linker that placed
-/// them next to each other — the second hit's version field is whatever follows
-/// in rodata, and the install path stops working with nothing else failing.
+/// it is the thing a *newer* helper will scan. The magic is therefore stored
+/// XOR-obfuscated (`VERSION_MAGIC_OBFUSCATED` ^ `VERSION_MAGIC_KEY`) so the
+/// plaintext exists only inside a record. If it ever appears verbatim in the
+/// binary — an inline literal, or a constant somebody de-obfuscated for
+/// readability — the second hit's version field is whatever follows in rodata,
+/// and the install path stops working with nothing else failing.
 #[test]
 fn the_scanners_own_needle_is_not_a_second_record() {
     let bytes = std::fs::read(env!("CARGO_BIN_EXE_veld-helper")).unwrap();

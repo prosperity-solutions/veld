@@ -188,7 +188,10 @@ impl State {
     /// 2. **Not signed by the org.** The verification from #261, over bytes read
     ///    once — see `veld_core::helper_store` for why "once" is the whole
     ///    property and not an optimisation.
-    /// 3. **Older than the helper already running.** The caller *is* the
+    /// 3. **Older than the newer of the running and the installed helper.**
+    ///    Flooring on the running version alone is not enough, because
+    ///    installing does not restart: see `veld_core::helper_store::rollback_floor`.
+    ///    The caller *is* the
     ///    installing user, whom #253's uid gate admits by design, so they can
     ///    reach this command directly and hand it a past release with a known
     ///    vulnerability. It would verify: a signature says the org built a

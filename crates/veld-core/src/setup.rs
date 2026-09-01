@@ -3213,6 +3213,23 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     if candidate.exists() {
         return Ok(candidate);
     }
+    // The root-owned store (#262), **after** the two above and only when it
+    // holds a properly signed helper.
+    //
+    // Last rather than first, deliberately: `veld setup privileged` must still
+    // install a *newer* lib-dir binary over the store, which is exactly what an
+    // update leaves behind, so preferring the store would pin the machine on
+    // whatever it already had. This arm is for the case where there is nothing
+    // else — a machine whose lib-dir copy was removed by hand, or an
+    // auto-bootstrap on a migrated install — where the alternative is the bare
+    // `"veld-helper"` below, which produces a service definition launchd cannot
+    // exec.
+    if name == "veld-helper" {
+        let store = crate::paths::privileged_helper_bin();
+        if crate::signing::verify_binary_signed(&store) {
+            return Ok(store);
+        }
+    }
     // Fall back to PATH lookup.
     Ok(PathBuf::from(name))
 }

@@ -12,8 +12,8 @@
 //! Rather than reach for `sudo` — which #338's rule 1 forbids, because a security
 //! fix behind a password prompt reaches almost nobody — the installer downloads to
 //! a path it *can* write and asks the **already-root** helper to install it. The
-//! helper verifies the org signature and refuses anything older than itself before
-//! the bytes move, so the fact that the caller is untrusted costs nothing: all the
+//! helper verifies the org signature and refuses anything older than the newer of
+//! the running and the installed helper, before the bytes move, so the fact that the caller is untrusted costs nothing: all the
 //! caller supplies is a filename.
 //!
 //! # Silent on every path that is not this one
@@ -91,7 +91,6 @@ pub async fn run(binary: PathBuf) -> i32 {
                 "veld-helper {version} installed into {}",
                 veld_core::paths::privileged_helper_dir().display()
             ));
-            remove_stale_lib_dir_helper();
             0
         }
         Err(e) => {
@@ -141,40 +140,27 @@ fn sudo_user_home() -> Option<std::path::PathBuf> {
     }))
 }
 
-/// Delete the helper left in the user-writable lib dir.
+/// Why the now-inert copy in the user-writable lib dir is **left alone**.
 ///
-/// `install.sh` still copies it there — it copies the whole tarball's payload
-/// and does not know which install shape it is on — and on a migrated machine
-/// that copy is inert: nothing execs it, the plist names the store and the binary
-/// watcher watches the store. What it *is* is the findable target #262 set out to
-/// remove ("a root auto-restarting binary in a user directory" is exactly what an
-/// attacker or a coding agent greps for), plus a second file that will drift out
-/// of step with the real one and confuse the next person to look.
+/// It is tempting to delete it — #262 lists "a root auto-restarting binary in a
+/// user directory is exactly what an attacker greps for" as its third gap, and
+/// after migration that copy is executed by nothing: the service names the
+/// store, and the binary watcher watches the store.
 ///
-/// Deliberately **after** a successful install and not before: until the store
-/// has the new binary, the lib-dir copy is still what a not-yet-migrated helper
-/// would relaunch onto, and deleting it early would leave launchd with a path
-/// that has nothing at it.
+/// It stays because deleting it bricks a repair this diff cannot reach.
+/// `setup::which_self` looks in the lib dir, then beside the CLI, then returns a
+/// bare `"veld-helper"`. **Every already-shipped CLI has that behaviour and
+/// cannot be changed.** So an older `veld` — a second copy in `/usr/local/bin`,
+/// one left by a pinned downgrade — running `sudo veld setup privileged` on a
+/// machine where the lib-dir copy had been removed would boot out the working
+/// root job and write `<string>veld-helper</string>` into the plist: a service
+/// launchd cannot exec, with no binary left on disk for a retry to find, and no
+/// unprivileged way back.
 ///
-/// Best-effort and silent. Failing to remove a file nothing runs is not worth
-/// failing an update over.
-fn remove_stale_lib_dir_helper() {
-    // Resolved for the same user `setup_mode` resolved the mode for.
-    // `paths::lib_dir()` reads `$HOME`, which under `sudo` is root's — so on a
-    // sudo-run install the mode would be found via `SUDO_USER` and the install
-    // would proceed, while this looked in `/root/.local/lib/veld` and left the
-    // real user's copy exactly where it was. The two halves have to agree about
-    // whose install this is.
-    let lib = match sudo_user_home() {
-        Some(home) if !veld_core::paths::lib_dir().starts_with(&home) => {
-            home.join(".local").join("lib").join("veld")
-        }
-        _ => veld_core::paths::lib_dir(),
-    };
-    let stale = lib.join("veld-helper");
-    if veld_core::paths::is_privileged_helper_path(&stale) {
-        return;
-    }
-    let _ = std::fs::remove_file(veld_core::signing::sig_path_for(&stale));
-    let _ = std::fs::remove_file(&stale);
-}
+/// The gap that remains is cosmetic rather than exploitable. Gap 3 is about a
+/// binary that gets *executed as root*; once the service definition names the
+/// store, this file is a stale copy and nothing more. Trading a real bricking
+/// path for that is the wrong way round, and #338's rule 2 says so.
+///
+/// Revisit once no supported CLI predates `fallback_helper_path`.
+const _WHY_THE_LIB_DIR_COPY_STAYS: () = ();

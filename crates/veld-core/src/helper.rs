@@ -125,7 +125,8 @@ pub const RELEASE_SLEEP_DISABLED: &str = "release_sleep_disabled";
 /// This is how an unprivileged updater replaces a **root-owned** helper without
 /// sudo: it downloads to a path it can write, and asks the running root helper
 /// to install it. The helper verifies the org signature and refuses anything
-/// older than itself before the bytes go anywhere — the caller is trusted for
+/// older than the newer of the running and the installed helper, before the
+/// bytes go anywhere — the caller is trusted for
 /// *nothing* except naming a file, because the caller is exactly who this
 /// protects against.
 ///

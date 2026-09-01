@@ -213,7 +213,10 @@ jobs:
               "ffa3297e793eedb20f1120c7f79c5cc2"))
           expected = os.environ["EXPECTED_VERSION"]
           data = open("dist/veld-helper", "rb").read()
-          hits = [i for i in range(len(data) - 15) if data[i:i + 16] == magic]
+          # Bounded on the full 48-byte record, not just the 16-byte magic, so a
+          # match near EOF cannot read a truncated field — mirroring
+          # `version_in_signed_bytes`'s `saturating_sub(VERSION_RECORD_LEN - 1)`.
+          hits = [i for i in range(len(data) - 47) if data[i:i + 16] == magic]
           # Mirrors `veld_core::signing::parse_version_field`: a hit whose field
           # is not printable ASCII followed by NUL padding is NOT a record, and
           # the Rust reader skips it. Counting every occurrence of the magic

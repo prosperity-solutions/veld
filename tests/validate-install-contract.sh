@@ -201,6 +201,23 @@ else
   bad "crates/veld/src/main.rs no longer takes \`--binary\` for ${HELPER_INSTALL_CMD}"
 fi
 
+# The store's two paths are hardcoded in install.sh's switch-to-user-paths
+# cleanup, duplicating `paths::privileged_helper_dir()`. Change the Rust and this
+# script silently stops removing the directory it orphans — root-owned files with
+# nothing left able to delete them, which is the leftover `veld uninstall` cannot
+# reach on that path (its escalation keys off `setup.json`, which the same branch
+# clears). Same class as section 1's env-var names, same fix: pin both sides.
+PATHS_RS="$REPO_ROOT/crates/veld-core/src/paths.rs"
+for store_dir in /var/db/veld-helper /var/lib/veld-helper; do
+  if ! grep -q "rm -rf ${store_dir}" "$SCRIPT"; then
+    bad "install.sh no longer removes ${store_dir} when switching off privileged paths"
+  elif ! grep -q "\"${store_dir}\"" "$PATHS_RS"; then
+    bad "${store_dir} is in install.sh but no longer in paths.rs — the two have drifted"
+  else
+    ok "install.sh and paths.rs agree on ${store_dir}"
+  fi
+done
+
 # --- 4. The prompt gate's truth table, under a real pty ----------------------
 #
 # `desktop_can_ask` is the gate in front of the only question this script asks.

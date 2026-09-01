@@ -1203,7 +1203,15 @@ fi
 # has just rejected.
 HELPER_INSTALL_OK="1"
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
-  if ! "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper"; then
+  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper"
+  HELPER_INSTALL_RC=$?
+  # Exit 2 is clap's "unrecognized subcommand": the CLI just installed is OLDER
+  # than this script and has no `_helper-install`. That happens on
+  # `veld update --target-version <older>`, where the script always comes from
+  # the current release but the binary does not. Such a CLI predates the
+  # root-owned store, so its install is the lib-dir copy above and this is
+  # correctly a no-op — not a refusal to warn about.
+  if [ "$HELPER_INSTALL_RC" -ne 0 ] && [ "$HELPER_INSTALL_RC" -ne 2 ]; then
     # Recorded rather than fatal: the CLI, daemon and Caddy halves of this
     # install are still worth completing, and the command has already printed
     # why it refused. What must NOT happen is the restart section below going on
@@ -1397,8 +1405,15 @@ else
   # Embedded: `veld update` owns the privileged restart (see the macOS branch).
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ] && [ -z "$EMBEDDED" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
-      echo "Restarting veld-helper service (privileged)..."
-      $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+      if [ -n "$HELPER_INSTALL_OK" ]; then
+        echo "Restarting veld-helper service (privileged)..."
+        $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+      else
+        # Same rule as the macOS branch: the store still holds the OLD binary,
+        # so restarting would only re-run it. Say so rather than implying the
+        # helper moved.
+        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      fi
     fi
   elif [ -z "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     if systemctl --user is-active --quiet veld-helper 2>/dev/null; then

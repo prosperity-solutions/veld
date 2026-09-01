@@ -30,7 +30,9 @@
 //! vulnerability. It verifies. So an install also requires the candidate's
 //! version, read out of the bytes the signature covers
 //! ([`crate::signing::version_in_signed_bytes`]), to be no older than the
-//! version already running.
+//! **newer of what is running and what is already installed** — see
+//! [`rollback_floor`], which explains why the running version alone leaves the
+//! rollback wide open.
 //!
 //! # What this deliberately does not do
 //!

@@ -163,9 +163,17 @@ impl Diagnostics {
         // the same rule the "Terminal URLs" row already applies to the daemon,
         // and for the same reason: doctor must ask the question the service
         // manager answers, not a similar-looking one.
-        let helper_bin = veld_core::setup::privileged_helper_program()
-            .await
-            .unwrap_or_else(|| lib.join("veld-helper"));
+        // Asked of the service manager for a **privileged** install only. An
+        // unprivileged one has its own user-level helper in the lib dir, and a
+        // machine that was once privileged can still have a system registration
+        // lying around — reporting that as this install's helper would name a
+        // binary the user's veld does not run.
+        let privileged = super::read_setup_mode().as_deref() == Some("privileged");
+        let helper_bin = match privileged {
+            true => veld_core::setup::privileged_helper_program().await,
+            false => None,
+        }
+        .unwrap_or_else(|| lib.join("veld-helper"));
         self.helper_path = tilde_path(&helper_bin);
         self.helper_version =
             query_binary_version(&helper_bin).unwrap_or_else(|| "not found".into());
@@ -700,7 +708,9 @@ impl Diagnostics {
                 Some(path) if !path.is_file() => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "The privileged veld-helper service names {}, but there is no binary                          there — it cannot start. Run `veld update`, or `sudo veld setup                          privileged` if that does not repair it",
+                        "The privileged veld-helper service names {}, but there is no \
+                         binary there \u{2014} it cannot start. Run `veld update`, or \
+                         `sudo veld setup privileged` if that does not repair it",
                         tilde_path(&path)
                     ),
                 }),
@@ -2511,6 +2521,61 @@ fn colorize_status(status: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// No user-facing string in this file has a run of stray spaces in the
+    /// middle of a sentence.
+    ///
+    /// A multi-line Rust literal joins its lines **only** when each ends with a
+    /// `\`; without one, the next line's indentation becomes twenty-odd literal
+    /// spaces inside the message. Nothing catches it — it compiles, the test
+    /// suite passes, and the defect is visible only to the user reading the
+    /// output, which for the rows in this file is somebody already trying to
+    /// diagnose a broken install.
+    ///
+    /// This is here because it happened twice while writing one row. Checking
+    /// the source is crude, but the alternative is asserting on rendered labels,
+    /// and most of them need a live daemon, a launchd job or a filesystem to
+    /// render at all.
+    #[test]
+    fn no_diagnostic_string_carries_a_run_of_stray_spaces() {
+        let src = include_str!("doctor.rs");
+        let offenders: Vec<&str> = src
+            .lines()
+            .map(str::trim_end)
+            // Only lines that are *inside* a string literal continuation carry
+            // this defect; a line whose trimmed start is code cannot.
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//") && !trimmed.starts_with("///")
+            })
+            .filter(|line| {
+                // The signature is a run of 3+ spaces with **text on both
+                // sides**: `…no binary` + spaces + `there…`. Deliberate padding
+                // (`println!("    {}", …)`, aligned columns) always has a quote
+                // or a brace on one side, so requiring letters on both is what
+                // separates the defect from the intent.
+                let chars: Vec<char> = line.chars().collect();
+                (0..chars.len()).any(|i| {
+                    if chars[i] != ' ' || i == 0 {
+                        return false;
+                    }
+                    let run_end = (i..chars.len()).find(|&j| chars[j] != ' ');
+                    let Some(end) = run_end else { return false };
+                    if end - i < 3 {
+                        return false;
+                    }
+                    let before = chars[i - 1];
+                    let after = chars[end];
+                    before.is_alphanumeric() && (after.is_alphanumeric() || after == '`')
+                })
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "these lines look like a string literal missing its `\\` continuation:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     use super::*;
     use std::time::Duration;
     use veld_core::tls_health::TlsHealth;
