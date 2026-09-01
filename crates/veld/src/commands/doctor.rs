@@ -192,11 +192,15 @@ impl Diagnostics {
         self.caddy_exists = caddy.exists();
 
         // Config
-        let config_path = dirs::home_dir()
-            .map(|h| h.join(".veld").join("setup.json"))
+        // One resolver for both, so the Mode row and every mode-gated check
+        // below agree. Doctor used to build this path itself, which under `sudo`
+        // reads root's empty home while `read_setup_mode` (used by the rows
+        // further down) reads the invoking user's — a report that says "Not
+        // configured" and then behaves as privileged.
+        let config_path = veld_core::setup::setup_json_path()
             .unwrap_or_else(|| PathBuf::from("~/.veld/setup.json"));
         self.config_path = tilde_path(&config_path);
-        self.config_mode = read_mode(&config_path);
+        self.config_mode = veld_core::setup::read_setup_mode().unwrap_or_default();
 
         // Veld Desktop. Optional on macOS, updated by `veld update` when the user
         // wants it, and able to be stale in a way nothing else here would show —
@@ -1933,23 +1937,6 @@ fn query_binary_version(path: &Path) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Read the mode from `~/.veld/setup.json`.
-fn read_mode(path: &Path) -> String {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return "not configured".to_string(),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return "not configured".to_string(),
-    };
-    value
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("not configured")
-        .to_string()
 }
 
 /// What is holding this machine awake, as one phrase.

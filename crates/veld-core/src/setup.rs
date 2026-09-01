@@ -221,6 +221,32 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 /// The `$HOME` answer still wins when there is one: a user with their own
 /// `setup.json` is the ordinary case, and `SUDO_USER` is only consulted when
 /// the current home has nothing to say.
+/// The `setup.json` [`read_setup_mode`] actually reads.
+///
+/// Exposed so that anything *displaying* the config location names the file the
+/// mode was read from. `veld doctor` had its own `dirs::home_dir()`-based path
+/// and its own reader, which under `sudo` disagreed with `read_setup_mode` — the
+/// report would print "Not configured" in its Mode row while every check gated
+/// on the mode behaved as privileged.
+pub fn setup_json_path() -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    if let Some(path) = home.clone().map(json_in).filter(|p| p.is_file()) {
+        return Some(path);
+    }
+    let real = resolve_real_user_home()?;
+    if Some(&real) == home.as_ref() {
+        // Nothing there, but it is still the file this user's install *would*
+        // use — callers display it, so answer with it rather than nothing.
+        return home.map(json_in);
+    }
+    Some(json_in(real))
+}
+
+/// `<home>/.veld/setup.json`.
+fn json_in(home: PathBuf) -> PathBuf {
+    home.join(".veld").join("setup.json")
+}
+
 pub fn read_setup_mode() -> Option<String> {
     let home = dirs::home_dir();
     if let Some(mode) = home.clone().and_then(read_mode_at) {
