@@ -156,13 +156,15 @@ impl Diagnostics {
         //
         // The path the SERVICE actually names, when there is one, and only
         // `lib_dir()` otherwise. A privileged install serves the helper from a
-        // root-owned directory (#262), and the lib-dir copy `install.sh` leaves
-        // behind is the one an update stops advancing — so guessing from
-        // `lib_dir()` would report a version that drifts further from the truth
-        // with every release, for a binary nothing runs. This is the same rule
-        // the "Terminal URLs" row already applies to the daemon, and for the
-        // same reason: doctor must ask the question the service manager answers,
-        // not a similar-looking one.
+        // root-owned directory (#262) while `install.sh` keeps writing the
+        // lib-dir copy on every run, so the two agree after a successful update
+        // and diverge **exactly when the handoff was refused** — which is
+        // precisely the state a user runs doctor to understand. Guessing from
+        // `lib_dir()` would then report the new version for a helper still
+        // running the old one. This is the same rule the "Terminal URLs" row
+        // already applies to the daemon, and for the same reason: doctor must
+        // ask the question the service manager answers, not a similar-looking
+        // one.
         // Asked of the service manager for a **privileged** install only. An
         // unprivileged one has its own user-level helper in the lib dir, and a
         // machine that was once privileged can still have a system registration
@@ -2521,57 +2523,89 @@ fn colorize_status(status: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    /// No user-facing string in this file has a run of stray spaces in the
-    /// middle of a sentence.
+    /// No string literal in this file is continued onto the next line without a
+    /// `\`.
     ///
-    /// A multi-line Rust literal joins its lines **only** when each ends with a
-    /// `\`; without one, the next line's indentation becomes twenty-odd literal
-    /// spaces inside the message. Nothing catches it — it compiles, the test
-    /// suite passes, and the defect is visible only to the user reading the
-    /// output, which for the rows in this file is somebody already trying to
-    /// diagnose a broken install.
+    /// That is the actual defect, and it is worth stating precisely because the
+    /// first version of this test asserted something narrower and passed while
+    /// the bug was present. A Rust literal spanning two source lines joins them
+    /// **only** if the first ends with a `\`; without one, the newline and the
+    /// next line's indentation become part of the string. The symptom is a
+    /// diagnostic printed with a twenty-space gap mid-sentence — visible only to
+    /// somebody already trying to fix a broken install, and invisible to the
+    /// compiler, to clippy and to every other test.
     ///
-    /// This is here because it happened twice while writing one row. Checking
-    /// the source is crude, but the alternative is asserting on rendered labels,
-    /// and most of them need a live daemon, a launchd job or a filesystem to
-    /// render at all.
+    /// It happened twice while writing one row, which is why checking the source
+    /// is worth the crudeness. Asserting on rendered labels instead would need a
+    /// live daemon, a launchd job and a filesystem for most of them.
     #[test]
-    fn no_diagnostic_string_carries_a_run_of_stray_spaces() {
+    fn no_string_literal_is_continued_without_a_backslash() {
         let src = include_str!("doctor.rs");
-        let offenders: Vec<&str> = src
-            .lines()
-            .map(str::trim_end)
-            // Only lines that are *inside* a string literal continuation carry
-            // this defect; a line whose trimmed start is code cannot.
-            .filter(|line| {
-                let trimmed = line.trim_start();
-                !trimmed.starts_with("//") && !trimmed.starts_with("///")
-            })
-            .filter(|line| {
-                // The signature is a run of 3+ spaces with **text on both
-                // sides**: `…no binary` + spaces + `there…`. Deliberate padding
-                // (`println!("    {}", …)`, aligned columns) always has a quote
-                // or a brace on one side, so requiring letters on both is what
-                // separates the defect from the intent.
-                let chars: Vec<char> = line.chars().collect();
-                (0..chars.len()).any(|i| {
-                    if chars[i] != ' ' || i == 0 {
-                        return false;
+        let mut offenders = Vec::new();
+        let mut in_string = false;
+        let mut in_raw = false;
+
+        for (n, line) in src.lines().enumerate() {
+            if in_raw {
+                if line.contains("\"#") {
+                    in_raw = false;
+                }
+                continue;
+            }
+            if !in_string && line.trim_start().starts_with("//") {
+                continue;
+            }
+            // A raw literal spans lines by design and needs no continuation.
+            if line.contains("r#\"") && !line.contains("\"#") {
+                in_raw = true;
+                continue;
+            }
+
+            // Character literals are skipped whole, so a `'"'` in the code does
+            // not read as opening a string. Only the exact `'x'` / `'\x'`
+            // shapes are treated as one — a bare `'` is far more often a
+            // lifetime, and swallowing to the next quote would eat the line.
+            let chars: Vec<char> = line.chars().collect();
+            let mut escaped = false;
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                if !in_string && c == '\'' {
+                    if chars.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                        continue;
                     }
-                    let run_end = (i..chars.len()).find(|&j| chars[j] != ' ');
-                    let Some(end) = run_end else { return false };
-                    if end - i < 3 {
-                        return false;
+                    if chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'') {
+                        i += 4;
+                        continue;
                     }
-                    let before = chars[i - 1];
-                    let after = chars[end];
-                    before.is_alphanumeric() && (after.is_alphanumeric() || after == '`')
-                })
-            })
-            .collect();
+                }
+                match c {
+                    '\\' if !escaped => escaped = true,
+                    '"' if !escaped => {
+                        in_string = !in_string;
+                        escaped = false;
+                    }
+                    _ => escaped = false,
+                }
+                i += 1;
+            }
+
+            if in_string {
+                // Still open at end of line: legitimate only with a trailing
+                // `\`, which is what joins the two halves.
+                if !line.trim_end().ends_with('\\') {
+                    offenders.push(format!("{}: {}", n + 1, line.trim()));
+                    // Do not cascade: report once and assume it closes.
+                    in_string = false;
+                }
+            }
+        }
+
         assert!(
             offenders.is_empty(),
-            "these lines look like a string literal missing its `\\` continuation:\n{}",
+            "these lines leave a string literal open with no `\\` continuation, so the \
+             newline and the next line's indentation end up inside the message:\n{}",
             offenders.join("\n")
         );
     }

@@ -33,7 +33,12 @@ use crate::output;
 
 /// Exit code, so `install.sh` can carry on regardless — see the module doc.
 pub async fn run(binary: PathBuf) -> i32 {
-    if setup_mode().as_deref() != Some("privileged") {
+    // `read_setup_mode` resolves the invoking user's home under `sudo` — see
+    // `veld_core::setup::read_setup_mode`. That matters here because
+    // `curl … | sudo bash` would otherwise read root's empty `$HOME`, answer
+    // "not privileged", and silently leave the store on the old binary while the
+    // CLI and daemon moved to the new release.
+    if super::read_setup_mode().as_deref() != Some("privileged") {
         return 0;
     }
 
@@ -101,43 +106,6 @@ pub async fn run(binary: PathBuf) -> i32 {
             1
         }
     }
-}
-
-/// The recorded setup mode, resolved for the user who actually ran the install.
-///
-/// `read_setup_mode` reads `$HOME/.veld/setup.json`, and under `sudo` that
-/// `$HOME` is root's — which has no `setup.json`, so a root-run `install.sh`
-/// would answer "not privileged", return 0, and silently leave the root-owned
-/// store on the old binary while the CLI and daemon moved to the new release.
-/// Nothing would print, and `watch_own_binary` watches the store, so nothing
-/// would restart either.
-///
-/// `SUDO_USER` is how the rest of `veld-core::setup` resolves the real user for
-/// exactly this reason.
-fn setup_mode() -> Option<String> {
-    if let Some(mode) = super::read_setup_mode() {
-        return Some(mode);
-    }
-    let content =
-        std::fs::read_to_string(sudo_user_home()?.join(".veld").join("setup.json")).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value
-        .get("mode")
-        .and_then(|m| m.as_str())
-        .map(str::to_owned)
-}
-
-/// The invoking user's home when this process is running under `sudo`.
-///
-/// `None` when it is not — every caller then falls back to the ordinary
-/// `$HOME`-based answer.
-fn sudo_user_home() -> Option<std::path::PathBuf> {
-    let user = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())?;
-    Some(std::path::PathBuf::from(if cfg!(target_os = "macos") {
-        format!("/Users/{user}")
-    } else {
-        format!("/home/{user}")
-    }))
 }
 
 /// Why the now-inert copy in the user-writable lib dir is **left alone**.

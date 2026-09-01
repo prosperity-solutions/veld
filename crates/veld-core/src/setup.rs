@@ -207,9 +207,27 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 
 /// Read the persisted setup mode from `~/.veld/setup.json`, if present.
 /// Returns `"privileged"`, `"unprivileged"`, `"auto"`, or `None` when unset.
+/// The recorded setup mode, falling back to the **invoking** user's home when
+/// this process is running under `sudo`.
+///
+/// `$HOME` under `sudo` is root's, which has no `setup.json` — so without the
+/// fallback every sudo-run caller reads "no mode recorded" and takes whatever
+/// branch that implies. That is load-bearing in three places since #262:
+/// `veld doctor`'s helper row and `veld version`'s candidate list both gate the
+/// root-owned store on it (a privileged machine would report a helper it does
+/// not run), and `which_self` gates the store candidate the same way. On Linux
+/// `sudo` resets `HOME` by default, so this is not a hypothetical there.
+///
+/// The `$HOME` answer still wins when there is one: a user with their own
+/// `setup.json` is the ordinary case, and `SUDO_USER` is only consulted when
+/// the current home has nothing to say.
 pub fn read_setup_mode() -> Option<String> {
-    let path = dirs::home_dir()?.join(".veld").join("setup.json");
-    let content = std::fs::read_to_string(path).ok()?;
+    read_mode_at(dirs::home_dir()?).or_else(|| read_mode_at(resolve_real_user_home()?))
+}
+
+/// [`read_setup_mode`] for one home directory.
+fn read_mode_at(home: PathBuf) -> Option<String> {
+    let content = std::fs::read_to_string(home.join(".veld").join("setup.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value
         .get("mode")
@@ -983,6 +1001,21 @@ async fn install_helper_inner(
     // signature row already says so.
     let veld_helper_bin = stage_helper_in_store(&veld_helper_bin);
 
+    // Refuse **before** anything is torn down.
+    //
+    // `install_helper_macos` starts by booting the running LaunchDaemon out, so
+    // by the time a bad path reaches the plist there is no working service left
+    // to fall back to. `which_self`'s last resort is a bare `"veld-helper"` with
+    // no directory — which produces a definition launchd cannot exec, on a
+    // machine that had a working one a moment earlier. Failing here leaves the
+    // helper exactly as it was.
+    if !veld_helper_bin.is_absolute() || !veld_helper_bin.is_file() {
+        anyhow::bail!(
+            "no veld-helper binary to install ({} is not a file) — reinstall with `veld update`",
+            veld_helper_bin.display()
+        );
+    }
+
     // Register as a system service. No silent direct-spawn fallback here: a
     // directly-spawned root helper has no service manager behind it, so it
     // dies permanently on the next binary update or reboot — and it can
@@ -1196,7 +1229,13 @@ fn helper_systemd_unit(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u
 ///
 /// Uses the modern `bootout` API; the legacy `unload` is deprecated and
 /// unreliable for system-domain LaunchDaemons.
-#[cfg(target_os = "macos")]
+///
+/// **Not `#[cfg(target_os = "macos")]`, deliberately.** `install_helper_macos`
+/// is selected by a *runtime* `match std::env::consts::OS`, so its body is
+/// compiled on Linux too — a `cfg` here is a hard build failure on Linux rather
+/// than the tidy-up it looks like. (It was exactly that, briefly; local
+/// `cargo clippy` on a Mac cannot see it, and CI's Linux `Check & Lint` can.)
+/// `launchctl` simply does not exist there, and this function is never reached.
 pub async fn bootout_and_drain_system_job(label: &str) {
     let _ = Command::new("launchctl")
         .args(["bootout", &format!("system/{label}")])
@@ -3228,7 +3267,13 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     // auto-bootstrap on a migrated install — where the alternative is the bare
     // `"veld-helper"` below, which produces a service definition launchd cannot
     // exec.
-    if name == "veld-helper" {
+    //
+    // Gated on the recorded mode as well as the name: `veld setup unprivileged`
+    // reaches this too, and handing it the store would write
+    // `/var/db/veld-helper/veld-helper` into a **user** LaunchAgent — a
+    // user-level helper permanently pinned to whatever the root store holds,
+    // which nothing on the unprivileged path ever advances.
+    if name == "veld-helper" && read_setup_mode().as_deref() == Some("privileged") {
         let store = crate::paths::privileged_helper_bin();
         if crate::signing::verify_binary_signed(&store) {
             return Ok(store);

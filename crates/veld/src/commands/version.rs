@@ -64,11 +64,11 @@ fn find_and_query_version(binary_name: &str) -> VersionResult {
 /// Build list of candidate paths for a binary.
 ///
 /// The privileged helper's root-owned directory comes **first** (#262), because
-/// on a migrated install that is the copy the service actually runs. The lib-dir
-/// copy is left in place (see `helper_install`), but it is the one an update
-/// stops advancing — so reading it here would report a version that drifts
-/// further from the truth with every release, and `check_version_mismatch` would
-/// warn about a binary nothing runs.
+/// on a migrated install that is the copy the service actually runs. `install.sh`
+/// keeps writing the lib-dir copy too, so the two agree after a successful
+/// update and diverge only when the install handoff was refused — and in that
+/// state the lib-dir copy reports the *new* version for a helper still running
+/// the old one, which is the one answer `check_version_mismatch` must not give.
 fn binary_candidates(binary_name: &str) -> Vec<String> {
     let mut paths = Vec::new();
     // **Privileged installs only.** A machine that was once privileged and is
@@ -77,7 +77,12 @@ fn binary_candidates(binary_name: &str) -> Vec<String> {
     // helper as this install's — which nothing updates any more, so
     // `check_version_mismatch` would print a permanent, false skew warning after
     // every update.
-    if crate::commands::read_setup_mode().as_deref() == Some("privileged") {
+    // Name-gated as well as mode-gated: the store holds the helper and nothing
+    // else, so probing it for `veld-daemon` is meaningless today and would be
+    // wrong the moment the store gained a second file.
+    if binary_name == "veld-helper"
+        && crate::commands::read_setup_mode().as_deref() == Some("privileged")
+    {
         paths.push(
             veld_core::paths::privileged_helper_dir()
                 .join(binary_name)

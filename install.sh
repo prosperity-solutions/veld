@@ -1200,7 +1200,13 @@ fi
 # none), and handing the helper a binary with no signature beside it would
 # surface "no readable 64-byte signature" mid-install for a case that should be
 # the silent no-op path.
-HELPER_INSTALL_OK="1"
+# Empty until the handoff has actually been attempted and accepted. Defaulting
+# to "1" meant "we did not try" read as "it worked": a tarball with a helper but
+# no `.sig` — the documented `VELD_VERSION`-pinned-to-a-pre-signing-release case
+# — left a migrated install printing "will restart itself to pick up the new
+# binary" while the store kept the old one. That is the false reassurance the
+# else-branch below exists to remove.
+HELPER_INSTALL_OK=""
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   # `|| HELPER_INSTALL_RC=$?` rather than a bare call followed by `$?`: this
   # script runs under `set -e`, which exempts a command on the left of `||` but
@@ -1216,13 +1222,13 @@ if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   # the current release but the binary does not. Such a CLI predates the
   # root-owned store, so its install is the lib-dir copy above and this is
   # correctly a no-op — not a refusal to warn about.
-  if [ "$HELPER_INSTALL_RC" -ne 0 ] && [ "$HELPER_INSTALL_RC" -ne 2 ]; then
-    # Recorded rather than fatal: the CLI, daemon and Caddy halves of this
-    # install are still worth completing, and the command has already printed
-    # why it refused. What must NOT happen is the restart section below going on
-    # to promise that the helper will pick up a binary it just rejected.
-    HELPER_INSTALL_OK=""
+  if [ "$HELPER_INSTALL_RC" -eq 0 ] || [ "$HELPER_INSTALL_RC" -eq 2 ]; then
+    HELPER_INSTALL_OK="1"
   fi
+  # Anything else is a refusal, and it is recorded rather than fatal: the CLI,
+  # daemon and Caddy halves of this install are still worth completing, and the
+  # command has already printed why. What must NOT happen is the restart section
+  # below going on to promise that the helper will pick up a binary it rejected.
 fi
 
 # --- Restart running services (picks up new binaries) ---
@@ -1381,16 +1387,18 @@ if [ "$OS" = "macos" ]; then
     # safeguard (see veld-helper caddy.rs).
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -z "$EMBEDDED" ] && [ -f "$HELPER_PLIST" ]; then
-      if sudo -n true 2>/dev/null; then
+      # The refusal test comes FIRST, above the sudo/no-sudo split. Below it, a
+      # passwordless-sudo machine would SIGTERM the root helper to re-run the
+      # very binary the store still holds, and print only "Restarting…" — the
+      # "was NOT updated" line would never appear on exactly the machines where
+      # a restart achieves nothing.
+      if [ -z "$HELPER_INSTALL_OK" ]; then
+        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      elif sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
-      elif [ -n "$HELPER_INSTALL_OK" ]; then
-        echo "Privileged veld-helper will restart itself to pick up the new binary (no sudo needed)."
       else
-        # The store still holds the OLD binary, so there is nothing for the
-        # helper to pick up. Printing the promise anyway is the same false
-        # reassurance the comment above says was removed from the old code.
-        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+        echo "Privileged veld-helper will restart itself to pick up the new binary (no sudo needed)."
       fi
     fi
   elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
