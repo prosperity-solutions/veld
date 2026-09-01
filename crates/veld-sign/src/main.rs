@@ -1,12 +1,24 @@
 //! `veld-sign` — sign a veld helper binary with the org's ed25519 key.
 //!
-//! Reads a binary and the org private key (PKCS#8 PEM, from an env var — the
-//! GitHub `SIGNING_PRIVATE_KEY` secret — or a file), and writes a detached
-//! `<binary>.sig` containing the raw 64-byte ed25519 signature.
+//! Reads a binary and **one or more** org private keys (PKCS#8 PEM, from env
+//! vars — the GitHub `SIGNING_PRIVATE_KEY` secret — or from files), and writes a
+//! detached `<binary>.sig` containing one raw 64-byte ed25519 signature per key,
+//! concatenated in the order the keys were given.
 //!
-//! The running root helper (`veld-helper`) verifies that signature against its
-//! embedded public key before ever relaunching onto a changed on-disk binary
-//! (see `crates/veld-helper/src/signing.rs`). CI runs this over the *final*
+//! With one key that is exactly the 64-byte file this tool has always written.
+//! Several keys is how a key rotation ships (#261 slice C): every helper
+//! generation in the field looks for a slot signed by a key *it* trusts, and the
+//! first slot belongs to the original key forever, because helpers shipped up to
+//! v16.59.0 read bytes `0..64` and nothing else. `--expect-slot-pubkeys` is what
+//! stops any slot silently becoming somebody else's — every slot, not just the
+//! first, because a wrong key in a later slot ships invisibly and wedges the whole
+//! fleet one release afterwards.
+//!
+//! The running root helper (`veld-helper`) verifies that signature against the
+//! keys **it** has compiled in — any slot under any of them — before ever
+//! relaunching onto a changed on-disk binary (see
+//! `crates/veld-helper/src/signing.rs`; the list is
+//! `veld_core::signing::ORG_SIGNING_KEYRING`). CI runs this over the *final*
 //! shipped bytes — on macOS that is the ad-hoc re-signed binary, so install.sh's
 //! later re-sign is a byte-idempotent no-op and the `.sig` still matches.
 //!
@@ -29,7 +41,8 @@
 //!     Debug-formats the entire value → [`read_key`];
 //!   * echoing anything from `argv`, because a key pasted where a *path* or a
 //!     *variable name* belongs — or passed positionally, since a PEM starts
-//!     with `-` — is one slip away in a workflow edit → [`echoable`];
+//!     with `-` — is one slip away in a workflow edit → [`echoable_name`],
+//!     [`echoable_path`] and [`echoable_flag`];
 //!   * quoting the PEM label without bounding it → [`pem_header`].
 //!
 //! The shape of the rule: **a message is assembled only from fixed strings, a
@@ -46,7 +59,18 @@ use std::process::ExitCode;
 use ed25519_dalek::Signer;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 
-const USAGE: &str = "usage: veld-sign --key-env <VAR> | --key-file <path> <binary>";
+const USAGE: &str = "usage: veld-sign (--key-env <VAR> | --key-file <path>)... \
+[--expect-slot-pubkeys <hex>[,<hex>...]] <binary>";
+
+/// Most keys this will sign with, and therefore most slots it will write.
+///
+/// Hand-kept equal to `veld_core::signing::MAX_SIG_SLOTS`, because this crate
+/// deliberately does not depend on `veld-core` outside its tests — it is a CI
+/// tool that must build fast for the *host* while the release build is
+/// cross-compiling. `ci.yml`'s `schema` job compares the two numbers so the
+/// duplication cannot rot: writing a slot past what any reader looks at would
+/// produce a release that silently omits a key it claims to carry.
+const MAX_SLOTS: usize = 8;
 
 /// Exit codes. The split is for whoever is reading a failed workflow log —
 /// `release.yml` runs this under `bash -e` and only sees zero vs non-zero.
@@ -201,10 +225,23 @@ fn echoable_flag(value: &str) -> &str {
 /// at a file on disk.
 ///
 /// Holds the *source* of the key, never the key — and renders even the source
-/// through [`echoable`], because the source itself comes from `argv`.
+/// through [`echoable_name`]/[`echoable_path`], because the source itself comes
+/// from `argv`.
+#[derive(PartialEq, Eq)]
 enum KeySource {
     Env(String),
     File(PathBuf),
+}
+
+impl KeySource {
+    /// Which flag this came from, for the "do not mix sources" check. Compared
+    /// rather than the value, so nothing about the value is involved.
+    fn flag(&self) -> &'static str {
+        match self {
+            KeySource::Env(_) => "--key-env",
+            KeySource::File(_) => "--key-file",
+        }
+    }
 }
 
 impl fmt::Display for KeySource {
@@ -519,24 +556,223 @@ fn read_key(source: &KeySource) -> Result<String, SignError> {
     }
 }
 
-/// Sign `binary` with `key_pem` (PKCS#8 PEM) and write `<binary>.sig`.
-fn sign_file(binary: &Path, key_pem: &str, source: &KeySource) -> Result<PathBuf, SignError> {
-    let signing_key = parse_signing_key(key_pem, source)?;
+/// A public key as lowercase hex — the one thing derived from a private key that
+/// is safe to print, and the only way an operator can tell *which* key a secret
+/// held when it turns out to be the wrong one.
+///
+/// Safe because it is public by construction: ed25519 verification keys are
+/// published (`veld_core::signing::ORG_KEY_1` is one, in the open, in the source
+/// tree), and recovering the private half from it is the hardness assumption the
+/// whole scheme rests on. Derived from the parsed key rather than taken from
+/// `argv`, which matters: a hex string *in argv* is 64 characters and so is a
+/// hex-encoded ed25519 seed, so an argv-supplied hex value is treated as
+/// possible key material and never echoed. See [`main`]'s slot-0 check.
+fn pubkey_hex(key: &ed25519_dalek::SigningKey) -> String {
+    key.verifying_key()
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// One slot of the detached signature: the key that signs it, and where that key
+/// came from (for diagnostics only — never rendered except through `echoable`).
+struct Slot {
+    key: ed25519_dalek::SigningKey,
+    source: KeySource,
+}
+
+/// Sign `binary` with every key in `slots` and write `<binary>.sig` as their
+/// signatures concatenated, in order.
+///
+/// **Every key is parsed before anything is written**, and the file is written in
+/// one call. A tool that signed and appended per key would leave a *shorter*
+/// `.sig` behind when the second key turned out to be unusable — and a shorter
+/// `.sig` is not a failure any reader can see. It is a release that verifies
+/// perfectly for the generation whose slot happened to be written and refuses for
+/// every other one. Failing before the first byte lands is the only safe shape.
+/// `keys` is taken **by value** so each PEM string can be dropped the moment it
+/// has been parsed. One private key used to be in memory at a time; N keys means
+/// N, and a core dump or a swapped page from the signing step would otherwise
+/// expose the whole set rather than one. Dropping is not zeroing — nothing here
+/// claims the bytes are scrubbed — but it ends the window at the first
+/// opportunity rather than at process exit.
+fn sign_file(
+    binary: &Path,
+    keys: Vec<(String, KeySource)>,
+    expect_slots: Option<&[String]>,
+) -> Result<Signed, SignError> {
+    let mut slots: Vec<Slot> = Vec::with_capacity(keys.len());
+    for (key_pem, source) in keys {
+        let key = parse_signing_key(&key_pem, &source)?;
+        drop(key_pem);
+        // Two slots holding the same key is a release claiming to cover two
+        // generations while covering one — the shape of a workflow that passes
+        // the same secret under two names. Compared on the *public* half, and
+        // reported by slot number only: nothing about either key is echoed.
+        if let Some(seen) = slots
+            .iter()
+            .position(|s| s.key.verifying_key() == key.verifying_key())
+        {
+            return Err(SignError::with_hint(
+                format!(
+                    "slot {} and slot {} were given the same key, so the signature would \
+                     claim to cover two keys and cover one",
+                    seen,
+                    slots.len()
+                ),
+                "each slot needs a distinct key; check whether two flags name the same \
+                 secret or the same file",
+            ));
+        }
+        slots.push(Slot { key, source });
+    }
+
+    // **Every** slot's key identity is checked here, before a single byte is
+    // written — for the same reason every key is parsed first: this function's
+    // contract is that a failure costs nothing on disk.
+    //
+    // The failure this guard exists for: a signing secret re-uploaded, rotated or
+    // created holding a *different but valid* key. The PEM parses, a signature is
+    // written, the release publishes — and a signature by the wrong key is
+    // indistinguishable from a correct one unless you know which key was meant.
+    //
+    // **Checking only slot 0 was not enough, and the gap was fleet-fatal.** Slot 0
+    // is verified by every already-shipped helper, so a wrong key in slot 1 ships
+    // *invisibly*: the transition release still installs everywhere via slot 0. It
+    // detonates one release later, when the retirement release lands on a machine
+    // whose keyring is now the slot-1 key alone and no slot in the artifact
+    // verifies under it — refusing to relaunch, refusing `restart` and `shutdown`,
+    // and refusing every future candidate. Fleet-wide, sudo-only: the one outcome
+    // #338 forbids, delivered by the mechanism that exists to honour it. The only
+    // thing that had stood in the way was the operator pasting the right hex.
+    //
+    // Checking the whole list also makes the *order* of the expected keys — and so
+    // of `veld_core::signing::ORG_REQUIRED_SLOT_KEYS` — a checked property rather
+    // than a convention, which matters because slot position is the format's only
+    // key identifier.
+    //
+    // The expected values came from `argv` and are **never echoed**: 64 hex
+    // characters is also the length of a hex-encoded ed25519 seed. What is printed
+    // instead is the public key *derived from the secret*, which is public by
+    // construction and is the thing an operator actually needs.
+    if let Some(expected) = expect_slots {
+        // The arity is decided in `main` from `argv` alone, and is a usage error
+        // there — see the module's rule for [`EXIT_USAGE`] — so this branch is
+        // unreachable through `main`. It is an error rather than an `assert!`
+        // anyway: `zip` would otherwise compare a *prefix* and pass, which is the
+        // silent-wrong-key outcome this whole check exists to prevent, and a panic
+        // is not something to introduce into the one tool that runs as part of a
+        // release. Unreachable and honest beats unreachable and absent.
+        //
+        // It reports `EXIT_BAD_INPUT` rather than `EXIT_USAGE` deliberately: reaching
+        // here means a *caller* skipped the argv check, which is an internal
+        // inconsistency and not a mistake the operator made on the command line.
+        if expected.len() != slots.len() {
+            return Err(SignError::with_hint(
+                format!(
+                    "--expect-slot-pubkeys names {} key(s) but {} were given to sign with",
+                    expected.len(),
+                    slots.len()
+                ),
+                "one comma-separated entry per key, in slot order; see \
+                 docs/signing-key-rotation.md",
+            ));
+        }
+        for (i, (want, slot)) in expected.iter().zip(slots.iter()).enumerate() {
+            let found = pubkey_hex(&slot.key);
+            if !want.eq_ignore_ascii_case(&found) {
+                return Err(SignError::with_hint(
+                    format!(
+                        "slot {i} was signed by public key {found}, which is not the key \
+                         this release must carry there"
+                    ),
+                    if i == 0 {
+                        "slot 0 must be the org's original signing key: every helper shipped \
+                         up to v16.59.0 verifies bytes 0..64 against it and nothing else, so \
+                         a release signed this way cannot be installed by any of them. The \
+                         expected value is not repeated here because a 64-character hex \
+                         argument cannot be told apart from a private seed"
+                    } else {
+                        "a wrong key in a later slot ships INVISIBLY — the release still \
+                         installs everywhere via slot 0 — and then wedges every install one \
+                         release later, when that key becomes the only one a helper accepts. \
+                         Check the secret against the public key printed above. The expected \
+                         value is not repeated here because a 64-character hex argument \
+                         cannot be told apart from a private seed"
+                    },
+                ));
+            }
+        }
+    }
+
     let data = std::fs::read(binary).map_err(|e| {
         SignError::new(format!(
             "cannot read {}: {e}",
             echoable_path(&binary.to_string_lossy())
         ))
     })?;
-    let sig = signing_key.sign(&data);
+
+    let mut sig_bytes = Vec::with_capacity(slots.len() * 64);
+    for slot in &slots {
+        sig_bytes.extend_from_slice(&slot.key.sign(&data).to_bytes());
+    }
+
+    // Written to a temporary and renamed, so "a failure costs nothing on disk" is
+    // true rather than nearly true. `std::fs::write` is not all-or-nothing: ENOSPC
+    // or EIO part-way through leaves a *truncated* `.sig` — say one and a half
+    // slots — beside the binary while the tool exits non-zero. That artifact
+    // verifies for whichever generation owns the slots that survived and for no
+    // other, which is precisely the shape this function's contract and the runbook
+    // both say cannot exist. A rename either happens or does not.
+    // Appended and **pid-suffixed**, the same rule and for the same reasons as
+    // `veld_core::helper_store::write_atomically`: appending (never
+    // `with_extension`, which would replace `.sig`) keeps the binary's and the
+    // signature's temporaries distinct, and the pid keeps two processes signing the
+    // same path from unlinking each other's in-flight file and renaming whatever
+    // then sits at that name into place.
     let sig_path = sig_path_for(binary);
-    std::fs::write(&sig_path, sig.to_bytes()).map_err(|e| {
+    let mut staging = sig_path.clone().into_os_string();
+    staging.push(format!(".incoming.{}", std::process::id()));
+    let staging = PathBuf::from(staging);
+    let write_error = |e: std::io::Error| {
         SignError::new(format!(
             "cannot write {}: {e}",
             echoable_path(&sig_path.to_string_lossy())
         ))
-    })?;
-    Ok(sig_path)
+    };
+    // Cleaned up on **both** failure paths. The first version guarded only the
+    // rename, so the one failure the staging was introduced for — ENOSPC or EIO
+    // part-way through the write — left a truncated file behind while reporting a
+    // failure, which is exactly the litter the comment claimed to avoid.
+    //
+    // What this cannot cover, said rather than implied: a **signal**. `ulimit -f 0`
+    // raises SIGXFSZ, which kills the process before any of this runs, and no
+    // userspace cleanup survives that. The bound of the claim is "every failure
+    // this function *returns*".
+    //
+    // Worth knowing why the litter matters at all, since the file is inert: this
+    // runs against `dist/`, and `release.yml` then tars that directory whole. A
+    // leftover `veld-helper.sig.incoming.<pid>` is not on `install.sh`'s allow-list
+    // of tarball entries, so it would make **every** install of that release refuse
+    // the tarball outright. `bash -e` aborts the step before `tar` on any failure
+    // here, signal included, so it is not reachable — but "inert" was the wrong
+    // word for it.
+    if let Err(e) = std::fs::write(&staging, &sig_bytes) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(write_error(e));
+    }
+    if let Err(e) = std::fs::rename(&staging, &sig_path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(write_error(e));
+    }
+    Ok(Signed { sig_path, slots })
+}
+
+/// What [`sign_file`] wrote: where, and which key holds each slot.
+struct Signed {
+    sig_path: PathBuf,
+    slots: Vec<Slot>,
 }
 
 /// `<path>.sig` — append, not replace any existing extension.
@@ -547,20 +783,41 @@ fn sig_path_for(binary: &Path) -> PathBuf {
 }
 
 fn main() -> ExitCode {
-    let mut key_env: Option<String> = None;
-    let mut key_file: Option<PathBuf> = None;
+    let mut sources: Vec<KeySource> = Vec::new();
+    let mut expect_slots: Option<Vec<String>> = None;
     let mut binary: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            // Repeatable, and **order is meaning**: the first key signs slot 0,
+            // which every helper shipped up to v16.59.0 reads and nothing else.
             "--key-env" => match args.next() {
-                Some(v) => key_env = Some(v),
+                Some(v) => sources.push(KeySource::Env(v)),
                 None => return usage("--key-env requires a value"),
             },
             "--key-file" => match args.next() {
-                Some(v) => key_file = Some(PathBuf::from(v)),
+                Some(v) => sources.push(KeySource::File(PathBuf::from(v))),
                 None => return usage("--key-file requires a value"),
+            },
+            // Comma-separated, in slot order — one entry per `--key-env`/
+            // `--key-file`, so the whole expected list is one argument and cannot
+            // drift out of order relative to the keys.
+            "--expect-slot-pubkeys" => match args.next() {
+                // Refused a second time rather than letting the last win.
+                // `--key-env` is repeatable by design; this is not, and a step
+                // carrying two of them is a half-finished edit whose first list
+                // would be silently ignored — which is the shape of mistake that
+                // puts the wrong key in a slot, the one thing this flag exists to
+                // catch.
+                Some(_) if expect_slots.is_some() => {
+                    return usage(
+                        "--expect-slot-pubkeys may be given only once; it takes a \
+                         comma-separated list, one entry per key, in slot order",
+                    );
+                }
+                Some(v) => expect_slots = Some(v.split(',').map(|h| h.trim().to_owned()).collect()),
+                None => return usage("--expect-slot-pubkeys requires a value"),
             },
             // A PEM begins with `-`, so a key handed over positionally lands
             // here rather than as the <binary> argument.
@@ -576,35 +833,103 @@ fn main() -> ExitCode {
         None => return usage("missing <binary> path"),
     };
 
-    let source = match (key_env, key_file) {
-        (Some(_), Some(_)) => return usage("--key-env and --key-file are mutually exclusive"),
-        (Some(var), None) => KeySource::Env(var),
-        (None, Some(path)) => KeySource::File(path),
-        (None, None) => return usage("provide --key-env or --key-file"),
-    };
+    if sources.is_empty() {
+        return usage("provide --key-env or --key-file");
+    }
+    // Kept a usage error, as it always was. With one key it meant "which one?";
+    // with several the order would answer that, but a step naming both flags is
+    // still overwhelmingly a half-finished edit rather than an intent, and the
+    // release path uses `--key-env` for every slot.
+    if sources.iter().any(|s| s.flag() != sources[0].flag()) {
+        return usage("--key-env and --key-file cannot be mixed");
+    }
+    // A slot past what any reader looks at is a key the release claims to carry
+    // and no helper will ever find. See [`MAX_SLOTS`].
+    if sources.len() > MAX_SLOTS {
+        return usage(&format!(
+            "at most {MAX_SLOTS} keys: no reader looks past slot {}",
+            MAX_SLOTS - 1
+        ));
+    }
 
-    let key_pem = match read_key(&source) {
-        Ok(v) => v,
+    // The shape of the expected slot-0 key, checked here — with the other argv
+    // validation, **before a single private key is read**.
+    //
+    // Two reasons, and the second is the better one. A malformed value would
+    // otherwise fall through to the mismatch inside `sign_file` and blame the
+    // *secret* for a mistake in the *command line*: measured, `banana` and an empty
+    // value both printed "not the one this release must carry". And the module's own
+    // rule for [`EXIT_USAGE`] is "the command line itself is wrong, before any input
+    // is touched" — so a bad invocation should not cause a private key to be read at
+    // all.
+    //
+    // The value is not echoed, here or anywhere: 64 hex characters is also the
+    // length of a hex-encoded ed25519 seed, and a malformed value could be anything.
+    // One expected key per key given, decidable from `argv` alone and therefore a
+    // usage error here rather than an input error after every private key has been
+    // read. Same rule as the shape check below.
+    if let Some(expected) = &expect_slots
+        && expected.len() != sources.len()
+    {
+        return usage(&format!(
+            "--expect-slot-pubkeys names {} key(s) but {} were given to sign with; it needs \
+             one comma-separated entry per key, in slot order",
+            expected.len(),
+            sources.len()
+        ));
+    }
+    if let Some(expected) = &expect_slots
+        && !expected
+            .iter()
+            .all(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
+    {
+        return usage(
+            "every entry in --expect-slot-pubkeys needs exactly 64 hexadecimal characters (a \
+             raw 32-byte ed25519 public key), comma-separated in slot order. No value is \
+             repeated here because a 64-character hex argument cannot be told apart from a \
+             private seed; derive each one with `openssl pkey -in <key>.pem -pubout -outform \
+             DER | tail -c 32 | xxd -p -c 32`",
+        );
+    }
+
+    // Read every key before signing anything, so a failure on the last one costs
+    // no bytes on disk. Each error names exactly **one** source — the one that
+    // failed — because a message listing them all is a message that grows with
+    // the number of secrets in play, and every one of those is a private key.
+    let mut keys: Vec<(String, KeySource)> = Vec::with_capacity(sources.len());
+    for source in sources {
+        match read_key(&source) {
+            Ok(pem) => keys.push((pem, source)),
+            Err(e) => {
+                eprintln!("{}", e.render());
+                return ExitCode::from(EXIT_BAD_INPUT);
+            }
+        }
+    }
+
+    let signed = match sign_file(&binary, keys, expect_slots.as_deref()) {
+        Ok(s) => s,
         Err(e) => {
             eprintln!("{}", e.render());
             return ExitCode::from(EXIT_BAD_INPUT);
         }
     };
 
-    match sign_file(&binary, &key_pem, &source) {
-        Ok(sig_path) => {
-            eprintln!(
-                "signed {} -> {}",
-                echoable_path(&binary.to_string_lossy()),
-                echoable_path(&sig_path.to_string_lossy())
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("{}", e.render());
-            ExitCode::from(EXIT_BAD_INPUT)
-        }
+    eprintln!(
+        "signed {} -> {} ({} slot{})",
+        echoable_path(&binary.to_string_lossy()),
+        echoable_path(&signed.sig_path.to_string_lossy()),
+        signed.slots.len(),
+        if signed.slots.len() == 1 { "" } else { "s" }
+    );
+    for (i, slot) in signed.slots.iter().enumerate() {
+        // The public key per slot, so a release log records exactly which keys a
+        // published artifact is verifiable under. That record is what a future
+        // rotation is planned against, and reconstructing it after the fact means
+        // re-deriving public keys from secrets nobody wants to touch again.
+        eprintln!("  slot {i}: {} -> {}", slot.source, pubkey_hex(&slot.key));
     }
+    ExitCode::SUCCESS
 }
 
 fn usage(msg: &str) -> ExitCode {
@@ -655,10 +980,16 @@ mod tests {
         let binary = dir.join("veld-helper");
         std::fs::write(&binary, b"macho/elf payload bytes").unwrap();
 
-        let sig_path = sign_file(&binary, TEST_PRIVATE_PEM, &env_source()).unwrap();
-        assert_eq!(sig_path, sig_path_for(&binary));
+        let signed = sign_file(
+            &binary,
+            vec![(TEST_PRIVATE_PEM.to_string(), env_source())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(signed.sig_path, sig_path_for(&binary));
+        assert_eq!(signed.slots.len(), 1);
 
-        let sig = std::fs::read(&sig_path).unwrap();
+        let sig = std::fs::read(&signed.sig_path).unwrap();
         let vk = VerifyingKey::from_bytes(&TEST_PUBLIC).unwrap();
         let sig = ed25519_dalek::Signature::from_slice(&sig).unwrap();
         assert!(vk.verify(b"macho/elf payload bytes", &sig).is_ok());

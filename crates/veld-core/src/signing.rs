@@ -1,13 +1,22 @@
 //! Org signature verification for the privileged `veld-helper`.
 //!
-//! The privileged helper runs as root but lives in a **user-writable**
-//! directory and relaunches itself (binary watcher, `restart`, `shutdown`) so
-//! the service manager can pick up a new version — the #247 escalation: any
-//! process with the installing user's privileges can swap the binary and get
-//! root on the next relaunch. The fix: the org signs each release helper with
-//! its ed25519 private key into a detached `<binary>.sig`, and the *running*
-//! helper verifies the on-disk binary against its embedded public key before
-//! it will `exit(0)` onto a replacement.
+//! The privileged helper runs as root and relaunches itself (binary watcher,
+//! `restart`, `shutdown`) so the service manager can pick up a new version. It
+//! used to do that from a **user-writable** directory — the #247 escalation: any
+//! process with the installing user's privileges could swap the binary and get
+//! root on the next relaunch. The fix: the org signs each release helper with its
+//! ed25519 private key into a detached `<binary>.sig`, and the *running* helper
+//! verifies the on-disk binary against its embedded public key before it will
+//! `exit(0)` onto a replacement.
+//!
+//! Since #262 the binary lives in a **root-owned** store
+//! ([`crate::paths::privileged_helper_dir`]) and the only way in is an install RPC
+//! that verifies a signature and refuses to go backwards, so this gate is no longer
+//! the only thing standing between the installing user and root — but it is still
+//! the thing that decides what root executes, and an install that has not migrated
+//! yet is still in the original shape. Written down because the previous version of
+//! this paragraph described a layout two releases old, which is the first thing a
+//! reader of this module sees.
 //!
 //! The crypto and the org key live **here** in `veld-core`, not in `veld-helper`,
 //! so `veld doctor` can check a helper's signature with the exact same
@@ -19,23 +28,181 @@
 //! unreadable binary, mismatched signature — returns false, and the callers
 //! (the helper's relaunch paths, and the doctor row) treat that as "not safe to
 //! relaunch onto", never "assume safe".
+//!
+//! # Key rotation (#261 slice C)
+//!
+//! A leaked private key needs a way out that does not itself depend on the
+//! leaked key, and the only trust an already-installed helper has is the key
+//! compiled into it. So rotation works by **accumulating** trust rather than
+//! replacing it:
+//!
+//!   * `<binary>.sig` is a list of 64-byte signatures over the binary — one
+//!     **slot** per key the release was signed by. Slot 0 belongs to
+//!     [`ORG_KEY_1`] and cannot move, because every helper shipped up to
+//!     v16.59.0 reads exactly bytes `0..64` and checks them against that one
+//!     key. With a single key the file is exactly 64 bytes, i.e. byte-identical
+//!     to what shipped before this existed.
+//!   * A helper accepts a binary when **any** slot verifies under **any** key in
+//!     [`ORG_SIGNING_KEYRING`] — the list compiled into that helper.
+//!   * Rotation is therefore a release: one whose keyring gained a key and whose
+//!     `.sig` gained a slot. Retirement is a later release whose keyring lost a
+//!     key while the `.sig` keeps its slot for helpers that still need it.
+//!
+//! **Trust rides the binary and nothing is persisted**, which is the property
+//! everything else here rests on:
+//!
+//!   * *Rotation cannot be replayed.* Changing which keys a helper trusts means
+//!     changing the binary it executes, and [`crate::helper_store`] already
+//!     refuses to install anything older than the newer of the running and the
+//!     installed version. Trust monotonicity is inherited from version
+//!     monotonicity rather than being a second thing to get right.
+//!   * *Adopting a key **is** executing the binary that carries it.* There is no
+//!     state in which an attacker has captured a machine's trust root without
+//!     already running code on it as root — which is why no separate
+//!     successor-commitment is needed here, and why a keyring persisted to disk
+//!     (the shape that does need one) was rejected. See
+//!     `docs/signing-key-rotation.md`.
+//!
+//! What this honestly does **not** buy, stated rather than implied: rotation
+//! makes a leaked key *insufficient*, never *useless*. Slot 0's signature has to
+//! keep being produced for as long as any pre-rotation helper might still be in
+//! the field, and nothing rescues a machine an attacker reached before the
+//! rotating release landed on it.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{Signature, VerifyingKey};
 
-/// The org's ed25519 public key, raw 32 bytes. Public — embedded at build time.
-/// Derived from `notes/veld-signing-ed25519.pub` (SPKI); the private key lives
-/// in the org vault and the GitHub `SIGNING_PRIVATE_KEY` secret.
-pub const ORG_SIGNING_PUBKEY: [u8; 32] = [
+/// One raw ed25519 public key.
+pub type PubKey = [u8; 32];
+
+/// The org's first ed25519 public key — the **only** key every helper shipped up
+/// to and including v16.59.0 has compiled in, and therefore the key whose
+/// signature must occupy slot 0 of `<binary>.sig`.
+///
+/// Derived from `notes/veld-signing-ed25519.pub` (SPKI); the private key lives in
+/// the org vault and the GitHub `SIGNING_PRIVATE_KEY` secret.
+///
+/// **Its slot position is not a convention, it is a compatibility contract.**
+/// Those helpers read exactly bytes `0..64` and verify them against this key, and
+/// their code cannot be changed. Move this key out of slot 0 and every one of
+/// them refuses to relaunch onto the next release — which leaves sudo as the only
+/// repair channel, the single outcome #338's rules forbid.
+pub const ORG_KEY_1: PubKey = [
     0x9d, 0x75, 0xa4, 0xc5, 0x5c, 0x02, 0xb4, 0x6e, 0x53, 0xa3, 0x0d, 0x1d, 0xf8, 0x84, 0xc8, 0xaa,
     0xf0, 0xd3, 0x90, 0x23, 0x06, 0xd1, 0xc6, 0xee, 0x53, 0x60, 0x32, 0x99, 0xa3, 0x1b, 0x31, 0x56,
 ];
 
+/// The keys **this build accepts** a signature from.
+///
+/// A binary verifies when any slot of its `.sig` verifies under any key here, so
+/// this list is what "trusted" means for the helper that links it. It rides the
+/// binary deliberately — see the module doc — so a helper's trust changes only
+/// when the binary it executes changes, and that transition is already governed
+/// by [`crate::helper_store`]'s version floor.
+///
+/// **Rotating** = a release that adds a key here *and* a matching slot in
+/// `release.yml`. **Retiring** = a later release that removes a key from here
+/// while [`ORG_REQUIRED_SLOT_KEYS`] keeps producing its slot. Do those in two
+/// separate releases: a release that both adds and retires leaves any helper
+/// whose only key was the retired one unable to verify the very artifact meant to
+/// move it forward.
+pub const ORG_SIGNING_KEYRING: &[PubKey] = &[ORG_KEY_1];
+
+/// The keys every release must still be **signed by**, whether or not this build
+/// would accept them.
+///
+/// A key stays here after it leaves [`ORG_SIGNING_KEYRING`], because some helper
+/// generation in the field accepts *only* that key and a release carrying no slot
+/// for it is a release that generation refuses. Dropping a key from this list is
+/// therefore a deliberate flag day that strands whatever remains of that
+/// generation on sudo — not a tidy-up. It is not something a rotation does.
+pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &[ORG_KEY_1];
+
+/// How many 64-byte slots `<binary>.sig` must carry for a release to be
+/// installable by every helper generation still in the field: one per distinct
+/// key across [`ORG_SIGNING_KEYRING`] and [`ORG_REQUIRED_SLOT_KEYS`].
+///
+/// Written out as a number rather than computed because it is read from **two**
+/// places that cannot evaluate Rust: `release.yml` passes exactly this many keys
+/// to `veld-sign`, and `ci.yml`'s `schema` job compares this constant against the
+/// number of key flags in that step — so a key added to the lists above without a
+/// matching secret fails a **pull request** instead of a release. The number is
+/// held honest against the lists themselves by
+/// `release_slot_count_matches_the_key_lists`.
+pub const RELEASE_SIG_SLOTS: usize = 1;
+
+/// One slot of a detached signature file: a raw ed25519 signature.
+pub const SIG_SLOT_LEN: usize = 64;
+
+/// Most slots [`read_detached_sig_slots`] will read.
+///
+/// A bound rather than a limit on what may be *written*: the file sits beside a
+/// binary in a directory the installing user can write, and on the install RPC it
+/// is a path they *name*, so an unbounded read is a memory DoS on every relaunch
+/// attempt, every doctor run and every install request. Eight is far more keys
+/// than the org will ever have live at once, and anything past it is ignored the
+/// same way the pre-rotation reader ignored everything past byte 64.
+///
+/// **It bounds root-side work as well as memory, and that is the newer reason.**
+/// [`verify_data_slots`] does up to `slots × keyring.len()` full ed25519
+/// verifications, each hashing the whole binary — ed25519 hashes `R ‖ A ‖ M`, so
+/// nothing can be shared between slots or keys — and the caller who writes the
+/// `.sig` chooses that multiplier. `any()` short-circuits, so the worst case is
+/// only reached by input that verifies under *nothing*, i.e. a refusal.
+///
+/// The real numbers, measured on an M-series Mac in a release build rather than
+/// guessed, because the first version of this comment was wrong by about 70x and
+/// a wrong number here is what the next person to raise this constant will trust:
+///
+///   * ~0.24 s per SHA-512 pass over 128 MiB, which is `helper_store`'s
+///     `MAX_CANDIDATE_BYTES` — the size an *unprivileged caller* may hand the
+///     install RPC. Eight junk slots against one key is therefore ~1.9 s of root
+///     CPU per request, against ~0.24 s before this existed. The install RPC does
+///     **not** go through [`classify_binary_signature`] — it calls
+///     [`verify_data_slots`] on bytes it already holds — so it pays that once.
+///   * The **relaunch and doctor** paths do go through
+///     [`classify_binary_signature`], which decides `Untrusted` twice before
+///     believing it, so on those paths a refusal costs two passes: **double** the
+///     figures above. That is the path with no lock in front of it and a
+///     ten-second tick behind it, so the doubling is the number that matters. It
+///     buys not printing a tampered-root-binary paragraph on a machine where an
+///     update has just landed correctly; judged worth it, and stated rather than
+///     buried.
+///   * Post-retirement the multiplier is `slots × (active + retired)`, because
+///     [`classify_binary_signature`] sweeps the active keys and then the retired
+///     ones. With one retired key and two active, 8 × 3 = 24 — and 48 on the
+///     relaunch/doctor path once the retry below is counted.
+///
+/// **The install lock does not cover the relaunch path.** The helper's binary
+/// watcher calls [`classify_binary_signature`] every `BINARY_WATCH_INTERVAL` for
+/// as long as the on-disk file differs from its baseline — so on an install not yet
+/// migrated to the root-owned store, where the installing user can write both
+/// files, the cost is paid on a timer with nothing serialising it. That read used
+/// to be an unbounded `std::fs::read` (as the pre-rotation
+/// `verify_binary_signed`'s was), which made the figures above meaningless there
+/// because the *size* was the attacker's to choose. It is bounded now — see
+/// [`MAX_VERIFIED_BINARY_BYTES`] — so the figures apply, and the doubling below is
+/// a doubling of something finite.
+///
+/// Byte-identical slots are collapsed before verifying, which removes the lazy
+/// version of that multiplier for free. It does not remove the deliberate one —
+/// eight *distinct* junk slots still cost eight passes — and closing that
+/// properly needs a key identifier per slot, which the format deliberately does
+/// not have (see `docs/signing-key-rotation.md`). Stated as a residual rather
+/// than implied: it is a CPU cost to an attacker who is already the installing
+/// user, on a machine where the same user can already keep the daemon busy.
+pub const MAX_SIG_SLOTS: usize = 8;
+
 /// Whether `data` carries a valid ed25519 signature by `pubkey` in `sig`.
-pub fn verify_data(pubkey: &[u8; 32], data: &[u8], sig: &[u8]) -> bool {
-    if sig.len() != 64 {
+///
+/// **One key, one 64-byte signature** — the primitive, and deliberately still
+/// strict about the length. This is the exact shape the pre-rotation helpers
+/// verify, so keeping it unchanged (and tested) is what lets the slot reader
+/// above it be added without wondering whether the floor moved.
+pub fn verify_data(pubkey: &PubKey, data: &[u8], sig: &[u8]) -> bool {
+    if sig.len() != SIG_SLOT_LEN {
         return false;
     }
     let Ok(vk) = VerifyingKey::from_bytes(pubkey) else {
@@ -47,6 +214,49 @@ pub fn verify_data(pubkey: &[u8; 32], data: &[u8], sig: &[u8]) -> bool {
     vk.verify_strict(data, &sig).is_ok()
 }
 
+/// Whether any 64-byte slot of `sig` verifies `data` under any key in `keyring`.
+///
+/// A slot that verifies under nothing is simply skipped, which is what makes the
+/// format additive: a future release may append whatever it likes after the slots
+/// this build understands, and a build that does not understand it reads noise
+/// that matches no key rather than failing. That tolerance is the same one the
+/// pre-rotation reader had by accident, made deliberate.
+///
+/// A trailing partial slot is ignored for the same reason. `sig` is expected to
+/// be bounded by the caller — [`read_detached_sig_slots`] is what does that.
+pub fn verify_data_slots(keyring: &[PubKey], data: &[u8], sig: &[u8]) -> bool {
+    any_slot_verifies(sig, |slot| {
+        keyring.iter().any(|key| verify_data(key, data, slot))
+    })
+}
+
+/// Whether any **distinct** 64-byte slot of `sig` satisfies `verify`.
+///
+/// Split from [`verify_data_slots`] so the deduplication is *observable*, which is
+/// the only way it survives. It is a pure cost optimisation: every functional test
+/// passes identically with or without it, so an engineer tidying what looks like
+/// unnecessary bookkeeping around a straightforward `any()` would reopen the
+/// CPU-amplification [`MAX_SIG_SLOTS`] spends its doc comment bounding, with
+/// nothing red anywhere. `each_distinct_slot_is_verified_at_most_once` counts the
+/// calls, and counting them needs this seam.
+fn any_slot_verifies(sig: &[u8], mut verify: impl FnMut(&[u8]) -> bool) -> bool {
+    let mut tried: Vec<&[u8]> = Vec::new();
+    for slot in sig.chunks_exact(SIG_SLOT_LEN) {
+        // Byte-identical slots are verified once. Each verification hashes the
+        // whole binary and the `.sig` is written by the caller, so a repeated slot
+        // is free work handed to root — see [`MAX_SIG_SLOTS`] for the measured
+        // cost and for what this does *not* fix.
+        if tried.contains(&slot) {
+            continue;
+        }
+        tried.push(slot);
+        if verify(slot) {
+            return true;
+        }
+    }
+    false
+}
+
 /// `<path>.sig` — the sibling detached signature (append, not replace).
 pub fn sig_path_for(binary: &Path) -> PathBuf {
     let mut s = binary.as_os_str().to_os_string();
@@ -54,77 +264,455 @@ pub fn sig_path_for(binary: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// The detached signature beside `binary`, or `None` when there isn't a
-/// readable 64-byte one.
+/// Largest binary this will read in order to verify it.
 ///
-/// Bounds the read to 64 bytes (a valid ed25519 signature is exactly that): the
-/// file can sit in a user-writable directory, so a huge one must not be slurped
-/// into memory here — that would be a memory DoS on every relaunch attempt,
-/// every doctor run, and (since #262) every install request.
+/// The read used to be an unbounded `std::fs::read`, on a path an unprivileged
+/// caller can influence, and each slot verification hashes the whole thing.
 ///
-/// `read_exact` rather than one `read`: a single `read` is allowed to return
-/// fewer bytes than asked for even on a regular file, and a short read here
-/// would fail a genuine signature closed. The bound is unchanged — the buffer is
-/// 64 bytes, so a larger `.sig` is still never read past that.
-fn read_detached_sig(binary: &Path) -> Option<[u8; 64]> {
+/// Measured rather than guessed, because the failure mode of a bound set too low is
+/// refusing a genuine artifact: the largest thing that legitimately reaches this is
+/// a **debug** build of the helper, 31 MB on this machine, and that only on a
+/// developer running `veld doctor` against `target/debug`. A release helper is
+/// ~6 MB. So this is four times the largest real artifact — deliberately the same
+/// figure `helper_store`'s `MAX_CANDIDATE_BYTES` uses, since they bound the same
+/// hostile shape for the same reason.
+///
+/// Two things checked rather than assumed. `release.yml` has no `lipo` step — it
+/// builds `aarch64-apple-darwin` and `x86_64-apple-darwin` as separate targets — so
+/// there is no universal binary to double the figure; the bound would still hold for
+/// one. And every call site here passes a `veld-helper` path, never `veld-daemon` or
+/// the ~40 MB `caddy`. A *Linux* debug build is the one artifact that could approach
+/// this, because it keeps DWARF inside the binary where macOS leaves it in the `.o`
+/// files — and it is never org-signed, so it is refused for want of a signature with
+/// or without the bound.
+pub const MAX_VERIFIED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Read a **regular file** at `path`, up to `limit` bytes, without ever blocking
+/// on a special file. `None` when it is not a readable regular file; otherwise the
+/// bytes and whether the file was **longer** than `limit`.
+///
+/// The two callers want opposite things from that flag and both are deliberate:
+/// the `.sig` reader **tolerates** a longer file and keeps the prefix, because a
+/// future release may append something this build does not understand and the
+/// pre-rotation reader tolerated exactly that; the binary reader **refuses** it,
+/// because a helper larger than the bound is not one of ours and fail-closed is the
+/// rule everywhere else here. Folding those into one "return None if too long"
+/// silently broke the tolerance, which is why the flag is explicit.
+///
+/// The whole discipline in one place, because this module needed it twice and
+/// getting one of the two wrong is exactly what happened:
+///
+///   * a pre-open `metadata` check, because some device nodes act on `open`
+///     itself: `/dev/watchdog` arms the hardware watchdog as root, and dropping the
+///     descriptor without the magic close reboots the machine. Nothing after the
+///     open can undo that;
+///   * `O_NONBLOCK`, because a plain `open(O_RDONLY)` on a **FIFO blocks until
+///     somebody opens the write end** — parking the helper's watcher, its
+///     `shutdown` handler, `veld doctor`, or a blocking-pool thread of the root
+///     daemon, permanently and uncancellably;
+///   * an `is_file()` check on the **descriptor**, never on the path, because a
+///     path can be swapped between the check and the open and a descriptor cannot;
+///   * a bound applied to the *read*, not to a prior `stat` — a stat answers about
+///     the file that was there a moment ago, and this path's whole hazard is a file
+///     that changes underneath us.
+///
+/// The pre-open `metadata` is a **TOCTOU and not a free one**: for the watchdog
+/// case the side effect *is* the open, so losing that race costs precisely what
+/// the check exists to prevent. It narrows the window; it does not close it, and
+/// closing it needs `O_NOFOLLOW` or `O_PATH` — `O_NOFOLLOW` being off the table
+/// because a path reached through a symlink must keep working. Both halves of that
+/// are pinned, one test per caller:
+/// `a_sig_symlinked_to_a_non_regular_file_is_refused` and
+/// `a_binary_symlinked_to_a_non_regular_file_is_refused`, each of which refuses a
+/// symlink to a FIFO *and* accepts a symlink to a real file. Said plainly because
+/// an earlier wording here claimed the race was harmless, and because the earlier
+/// version of this comment cited only the `.sig` test from the binary's guard.
+fn read_regular_file_bounded(path: &Path, limit: u64) -> Option<(Vec<u8>, bool)> {
     use std::os::unix::fs::OpenOptionsExt;
 
-    let path = sig_path_for(binary);
-    // `O_NONBLOCK`, and a regular-file check on the descriptor, for the same
-    // reason `helper_store::Candidate::read` does it to the binary: this path
-    // sits beside a binary in a directory the installing user can write, and on
-    // the install RPC it is a path they *name*. A plain `open(O_RDONLY)` on a
-    // **FIFO blocks until somebody opens the write end** — which would park the
-    // helper's binary watcher, `veld doctor`, or a blocking-pool thread of the
-    // root daemon, permanently and uncancellably.
-    let mut file = std::fs::OpenOptions::new()
+    if !std::fs::metadata(path).ok()?.is_file() {
+        return None;
+    }
+    let file = std::fs::OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
-        .open(&path)
+        .open(path)
         .ok()?;
     if !file.metadata().ok()?.is_file() {
         return None;
     }
-    let mut sig = [0u8; 64];
-    file.read_exact(&mut sig).ok()?;
-    Some(sig)
+    let mut bytes = Vec::new();
+    // `take(limit + 1)` + `read_to_end`: one extra byte is what distinguishes "a
+    // file exactly at the bound" from "a longer one", and `read_to_end` rather than
+    // a single `read` because a single `read` may return fewer bytes than asked for
+    // even on a regular file. The bound is on the *read*, not on a prior `stat`.
+    // `saturating_add`: `limit + 1` would wrap at `u64::MAX` and `take(0)` then
+    // returns a *successful empty read* — the one shape both callers read as
+    // "verified nothing". Unreachable with today's two constant call sites, and
+    // not worth leaving as a trap for a third.
+    file.take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
+    let over = bytes.len() as u64 > limit;
+    bytes.truncate(limit as usize);
+    Some((bytes, over))
 }
 
-/// [`read_detached_sig`] for callers outside this module, as an `Option` of the
-/// raw 64 bytes. The install path (`crate::helper_store`) needs the signature
-/// itself and not just a verdict, because it installs the `.sig` it verified
-/// against rather than re-reading the caller's path a second time.
-pub fn read_detached_sig_bytes(binary: &Path) -> Option<[u8; 64]> {
-    read_detached_sig(binary)
+/// The detached signature slots beside `binary`, or `None` when there is not
+/// even one readable 64-byte slot.
+///
+/// Bounded to [`MAX_SIG_SLOTS`] slots: the file can sit in a user-writable
+/// directory, so a huge one must not be slurped into memory here — that would be
+/// a memory DoS on every relaunch attempt, every doctor run, and (since #262)
+/// every install request.
+///
+/// **Returns whole slots only.** A file of 100 bytes yields the first 64 and
+/// drops the rest, exactly as the pre-rotation reader did; a file of 63 yields
+/// `None`, exactly as `read_exact` into a `[u8; 64]` did. Both behaviours are
+/// load-bearing rather than incidental — `the_pre_rotation_reader_still_accepts_a_multi_slot_release`
+/// is what holds them.
+fn read_detached_sig_slots_inner(binary: &Path) -> Option<Vec<u8>> {
+    match read_detached_sig_slots_classified(binary) {
+        SigRead::Slots(slots) => Some(slots),
+        SigRead::NoWholeSlot | SigRead::Unreadable => None,
+    }
+}
+
+/// What reading the slots beside a binary produced.
+///
+/// Three outcomes, because the middle one is **not** a read failure and treating
+/// it as one put it on the wrong side of [`classify_binary_signature`]'s retry
+/// rule. `install.sh` writes the lib-dir `.sig` with `cp`, which truncates in
+/// place — so there is a real window in which the file reads fine and holds no
+/// whole slot, and that is a torn write, exactly what the retry exists for.
+///
+/// The narrowing bought nothing at that boundary either: somebody wanting two
+/// reads per tick plants 64 bytes of junk, which is a verification failure and is
+/// retried anyway.
+enum SigRead {
+    /// At least one whole 64-byte slot.
+    Slots(Vec<u8>),
+    /// Read fine, but 0–63 bytes: no whole slot. A torn write, not a bad path.
+    NoWholeSlot,
+    /// The path could not be read at all — missing, not a regular file, or an I/O
+    /// error. Not retried.
+    Unreadable,
+}
+
+/// [`read_detached_sig_slots_inner`], keeping the distinction the retry needs.
+fn read_detached_sig_slots_classified(binary: &Path) -> SigRead {
+    let Some((mut slots, _over)) =
+        read_regular_file_bounded(&sig_path_for(binary), (MAX_SIG_SLOTS * SIG_SLOT_LEN) as u64)
+    else {
+        return SigRead::Unreadable;
+    };
+    slots.truncate(slots.len() - slots.len() % SIG_SLOT_LEN);
+    if slots.is_empty() {
+        return SigRead::NoWholeSlot;
+    }
+    SigRead::Slots(slots)
+}
+
+/// [`read_detached_sig_slots_inner`] for callers outside this module.
+///
+/// The install path (`crate::helper_store`) needs the slots themselves and not
+/// just a verdict, because it installs the `.sig` it verified against rather than
+/// re-reading the caller's path a second time — and it must install **every**
+/// slot, not only the one that happened to verify. A slot dropped on the way into
+/// the store is a slot the *next* helper generation cannot find.
+pub fn read_detached_sig_slots(binary: &Path) -> Option<Vec<u8>> {
+    read_detached_sig_slots_inner(binary)
+}
+
+/// How much this build trusts the signature beside a binary.
+///
+/// Three answers rather than a bool because the middle one is a real state with
+/// its own remedy, and reporting it as "not signed by us" would read as tampering
+/// on a machine where nothing is wrong. See [`SigTrust::RetiredOnly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SigTrust {
+    /// A slot verified under a key in [`ORG_SIGNING_KEYRING`]. Safe.
+    Active,
+    /// No slot verified under an active key, but one verified under a key that
+    /// *used* to be active — so the org really did build these bytes, and this
+    /// build has simply stopped accepting that key.
+    ///
+    /// The way a healthy machine reaches this: a pre-rotation helper's install
+    /// RPC kept only the first 64 bytes of the `.sig` it was handed (its
+    /// `Candidate` held a `[u8; 64]`), so a machine that jumped straight from a
+    /// pre-rotation release to a post-retirement one has a store holding the
+    /// right binary beside a signature with only the retired slot left in it.
+    /// Nothing is compromised — the bytes are genuine and no *incoming* candidate
+    /// is accepted on this basis — and re-running the installer
+    /// ([`INSTALLER_COMMAND`]) writes the full slot list and clears it.
+    /// **Not `veld update`**, which is a no-op on a machine already on the latest
+    /// release, and a machine in this state is on the latest release by
+    /// construction; see [`INSTALLER_COMMAND`] for why. Fail-closed still applies:
+    /// this is not accepted anywhere, it is only *diagnosed* differently.
+    RetiredOnly,
+    /// Nothing verified. Missing, malformed, or not ours.
+    Untrusted,
+}
+
+/// The no-password repair for [`SigTrust::RetiredOnly`], named in one place
+/// because three messages and a runbook have to agree on it.
+///
+/// **Not `veld update`**, and that was the first answer. `veld update` resolves a
+/// target and takes its "already on the latest version" branch when there is
+/// nothing newer, so the installer never runs — and a machine in the RetiredOnly
+/// state is by construction *on* the latest release, because installing it is how
+/// it got there. `--target-version` at the current version is the same no-op.
+/// Re-running the installer does re-drive the helper handoff at the current
+/// version, and the store's floor accepts an equal version, so this repairs it
+/// and asks for no password.
+pub const INSTALLER_COMMAND: &str = "curl -fsSL https://veld.oss.life.li/get | bash";
+
+/// Keys that were once active and are not any more — [`ORG_REQUIRED_SLOT_KEYS`]
+/// minus [`ORG_SIGNING_KEYRING`].
+///
+/// Derived rather than listed so it cannot disagree with the two lists it comes
+/// from. Empty until the first retirement, which is why
+/// [`SigTrust::RetiredOnly`] is unreachable today and tested with explicit lists
+/// instead.
+fn retired_keys() -> Vec<PubKey> {
+    ORG_REQUIRED_SLOT_KEYS
+        .iter()
+        .filter(|key| !ORG_SIGNING_KEYRING.contains(key))
+        .copied()
+        .collect()
+}
+
+/// [`classify_binary_signature`] against explicit lists, so the retired-key case
+/// is testable before any key has actually been retired.
+pub fn classify_data(active: &[PubKey], retired: &[PubKey], data: &[u8], sig: &[u8]) -> SigTrust {
+    if verify_data_slots(active, data, sig) {
+        SigTrust::Active
+    } else if verify_data_slots(retired, data, sig) {
+        SigTrust::RetiredOnly
+    } else {
+        SigTrust::Untrusted
+    }
+}
+
+/// How much this build trusts `binary`'s detached signature.
+///
+/// **A verification failure is re-checked once before it is believed** — and only
+/// that failure, which is the narrow part.
+///
+/// The signature and the binary are read in two separate operations, and
+/// `helper_store` installs the signature *then* the binary, so a read landing
+/// between the two renames sees a new signature beside a stale binary and nothing
+/// verifies. That is fail-closed and self-healing (no tear can produce a false
+/// `Active`), but the caller's reaction to `Untrusted` is a paragraph about a
+/// tampered root binary, and printing that on a machine where an update has just
+/// landed correctly is the alarm [`SigTrust::RetiredOnly`] exists to avoid
+/// elsewhere.
+///
+/// **The retry is scoped to the tear, not to every refusal.** A tear means both
+/// reads *succeeded* and the bytes did not verify, so an unreadable path — a
+/// missing file, a FIFO, a device node, an over-bound binary — is answered once and
+/// not retried. The first version retried every refusal, which handed a second
+/// race per watcher tick against the pre-open `stat` in
+/// [`read_regular_file_bounded`] to any machine whose helper path was merely
+/// *unreadable* — permanently, and on machines nobody had attacked.
+///
+/// Narrowly stated, because an earlier wording here overclaimed twice. The scoping
+/// removes the doubling only for **benign** refusals: somebody who can already
+/// write the directory still arms two windows per tick by leaving a *readable*
+/// non-verifying pair there, which is the state they are in anyway once they have
+/// swapped the binary.
+///
+/// And the doubled thing is worse than an `open` race, which is what the earlier
+/// wording said. `relaunch_guard` returning `None` is what makes the helper
+/// `exit(0)` so the service manager re-execs whatever is at the path — so a second
+/// pass is a second **chance to be seen as genuine before that exec**, to an
+/// attacker alternating a real release pair with their own binary. It does not
+/// change reachability (the watcher ticks forever either way) and it is strictly
+/// fewer windows than the version it replaced, but it is two per tick, not one.
+///
+/// It **reduces** the false alarm rather than removing it, and the arithmetic is
+/// worth stating rather than overclaiming: the retry is immediate, and one pass over
+/// a release helper is a few tens of milliseconds against a window that includes
+/// writing and `fsync`ing the whole binary. A second pass can land inside the same
+/// window. `veld doctor` additionally knows when an update is in progress and is the
+/// right place to suppress the paragraph outright if this proves not enough.
+pub fn classify_binary_signature(binary: &Path) -> SigTrust {
+    classify_with_retry(|| classify_binary_signature_once(binary, MAX_VERIFIED_BINARY_BYTES))
+}
+
+/// [`classify_binary_signature`]'s retry rule, over a pass it can count.
+///
+/// Split out for the same reason [`any_slot_verifies`] is: the scoping changes no
+/// verdict any other test can observe, only the number of passes — so without a
+/// seam to count them, "retry only the tear" could be simplified back to "retry
+/// every refusal" with nothing red anywhere, handing an attacker a second race per
+/// tick against the pre-`stat` in [`read_regular_file_bounded`].
+/// `only_a_verification_failure_is_retried` counts them.
+fn classify_with_retry(mut pass: impl FnMut() -> Option<SigTrust>) -> SigTrust {
+    match pass() {
+        // A read failed. Answer once; do not hand out a second race.
+        None => SigTrust::Untrusted,
+        Some(SigTrust::Untrusted) => pass().unwrap_or(SigTrust::Untrusted),
+        Some(settled) => settled,
+    }
+}
+
+/// One pass of [`classify_binary_signature`]. `None` means a read failed, which is
+/// what separates a tear from an unreadable path — see there.
+fn classify_binary_signature_once(binary: &Path, limit: u64) -> Option<SigTrust> {
+    let sig = match read_detached_sig_slots_classified(binary) {
+        SigRead::Slots(slots) => slots,
+        // Read fine, no whole slot: a **torn** `.sig`, which is what the retry is
+        // for. `install.sh` writes the lib-dir copy with `cp`, so the file really
+        // does pass through zero length in place. Reporting this as a read failure
+        // put it on the wrong side of the rule — see [`SigRead`].
+        SigRead::NoWholeSlot => return Some(SigTrust::Untrusted),
+        SigRead::Unreadable => return None,
+    };
+    // Read through the **same** shape as the `.sig` above, and that pairing is the
+    // point: a first attempt at this guard used `std::fs::metadata` plus
+    // `std::fs::read`, which is the weaker half of the pair. `std::fs::read` has no
+    // `O_NONBLOCK`, so winning the race with a symlink to a FIFO parks root's open
+    // **forever** — an uncancellable stall of the helper's binary watcher or its
+    // `shutdown` handler, which is the repair channel itself.
+    //
+    // Reachable, and not only through the install RPC. On a privileged install not
+    // yet migrated to the root-owned store the installing user owns
+    // `~/.local/lib/veld/veld-helper`, so they can replace it with a symlink and
+    // send the uid-gated `shutdown` request — which calls the relaunch guard
+    // **directly**, with no `binary_executes()` in front of it, unlike the watcher
+    // and `restart`.
+    // `limit` is a parameter rather than the constant, so the over-bound arm below
+    // has a test seam. Without one, deleting that arm leaves every test green while
+    // the binary is verified as a prefix — reinstating the slots × keys hashing cost
+    // [`MAX_SIG_SLOTS`] spends a paragraph bounding. The same argument that gave
+    // [`any_slot_verifies`] and [`classify_with_retry`] theirs.
+    let (data, over) = read_regular_file_bounded(binary, limit)?;
+    if over {
+        // A helper bigger than the bound is not one of ours. Fail closed rather
+        // than verify a prefix, which would verify nothing — and report it as a
+        // read failure so it is not retried.
+        return None;
+    }
+    Some(classify_data(
+        ORG_SIGNING_KEYRING,
+        &retired_keys(),
+        &data,
+        &sig,
+    ))
 }
 
 /// Whether `binary` carries a valid org signature in `<binary>.sig`.
 ///
-/// `false` for any failure — see the module doc on fail-closed.
+/// `false` for any failure — see the module doc on fail-closed. A signature by a
+/// **retired** key is a failure here too: admitting one would make retirement mean
+/// nothing.
+///
+/// **This is the strict predicate by name, not a live gate**, and saying so is the
+/// honest version of a claim this comment used to make. It has no production
+/// callers: the relaunch gate is [`relaunch_guard`], the install gate is
+/// `helper_store::Candidate::verified_version_with` (which hands
+/// [`ORG_SIGNING_KEYRING`] to [`verify_data_slots`] directly), and `setup`'s two
+/// service-definition call sites use [`is_org_binary`]. It stays because it is the
+/// name a reader looks for, and because it and [`is_org_binary`] only make sense as
+/// a documented pair — which is the mitigation for the one mistake in this module
+/// that would be a privilege escalation rather than a brick: calling the lax one
+/// where the strict one belongs.
 pub fn verify_binary_signed(binary: &Path) -> bool {
-    let Some(sig) = read_detached_sig(binary) else {
-        return false;
-    };
-    let Ok(data) = std::fs::read(binary) else {
-        return false;
-    };
-    verify_data(&ORG_SIGNING_PUBKEY, &data, &sig)
+    classify_binary_signature(binary) == SigTrust::Active
+}
+
+/// The refusal text for a binary signed only by a retired key.
+///
+/// Split out so the test that holds its remedy honest reads the real string
+/// rather than a copy: the advice was wrong once (`veld update`, which is a no-op
+/// on every machine that can reach this state) and both `SigTrust` arms are
+/// unreachable in this build, so nothing else would catch it.
+fn relaunch_guard_message_for_retired(binary: &Path) -> String {
+    format!(
+        "the binary at {} is signed with an org key this release has retired, and its {} \
+         carries no slot for a current one; refusing to relaunch onto it. The binary itself is \
+         genuine — re-run the installer ({INSTALLER_COMMAND}) to write the full signature back; \
+         no password is needed, and `veld update` will not do it when you are already on the \
+         latest release",
+        binary.display(),
+        sig_path_for(binary).display()
+    )
+}
+
+/// Whether `binary` is genuinely an org build, **whatever key generation signed
+/// it** — including one this release has retired.
+///
+/// **A different question from [`verify_binary_signed`], and the difference is
+/// the point.** That one answers "may I relaunch onto this, or install it", where
+/// a retired key must not be enough or retirement would mean nothing. This one
+/// answers "is this file ours", which is what
+/// `setup::which_privileged_helper` and `setup::fallback_helper_path` actually
+/// need: they are choosing which path to write into a **service definition**, and
+/// their alternative when the answer is no is a bare `"veld-helper"` that launchd
+/// cannot exec — a bricked root service.
+///
+/// Safe to be laxer here precisely because it is not a gate — but only for a file
+/// **nobody but root can have written**, and that is now checked rather than
+/// argued. The store is root-owned under a root-owned parent, so only root put
+/// that file there, and it got there by passing the *strict* install gate of
+/// whichever helper generation installed it. Refusing it would protect nothing an
+/// attacker could reach; it would only brick the machine — and it would brick it
+/// in the truncation window described on [`SigTrust::RetiredOnly`], where the
+/// binary is beyond doubt genuine.
+///
+/// The ownership walk is what stops that argument from being the only thing
+/// holding. If the invariant is ever broken — a failed migration, a restore from a
+/// user-owned backup, a legacy `/usr/local` tree a Homebrew install owns — a
+/// retired key stops being accepted here and this falls back to the strict answer.
+/// An **active** signature is accepted unconditionally, so the anti-brick property
+/// is untouched on every healthy machine.
+///
+/// **Do not use this for a relaunch, an install, or anything else that decides
+/// whether to trust incoming bytes.** Those are [`verify_binary_signed`].
+pub fn is_org_binary(binary: &Path) -> bool {
+    let trust = classify_binary_signature(binary);
+    // The ownership walk is only asked for when it can change the answer, so a
+    // healthy machine pays nothing for it.
+    let root_owned =
+        || trust == SigTrust::RetiredOnly && crate::helper_store::is_root_owned_and_locked(binary);
+    org_binary_verdict(trust, root_owned())
+}
+
+/// [`is_org_binary`]'s decision, as a pure function of its two inputs.
+///
+/// Split out because [`SigTrust::RetiredOnly`] is unreachable in a build with
+/// nothing retired, so the only way to hold the retired arm honest is to test the
+/// mapping directly — and this arm is the one place in the whole mechanism where a
+/// retired key changes an outcome.
+fn org_binary_verdict(trust: SigTrust, root_owned: bool) -> bool {
+    match trust {
+        SigTrust::Active => true,
+        SigTrust::RetiredOnly => root_owned,
+        SigTrust::Untrusted => false,
+    }
 }
 
 /// A reason when `binary` is NOT safe to relaunch onto, or `None` when it
-/// verifies. Wraps [`verify_binary_signed`] with a diagnosable message for the
-/// fail-closed callers (the helper's watcher/`restart`/`shutdown`, and `veld
-/// doctor`).
+/// verifies. Wraps [`classify_binary_signature`] with a diagnosable message for
+/// the fail-closed callers (the helper's watcher/`restart`/`shutdown`, and `veld
+/// doctor`) — **not** [`verify_binary_signed`], which this said before and which
+/// has no production callers at all: three verdicts need three messages, and a
+/// bool cannot carry the retired-key one.
 pub fn relaunch_guard(binary: &Path) -> Option<String> {
-    if verify_binary_signed(binary) {
-        return None;
+    match classify_binary_signature(binary) {
+        SigTrust::Active => None,
+        // Named separately because the remedy is different and the alarming
+        // reading is wrong: these bytes are genuinely ours. See
+        // [`SigTrust::RetiredOnly`] for how a healthy machine gets here.
+        SigTrust::RetiredOnly => Some(relaunch_guard_message_for_retired(binary)),
+        SigTrust::Untrusted => Some(format!(
+            "the binary at {} is not signed with the org's key (or its {} is \
+             missing/invalid); refusing to relaunch onto it",
+            binary.display(),
+            sig_path_for(binary).display()
+        )),
     }
-    Some(format!(
-        "the binary at {} is not signed with the org's key (or its {} is \
-         missing/invalid); refusing to relaunch onto it",
-        binary.display(),
-        sig_path_for(binary).display()
-    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -534,6 +1122,806 @@ mod tests {
 
         assert!(!verify_binary_signed(&binary));
         assert!(relaunch_guard(&binary).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // -- Key rotation (#261 slice C) ----------------------------------------
+
+    /// A named key generation, so the tests below read as "a G1 helper meets a
+    /// G3 release" rather than as index arithmetic.
+    fn gen_key(n: u8) -> (SigningKey, PubKey) {
+        let signing = SigningKey::from_bytes(&[0xA0 + n; 32]);
+        (signing.clone(), VerifyingKey::from(&signing).to_bytes())
+    }
+
+    /// A `.sig` as the release pipeline writes one: one 64-byte slot per key, in
+    /// the order given, over exactly `data`.
+    fn slots(keys: &[&SigningKey], data: &[u8]) -> Vec<u8> {
+        keys.iter().flat_map(|k| k.sign(data).to_bytes()).collect()
+    }
+
+    /// **The compatibility contract, asserted rather than trusted.**
+    ///
+    /// Every helper shipped up to v16.59.0 reads exactly bytes `0..64` of the
+    /// `.sig` and checks them against its single embedded key, which is
+    /// [`ORG_KEY_1`]. Their code cannot be changed. So [`ORG_KEY_1`] must stay
+    /// first in [`ORG_REQUIRED_SLOT_KEYS`] — the list `release.yml` signs in
+    /// order — or the next release is one every one of those helpers refuses to
+    /// relaunch onto, and sudo becomes the only repair channel.
+    #[test]
+    fn org_key_1_holds_slot_zero_forever() {
+        assert_eq!(
+            ORG_REQUIRED_SLOT_KEYS.first(),
+            Some(&ORG_KEY_1),
+            "ORG_KEY_1 must be the first key a release is signed by: every helper \
+             shipped up to v16.59.0 verifies sig[0..64] against it and nothing else"
+        );
+    }
+
+    /// [`RELEASE_SIG_SLOTS`] is read by two places that cannot evaluate Rust —
+    /// `release.yml`'s key flags and `ci.yml`'s gate on them — so it has to be
+    /// held honest against the lists it summarises.
+    #[test]
+    fn release_slot_count_matches_the_key_lists() {
+        let mut all: Vec<PubKey> = ORG_SIGNING_KEYRING.to_vec();
+        for key in ORG_REQUIRED_SLOT_KEYS {
+            if !all.contains(key) {
+                all.push(*key);
+            }
+        }
+        assert_eq!(
+            RELEASE_SIG_SLOTS,
+            all.len(),
+            "RELEASE_SIG_SLOTS is what release.yml and ci.yml count key flags \
+             against; a key added to ORG_SIGNING_KEYRING or ORG_REQUIRED_SLOT_KEYS \
+             without bumping it ships a release missing a slot"
+        );
+    }
+
+    /// **This is the load-bearing test of the whole slice.**
+    ///
+    /// The claim the format change rests on is that a helper *already in the
+    /// field* still verifies a multi-slot release. That helper's code cannot be
+    /// re-run here, so the test re-implements it: `read_exact` into a `[u8; 64]`,
+    /// then one `verify_data` against one key. If a future edit to the writer
+    /// ever moves [`ORG_KEY_1`]'s signature off byte 0, or pads before it, this
+    /// fails — and what it is standing in for is every privileged install in
+    /// existence refusing the release that was meant to move it forward.
+    #[test]
+    fn the_pre_rotation_reader_still_accepts_a_multi_slot_release() {
+        let (k1, p1) = gen_key(1);
+        let (k2, _) = gen_key(2);
+        let (k3, _) = gen_key(3);
+        let binary = b"\x7fELF a three-generation release";
+
+        for keys in [vec![&k1], vec![&k1, &k2], vec![&k1, &k2, &k3]] {
+            let sig = slots(&keys, binary);
+
+            // Exactly what the shipped `read_detached_sig` does: a fixed 64-byte
+            // buffer filled by `read_exact`, and everything after it unread.
+            let mut first_slot = [0u8; 64];
+            let mut cursor: &[u8] = &sig;
+            cursor.read_exact(&mut first_slot).expect(
+                "a release must always carry at least one whole slot; a shorter \
+                 .sig is what `read_exact` fails closed on",
+            );
+
+            assert!(
+                verify_data(&p1, binary, &first_slot),
+                "a {}-slot release is not accepted by a pre-rotation helper",
+                keys.len()
+            );
+        }
+    }
+
+    /// A one-key `.sig` is exactly the 64 bytes the pre-rotation reader expects.
+    ///
+    /// A permanent invariant about the *format*, not about today's key count: it
+    /// stays true after every rotation and must never be deleted.
+    #[test]
+    fn a_one_key_signature_is_exactly_64_bytes() {
+        let (k1, _) = gen_key(1);
+        assert_eq!(slots(&[&k1], b"payload").len(), SIG_SLOT_LEN);
+        assert_eq!(SIG_SLOT_LEN, 64);
+    }
+
+    /// **A tripwire, not an invariant — delete it on the release that rotates.**
+    ///
+    /// It asserts that *today's* artifact is byte-identical to the pre-rotation
+    /// one, which is why this mechanism could ship with the format change carrying
+    /// no risk at all: `RELEASE_SIG_SLOTS` is 1, so `veld-sign` writes exactly the
+    /// 64 bytes it always wrote and no shipped helper has anything to notice.
+    ///
+    /// That stops being true the moment a second key is added, and it goes red for
+    /// a *correct* change — which is the same trap the retirement-day tripwire had
+    /// before it was split out, and it was found the same way: by performing a
+    /// simulated rotation against this file. It is alone in its own function so
+    /// that deleting it takes nothing else with it, and
+    /// `docs/signing-key-rotation.md` step 2 names it.
+    #[test]
+    fn no_rotation_has_happened_yet_so_the_artifact_is_unchanged() {
+        assert_eq!(
+            RELEASE_SIG_SLOTS * SIG_SLOT_LEN,
+            64,
+            "a second key has been added, so releases are no longer byte-identical \
+             to the pre-rotation shape. That is expected on a rotation — see \
+             docs/signing-key-rotation.md step 2, then delete THIS test and \
+             nothing else in this file"
+        );
+    }
+
+    /// **The acceptance criterion.** A helper trusting only the current key
+    /// accepts a release that is *also* signed under a new key, and a helper that
+    /// has moved to the new key accepts the same artifact — one release satisfies
+    /// both, which is what makes a transition possible with no user action.
+    #[test]
+    fn one_release_satisfies_every_generation_that_signed_it() {
+        let (k1, p1) = gen_key(1);
+        let (k2, p2) = gen_key(2);
+        let (k3, p3) = gen_key(3);
+        let binary = b"\x7fELF the transition release";
+        let sig = slots(&[&k1, &k2, &k3], binary);
+
+        // G1 trusts only K1; G2 has accumulated K1+K2; G3 has retired K1.
+        for (label, keyring) in [
+            ("G1 (K1 only)", vec![p1]),
+            ("G2 (K1 + K2)", vec![p1, p2]),
+            ("G3 (K2 + K3, K1 retired)", vec![p2, p3]),
+            ("G4 (K3 only)", vec![p3]),
+        ] {
+            assert!(
+                verify_data_slots(&keyring, binary, &sig),
+                "{label} refused a release it was signed for"
+            );
+        }
+    }
+
+    /// **The acceptance criterion, in the direction that matters.** A rotation
+    /// artifact not signed by a currently-trusted key is refused — including one
+    /// signed perfectly well by a key this generation has retired, which is the
+    /// whole point of retiring it.
+    #[test]
+    fn a_release_signed_by_no_trusted_key_is_refused() {
+        let (k1, p1) = gen_key(1);
+        // Only the public half of K2 is needed: this test never signs with it —
+        // that is the point, a generation that has moved to K2 must refuse a
+        // signature it did not make.
+        let (_, p2) = gen_key(2);
+        let (attacker, _) = gen_key(9);
+        let binary = b"\x7fELF not for you";
+
+        // The forgery an attacker holding the leaked K1 can produce. A generation
+        // that still trusts K1 takes it — that generation is unprotectable and
+        // this states so — and a generation that has retired K1 does not.
+        let leaked = slots(&[&k1], binary);
+        assert!(verify_data_slots(&[p1], binary, &leaked));
+        assert!(
+            !verify_data_slots(&[p2], binary, &leaked),
+            "retiring K1 must actually stop a K1 signature being sufficient — \
+             otherwise rotation buys nothing at all"
+        );
+
+        // A key that was never ours is refused by everyone.
+        let forged = slots(&[&attacker], binary);
+        assert!(!verify_data_slots(&[p1, p2], binary, &forged));
+
+        // And a slot list with no slot for the reader's key is refused even when
+        // every slot in it is a genuine org signature.
+        let genuine_but_wrong_generation = slots(&[&k1], binary);
+        assert!(!verify_data_slots(
+            &[p2],
+            binary,
+            &genuine_but_wrong_generation
+        ));
+    }
+
+    /// A signature covers the bytes, so a slot list cannot be lifted onto other
+    /// bytes — however many slots it has.
+    #[test]
+    fn slots_do_not_verify_against_bytes_they_do_not_cover() {
+        let (k1, p1) = gen_key(1);
+        let (k2, p2) = gen_key(2);
+        let sig = slots(&[&k1, &k2], b"the genuine binary");
+        assert!(verify_data_slots(&[p1, p2], b"the genuine binary", &sig));
+        assert!(!verify_data_slots(&[p1, p2], b"a swapped binary", &sig));
+    }
+
+    /// A retired key is **diagnosed**, never accepted.
+    ///
+    /// This is the state a machine reaches by jumping straight from a pre-rotation
+    /// release to a post-retirement one: the old install RPC kept only the first
+    /// 64 bytes of the `.sig`, so the store holds the right binary beside a
+    /// signature with only the retired slot in it. Reporting that as "not signed
+    /// with the org's key" would read as tampering on a machine where the bytes
+    /// are genuine — but it must still not be *accepted*, or retirement would be
+    /// decorative.
+    #[test]
+    fn a_retired_key_is_diagnosed_rather_than_accepted() {
+        let (k1, p1) = gen_key(1);
+        let (k2, p2) = gen_key(2);
+        let binary = b"\x7fELF genuine, and truncated on the way in";
+
+        let truncated = slots(&[&k1], binary);
+        assert_eq!(
+            classify_data(&[p2], &[p1], binary, &truncated),
+            SigTrust::RetiredOnly
+        );
+        // Active wins when both would match, so a full slot list is never
+        // reported as retired.
+        let full = slots(&[&k1, &k2], binary);
+        assert_eq!(classify_data(&[p2], &[p1], binary, &full), SigTrust::Active);
+        // And nothing ours at all stays plain untrusted.
+        let (attacker, _) = gen_key(9);
+        assert_eq!(
+            classify_data(&[p2], &[p1], binary, &slots(&[&attacker], binary)),
+            SigTrust::Untrusted
+        );
+    }
+
+    /// Nothing is retired yet, so `retired_keys()` is empty.
+    ///
+    /// **This is the one test the runbook's step 3 tells you to delete**, and it
+    /// is alone in its own function for that reason: it used to be bundled with
+    /// the two invariants below, and deleting a red test — the natural reaction
+    /// on the day the runbook itself says you are reading it under pressure —
+    /// would have taken both of them with it silently.
+    #[test]
+    fn nothing_is_retired_yet() {
+        assert!(
+            retired_keys().is_empty(),
+            "a key has left ORG_SIGNING_KEYRING while ORG_REQUIRED_SLOT_KEYS still \
+             names it — that is a retirement. Read docs/signing-key-rotation.md \
+             step 3, then delete THIS test and nothing else in this file"
+        );
+    }
+
+    /// The keyring is never empty.
+    ///
+    /// **Do not delete this one on retirement day.** The runbook's step 3 is
+    /// literally "remove `ORG_KEY_1` from `ORG_SIGNING_KEYRING`"; doing that on a
+    /// tree where step 2 was skipped, reverted or mis-merged ships a helper that
+    /// trusts nothing — every candidate refused, every relaunch refused, `restart`
+    /// and `shutdown` refused, and sudo the only repair. Which is the wedged
+    /// updater #338's rule 2 forbids, shipped by the mechanism that exists to
+    /// honour it.
+    #[test]
+    fn the_keyring_is_never_empty() {
+        assert!(
+            !ORG_SIGNING_KEYRING.is_empty(),
+            "ORG_SIGNING_KEYRING is empty, so this build trusts nothing and refuses \
+             every release. See docs/signing-key-rotation.md — a retirement removes \
+             a key from the keyring only AFTER a release has added its successor"
+        );
+    }
+
+    /// Every key this build accepts is one releases are actually signed by.
+    ///
+    /// **Do not delete this one on retirement day either.** A key in the keyring
+    /// but not in `ORG_REQUIRED_SLOT_KEYS` is a key no release carries a slot for,
+    /// so this build would refuse every release for a reason that looks like a
+    /// signing failure.
+    #[test]
+    fn every_accepted_key_is_one_releases_are_signed_by() {
+        for key in ORG_SIGNING_KEYRING {
+            assert!(
+                ORG_REQUIRED_SLOT_KEYS.contains(key),
+                "a key this build accepts is not one releases are signed by, so \
+                 this build would refuse every release"
+            );
+        }
+    }
+
+    /// A trailing partial slot is ignored rather than fatal, and a file with no
+    /// whole slot at all is refused.
+    ///
+    /// The tolerant half is what keeps the format additive: a future release may
+    /// append something this build does not understand, and this build must read
+    /// noise that matches no key rather than failing closed on a genuine
+    /// artifact. The strict half is the pre-rotation `read_exact` behaviour, kept.
+    #[test]
+    fn a_partial_slot_is_ignored_and_a_sub_slot_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-slots-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k1, p1) = gen_key(1);
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"payload").unwrap();
+
+        // 64 bytes + 17 bytes of something else.
+        let mut sig = slots(&[&k1], b"payload");
+        sig.extend_from_slice(b"a future addition");
+        std::fs::write(sig_path_for(&binary), &sig).unwrap();
+        let read = read_detached_sig_slots(&binary).unwrap();
+        assert_eq!(read.len(), 64, "the partial trailing slot must be dropped");
+        assert!(verify_data_slots(&[p1], b"payload", &read));
+
+        // 63 bytes: no whole slot.
+        std::fs::write(sig_path_for(&binary), &sig[..63]).unwrap();
+        assert!(read_detached_sig_slots(&binary).is_none());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `is_org_binary` is "is this ours", where [`verify_binary_signed`] is "may I
+    /// trust this". The asymmetry is the whole reason it exists: `setup`'s two
+    /// callers are choosing a path to write into a service definition, and their
+    /// alternative when the answer is no is a bare `"veld-helper"` launchd cannot
+    /// exec.
+    ///
+    /// Only two of the three states are reachable in this build (nothing is
+    /// retired yet), so the third is asserted on the mapping rather than on a
+    /// file — which is the part a future edit could get wrong.
+    #[test]
+    fn is_org_binary_asks_whether_it_is_ours_not_whether_to_trust_it() {
+        // The mapping over both inputs. A retired key is "ours" only for a file
+        // nobody but root can have written — which is what bounds the laxity by
+        // the property that makes it safe rather than by a comment claiming it.
+        for (trust, root_owned, expected) in [
+            (SigTrust::Active, true, true),
+            // Active is accepted whatever the ownership: refusing it would brick
+            // the root service on a machine where nothing is wrong.
+            (SigTrust::Active, false, true),
+            (SigTrust::RetiredOnly, true, true),
+            (SigTrust::RetiredOnly, false, false),
+            (SigTrust::Untrusted, true, false),
+            (SigTrust::Untrusted, false, false),
+        ] {
+            assert_eq!(
+                org_binary_verdict(trust, root_owned),
+                expected,
+                "{trust:?} with root_owned={root_owned} must be {expected}: \
+                 `setup::fallback_helper_path` and `which_privileged_helper` write \
+                 this answer into a root service definition, and a wrong `false` \
+                 there is a job launchd cannot exec"
+            );
+        }
+        assert_eq!(
+            classify_data(
+                &[],
+                &[gen_key(1).1],
+                b"genuine",
+                &slots(&[&gen_key(1).0], b"genuine")
+            ),
+            SigTrust::RetiredOnly,
+            "a retired key must classify as RetiredOnly, not Untrusted"
+        );
+
+        // And on a real file, for the two states this build can reach.
+        let dir = std::env::temp_dir().join(format!("veld-sig-org-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"genuine bytes").unwrap();
+        std::fs::write(
+            sig_path_for(&binary),
+            slots(&[&gen_key(9).0], b"genuine bytes"),
+        )
+        .unwrap();
+        assert!(
+            !is_org_binary(&binary),
+            "a key that was never ours is not ours"
+        );
+        assert!(!verify_binary_signed(&binary));
+        std::fs::write(sig_path_for(&binary), b"not even 64 bytes").unwrap();
+        assert!(
+            !is_org_binary(&binary),
+            "an unreadable signature is not ours"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The retired-key refusal names a remedy that actually works.
+    ///
+    /// The first version said "run `veld update`", which is a **no-op** on the one
+    /// machine that can reach this state: `veld update` resolves a target, finds
+    /// nothing newer, and takes its "already on the latest version" branch without
+    /// running the installer — and a RetiredOnly machine is on the latest release
+    /// by construction, because installing it is how it got there. Both arms of
+    /// this enum are unreachable in this build, so nothing else would ever have
+    /// caught the wrong advice.
+    #[test]
+    fn the_retired_key_refusal_does_not_send_you_to_a_no_op() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-remedy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"payload").unwrap();
+        std::fs::write(sig_path_for(&binary), slots(&[&gen_key(1).0], b"payload")).unwrap();
+
+        // Reached through `relaunch_guard`'s own RetiredOnly arm, with explicit
+        // lists, since nothing is retired in this build.
+        let reason = match classify_data(
+            &[],
+            &[gen_key(1).1],
+            b"payload",
+            &slots(&[&gen_key(1).0], b"payload"),
+        ) {
+            SigTrust::RetiredOnly => relaunch_guard_message_for_retired(&binary),
+            other => panic!("expected RetiredOnly, got {other:?}"),
+        };
+        assert!(reason.contains(INSTALLER_COMMAND), "{reason}");
+        assert!(reason.contains("no password is needed"), "{reason}");
+        // `veld update` may be *mentioned* — the message says explicitly that it
+        // will not do this — but never in the imperative, which is the form the
+        // wrong version used.
+        for imperative in [
+            "run `veld update`",
+            "Run `veld update`",
+            "with `veld update`",
+        ] {
+            assert!(
+                !reason.contains(imperative),
+                "the remedy must not be `veld update`: it does nothing on a machine \
+                 already on the latest release, which is every machine that can reach \
+                 this state.\n{reason}"
+            );
+        }
+        assert!(reason.contains("will not do it"), "{reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A **torn** `.sig` is a verification failure, not a read failure — so it gets
+    /// the retry, and an unreadable path still does not.
+    ///
+    /// The distinction is reachable rather than theoretical: `install.sh` writes the
+    /// lib-dir `.sig` with `cp`, which truncates in place, so the file really does
+    /// pass through zero length while the helper's watcher and `veld doctor` may be
+    /// reading it. Classifying that as "unreadable" answered it once and printed the
+    /// tampered-root-binary paragraph on a machine where nothing was wrong.
+    #[test]
+    fn a_torn_signature_is_retried_but_an_unreadable_one_is_not() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-torn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"payload").unwrap();
+
+        // 0 and 63 bytes: read fine, no whole slot.
+        for len in [0usize, 1, 63] {
+            std::fs::write(sig_path_for(&binary), vec![0u8; len]).unwrap();
+            assert!(
+                matches!(
+                    read_detached_sig_slots_classified(&binary),
+                    SigRead::NoWholeSlot
+                ),
+                "{len} bytes is a torn write, not an unreadable path"
+            );
+            assert_eq!(
+                classify_binary_signature_once(&binary, 4096),
+                Some(SigTrust::Untrusted),
+                "{len} bytes must be a verdict, so the retry applies"
+            );
+        }
+
+        // Absent: genuinely unreadable, and answered once.
+        std::fs::remove_file(sig_path_for(&binary)).unwrap();
+        assert!(matches!(
+            read_detached_sig_slots_classified(&binary),
+            SigRead::Unreadable
+        ));
+        assert_eq!(classify_binary_signature_once(&binary, 4096), None);
+
+        // A whole slot reads as slots, whatever it verifies as.
+        std::fs::write(sig_path_for(&binary), slots(&[&gen_key(1).0], b"payload")).unwrap();
+        assert!(matches!(
+            read_detached_sig_slots_classified(&binary),
+            SigRead::Slots(_)
+        ));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The over-bound arm of `classify_binary_signature_once`, through its limit
+    /// seam — a binary past the bound is a **read failure**, so it is refused and
+    /// not retried.
+    ///
+    /// Without the seam the arm could be deleted with every test still green, and
+    /// the binary would then be verified as a 128 MiB prefix.
+    #[test]
+    fn an_over_bound_binary_is_refused_once_and_not_retried() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-obb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        let body = vec![0x77u8; 4096];
+        std::fs::write(&binary, &body).unwrap();
+        std::fs::write(sig_path_for(&binary), slots(&[&gen_key(1).0], &body)).unwrap();
+
+        assert_eq!(
+            classify_binary_signature_once(&binary, 2048),
+            None,
+            "past the bound must be a read failure, so it is answered once"
+        );
+        // Under the bound the same pair is a verdict again — so the refusal is the
+        // bound, not something else about the fixture.
+        assert!(classify_binary_signature_once(&binary, 4096).is_some());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Only a **verification failure** is retried, and the passes are counted.
+    ///
+    /// The scoping changes no verdict any other test observes — only how many times
+    /// the two reads happen — so without this the loop could be simplified back to
+    /// "retry every refusal" with nothing red, handing a second race per watcher
+    /// tick to any machine whose helper path is merely unreadable.
+    #[test]
+    fn only_a_verification_failure_is_retried() {
+        // A read failure is answered once.
+        let mut calls = 0;
+        assert_eq!(
+            classify_with_retry(|| {
+                calls += 1;
+                None
+            }),
+            SigTrust::Untrusted
+        );
+        assert_eq!(calls, 1, "an unreadable path must not get a second race");
+
+        // A verification failure — both reads succeeded — is retried exactly once.
+        let mut calls = 0;
+        assert_eq!(
+            classify_with_retry(|| {
+                calls += 1;
+                Some(SigTrust::Untrusted)
+            }),
+            SigTrust::Untrusted
+        );
+        assert_eq!(calls, 2, "the tear is what the retry is for");
+
+        // ...and the second pass is believed, which is the point.
+        let mut calls = 0;
+        assert_eq!(
+            classify_with_retry(|| {
+                calls += 1;
+                if calls == 1 {
+                    Some(SigTrust::Untrusted)
+                } else {
+                    Some(SigTrust::Active)
+                }
+            }),
+            SigTrust::Active
+        );
+        assert_eq!(calls, 2);
+
+        // A settled verdict is never re-read, whichever it is.
+        for verdict in [SigTrust::Active, SigTrust::RetiredOnly] {
+            let mut calls = 0;
+            assert_eq!(
+                classify_with_retry(|| {
+                    calls += 1;
+                    Some(verdict)
+                }),
+                verdict
+            );
+            assert_eq!(calls, 1, "{verdict:?} is settled on the first pass");
+        }
+
+        // A second pass that cannot read falls back to the refusal rather than
+        // panicking on the `Option`.
+        let mut calls = 0;
+        assert_eq!(
+            classify_with_retry(|| {
+                calls += 1;
+                if calls == 1 {
+                    Some(SigTrust::Untrusted)
+                } else {
+                    None
+                }
+            }),
+            SigTrust::Untrusted
+        );
+        assert_eq!(calls, 2);
+    }
+
+    /// A binary past [`MAX_VERIFIED_BINARY_BYTES`] is refused rather than verified
+    /// as a prefix — and refused as a *read failure*, so it is not retried.
+    ///
+    /// The read it replaced was unbounded, on a path an unprivileged caller can
+    /// influence, and each slot verification hashes the whole thing. Verifying a
+    /// prefix would verify nothing at all, so fail-closed is the only answer.
+    #[test]
+    fn a_binary_past_the_bound_is_refused_not_verified_as_a_prefix() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-bound-b-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k1, p1) = gen_key(1);
+        let binary = dir.join("veld-helper");
+
+        // Just over a small bound, so the test costs bytes rather than gigabytes:
+        // the reader is exercised through its own parameter.
+        let body = vec![0x5Au8; 4096];
+        std::fs::write(&binary, &body).unwrap();
+        std::fs::write(sig_path_for(&binary), slots(&[&k1], &body)).unwrap();
+
+        let (read, over) = read_regular_file_bounded(&binary, 2048).unwrap();
+        assert!(over, "a file longer than the bound must report it");
+        assert_eq!(read.len(), 2048, "and must be truncated to the bound");
+        // The truncated prefix verifies under nothing, which is why a caller that
+        // accepted it would be accepting an unverified binary.
+        assert!(!verify_data_slots(&[p1], &read, &slots(&[&k1], &body)));
+
+        // At the bound exactly: not over, and whole.
+        let (read, over) = read_regular_file_bounded(&binary, 4096).unwrap();
+        assert!(!over);
+        assert_eq!(read, body);
+        assert!(verify_data_slots(&[p1], &read, &slots(&[&k1], &body)));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A **binary** symlinked to a non-regular file is refused, like the `.sig`.
+    ///
+    /// The pair is the hazard: the `.sig` read was guarded first and this one was
+    /// missed, and `shutdown` reaches the relaunch guard with no
+    /// `binary_executes()` check in front of it. `std::fs::read` opens the path, and
+    /// opening `/dev/watchdog` as root arms the hardware watchdog — no flag on the
+    /// open undoes an open that already happened. An unprivileged user cannot make
+    /// a device node but can make the symlink, on any install whose helper still
+    /// lives in a directory they own.
+    #[test]
+    fn a_binary_symlinked_to_a_non_regular_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-binlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k1, _) = gen_key(1);
+
+        let fifo = dir.join("a-fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a plain libc call with a valid NUL-terminated path.
+        assert_eq!(unsafe { nix::libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        // A real, readable 64-byte `.sig` so the sig guard passes and control
+        // actually reaches the binary read — otherwise this test would pass for
+        // the wrong reason.
+        let binary = dir.join("veld-helper");
+        std::os::unix::fs::symlink(&fifo, &binary).unwrap();
+        std::fs::write(sig_path_for(&binary), slots(&[&k1], b"anything")).unwrap();
+        assert!(
+            read_detached_sig_slots(&binary).is_some(),
+            "the .sig must be readable"
+        );
+
+        assert_eq!(classify_binary_signature(&binary), SigTrust::Untrusted);
+        assert!(!verify_binary_signed(&binary));
+        assert!(relaunch_guard(&binary).is_some());
+
+        // ...and a binary reached **through a symlink to a real file** still
+        // verifies, which is the half that keeps the guard from being a
+        // regression. Asserted through `classify_binary_signature`, not through
+        // `verify_data_slots`, because the guard being tested lives in the reader
+        // and only the full path exercises it. An earlier version of this test
+        // replaced the symlink with a plain file, which proved nothing about
+        // symlinks at all.
+        std::fs::remove_file(&binary).unwrap();
+        let real = dir.join("the-real-helper");
+        std::fs::write(&real, b"anything").unwrap();
+        std::os::unix::fs::symlink(&real, &binary).unwrap();
+        assert_eq!(
+            classify_data(
+                &[gen_key(1).1],
+                &[],
+                &std::fs::read(&binary).unwrap(),
+                &read_detached_sig_slots(&binary).unwrap()
+            ),
+            SigTrust::Active,
+            "a binary reached through a symlink to a regular file must still verify"
+        );
+        // And the real path, through the production entry point, with this
+        // build's own keyring — which must refuse it, because the fixture is not
+        // signed by the org.
+        assert_eq!(classify_binary_signature(&binary), SigTrust::Untrusted);
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The slot dedupe is counted, not assumed.
+    ///
+    /// Without this, the dedupe is invisible: it changes no verdict, so every
+    /// other test passes with the loop reduced to a plain `any()` — and reducing
+    /// it reopens the CPU amplification [`MAX_SIG_SLOTS`] documents, on a `.sig`
+    /// the caller writes, with nothing red anywhere.
+    #[test]
+    fn each_distinct_slot_is_verified_at_most_once() {
+        let mut sig = Vec::new();
+        // Eight identical junk slots — the cheap version of the attack.
+        for _ in 0..8 {
+            sig.extend_from_slice(&[0xAAu8; SIG_SLOT_LEN]);
+        }
+        let mut calls = 0usize;
+        assert!(!any_slot_verifies(&sig, |_| {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 1, "eight identical slots must cost one verification");
+
+        // Eight distinct slots still cost eight: dedupe does not, and is not
+        // claimed to, stop a deliberate attacker. See [`MAX_SIG_SLOTS`].
+        let mut sig = Vec::new();
+        for n in 0..8u8 {
+            sig.extend_from_slice(&[n; SIG_SLOT_LEN]);
+        }
+        let mut calls = 0usize;
+        assert!(!any_slot_verifies(&sig, |_| {
+            calls += 1;
+            false
+        }));
+        assert_eq!(calls, 8);
+
+        // And it short-circuits: nothing after a match is verified.
+        let mut calls = 0usize;
+        assert!(any_slot_verifies(&sig, |_| {
+            calls += 1;
+            true
+        }));
+        assert_eq!(
+            calls, 1,
+            "verification must stop at the first slot that passes"
+        );
+    }
+
+    /// A `.sig` that is a **symlink to a non-regular file** is refused, and the
+    /// path is stat'd before it is opened.
+    ///
+    /// The hazard is not the FIFO used here — `O_NONBLOCK` already survives that.
+    /// It is a device node: opening `/dev/watchdog` as root arms the hardware
+    /// watchdog and dropping the descriptor reboots the machine, and no flag on
+    /// the `open` can undo an `open` that already happened. An unprivileged user
+    /// cannot create a device node but can create the **symlink**, either at a
+    /// path they name on the install RPC or in a lib dir they own.
+    ///
+    /// The second half matters as much: a symlink to a *regular* file must still
+    /// work, or this guard would break a legitimate layout to close a hostile one.
+    #[test]
+    fn a_sig_symlinked_to_a_non_regular_file_is_refused() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k1, p1) = gen_key(1);
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"payload").unwrap();
+
+        let fifo = dir.join("a-fifo");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a plain libc call with a valid NUL-terminated path.
+        assert_eq!(unsafe { nix::libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        std::os::unix::fs::symlink(&fifo, sig_path_for(&binary)).unwrap();
+        assert!(
+            read_detached_sig_slots(&binary).is_none(),
+            "a .sig symlinked to a FIFO must be refused"
+        );
+        assert!(!verify_binary_signed(&binary));
+
+        // ...and a symlink to a real signature is still read.
+        std::fs::remove_file(sig_path_for(&binary)).unwrap();
+        let real = dir.join("elsewhere.bin");
+        std::fs::write(&real, slots(&[&k1], b"payload")).unwrap();
+        std::os::unix::fs::symlink(&real, sig_path_for(&binary)).unwrap();
+        let read = read_detached_sig_slots(&binary).expect("a symlink to a regular file is fine");
+        assert!(verify_data_slots(&[p1], b"payload", &read));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Slots past [`MAX_SIG_SLOTS`] are ignored, not fatal — and the read is
+    /// bounded, so a huge `.sig` in a user-writable directory is not a memory DoS
+    /// on every relaunch attempt.
+    #[test]
+    fn the_slot_read_is_bounded_and_the_excess_is_ignored() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-bound-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (k1, p1) = gen_key(1);
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"payload").unwrap();
+
+        // A real first slot, then a megabyte of junk.
+        let mut sig = slots(&[&k1], b"payload");
+        sig.extend_from_slice(&vec![0xEEu8; 1 << 20]);
+        std::fs::write(sig_path_for(&binary), &sig).unwrap();
+
+        let read = read_detached_sig_slots(&binary).unwrap();
+        assert_eq!(read.len(), MAX_SIG_SLOTS * SIG_SLOT_LEN);
+        assert!(verify_data_slots(&[p1], b"payload", &read));
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

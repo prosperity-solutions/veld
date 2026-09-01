@@ -22,6 +22,20 @@
 //! them against, and [`Candidate::install`] writes those bytes — so what is
 //! checked and what lands are the same object, not the same name.
 //!
+//! # Every signature slot is installed, not just the one that verified
+//!
+//! `<binary>.sig` is a list of 64-byte slots, one per key the release was signed
+//! by (`crate::signing`). This module installs **all** of them.
+//!
+//! That is not tidiness. A helper accepts a binary when any slot verifies under
+//! any key in its own keyring, and different helper generations have different
+//! keyrings — so a slot dropped on the way into the store is a slot the *next*
+//! generation cannot find, leaving a genuine binary its own relaunch guard will
+//! not accept. The pre-rotation code held the signature in a `[u8; 64]` and
+//! therefore truncated exactly this way; that is a fixed fact about releases
+//! already shipped, and `crate::signing::SigTrust::RetiredOnly` is what names the
+//! state it leaves behind.
+//!
 //! # And the version, which is not optional
 //!
 //! A signature attests provenance, not currency. The attacker *is* the
@@ -134,10 +148,12 @@ const SIG_MODE: u32 = 0o644;
 /// one set of bytes rather than three visits to one path.
 pub struct Candidate {
     bytes: Vec<u8>,
-    /// Read alongside the binary and kept, so the `.sig` installed beside it is
-    /// the one that was actually verified rather than whatever the path holds by
-    /// the time we get around to copying it.
-    sig: [u8; 64],
+    /// Every signature slot, read alongside the binary and kept whole — so the
+    /// `.sig` installed beside it is the one that was actually verified rather
+    /// than whatever the path holds by the time we get around to copying it, and
+    /// so no slot is lost on the way in. Bounded by
+    /// [`signing::MAX_SIG_SLOTS`] at read time.
+    sig: Vec<u8>,
     /// Only for error messages. Never re-opened.
     source: PathBuf,
 }
@@ -152,7 +168,10 @@ impl std::fmt::Debug for Candidate {
         f.debug_struct("Candidate")
             .field("source", &self.source)
             .field("bytes", &format_args!("{} bytes", self.bytes.len()))
-            .field("sig", &format_args!("64 bytes"))
+            .field(
+                "sig",
+                &format_args!("{} slot(s)", self.sig.len() / signing::SIG_SLOT_LEN),
+            )
             .finish()
     }
 }
@@ -217,8 +236,8 @@ impl Candidate {
                  install it"
             );
         }
-        let sig = signing::read_detached_sig_bytes(binary)
-            .context("no readable 64-byte signature beside the staged helper")?;
+        let sig = signing::read_detached_sig_slots(binary)
+            .context("no readable signature slot beside the staged helper")?;
         Ok(Self {
             bytes,
             sig,
@@ -233,20 +252,22 @@ impl Candidate {
     /// meaningful *because* the signature covers the bytes it was read from, so
     /// verification comes first and a failure there short-circuits.
     pub fn verified_version(&self) -> Result<String> {
-        self.verified_version_with(&signing::ORG_SIGNING_PUBKEY)
+        self.verified_version_with(signing::ORG_SIGNING_KEYRING)
     }
 
-    /// [`Self::verified_version`] against an explicit key.
+    /// [`Self::verified_version`] against an explicit keyring.
     ///
     /// Private, and the whole seam this type has: the public entry points name
-    /// [`signing::ORG_SIGNING_PUBKEY`] and cannot be pointed at another key. It
+    /// [`signing::ORG_SIGNING_KEYRING`] and cannot be pointed at another key. It
     /// exists so the tests below can build a *genuinely signed* candidate —
     /// which is the only way to exercise the check that matters, since a
     /// correctly signed older release is exactly what the version rule exists to
     /// refuse and an unsigned fixture would be rejected one step earlier and
-    /// prove nothing.
-    fn verified_version_with(&self, pubkey: &[u8; 32]) -> Result<String> {
-        if !signing::verify_data(pubkey, &self.bytes, &self.sig) {
+    /// prove nothing. It is also how the cross-generation cases are tested at
+    /// all: a "helper that trusts only the retired key" is precisely a call to
+    /// this with a one-key keyring.
+    fn verified_version_with(&self, keyring: &[signing::PubKey]) -> Result<String> {
+        if !signing::verify_data_slots(keyring, &self.bytes, &self.sig) {
             bail!("the staged helper is not signed with the org's key; refusing to install it");
         }
         signing::version_in_signed_bytes(&self.bytes).context(
@@ -262,8 +283,8 @@ impl Candidate {
     ///
     /// `floor` is the version this candidate must not be older than. See
     /// [`rollback_floor`]: it is emphatically **not** just the running version.
-    fn approve(&self, pubkey: &[u8; 32], floor: &str) -> Result<String> {
-        let version = self.verified_version_with(pubkey)?;
+    fn approve(&self, keyring: &[signing::PubKey], floor: &str) -> Result<String> {
+        let version = self.verified_version_with(keyring)?;
         if !signing::version_is_not_older(&version, floor) {
             return Err(NotNewer {
                 candidate: version,
@@ -293,7 +314,7 @@ impl Candidate {
     /// its own install path.
     fn install_locked(&self, running_version: &str) -> Result<String> {
         let version = self.approve(
-            &signing::ORG_SIGNING_PUBKEY,
+            signing::ORG_SIGNING_KEYRING,
             &rollback_floor(running_version),
         )?;
 
@@ -390,6 +411,17 @@ pub fn is_not_newer(error: &anyhow::Error) -> bool {
 /// `None` covers "no store yet", "unreadable", and "there but not properly
 /// signed" — all of which mean there is nothing here worth protecting, so an
 /// install should be judged against the running version alone.
+///
+/// **A second route to `None` arrived with key rotation**, and it is benign for a
+/// reason worth writing down rather than re-deriving. A store whose `.sig` was
+/// truncated to slot 0 by a pre-rotation installer verifies only under a retired
+/// key (`crate::signing::SigTrust::RetiredOnly`), so this answers `None` and
+/// [`rollback_floor`] drops back to the running version — the same degradation
+/// already documented for a crash between the two renames in
+/// [`Candidate::install_locked`]. It opens no window here: a machine in that state
+/// has already restarted onto the store binary, so installed *is* running, and the
+/// floor is unchanged. The moment a real install writes a full slot list, this
+/// answers again.
 pub fn installed_version() -> Option<String> {
     let bin = crate::paths::privileged_helper_bin();
     Candidate::read(&bin).ok()?.verified_version().ok()
@@ -618,9 +650,9 @@ mod tests {
 
     /// A stand-in for the org's key. The production entry points cannot be
     /// pointed at it — see [`Candidate::verified_version_with`].
-    fn test_key() -> (SigningKey, [u8; 32]) {
+    fn test_key() -> (SigningKey, [signing::PubKey; 1]) {
         let signing = SigningKey::from_bytes(&[3u8; 32]);
-        (signing.clone(), VerifyingKey::from(&signing).to_bytes())
+        (signing.clone(), [VerifyingKey::from(&signing).to_bytes()])
     }
 
     /// A helper binary as the release pipeline would produce one: bytes carrying
@@ -800,6 +832,125 @@ mod tests {
         );
     }
 
+    // -- Key rotation (#261 slice C) -----------------------------------------
+
+    /// A release signed by several keys: one 64-byte slot each, in order, over
+    /// exactly the bytes that carry the version record.
+    fn signed_helper_slots(dir: &Path, version: &str, keys: &[&SigningKey]) -> PathBuf {
+        let mut bytes = b"\x7fELF ... a plausible helper ...".to_vec();
+        bytes.extend_from_slice(&signing::version_record(version));
+        bytes.extend_from_slice(b"... and the rest of the program ...");
+        let bin = dir.join("veld-helper");
+        std::fs::write(&bin, &bytes).unwrap();
+        let sig: Vec<u8> = keys
+            .iter()
+            .flat_map(|k| k.sign(&bytes).to_bytes())
+            .collect();
+        std::fs::write(signing::sig_path_for(&bin), &sig).unwrap();
+        bin
+    }
+
+    fn gen_key(n: u8) -> (SigningKey, signing::PubKey) {
+        let k = SigningKey::from_bytes(&[0xB0 + n; 32]);
+        (k.clone(), VerifyingKey::from(&k).to_bytes())
+    }
+
+    /// **Every slot is kept, not only the one that verified.**
+    ///
+    /// This is the defect the pre-rotation code has and cannot be patched out of:
+    /// it held the signature in a `[u8; 64]`, so installing a multi-slot release
+    /// wrote one slot into the store and dropped the rest. A helper generation
+    /// whose key owned a dropped slot then cannot verify a binary that is
+    /// perfectly genuine. Nothing else in the suite would notice — the install
+    /// succeeds, the version is right, and the damage only shows up one release
+    /// later on somebody else's machine.
+    #[test]
+    fn every_signature_slot_is_kept_not_just_the_one_that_verified() {
+        let scratch = Scratch::new("slots");
+        let (k1, _) = gen_key(1);
+        let (k2, _) = gen_key(2);
+        let (k3, p3) = gen_key(3);
+        let bin = signed_helper_slots(scratch.path(), "16.59.0", &[&k1, &k2, &k3]);
+
+        let candidate = Candidate::read(&bin).unwrap();
+        // Verified by the *last* slot, which is the interesting case: a naive
+        // implementation would keep only what it needed.
+        assert_eq!(candidate.verified_version_with(&[p3]).unwrap(), "16.59.0");
+        assert_eq!(
+            candidate.sig.len(),
+            3 * signing::SIG_SLOT_LEN,
+            "the store must receive every slot the release carried, or the next \
+             helper generation cannot verify a binary that is genuinely ours"
+        );
+    }
+
+    /// A helper that has **retired** the key a candidate is signed by refuses it,
+    /// even though the signature is a real org signature over real org bytes.
+    ///
+    /// This is the acceptance criterion rotation exists for: once a key is out of
+    /// the keyring, a leaked copy of it stops being a way past this gate. It is
+    /// also the reason the refusal must not be typed as [`NotNewer`] — the
+    /// candidate here is *newer*, and reporting it as a version problem would
+    /// send whoever debugs it in exactly the wrong direction.
+    #[test]
+    fn a_candidate_signed_only_by_a_retired_key_is_refused_on_its_signature() {
+        let scratch = Scratch::new("retired");
+        let (k1, _) = gen_key(1);
+        let (_, p2) = gen_key(2);
+        let bin = signed_helper_slots(scratch.path(), "99.0.0", &[&k1]);
+
+        let err = Candidate::read(&bin)
+            .unwrap()
+            .approve(&[p2], "16.58.3")
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("not signed with the org's key"),
+            "{err}"
+        );
+        assert!(
+            !is_not_newer(&err),
+            "a retired-key refusal must not read as a version refusal: {err:#}"
+        );
+    }
+
+    /// Accumulated trust does not accumulate *permission*: a candidate that
+    /// verifies under any keyring key is still held to the version floor.
+    ///
+    /// Worth pinning explicitly, because the natural way to add a keyring is to
+    /// widen the signature check and forget that it sits in front of the rollback
+    /// gate. A second trusted key must not become a second way to install an old
+    /// helper.
+    #[test]
+    fn a_second_trusted_key_is_not_a_way_around_the_version_floor() {
+        let scratch = Scratch::new("floor");
+        let (k1, p1) = gen_key(1);
+        let (k2, p2) = gen_key(2);
+        let bin = signed_helper_slots(scratch.path(), "16.57.0", &[&k1, &k2]);
+
+        let candidate = Candidate::read(&bin).unwrap();
+        for keyring in [vec![p1], vec![p2], vec![p1, p2]] {
+            let err = candidate.approve(&keyring, "16.58.3").unwrap_err();
+            assert!(is_not_newer(&err), "{err:#}");
+        }
+    }
+
+    /// The store's own `.sig` is written whole, whatever its length.
+    ///
+    /// `write_atomically` takes a slice, so this is really a guard against a
+    /// future edit reintroducing a fixed-size buffer somewhere on this path —
+    /// which is precisely the shape the pre-rotation bug had.
+    #[test]
+    fn a_multi_slot_signature_is_written_whole() {
+        let scratch = Scratch::new("write-slots");
+        let bin = scratch.path().join("veld-helper");
+        let sig = signing::sig_path_for(&bin);
+        let three: Vec<u8> = (0..3u8).flat_map(|n| [n; signing::SIG_SLOT_LEN]).collect();
+
+        write_atomically(&sig, &three, SIG_MODE).unwrap();
+        assert_eq!(std::fs::read(&sig).unwrap(), three);
+        assert_eq!(three.len(), 3 * signing::SIG_SLOT_LEN);
+    }
+
     /// The ownership gate, exercised on a directory the test owns. A test runs
     /// as the user, so the *passing* case cannot be built here — this pins the
     /// refusal, which is the direction that matters.
@@ -933,7 +1084,7 @@ mod tests {
         let bin = dir.join("veld-helper");
         std::fs::write(&bin, b"unsigned").unwrap();
         let err = Candidate::read(&bin).unwrap_err().to_string();
-        assert!(err.contains("no readable 64-byte signature"), "{err}");
+        assert!(err.contains("no readable signature slot"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

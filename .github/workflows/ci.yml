@@ -205,7 +205,7 @@ jobs:
       - name: The macOS signing smoke job still exists
         run: |
           python3 - <<'PY'
-          import pathlib, sys, yaml
+          import pathlib, re, sys, yaml
           ci = yaml.safe_load(open(".github/workflows/ci.yml"))
           job = ci["jobs"].get("signing-smoke")
           if job is None:
@@ -230,12 +230,20 @@ jobs:
                        "signing case silently stops running; delete the test or fix "
                        "it rather than skipping it (issue #339)")
 
-          # No job that a pull request can start may reach the org signing
+          # No job that a pull request can start may reach ANY org signing
           # secret. Checking every workflow, and checking the *guard* rather than
           # the filename, because release.yml is itself `pull_request`-triggered
           # (it previews the next version on a PR) — the only thing keeping the
           # key off those runs is the `push`-only `if:` on its `build` job, and
           # exempting the file by name would leave exactly that guard unchecked.
+          #
+          # Derived for N secrets rather than for the one that existed when this
+          # was written (issue #261 slice C). A key rotation adds a second private
+          # key under a second secret name, and an assertion pinned to one literal
+          # name would go quiet for the new one — the moment the check is needed
+          # most, since a fresh secret is exactly what a half-finished workflow
+          # edit exposes. So the shared prefix is matched as well as the exact
+          # name, and both are assembled at runtime for the reason below.
           #
           # Walking the parsed YAML rather than grepping means the comments above
           # — which do name the secret — are already gone, and dict keys are
@@ -248,7 +256,19 @@ jobs:
           # itself: its own `run:` block is a string in the very documents it
           # walks. (Writing them literally made the gate fail on a clean tree —
           # once per needle.)
-          secret = "SIGNING_" + "PRIVATE_KEY"
+          secret = "SIGN" + "ING_" + "PRIVATE_KEY"
+          # Every signing secret shares this prefix by convention, which is what
+          # makes "N secrets" checkable without listing them. Nothing else in
+          # these workflows uses it: the smoke test's throwaway key is
+          # VELD_SIGN_SMOKE_KEY, which has no underscore in that position.
+          #
+          # Assembled at runtime for a reason that now covers more ground than the
+          # exact name did: a `run:` block's COMMENTS are part of its string, so no
+          # step in this job may contain the prefix in prose either. Naming the
+          # keyring constant in a comment two steps down was enough to fail a
+          # clean tree — which is the gate working, and is why the constants are
+          # referred to by file rather than by name below.
+          secret_prefix = "SIGN" + "ING_"
           bulk_ref = "toJSON(" + "secrets)"
           dynamic_ref = "secrets" + "["
           def strings(node):
@@ -266,6 +286,11 @@ jobs:
                   packed = s.replace(" ", "")
                   if secret in s:
                       return secret
+                  # Any other secret under the same prefix — a rotation's second
+                  # key, or a third. Reported without naming it, because the name
+                  # is the thing this file must not contain.
+                  if secret_prefix in s:
+                      return "a signing secret"
                   if bulk_ref in packed:
                       return "the whole secrets context"
                   if dynamic_ref in packed:
@@ -308,6 +333,65 @@ jobs:
                           "not guarded `github.event_name == 'push'`. The signing "
                           "key must never be reachable from a PR run (issue #339)"
                       )
+          # No secret may be interpolated into a `run:` block. Two separate
+          # reasons, and the second one cost a blocked CI run to learn.
+          #
+          # The security one: a secret expanded into a shell command lands in the
+          # process table and in any `set -x` trace, where `env:` does not. The
+          # correct channel is an `env:` entry, which is what release.yml uses.
+          #
+          # The mechanical one: GitHub evaluates `${…}` expressions in a `run:`
+          # block BEFORE the shell sees it, so a *mention* of the syntax — in a
+          # comment, in a hint string, in a Python literal inside a heredoc — is
+          # evaluated as an expression. An invalid one fails the **whole workflow at
+          # startup**: zero jobs, conclusion `failure`, no usable error. PyYAML
+          # accepts it, `just workflow-gates` accepts it, and every local check
+          # stays green, which is exactly what happened here. Describe the remedy in
+          # prose instead.
+          #
+          # Assembled at runtime like the needles above, for the same reason: this
+          # block is a string in the documents it walks.
+          # Two checks, because the second is the general form of the first.
+          #
+          # The regexes are written with escapes (`\$\{\{`), which is not only
+          # because a regex needs them: it also means this block does not contain the
+          # syntax literally, so the gate cannot fail on itself. That is not
+          # hypothetical — it happened, twice.
+          secret_in_run = "${" + "{ secrets."
+          expr_in_run = re.compile(r"\$\{\{(.*?)\}\}", re.S)
+          # What a real expression looks like: a context path, an index, a function
+          # call. Deliberately generous — the point is to catch PROSE, not to
+          # validate GitHub's grammar.
+          plausible = re.compile(r"[A-Za-z_][\w.\-\[\]'\"* ]*\Z")
+          for path in sorted(pathlib.Path(".github/workflows").glob("*.y*ml")):
+              doc = yaml.safe_load(path.read_text())
+              for job_name, job in (doc.get("jobs") or {}).items():
+                  for step in (job.get("steps") or []):
+                      body = step.get("run")
+                      if not isinstance(body, str):
+                          continue
+                      where = f"{path}: job {job_name!r} step {step.get('name')!r}"
+                      if secret_in_run in body:
+                          sys.exit(
+                              f"{where} names a secret inside its `run:` block. Pass it "
+                              "through the step's `env:` instead — a secret interpolated into "
+                              "a shell command reaches the process table and any trace, where "
+                              "an `env:` entry does not."
+                          )
+                      for m in expr_in_run.finditer(body):
+                          expr = m.group(1).strip()
+                          if not plausible.match(expr):
+                              sys.exit(
+                                  f"{where} contains what GitHub will read as an EXPRESSION "
+                                  f"but is not one: {expr[:60]!r}. Actions evaluates these in "
+                                  "a `run:` block before the shell sees it — including inside "
+                                  "a comment or a string literal — and an invalid one fails "
+                                  "the WHOLE WORKFLOW at startup: zero jobs, conclusion "
+                                  "`failure`, no usable error, and every local check green. "
+                                  "If you are describing the syntax rather than using it, "
+                                  "describe it in prose."
+                              )
+
           # The version-record guard in `release.yml`'s packaging step (issue
           # #262) has the same "gate that cannot fail" problem `signing-smoke`
           # has: nothing else in CI notices if it is deleted, and what it
@@ -331,6 +415,327 @@ jobs:
 
           print("signing-smoke intact")
           print("release.yml version-record check intact")
+          PY
+
+      # ── Key-rotation gates (issue #261 slice C) ──────────────────────────
+      #
+      # Everything below pins a fact that lives in TWO files with no compiler
+      # tie between them, where the drift is silent and the symptom is a release
+      # no privileged install can accept — repairable only with sudo on every
+      # machine, which is the one outcome #338's rules forbid.
+      #
+      # It is homed here for the same reason the checks above are: `release.yml`'s
+      # `build` job is push-only, so nothing it contains is ever exercised by a
+      # pull request. This is the PR-time equivalent.
+      - name: Signature slot layout matches release.yml
+        run: |
+          python3 - <<'PY'
+          import pathlib, re, sys, yaml
+
+          signing = pathlib.Path("crates/veld-core/src/signing.rs").read_text()
+
+          def rust_const(name, text, path):
+              m = re.search(rf"const {name}: usize = (\d+);", text)
+              if not m:
+                  sys.exit(f"{path}: `{name}` is gone; the slot-layout gates in "
+                           "ci.yml read it (issue #261 slice C)")
+              return int(m.group(1))
+
+          slots = rust_const("RELEASE_SIG_SLOTS", signing, "crates/veld-core/src/signing.rs")
+
+          release = yaml.safe_load(open(".github/workflows/release.yml"))
+          pkg = [
+              step
+              for job in release["jobs"].values()
+              for step in (job.get("steps") or [])
+              if step.get("name") == "Package client binaries"
+          ]
+          if not pkg:
+              sys.exit("release.yml: the `Package client binaries` step is gone, and "
+                       "with it the only place the helper is ever signed")
+          run = pkg[0].get("run", "")
+          # Comment lines are part of a `run:` block's string and this step's own
+          # prose names the flags, so they are stripped before counting. Counting
+          # them would silently inflate the number and make this gate unfailable.
+          command = "\n".join(
+              line for line in run.splitlines() if not line.strip().startswith("#")
+          )
+
+          # 1. One key flag per slot. A key added to the keyring or the
+          #    required-slot list in `crates/veld-core/src/signing.rs` — the two
+          #    constants RELEASE_SIG_SLOTS summarises — without a matching secret
+          #    produces a release
+          #    that omits a slot some helper generation accepts *only* that key
+          #    for — and that generation then refuses every future release.
+          flags = command.count("--key-env") + command.count("--key-file")
+          if flags != slots:
+              sys.exit(
+                  f"release.yml signs the helper with {flags} key(s) but "
+                  f"veld_core::signing::RELEASE_SIG_SLOTS says {slots}. Add or remove a "
+                  "`--key-env <SECRET>` line in `Package client binaries` to match, and "
+                  "read docs/signing-key-rotation.md before changing either."
+              )
+
+          # 2. Every `--key-env NAME` has a matching `env:` entry, and every NAME
+          #    carries the shared signing-secret prefix.
+          #
+          #    The first half: veld-sign reads a key by variable NAME, so a flag
+          #    with no `env:` entry is indistinguishable from an unset secret — the
+          #    release dies at this step, push-only, AFTER merge. Counting flags
+          #    alone let a PR go green on exactly that.
+          #
+          #    The second half turns a convention into an invariant. The leak gate
+          #    above matches signing secrets by prefix so that a rotation's second
+          #    key is covered without an edit; that only works if the name actually
+          #    carries the prefix, which until now was prose in a runbook. A key
+          #    added as `ORG_KEY_2_PEM` would reach a PR-startable job with neither
+          #    needle firing. Assembled at runtime, same reason as everywhere else
+          #    in this job.
+          env_keys = set((pkg[0].get("env") or {}).keys())
+          prefix = "SIGN" + "ING_"
+          names = re.findall(r"--key-env\s+(\S+)", command)
+          # `--key-env=NAME` keeps the count right and yields no name, which would
+          # skip both checks below in silence — precisely the failure they exist to
+          # catch. veld-sign rejects that form as an unknown flag, so the release
+          # would die after merge.
+          if len(names) != command.count("--key-env"):
+              sys.exit(
+                  "release.yml: a `--key-env` in `Package client binaries` is not written as "
+                  "`--key-env <NAME>` (the `--key-env=NAME` form is rejected by veld-sign and "
+                  "is invisible to the checks below). Use a space."
+              )
+          for name in names:
+              if name not in env_keys:
+                  # The remedy is described in prose on purpose, and the reason is
+                  # worth stating without demonstrating it: GitHub's expression
+                  # syntax, written out in a `run:` block, is EVALUATED before the
+                  # shell sees it — even inside a comment or a string literal like
+                  # this one. An invalid expression fails the whole workflow at
+                  # startup: zero jobs, conclusion `failure`, no usable error.
+                  # PyYAML parses it happily, `just workflow-gates` parses it
+                  # happily, and every local check stays green. This comment cost
+                  # two blocked CI runs to get right, the second because it
+                  # quoted the syntax while explaining not to.
+                  sys.exit(
+                      f"release.yml: `Package client binaries` passes `--key-env {name}` but "
+                      f"its `env:` block has no {name} entry, so veld-sign sees an unset "
+                      f"variable and the release fails at the signing step. Add a {name} "
+                      f"entry to that step's env:, taking its value from the {name} secret "
+                      "the same way the existing line does."
+                  )
+              if not name.startswith(prefix):
+                  sys.exit(
+                      f"release.yml: the signing secret {name!r} does not carry the shared "
+                      "signing-secret name prefix. The leak gate in this job matches that "
+                      "prefix so a rotation's second key is covered without an edit — a name "
+                      "without it is a secret that can reach a pull-request job unnoticed. "
+                      "Rename it, and see docs/signing-key-rotation.md step 1."
+                  )
+
+          # 3. EVERY slot's expected public key, element-wise against the source.
+          #
+          #    Not just slot 0. A wrong key in slot 1 ships INVISIBLY — the release
+          #    still installs everywhere via slot 0 — and then wedges every
+          #    privileged install one release later, when that key becomes the only
+          #    one a helper accepts: refusing to relaunch, refusing `restart` and
+          #    `shutdown`, refusing every future candidate. Fleet-wide, sudo-only,
+          #    which is the one outcome #338 forbids. Before this check the only
+          #    thing in the way was the operator pasting the right hex.
+          #
+          #    Element-wise also makes the ORDER of `ORG_REQUIRED_SLOT_KEYS` a
+          #    checked property rather than a convention, which matters because slot
+          #    position is the format's only key identifier.
+          #
+          #    This parses Rust with a regex, so the question that matters is whether
+          #    a mis-parse can fail SILENTLY. Every shape tried fails loudly instead:
+          #    a comment inside the array, a nested path (`keys::ORG_KEY_1`), an
+          #    array-repeat (`&[K; 1]`), or bytes written inline all produce a name
+          #    that has no `pub const <name>: PubKey` and exit with "named by
+          #    ORG_REQUIRED_SLOT_KEYS but is not defined"; a trailing comma is
+          #    filtered; and the two lists come from different files, so a mis-parse
+          #    that dropped a key would make them differ rather than agree. Checked
+          #    against a rustfmt'd three-key list, which is the realistic future
+          #    shape.
+          m = re.search(r"--expect-slot-pubkeys\s+([0-9a-fA-F,]+)", command)
+          if not m:
+              sys.exit(
+                  "release.yml: `Package client binaries` no longer passes "
+                  "`--expect-slot-pubkeys <hex>[,<hex>...]` to veld-sign. Without it a signing "
+                  "secret holding a different valid key ships a release that no helper in the "
+                  "field can relaunch onto (issue #261 slice C)."
+              )
+          # Split exactly as veld-sign does (`v.split(',').map(trim)`), and do NOT
+          # filter empties. Filtering them made a stray comma a GREEN pull request
+          # and a dead release: the gate saw the right list while veld-sign saw an
+          # extra empty entry and exited at the push-only signing step, after merge.
+          # That is the same class as the `--key-env=NAME` check above.
+          declared = [h.strip().lower() for h in m.group(1).split(",")]
+          if any(not h for h in declared):
+              sys.exit(
+                  "release.yml: `--expect-slot-pubkeys` has an empty entry — a leading, "
+                  "trailing or doubled comma. veld-sign does not ignore it and would fail "
+                  "the release at the signing step, which is push-only and therefore after "
+                  "merge."
+              )
+          # And the count veld-sign actually enforces, which is one expected key per
+          # key flag. A duplicated entry in ORG_REQUIRED_SLOT_KEYS would otherwise
+          # match element-wise against a duplicated expect list and still die at
+          # release.
+          if len(declared) != flags:
+              sys.exit(
+                  f"release.yml: `--expect-slot-pubkeys` names {len(declared)} key(s) but "
+                  f"{flags} key flag(s) are passed. veld-sign requires one expected key per "
+                  "key, in slot order."
+              )
+
+          def key_hex(name):
+              # `re.escape`, because `name` comes out of the parsed array and is
+              # interpolated into a pattern. Without it, a key written inline as bytes
+              # or a comment carrying an unbalanced paren dies with a Python
+              # traceback instead of the message below — still loud, but not the
+              # message this gate's comment promises.
+              k = re.search(rf"pub const {re.escape(name)}: PubKey = \[(.*?)\];", signing, re.S)
+              if not k:
+                  sys.exit(f"crates/veld-core/src/signing.rs: `{name}` is named by "
+                           "ORG_REQUIRED_SLOT_KEYS but is not defined")
+              hexes = re.findall(r"0x([0-9a-fA-F]{2})", k.group(1))
+              if len(hexes) != 32:
+                  sys.exit(f"{name} parsed as {len(hexes)} bytes, expected 32")
+              return "".join(h.lower() for h in hexes)
+
+          req = re.search(
+              r"pub const ORG_REQUIRED_SLOT_KEYS: &\[PubKey\] = &\[(.*?)\];", signing, re.S
+          )
+          if not req:
+              sys.exit("crates/veld-core/src/signing.rs: `ORG_REQUIRED_SLOT_KEYS` is gone; it "
+                       "is the list of keys every release must be signed by")
+          expected = [key_hex(n.strip()) for n in req.group(1).split(",") if n.strip()]
+          if len(set(expected)) != len(expected):
+              sys.exit(
+                  "crates/veld-core/src/signing.rs: ORG_REQUIRED_SLOT_KEYS lists a key twice. "
+                  "RELEASE_SIG_SLOTS counts the distinct union, so the Rust tests stay green "
+                  "while veld-sign is handed a different number of keys than expected entries."
+              )
+          if declared != expected:
+              sys.exit(
+                  "release.yml's --expect-slot-pubkeys does not match "
+                  "veld_core::signing::ORG_REQUIRED_SLOT_KEYS, element for element and in "
+                  f"order ({len(declared)} declared vs {len(expected)} required). One side was "
+                  "edited without the other. Slot position is this format's only key "
+                  "identifier, and slot 0 is a compatibility contract with every "
+                  "already-shipped helper — neither side may change alone. See "
+                  "docs/signing-key-rotation.md."
+              )
+          if expected[0] != key_hex("ORG_KEY_1"):
+              sys.exit(
+                  "crates/veld-core/src/signing.rs: ORG_KEY_1 is no longer first in "
+                  "ORG_REQUIRED_SLOT_KEYS. Every helper shipped up to v16.59.0 verifies "
+                  "bytes 0..64 against it and nothing else."
+              )
+
+          # 4. veld-sign's own slot ceiling. It deliberately does not depend on
+          #    veld-core outside its tests (it must build fast for the host while
+          #    the release build cross-compiles), so the number is duplicated and
+          #    this is what stops the copy rotting. A ceiling above the reader's
+          #    would write slots no helper ever looks at.
+          sign_main = pathlib.Path("crates/veld-sign/src/main.rs").read_text()
+          if rust_const("MAX_SLOTS", sign_main, "crates/veld-sign/src/main.rs") != rust_const(
+              "MAX_SIG_SLOTS", signing, "crates/veld-core/src/signing.rs"
+          ):
+              sys.exit(
+                  "veld-sign's MAX_SLOTS and veld_core::signing::MAX_SIG_SLOTS disagree. "
+                  "The signer would write slots the reader never reads."
+              )
+
+          # 5. The rotation format runs in production exactly once, on the worst
+          #    day, and `release.yml`'s signing step is push-only — so these tests
+          #    are its only exercise before it is needed. The macOS one has a
+          #    single executing home (`signing-smoke`), the same reason the
+          #    ad-hoc-resign case is pinned above.
+          smoke = pathlib.Path("crates/veld-sign/tests/smoke.rs").read_text()
+          for name, why in [
+              ("several_keys_write_one_slot_each_in_order",
+               "nothing else checks that the flag order is the slot order"),
+              ("a_pre_rotation_reader_accepts_a_multi_slot_signature",
+               "this is the only check that an already-shipped helper still accepts a "
+               "rotation release"),
+              ("a_bad_key_in_a_later_slot_writes_no_signature_at_all",
+               "without it a failed rotation can leave a partial .sig that verifies for "
+               "one generation and no other"),
+              ("an_unexpected_key_in_any_slot_is_refused_and_the_expected_value_is_not_echoed",
+               "this covers the wrong-secret guard for EVERY slot, its count check, and its "
+               "no-echo rule; a slot-0-only version of it missed the fleet-fatal case"),
+              ("a_malformed_expected_pubkey_blames_the_flag_not_the_secret",
+               "without it a bad flag is reported as a wrong signing secret, which is where "
+               "somebody looks first on a failed release"),
+              ("no_key_material_from_any_slot_reaches_stderr",
+               "a second key doubles the surface #339 found the leaks in; veld-sign's "
+               "module doc enumerates them"),
+              ("the_same_key_in_two_slots_is_refused_without_naming_it",
+               "the runbook and veld-sign's own usage text both state this guarantee"),
+              ("more_keys_than_slots_is_a_usage_error",
+               "without it a release can claim more slots than any reader looks at"),
+              ("adhoc_resign_is_byte_idempotent_for_a_multi_slot_signature",
+               "install.sh's macOS re-sign is unverified for the multi-slot shape "
+               "otherwise, and this is the only macOS home for it"),
+          ]:
+              if f"fn {name}" not in smoke:
+                  sys.exit(f"crates/veld-sign/tests/smoke.rs: `{name}` is gone — {why} "
+                           "(issue #261 slice C)")
+
+          # 6. The invariants a rotation must NOT delete.
+          #
+          #    `signing.rs` deliberately carries two TRIPWIRES that go red for a
+          #    correct rotation and whose docs tell the operator to delete them —
+          #    `nothing_is_retired_yet` and
+          #    `no_rotation_has_happened_yet_so_the_artifact_is_unchanged`. Beside
+          #    them sit permanent invariants that look identical when the whole
+          #    file is red. Deleting a red test is the natural reaction on the day
+          #    the runbook itself says you are reading it under pressure, and this
+          #    is the list that survives it. Each was in a bundled test until a
+          #    simulated rotation against this repo showed what deleting it cost.
+          invariants = pathlib.Path("crates/veld-core/src/signing.rs").read_text()
+          for name, why in [
+              ("a_one_key_signature_is_exactly_64_bytes",
+               "the permanent half of the byte-identical claim; its tripwire twin is "
+               "the half a rotation deletes"),
+              ("the_keyring_is_never_empty",
+               "without it, a retirement performed without its matching addition ships a "
+               "helper that trusts nothing and leaves sudo as the only repair"),
+              ("every_accepted_key_is_one_releases_are_signed_by",
+               "without it, a key in the keyring but not in the required-slot list makes "
+               "this build refuse every release"),
+              ("org_key_1_holds_slot_zero_forever",
+               "slot 0 is the compatibility contract with every already-shipped helper"),
+              ("the_pre_rotation_reader_still_accepts_a_multi_slot_release",
+               "the only check that an already-shipped helper accepts a rotation release"),
+              ("a_binary_past_the_bound_is_refused_not_verified_as_a_prefix",
+               "the binary read was unbounded on a path an unprivileged caller can "
+               "influence, and verifying a prefix verifies nothing"),
+              ("a_binary_symlinked_to_a_non_regular_file_is_refused",
+               "root follows a user-planted symlink here, and `shutdown` reaches the "
+               "relaunch guard with no executability check in front of it"),
+              ("a_torn_signature_is_retried_but_an_unreadable_one_is_not",
+               "install.sh writes the lib-dir .sig with `cp`, so a torn read is real; "
+               "classifying it as unreadable printed a tampering paragraph on a healthy "
+               "machine"),
+              ("an_over_bound_binary_is_refused_once_and_not_retried",
+               "the over-bound arm has no other seam, and deleting it would verify the "
+               "binary as a prefix with every test still green"),
+              ("only_a_verification_failure_is_retried",
+               "the retry scoping changes no verdict, only the number of reads, so nothing "
+               "else would notice it being widened back to every refusal"),
+              ("each_distinct_slot_is_verified_at_most_once",
+               "the slot dedupe changes no verdict, so nothing else would notice it being "
+               "simplified away"),
+          ]:
+              if f"fn {name}" not in invariants:
+                  sys.exit(f"crates/veld-core/src/signing.rs: `{name}` is gone — {why}. If you "
+                           "are performing a rotation, docs/signing-key-rotation.md names the "
+                           "ONE test each step deletes; this is not one of them.")
+
+          print(f"signature slots: {slots}; slot 0 pinned to ORG_KEY_1; rotation smoke tests intact")
+          print("signing.rs rotation invariants intact")
           PY
 
       # `install.sh` is the largest program in this repo that nothing checked.
