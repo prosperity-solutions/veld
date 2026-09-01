@@ -1177,6 +1177,26 @@ if [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   $NEED_SUDO chmod 644 "${LIB_DIR}/veld-helper.sig"
 fi
 
+# In privileged mode the helper is served from a ROOT-OWNED directory (issue
+# #262) — the point being that this script, running as the user, cannot write
+# it. So instead of copying, hand the download to the already-root helper over
+# its socket: it verifies the org signature and refuses anything older than
+# itself before installing. That is what keeps updates sudo-free (issue #338's
+# rule 1) on an install whose whole purpose is to be unwritable.
+#
+# Deliberately unconditional, and deliberately quiet. The command is a no-op on
+# every install this does not apply to — unprivileged, or privileged but not yet
+# migrated — because on those the copy above IS the update and there is nothing
+# for a user to act on. It also cleans up that now-inert copy once the real
+# install has succeeded, so a migrated machine stops carrying a root-daemon-shaped
+# binary in a user-writable directory.
+#
+# `|| true`: a helper that refuses the new binary has already said why, and the
+# rest of the install (CLI, daemon, Caddy) is still worth completing.
+if [ -f "${TMP_DIR}/veld-helper" ]; then
+  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper" || true
+fi
+
 # --- Restart running services (picks up new binaries) ---
 
 # Detect install mode from setup.json to determine how to restart the helper.

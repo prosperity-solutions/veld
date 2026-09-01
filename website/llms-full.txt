@@ -21,6 +21,13 @@ This detects your OS and architecture, downloads the latest release, and install
 - `veld` to `~/.local/bin/`
 - `veld-helper` and `veld-daemon` to `~/.local/lib/veld/`
 
+In **privileged** mode the helper is then served from a root-owned directory
+(`/var/db/veld-helper` on macOS, `/var/lib/veld-helper` on Linux) instead: it runs
+as root, so a binary the installing user could overwrite would be root on the next
+reboot. Updates still need no sudo — the installer hands the new binary to the
+running root helper, which verifies its signature and refuses anything older than
+itself before installing it.
+
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
 **Upgrading from an older veld:** `veld.json` must declare `"schemaVersion": "3"`; `"1"` and `"2"` no longer load. The load error names every change needed. See `docs/migrating-to-v3.md` for the complete rule set, then `veld lint` to verify. There is no v4: what v3 gained after shipping (`long_running`, port-less long-running nodes, `protocol`/`host` on a named port, the `settle` probe, per-port sharing consent) is additive, and `docs/adopting-long-running-and-ports.md` covers adopting it.

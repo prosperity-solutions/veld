@@ -59,6 +59,13 @@ This detects your OS and architecture, downloads the latest release, and install
 - `veld` to `~/.local/bin/`
 - `veld-helper` and `veld-daemon` to `~/.local/lib/veld/`
 
+In **privileged** mode the helper is then served from a root-owned directory
+(`/var/db/veld-helper` on macOS, `/var/lib/veld-helper` on Linux) instead: it runs
+as root, so a binary the installing user could overwrite would be root on the next
+reboot. Updates still need no sudo — the installer hands the new binary to the
+running root helper, which verifies its signature and refuses anything older than
+itself before installing it.
+
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
 Setup is optional — commands auto-bootstrap on first use with HTTPS on port 18443.
@@ -398,7 +405,7 @@ The reason both exist: a Caddy whose certificate maintenance had stopped once se
 On macOS a launchd job's stdout and stderr are **discarded** unless its plist names a file, so:
 
 - **The daemon** logs to `~/.veld/veld-daemon.log`, owner-only. In the user's own directory rather than beside the binary, because the daemon is a user LaunchAgent and a legacy `/usr/local` install's lib dir is root-owned — and launchd does not run a job whose log file it cannot create, it exits it `EX_CONFIG` before the program starts.
-- **The privileged helper** logs to `<lib dir>/veld-helper.log` (`~/.local/lib/veld/veld-helper.log` for a default install). It runs as root, so that directory is writable whichever prefix it is. The *unprivileged* helper has no log file yet.
+- **The privileged helper** logs beside its own binary — `/var/db/veld-helper/veld-helper.log` on macOS and `/var/lib/veld-helper/veld-helper.log` on Linux, since that is the root-owned directory it is served from. On an install still awaiting that move, and for a legacy `/usr/local` one, it is `<lib dir>/veld-helper.log`. It runs as root, so the directory is writable whichever it is, and the file is world-readable so you do not need `sudo` to read it. The *unprivileged* helper has no log file yet.
 - **Caddy** logs to `<lib dir>/caddy-data/caddy.log`, rolling at 4 MB and keeping two rolls. Not via a plist — the helper spawns Caddy itself, with its output discarded — so Caddy is configured to write the file. Inside `caddy-data` rather than beside the other logs on purpose: in privileged mode Caddy runs as **root** while the lib dir is user-owned, and Caddy opens its log without `O_NOFOLLOW`, so a symlink planted at a user-writable path would have root appending wherever it pointed. `caddy-data` is root-owned. The helper creates the file itself, `0644`, so you can read it without `sudo`, and if it cannot be made openable veld leaves the log out of Caddy's config rather than let a log cost you every route (naming an unopenable log fails the *whole* config). It matters more than it looks: certificate issuance and renewal happen entirely inside Caddy, veld cannot report on them, and a renewal that fails is written down here and nowhere else. No access logs go here, only lifecycle and errors.
 
 On Linux systemd captures unit output itself: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location in its Installation block — read out of the service definition, so it names the file that is really being written — and says plainly when a machine is not capturing it, which is the case for any install set up before this existed. `veld setup <mode>` writes the current definition.

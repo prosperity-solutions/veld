@@ -185,6 +185,38 @@ jobs:
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             codesign --force --sign - dist/veld-helper
           fi
+          # The helper must carry its own version inside the bytes about to be
+          # signed (issue #262): the install RPC refuses a candidate it cannot
+          # version, because an unversioned binary is one it cannot tell apart
+          # from a downgrade. Nothing in the program reads that record — it
+          # survives on `#[used]` alone — so a build that quietly lost it would
+          # produce a release NO privileged install could ever update onto, and
+          # the repair channel for that is asking every user for sudo, which is
+          # the outcome this whole chain exists to avoid.
+          #
+          # Checked here rather than only in `cargo test` because this is the
+          # cross-compiled artifact that actually ships, and it is the one thing
+          # a host-architecture test cannot speak for. Failing the release is the
+          # cheap outcome; shipping is not.
+          python3 - <<'PYCHECK'
+          import sys
+          magic = bytes(b ^ 0xA5 for b in bytes.fromhex(
+              "ffa3297e793eedb20f1120c7f79c5cc2"))
+          data = open("dist/veld-helper", "rb").read()
+          hits = [i for i in range(len(data) - 15) if data[i:i + 16] == magic]
+          versions = set()
+          for i in hits:
+              field = data[i + 16:i + 48]
+              versions.add(field.rstrip(b"\0").decode("ascii", "replace"))
+          if len(versions) != 1:
+              sys.exit(
+                  f"dist/veld-helper carries {len(hits)} version record(s) resolving to "
+                  f"{sorted(versions)}; expected exactly one version. See "
+                  "veld_core::signing::version_record and the VELD_HELPER_VERSION_RECORD "
+                  "static in crates/veld-helper/src/main.rs."
+              )
+          print(f"veld-helper version record: {versions.pop()}")
+          PYCHECK
           # veld-sign is a CI tool that must RUN on the runner, so it is built
           # for the host — never for ${{ matrix.target }}, whose binary is
           # cross-compiled (aarch64 on an x86_64 runner) and cannot execute here.

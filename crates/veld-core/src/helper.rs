@@ -120,6 +120,21 @@ pub const SLEEP_ADOPTION_GRACE_SECS: u64 = 90;
 /// version-skew rule as [`HOLD_SLEEP_DISABLED`].
 pub const RELEASE_SLEEP_DISABLED: &str = "release_sleep_disabled";
 
+/// Install a new privileged helper binary from a staged path (#262).
+///
+/// This is how an unprivileged updater replaces a **root-owned** helper without
+/// sudo: it downloads to a path it can write, and asks the running root helper
+/// to install it. The helper verifies the org signature and refuses anything
+/// older than itself before the bytes go anywhere — the caller is trusted for
+/// *nothing* except naming a file, because the caller is exactly who this
+/// protects against.
+///
+/// Helpers older than the release that added this answer
+/// `unknown command: install_helper`; a caller must treat that as "this install
+/// still keeps its helper in the lib dir", not as a failure — on such a machine
+/// `install.sh`'s own copy is still the mechanism.
+pub const INSTALL_HELPER: &str = "install_helper";
+
 /// Wire format: `{"command": "<name>", "args": {…}}`.
 ///
 /// We implement [`Serialize`] manually so that the enum serialises into the
@@ -164,6 +179,11 @@ pub enum HelperCommand {
     },
     /// Drop the hold above immediately. See [`RELEASE_SLEEP_DISABLED`].
     ReleaseSleepDisabled,
+    /// Install the verified helper binary staged at `path` into the root-owned
+    /// store. See [`INSTALL_HELPER`].
+    InstallHelper {
+        path: String,
+    },
 }
 
 impl Serialize for HelperCommand {
@@ -206,6 +226,9 @@ impl Serialize for HelperCommand {
                 RELEASE_SLEEP_DISABLED,
                 serde_json::Value::Object(Default::default()),
             ),
+            HelperCommand::InstallHelper { path } => {
+                (INSTALL_HELPER, serde_json::json!({ "path": path }))
+            }
         };
 
         let mut map = serializer.serialize_map(Some(2))?;
@@ -391,6 +414,19 @@ impl HelperClient {
     /// than a failure.
     pub async fn restart(&self) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::Restart).await
+    }
+
+    /// Ask the privileged helper to install the signed binary staged at `path`
+    /// into its root-owned store. See [`HelperCommand::InstallHelper`].
+    ///
+    /// `path` must be readable by **root**, not by the caller: the helper opens
+    /// it itself. `<path>.sig` must sit beside it, exactly as the release
+    /// tarball ships the pair.
+    pub async fn install_helper(&self, path: &Path) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::InstallHelper {
+            path: path.to_string_lossy().into_owned(),
+        })
+        .await
     }
 
     /// Hold battery lid-closed sleep off for `lease_secs`, or renew the hold.

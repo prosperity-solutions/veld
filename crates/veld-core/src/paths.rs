@@ -75,8 +75,9 @@ pub fn set_owner_only(_path: &Path) -> std::io::Result<()> {
 ///
 /// The **helper's** rule, and only the helper's — see [`daemon_log_path_in`] for why
 /// the daemon cannot share it. In privileged mode the helper is a root
-/// `LaunchDaemon`, so root writing to a root-owned lib dir is exactly right, and
-/// this is where `veld-helper.log` has always been.
+/// `LaunchDaemon` served from [`privileged_helper_dir`], so this lands in a
+/// root-owned directory — which is exactly right for a file only root writes,
+/// and still readable without `sudo` because that directory is `0755`.
 ///
 /// `/tmp` when the binary has no parent, which only a relative bare filename
 /// produces.
@@ -173,6 +174,65 @@ pub fn sleep_marker_dir() -> PathBuf {
         PathBuf::from("/var/db/veld")
     } else {
         PathBuf::from("/var/lib/veld")
+    }
+}
+
+/// Where the **privileged** helper binary lives: a directory the installing user
+/// cannot write (#262).
+///
+/// This is the whole of #247's fix. The default privileged install ran the root
+/// LaunchDaemon out of `$HOME/.local/lib/veld`, so any process with the user's
+/// privileges could overwrite the binary and get root at the next reboot, when
+/// launchd execs whatever sits at the plist's path. #261's signing stopped the
+/// *running* helper relaunching onto a swap; nothing verifies at process start,
+/// and nothing can — the process doing the checking would be the attacker's
+/// binary. Removing the writable file is what removes the escalation.
+///
+/// **Why not `/usr/local/lib/veld`**, the obvious address and the one
+/// [`lib_dir`] already knows. It is not reliably root-owned on macOS: Homebrew
+/// on Intel Macs takes ownership of `/usr/local`, so on a large slice of the
+/// install base an unprivileged attacker can *pre-create* `/usr/local/lib/veld`
+/// as themselves, and "we create it root-owned" fixes nothing about a directory
+/// that is already there. `/var/db` (`root:wheel`) and `/var/lib` (`root:root`)
+/// have a root-owned parent on every machine, so pre-creation there requires
+/// root — which makes it not an attack. It also keeps `veld doctor`'s shipped
+/// "No stale system install" row honest: that row fails when
+/// `/usr/local/lib/veld` exists and is not the active lib dir, so putting the
+/// helper there would have made it fail for every migrated user.
+///
+/// **Why a sibling of [`sleep_marker_dir`] rather than a subdirectory of it.**
+/// Same reasoning about the parent, and the same two paths — but that directory
+/// is `0700`, and this one must be world-*readable*: `veld doctor` runs as the
+/// user and reads this binary and its `.sig` to report the signature row. Two
+/// directories with one job each, rather than one directory whose mode has to
+/// serve both.
+pub fn privileged_helper_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/db/veld-helper")
+    } else {
+        PathBuf::from("/var/lib/veld-helper")
+    }
+}
+
+/// The privileged helper binary inside [`privileged_helper_dir`].
+pub fn privileged_helper_bin() -> PathBuf {
+    privileged_helper_dir().join("veld-helper")
+}
+
+/// Whether `path` is the helper inside the root-owned directory — i.e. whether
+/// this install has been migrated off the user-writable location.
+///
+/// Compares canonicalised paths so a symlinked `/var` (macOS resolves it to
+/// `/private/var`) does not read as a different install. A path that cannot be
+/// canonicalised is not the store's, which is the fail-closed direction: it
+/// leaves the caller on the old, still-working copy path.
+pub fn is_privileged_helper_path(path: &Path) -> bool {
+    match (
+        std::fs::canonicalize(path),
+        std::fs::canonicalize(privileged_helper_bin()),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 

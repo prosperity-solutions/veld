@@ -755,6 +755,17 @@ enum Command {
         variant: String,
     },
 
+    /// Internal: hand a downloaded veld-helper to the running root helper, which
+    /// verifies its signature and version and installs it into its root-owned
+    /// directory (#262). Called by `install.sh`; a no-op on any install whose
+    /// helper is not served from that directory.
+    #[command(name = "_helper-install", hide = true)]
+    InternalHelperInstall {
+        /// The downloaded `veld-helper`, with its `.sig` beside it.
+        #[arg(long)]
+        binary: std::path::PathBuf,
+    },
+
     /// Internal (legacy): read stdin, prepend timestamps, append to a log
     /// file. Kept so detached pipelines started by a pre-SQLite veld keep
     /// working after an upgrade — if this subcommand disappeared, the running
@@ -1314,6 +1325,7 @@ async fn main() {
         },
 
         Command::Uninstall => commands::uninstall::run().await,
+        Command::InternalHelperInstall { binary } => commands::helper_install::run(binary).await,
 
         Command::Ui => commands::ui::run().await,
 

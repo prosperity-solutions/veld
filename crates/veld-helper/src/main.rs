@@ -1,6 +1,7 @@
 mod caddy;
 mod dns;
 mod handler;
+mod migrate;
 mod protocol;
 mod signing;
 mod sleep;
@@ -16,6 +17,24 @@ use tracing::{debug, error, info, warn};
 use veld_core::helper_gate::{Gate, GateSource};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// This helper's version, as data inside the binary the org signs (#262).
+///
+/// The install RPC refuses a candidate that is older than the helper already
+/// running, and the version it compares has to come from inside the signed
+/// payload — a filename or a `--version` the candidate prints for itself is
+/// chosen by whoever is asking. The signature covers every byte of this binary,
+/// so it covers this record; see [`veld_core::signing::version_record`].
+///
+/// `#[used]` and `#[unsafe(no_mangle)]` are both load-bearing and neither is
+/// decoration: nothing in the program *reads* this, so without them the
+/// optimiser drops it and the shipped helper carries no version at all — an
+/// artifact every future helper would refuse to install. `a_release_build_carries_exactly_one_version_record`
+/// in `tests/version_record.rs` is what stops that shipping.
+#[used]
+#[unsafe(no_mangle)]
+pub static VELD_HELPER_VERSION_RECORD: [u8; veld_core::signing::VERSION_RECORD_LEN] =
+    veld_core::signing::version_record(VERSION);
 
 /// How often the watchdog checks that Caddy is alive and serving.
 const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
@@ -109,6 +128,9 @@ fn parse_args() -> Result<HelperConfig> {
                 let path = args.get(i).context("--caddy-bin requires a value")?;
                 caddy_bin = Some(PathBuf::from(path));
             }
+            // Consumed above, before the process ever gets here; listed so the
+            // unknown-argument arm does not reject a flag this binary accepts.
+            migrate::REREGISTER_FLAG => {}
             "--allow-uid" => {
                 i += 1;
                 let value = args.get(i).context("--allow-uid requires a value")?;
@@ -136,6 +158,15 @@ async fn main() -> Result<()> {
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+
+    // Handled ahead of `parse_args`, because this is not a way of *running* the
+    // helper: it re-registers the privileged service from the definition already
+    // on disk and exits. Migration spawns it on the freshly installed binary
+    // (see `migrate`), detached, because on macOS the `bootout` half of a
+    // re-registration kills the job that would otherwise be doing it.
+    if std::env::args().any(|a| a == migrate::REREGISTER_FLAG) {
+        return migrate::reregister_service().await;
+    }
 
     let config = parse_args()?;
 
@@ -197,6 +228,12 @@ async fn main() -> Result<()> {
         .ok();
     let gate = Gate::resolve(config.allow_uid, privileged, exe.as_deref());
     log_gate(&gate);
+
+    // Kept before `config.caddy_bin` is moved into the handler: the migration
+    // below rewrites the service definition and must reproduce every argument
+    // this process was started with, or the relaunched helper silently loses
+    // its `--caddy-bin` and resolves a different Caddy.
+    let caddy_bin_for_migration = config.caddy_bin.clone();
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -298,6 +335,15 @@ async fn main() -> Result<()> {
     if privileged {
         tokio::spawn(watch_own_binary());
     }
+
+    // Move off a user-writable binary if this install is still running from one
+    // (#262). Last in the startup sequence and deliberately so: it ends by
+    // spawning a re-registration that boots this job out, so everything above —
+    // adopting a running Caddy, reconciling the sleep lease — must have
+    // completed first, or the relaunched helper would inherit a half-reconciled
+    // machine. A no-op on every install that has already migrated, and on every
+    // one that was never affected.
+    migrate::migrate_to_root_owned_dir(privileged, caddy_bin_for_migration.as_deref(), &gate).await;
 
     // Graceful shutdown on SIGTERM/Ctrl-C (e.g. `launchctl bootout`). Caddy is
     // intentionally left running so URLs stay up while launchd relaunches us.

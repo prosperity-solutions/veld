@@ -142,6 +142,7 @@ impl State {
                 self.handle_hold_sleep_disabled(&request.args).await
             }
             veld_core::helper::RELEASE_SLEEP_DISABLED => self.handle_release_sleep_disabled().await,
+            veld_core::helper::INSTALL_HELPER => self.handle_install_helper(&request.args).await,
             other => {
                 warn!(command = other, "unknown command");
                 Response::err(format!("unknown command: {other}"))
@@ -168,6 +169,74 @@ impl State {
         Handled {
             response: Response::ok(),
             exit_after_reply: true,
+        }
+    }
+
+    /// Install a new helper binary into the root-owned store (#262).
+    ///
+    /// This is the command that lets an **unprivileged** `veld update` replace a
+    /// binary only root can write, with no sudo prompt — the requirement #338's
+    /// rule 1 puts on every change in this chain. The caller downloads to a path
+    /// it can write and names it here; root does the rest.
+    ///
+    /// Three refusals, and the third is the one that is easy to leave out:
+    ///
+    /// 1. **Unprivileged helper.** An unprivileged helper runs as the user and
+    ///    serves a binary the user already owns, so there is no store, nothing to
+    ///    protect, and an install here would only be a confusing way to copy a
+    ///    file.
+    /// 2. **Not signed by the org.** The verification from #261, over bytes read
+    ///    once — see `veld_core::helper_store` for why "once" is the whole
+    ///    property and not an optimisation.
+    /// 3. **Older than the helper already running.** The caller *is* the
+    ///    installing user, whom #253's uid gate admits by design, so they can
+    ///    reach this command directly and hand it a past release with a known
+    ///    vulnerability. It would verify: a signature says the org built a
+    ///    binary, not that the binary is current. Without this check the
+    ///    root-owned directory closes the overwrite and leaves the rollback.
+    ///
+    /// Installing does **not** restart anything. The caller follows with
+    /// `restart` once it is ready, which keeps this command's blast radius to
+    /// "a file changed" and leaves the existing relaunch gate in charge of
+    /// whether the new binary is ever executed.
+    async fn handle_install_helper(&self, args: &Value) -> Response {
+        if !self.privileged {
+            return Response::err(
+                "this helper is not the privileged one, so it has no root-owned store to install \
+                 into",
+            );
+        }
+        let path = match args.get("path").and_then(Value::as_str) {
+            Some(p) => std::path::PathBuf::from(p),
+            None => return Response::err("missing 'path' in args"),
+        };
+
+        // Reading and installing both touch the filesystem and the binary is
+        // several megabytes, so this goes to a blocking thread rather than
+        // stalling the reactor that every other connection shares.
+        let running = env!("CARGO_PKG_VERSION");
+        let outcome = tokio::task::spawn_blocking(move || {
+            veld_core::helper_store::Candidate::read(&path)
+                .and_then(|candidate| candidate.install(running))
+        })
+        .await;
+
+        match outcome {
+            Ok(Ok(version)) => {
+                info!(
+                    version,
+                    "installed a verified helper binary into the root-owned store"
+                );
+                Response::ok_with_data(serde_json::json!({ "installed_version": version }))
+            }
+            Ok(Err(e)) => {
+                // `warn`, not `debug`: every arm here is either an attack or a
+                // broken release, and the helper's own log is where a support
+                // transcript looks first.
+                warn!(error = %format!("{e:#}"), "refusing to install a helper binary");
+                Response::err(format!("{e:#}"))
+            }
+            Err(e) => Response::err(format!("the install task failed: {e}")),
         }
     }
 
