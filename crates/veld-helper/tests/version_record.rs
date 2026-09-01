@@ -12,15 +12,24 @@
 //! `CARGO_BIN_EXE_veld-helper` is what makes this checkable: Cargo builds the
 //! real binary for the integration test and hands over its path, so this asserts
 //! against linked output rather than against source.
+//!
+//! **It is the profile CI runs, which is `debug`.** The release profile — and
+//! the cross-compiled artifact that actually ships — is covered by the
+//! equivalent check in `release.yml`'s `Package client binaries` step, which is
+//! the one thing a host-architecture debug test cannot speak for. Neither is
+//! redundant.
 
 /// The record is in the binary, exactly once, and says what the crate says.
 ///
-/// "Exactly once" is not pedantry. The scanner assembles its 16-byte needle at
-/// runtime from two halves precisely so that a helper searching a *future*
-/// helper does not also match its own copy of the needle — a second hit with a
-/// different version makes `version_in_signed_bytes` return `None`, which reads
-/// as "unversioned" and refuses the install. This is the test that would catch
-/// somebody "simplifying" the split magic into an inline literal.
+/// "Exactly once" is not pedantry. The scanner recovers its 16-byte needle by
+/// XOR from `veld_core::signing::VERSION_MAGIC_OBFUSCATED`, precisely so that a
+/// helper searching a *future* helper does not also match its own copy of the
+/// needle — a second hit with a different version makes `version_in_signed_bytes`
+/// return `None`, which reads as "unversioned" and refuses the install. This is
+/// the test that would catch somebody "simplifying" the obfuscation into an
+/// inline literal, which is not hypothetical: storing the magic as two plain
+/// halves was tried first, and in a debug build the linker laid them next to
+/// each other and reproduced the needle anyway.
 #[test]
 fn a_built_helper_carries_exactly_one_version_record() {
     let bytes = std::fs::read(env!("CARGO_BIN_EXE_veld-helper"))
@@ -55,6 +64,6 @@ fn the_scanners_own_needle_is_not_a_second_record() {
         hits, 1,
         "expected the 16-byte version magic exactly once in the built helper, found {hits}. \
          More than one means the scanner's needle is sitting in the binary contiguously — \
-         see veld_core::signing::VERSION_MAGIC_A."
+         see veld_core::signing::VERSION_MAGIC_OBFUSCATED."
     );
 }

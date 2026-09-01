@@ -211,13 +211,16 @@ impl State {
             None => return Response::err("missing 'path' in args"),
         };
 
+        // Kept for the log only — see the `warn!` below for why it is never
+        // formatted with `Display`.
+        let logged_path = path.clone();
+
         // Reading and installing both touch the filesystem and the binary is
         // several megabytes, so this goes to a blocking thread rather than
         // stalling the reactor that every other connection shares.
         let running = env!("CARGO_PKG_VERSION");
         let outcome = tokio::task::spawn_blocking(move || {
-            veld_core::helper_store::Candidate::read(&path)
-                .and_then(|candidate| candidate.install(running))
+            veld_core::helper_store::install_from(&path, running)
         })
         .await;
 
@@ -233,8 +236,22 @@ impl State {
                 // `warn`, not `debug`: every arm here is either an attack or a
                 // broken release, and the helper's own log is where a support
                 // transcript looks first.
-                warn!(error = %format!("{e:#}"), "refusing to install a helper binary");
-                Response::err(format!("{e:#}"))
+                //
+                // Two things about this line are load-bearing. The path is
+                // recorded with `?` (Debug), which escapes control characters —
+                // a caller-supplied path containing a newline would otherwise
+                // forge whole log lines in a file this diff moved into a
+                // world-readable directory. And the peer gets `{e}`, the
+                // top-level message only, while the log gets `{e:#}`, the whole
+                // chain: the chain is where the errno lives, and handing an
+                // unprivileged caller root's errno for a path of their choosing
+                // is a filesystem oracle.
+                warn!(
+                    path = ?logged_path,
+                    error = %format!("{e:#}"),
+                    "refusing to install a helper binary"
+                );
+                Response::err(format!("{e}"))
             }
             Err(e) => Response::err(format!("the install task failed: {e}")),
         }

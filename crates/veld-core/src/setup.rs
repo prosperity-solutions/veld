@@ -869,30 +869,77 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
 /// written is a machine that keeps the shape it has today, which is the
 /// pre-existing state rather than a new one. The refusal is logged, and
 /// `veld doctor`'s signature row is where a user sees the consequence.
+///
+/// **The version floor still applies here**, and that is a change from the first
+/// version of this function, which passed the candidate's own version as the
+/// floor and so compared a value against itself. `Candidate::install` now
+/// derives the floor from what is already in the store, so an older release's
+/// `veld setup privileged` cannot silently walk the root daemon backwards past
+/// every gate — it keeps the newer helper the store already holds and points the
+/// service definition at that.
 fn stage_helper_in_store(bin: &Path) -> PathBuf {
+    let store = crate::paths::privileged_helper_bin();
     let candidate = match crate::helper_store::Candidate::read(bin) {
         Ok(c) => c,
-        Err(_) => return bin.to_path_buf(),
+        Err(_) => return fallback_helper_path(bin),
     };
     // The version this binary claims, not the one *this* process was compiled
     // as: `veld setup` may be a different release from the helper it installs
     // (a `veld setup privileged` run from an older CLI), and comparing against
-    // our own would refuse a perfectly good newer helper.
+    // our own would refuse a perfectly good newer helper. The floor that does
+    // apply comes from the store, inside `install`.
     let version = match candidate.verified_version() {
         Ok(v) => v,
-        Err(_) => return bin.to_path_buf(),
+        Err(_) => return fallback_helper_path(bin),
     };
     match candidate.install(&version) {
-        Ok(_) => crate::paths::privileged_helper_bin(),
+        Ok(_) => store,
+        // Refused because the store already holds something newer. Not a
+        // failure: serve what is there. Returning `bin` instead would point the
+        // service definition at the *older* binary this run brought, which is
+        // the downgrade the refusal just prevented, arriving by another door.
+        Err(_) if crate::signing::verify_binary_signed(&store) => {
+            tracing::info!(
+                "keeping the helper already in {}; {} ({version}) is not newer",
+                store.display(),
+                bin.display()
+            );
+            store
+        }
         Err(e) => {
             tracing::warn!(
                 error = %format!("{e:#}"),
                 "could not stage the helper in its root-owned directory; serving it from {}",
                 bin.display()
             );
-            bin.to_path_buf()
+            fallback_helper_path(bin)
         }
     }
+}
+
+/// What to point the service definition at when `bin` cannot be staged.
+///
+/// Normally `bin` itself — the pre-existing behaviour, for a local build or a
+/// machine where the store cannot be written.
+///
+/// **The exception is what makes `sudo veld setup privileged` still a repair.**
+/// On a migrated install the lib-dir copy of the helper is deleted once the real
+/// one is in the store, so `which_self` finds nothing and hands this a bare
+/// `veld-helper` with no path. Writing *that* into a plist produces a service
+/// launchd cannot exec — turning the documented remedy for a broken privileged
+/// helper into the thing that breaks it. When the store already holds a properly
+/// signed helper, it is both the right answer and the one already running.
+fn fallback_helper_path(bin: &Path) -> PathBuf {
+    let store = crate::paths::privileged_helper_bin();
+    if !bin.is_file() && crate::signing::verify_binary_signed(&store) {
+        tracing::info!(
+            "no helper binary at {}; keeping the signed one already in {}",
+            bin.display(),
+            store.display()
+        );
+        return store;
+    }
+    bin.to_path_buf()
 }
 
 /// Shared implementation for `install_helper` and `install_helper_with_bin`.
@@ -1016,11 +1063,17 @@ async fn install_helper_inner(
 /// The `<key>ProgramArguments</key>` array of the privileged helper's macOS
 /// plist: the binary path, the `--allow-uid` gate (the installing user's uid),
 /// and the optional `--caddy-bin`. Pure so the wiring can be pinned by a test.
-fn helper_plist_program_args(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
-    let mut program_args = format!(
-        "        <string>{}</string>\n        <string>--allow-uid</string>\n        <string>{allow_uid}</string>",
-        bin.display()
-    );
+fn helper_plist_program_args(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: Option<u32>,
+) -> String {
+    let mut program_args = format!("        <string>{}</string>", bin.display());
+    if let Some(uid) = allow_uid {
+        program_args.push_str(&format!(
+            "\n        <string>--allow-uid</string>\n        <string>{uid}</string>"
+        ));
+    }
     if let Some(caddy) = caddy_bin {
         program_args.push_str(&format!(
             "\n        <string>--caddy-bin</string>\n        <string>{}</string>",
@@ -1033,7 +1086,7 @@ fn helper_plist_program_args(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u3
 /// The privileged helper's macOS LaunchDaemon plist, as text. Pure so the
 /// wiring can be pinned by a test and so the self-migration path (#262) writes
 /// exactly the same definition `veld setup privileged` does.
-fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
+fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32>) -> String {
     let label = HELPER_LABEL_MACOS;
 
     // Build ProgramArguments with --allow-uid (the peer-credential gate's
@@ -1083,11 +1136,14 @@ fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> St
 
 /// The privileged helper's Linux systemd unit, as text. Pure for the same
 /// reason as [`helper_plist_body`].
-fn helper_systemd_unit(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
+fn helper_systemd_unit(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32>) -> String {
     // --allow-uid is the peer-credential gate's allowed uid: the helper runs
     // as root but its socket is world-writable so the unprivileged CLI (the
     // installing user) can drive it, and every other peer must be rejected.
-    let mut exec_start = format!("{} --allow-uid {allow_uid}", bin.display());
+    let mut exec_start = bin.display().to_string();
+    if let Some(uid) = allow_uid {
+        exec_start.push_str(&format!(" --allow-uid {uid}"));
+    }
     if let Some(caddy) = caddy_bin {
         exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
     }
@@ -1164,7 +1220,11 @@ pub fn helper_unit_path() -> PathBuf {
 /// re-point the service without a second copy of the template. Two templates
 /// for one file is how a `KeepAlive` or a `KillMode` silently stops applying to
 /// half the installs, and this one is a root daemon's definition.
-pub fn helper_service_definition(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
+pub fn helper_service_definition(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: Option<u32>,
+) -> String {
     if cfg!(target_os = "macos") {
         helper_plist_body(bin, caddy_bin, allow_uid)
     } else {
@@ -1184,7 +1244,7 @@ pub fn helper_service_definition(bin: &Path, caddy_bin: Option<&Path>, allow_uid
 pub fn write_helper_service_definition(
     bin: &Path,
     caddy_bin: Option<&Path>,
-    allow_uid: u32,
+    allow_uid: Option<u32>,
 ) -> Result<PathBuf, anyhow::Error> {
     let path = if cfg!(target_os = "macos") {
         helper_plist_path()
@@ -1193,7 +1253,21 @@ pub fn write_helper_service_definition(
     };
     let body = helper_service_definition(bin, caddy_bin, allow_uid);
     let tmp = path.with_extension("veld-incoming");
-    std::fs::write(&tmp, &body).with_context(|| format!("failed to write {}", tmp.display()))?;
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        // Durable **before** the rename, for the same reason
+        // `helper_store::write_atomically` fsyncs: a rename is metadata and can
+        // outlive the data blocks it points at. Lose power in that window and
+        // boot finds a zero-length plist — launchd registers nothing, the root
+        // helper never starts, and its binary now sits where the user cannot
+        // repair it. This is the one file in the migration with no fallback.
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", tmp.display()))?;
+    }
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("failed to move {} into place", tmp.display()))?;
     Ok(path)
@@ -1208,11 +1282,14 @@ async fn install_helper_macos(
     let plist_path = plist_path_buf.as_path();
     let label = HELPER_LABEL_MACOS;
 
-    let plist = helper_plist_body(bin, caddy_bin, allow_uid);
-
     bootout_and_drain_system_job(label).await;
 
-    std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
+    // Through the same atomic, fsync-ing writer the migration uses. Two writers
+    // for one root-daemon definition is how a durability rule ends up applying
+    // to half the installs — the same argument `helper_service_definition` makes
+    // about there being one template.
+    write_helper_service_definition(bin, caddy_bin, Some(allow_uid))
+        .context("failed to write helper LaunchDaemon plist")?;
 
     match bootstrap_launchd_job("system", label, plist_path, None, false).await? {
         BootstrapOutcome::Bootstrapped | BootstrapOutcome::LegacyLoaded => {}
@@ -1710,10 +1787,8 @@ async fn install_helper_linux(
     caddy_bin: Option<&Path>,
     allow_uid: u32,
 ) -> Result<(), anyhow::Error> {
-    let unit_path_buf = helper_unit_path();
-    let unit_path = unit_path_buf.as_path();
-    let unit = helper_systemd_unit(bin, caddy_bin, allow_uid);
-    std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
+    write_helper_service_definition(bin, caddy_bin, Some(allow_uid))
+        .context("failed to write helper systemd unit")?;
 
     run_cmd("systemctl", &["daemon-reload"]).await?;
     // restart (not just enable) to pick up new binary on upgrades.
@@ -3809,7 +3884,8 @@ mod tests {
     /// The peer-credential gate's plist wiring.
     #[test]
     fn helper_plist_args_carry_allow_uid() {
-        let args = helper_plist_program_args(std::path::Path::new("/x/veld-helper"), None, 501);
+        let args =
+            helper_plist_program_args(std::path::Path::new("/x/veld-helper"), None, Some(501));
         assert!(args.contains("--allow-uid"));
         assert!(args.contains("501"));
         assert!(args.contains("/x/veld-helper"));
@@ -3817,7 +3893,7 @@ mod tests {
         let with_caddy = helper_plist_program_args(
             std::path::Path::new("/x/veld-helper"),
             Some(std::path::Path::new("/x/caddy")),
-            501,
+            Some(501),
         );
         assert!(with_caddy.contains("--caddy-bin"));
         assert!(with_caddy.contains("/x/caddy"));
@@ -3842,13 +3918,13 @@ mod tests {
         let store = crate::paths::privileged_helper_bin();
         let caddy = std::path::Path::new("/x/caddy");
 
-        let plist = super::helper_plist_body(&store, Some(caddy), ME);
+        let plist = super::helper_plist_body(&store, Some(caddy), Some(ME));
         assert!(plist.contains(&store.display().to_string()), "{plist}");
         assert!(plist.contains("<string>--allow-uid</string>"), "{plist}");
         assert!(plist.contains(&format!("<string>{ME}</string>")), "{plist}");
         assert!(plist.contains("/x/caddy"), "{plist}");
 
-        let unit = super::helper_systemd_unit(&store, Some(caddy), ME);
+        let unit = super::helper_systemd_unit(&store, Some(caddy), Some(ME));
         assert!(unit.contains(&format!("--allow-uid {ME}")), "{unit}");
         assert!(unit.contains(&store.display().to_string()), "{unit}");
         assert!(unit.contains("--caddy-bin /x/caddy"), "{unit}");

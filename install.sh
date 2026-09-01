@@ -1193,8 +1193,20 @@ fi
 #
 # `|| true`: a helper that refuses the new binary has already said why, and the
 # rest of the install (CLI, daemon, Caddy) is still worth completing.
-if [ -f "${TMP_DIR}/veld-helper" ]; then
-  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper" || true
+# Both halves are required. The `.sig` copy above already treats the signature
+# as optional (a `VELD_VERSION` pinned to a pre-signing release has none), and
+# handing the helper a binary with no signature beside it would surface
+# "no readable 64-byte signature" mid-install for a case that should be the
+# silent no-op path.
+HELPER_INSTALL_OK="1"
+if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
+  if ! "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper"; then
+    # Recorded rather than fatal: the CLI, daemon and Caddy halves of this
+    # install are still worth completing, and the command has already printed
+    # why it refused. What must NOT happen is the restart section below going on
+    # to promise that the helper will pick up a binary it just rejected.
+    HELPER_INSTALL_OK=""
+  fi
 fi
 
 # --- Restart running services (picks up new binaries) ---
@@ -1272,12 +1284,17 @@ fi
 # in crates/veld-core/src/setup.rs); this path never got the fix, which is why an
 # update usually ended with a dead daemon and a manual `veld setup` to revive it.
 #
-# A job that is already registered does not need re-registering: only `veld setup`
-# writes these plists, so an update changes the binary and not the definition
-# launchd holds. The consequence is worth stating rather than discovering: because
-# this no longer re-bootstraps, an update is no longer a point where a plist file
-# that is newer than launchd's registration converges. `veld setup` is now the only
-# one — which is where such a mismatch comes from in the first place (a bootstrap
+# A job that is already registered does not need re-registering: an update
+# changes the binary and not the definition launchd holds. The consequence is
+# worth stating rather than discovering: because this no longer re-bootstraps, an
+# update is no longer a point where a plist file that is newer than launchd's
+# registration converges.
+#
+# Two writers of the privileged helper's plist now exist, not one. `veld setup`
+# is still the deliberate convergence point, and the helper's own one-time
+# migration onto its root-owned directory (issue #262) is the other — that one
+# re-registers itself, from a detached child, and `veld doctor` reports the
+# drift if it does not. So a stale registration is still repaired by `veld setup` — which is where such a mismatch comes from in the first place (a bootstrap
 # that lost the race and fell back to kickstarting the stale registration, the
 # `BootstrapOutcome::KickstartedStale` warning), and that warning already tells the
 # user to re-run setup.
@@ -1343,8 +1360,13 @@ if [ "$OS" = "macos" ]; then
       if sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
-      else
+      elif [ -n "$HELPER_INSTALL_OK" ]; then
         echo "Privileged veld-helper will restart itself to pick up the new binary (no sudo needed)."
+      else
+        # The store still holds the OLD binary, so there is nothing for the
+        # helper to pick up. Printing the promise anyway is the same false
+        # reassurance the comment above says was removed from the old code.
+        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
       fi
     fi
   elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then

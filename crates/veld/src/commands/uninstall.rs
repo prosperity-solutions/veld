@@ -4,7 +4,18 @@ use std::io::{self, BufRead, Write};
 /// `veld uninstall` -- remove Veld and clean up.
 pub async fn run() -> i32 {
     let mode = super::read_setup_mode();
-    let needs_sudo = mode.as_deref() == Some("privileged");
+    // Escalate for a recorded privileged mode **or** for a root-owned helper
+    // directory that is still on disk (#262).
+    //
+    // The second half is not redundant. `install.sh`'s switch-to-user-paths path
+    // overwrites `setup.json` with `{}` while leaving the store behind, so a
+    // machine can carry a root-owned helper and its signature with nothing
+    // saying it was ever privileged. Without this the uninstall runs
+    // unprivileged, `remove_dir_all` fails, and the user is left with root-owned
+    // files and no veld able to remove them — precisely the leftover this issue
+    // set out to prevent.
+    let needs_sudo =
+        mode.as_deref() == Some("privileged") || veld_core::paths::privileged_helper_dir().exists();
 
     // Only escalate to sudo for privileged installations.
     if needs_sudo && !super::setup::is_root_user() {

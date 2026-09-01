@@ -42,11 +42,35 @@
 //! exists to enforce.
 
 use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::{Context, Result, bail};
 
 use crate::signing;
+
+/// Serialises installs, so only one candidate is ever in memory.
+///
+/// The socket accepts connections concurrently and the caller is unprivileged,
+/// so without this a handful of parallel `install_helper` requests have the root
+/// daemon allocating [`MAX_CANDIDATE_BYTES`] *each*. The process that gets
+/// OOM-killed is the one holding every live URL up, and it is reachable by
+/// anybody the uid gate already admits — which, by design, is the attacker.
+///
+/// Taken **before** the read rather than around the write, because the memory is
+/// what needs bounding; a lock held only over the rename would leave every
+/// waiter holding its own copy.
+///
+/// A poisoned lock is recovered rather than propagated: the data it guards is
+/// `()`, so there is no invariant a panicking holder could have broken, and
+/// refusing every future install because one panicked is the wedged updater
+/// #338's rule 2 forbids.
+fn install_lock() -> MutexGuard<'static, ()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let lock = LOCK.get_or_init(|| Mutex::new(()));
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Largest candidate binary this will read. The release helper is ~6 MB, so
 /// this leaves twenty times the headroom a real one needs — it exists to bound a
@@ -68,6 +92,14 @@ const SIG_MODE: u32 = 0o644;
 
 /// A helper binary that has been read into memory together with the detached
 /// signature it will be checked against.
+///
+/// **No error message in here names the path or the underlying errno**, and that
+/// is deliberate rather than terse. These errors travel back over the socket to
+/// an unprivileged caller, and root distinguishing "no such file" from
+/// "permission denied" for an arbitrary path turns the root daemon into a probe
+/// for trees the caller cannot otherwise stat. The caller already knows which
+/// path it asked about; what it does not get to learn is what *root* saw there.
+/// The full chain, errno and all, still reaches the helper's own log.
 ///
 /// Constructing one reads; [`Self::verified_version`] checks; [`Self::install`]
 /// writes what was read. See the module doc for why those must be three views of
@@ -105,24 +137,44 @@ impl Candidate {
     /// that was there a moment ago, and this path's whole hazard is a file that
     /// changes underneath us.
     pub fn read(binary: &Path) -> Result<Self> {
-        let file = std::fs::File::open(binary)
-            .with_context(|| format!("cannot read the helper at {}", binary.display()))?;
+        // `O_NONBLOCK`, and it is not an optimisation. The caller is
+        // unprivileged and names this path, and a plain `open(O_RDONLY)` on a
+        // **FIFO blocks until somebody opens the write end** — so a named pipe
+        // left at the path would park this thread forever, inside the blocking
+        // pool of a root daemon, with the socket timeout long since expired and
+        // the thread never coming back. Repeat it and the pool is gone, taking
+        // every other blocking task with it. Opening non-blocking lets the
+        // regular-file check below run at all. It is a no-op for the regular
+        // files this actually installs.
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK)
+            .open(binary)
+            .context("cannot read the staged helper")?;
+
+        // Asked of the **open descriptor**, never of the path: a path can be
+        // swapped between the check and the open, and a descriptor cannot. A
+        // directory, a device, a socket or the FIFO above is not something to
+        // hand to launchd, and reading one has failure modes a regular file does
+        // not (`/dev/zero` is an infinite 128 MB, a character device can have
+        // side effects on read).
+        let meta = file.metadata().context("cannot read the staged helper")?;
+        if !meta.is_file() {
+            bail!("the staged helper is not a regular file; refusing to install it");
+        }
+
         let mut bytes = Vec::new();
         file.take(MAX_CANDIDATE_BYTES + 1)
             .read_to_end(&mut bytes)
-            .with_context(|| format!("cannot read the helper at {}", binary.display()))?;
+            .context("cannot read the staged helper")?;
         if bytes.len() as u64 > MAX_CANDIDATE_BYTES {
             bail!(
-                "the file at {} is larger than {MAX_CANDIDATE_BYTES} bytes; refusing to install it",
-                binary.display()
+                "the staged helper is larger than {MAX_CANDIDATE_BYTES} bytes; refusing to \
+                 install it"
             );
         }
-        let sig = signing::read_detached_sig_bytes(binary).with_context(|| {
-            format!(
-                "no readable 64-byte signature at {}",
-                signing::sig_path_for(binary).display()
-            )
-        })?;
+        let sig = signing::read_detached_sig_bytes(binary)
+            .context("no readable 64-byte signature beside the staged helper")?;
         Ok(Self {
             bytes,
             sig,
@@ -151,31 +203,27 @@ impl Candidate {
     /// prove nothing.
     fn verified_version_with(&self, pubkey: &[u8; 32]) -> Result<String> {
         if !signing::verify_data(pubkey, &self.bytes, &self.sig) {
-            bail!(
-                "the helper at {} is not signed with the org's key; refusing to install it",
-                self.source.display()
-            );
+            bail!("the staged helper is not signed with the org's key; refusing to install it");
         }
-        signing::version_in_signed_bytes(&self.bytes).with_context(|| {
-            format!(
-                "the helper at {} is signed but carries no version record, so it cannot be \
-                 checked against the running version; refusing to install it",
-                self.source.display()
-            )
-        })
+        signing::version_in_signed_bytes(&self.bytes).context(
+            "the staged helper is signed but carries no version record, so it cannot be checked \
+             against the running version; refusing to install it",
+        )
     }
 
     /// Verify and version-check, returning the version that may be installed.
     ///
     /// Split from the writing half so the decision — which is the whole security
     /// property — can be tested without a root-owned directory to write into.
-    fn approve(&self, pubkey: &[u8; 32], running_version: &str) -> Result<String> {
+    ///
+    /// `floor` is the version this candidate must not be older than. See
+    /// [`rollback_floor`]: it is emphatically **not** just the running version.
+    fn approve(&self, pubkey: &[u8; 32], floor: &str) -> Result<String> {
         let version = self.verified_version_with(pubkey)?;
-        if !signing::version_is_not_older(&version, running_version) {
+        if !signing::version_is_not_older(&version, floor) {
             bail!(
-                "refusing to install veld-helper {version} over the running {running_version}: a \
-                 signature says who built a binary, not how old it is, so an install may only \
-                 move forward"
+                "refusing to install veld-helper {version} over {floor}: a signature says who \
+                 built a binary, not how old it is, so an install may only move forward"
             );
         }
         Ok(version)
@@ -188,7 +236,21 @@ impl Candidate {
     /// [`crate::signing::version_is_not_older`]. Older ones are the whole reason
     /// this function takes `running_version` at all.
     pub fn install(&self, running_version: &str) -> Result<String> {
-        let version = self.approve(&signing::ORG_SIGNING_PUBKEY, running_version)?;
+        let _guard = install_lock();
+        self.install_locked(running_version)
+    }
+
+    /// [`Self::install`] with the lock already held.
+    ///
+    /// Separate because [`install_from`] must take the lock *before* it reads —
+    /// the read is the megabytes — and `std::sync::Mutex` is not reentrant, so a
+    /// locked wrapper calling a locked wrapper would deadlock the root daemon on
+    /// its own install path.
+    fn install_locked(&self, running_version: &str) -> Result<String> {
+        let version = self.approve(
+            &signing::ORG_SIGNING_PUBKEY,
+            &rollback_floor(running_version),
+        )?;
 
         let dir = ensure_dir()?;
         let bin = dir.join("veld-helper");
@@ -208,6 +270,52 @@ impl Candidate {
     /// The bytes, for a caller that needs to look at them without installing.
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
+    }
+}
+
+/// Read, verify, version-check and install the helper staged at `binary` — the
+/// whole operation under [`install_lock`], so only one candidate is ever held in
+/// memory.
+///
+/// This is what every unprivileged-caller path uses. [`Candidate::read`] and
+/// [`Candidate::install`] stay separate underneath because the migration path
+/// needs to inspect a candidate before committing to it, but nothing that takes
+/// a path from outside should reach them directly.
+pub fn install_from(binary: &Path, running_version: &str) -> Result<String> {
+    let _guard = install_lock();
+    Candidate::read(binary)?.install_locked(running_version)
+}
+
+/// The verified version of the helper currently in the store, if there is one.
+///
+/// `None` covers "no store yet", "unreadable", and "there but not properly
+/// signed" — all of which mean there is nothing here worth protecting, so an
+/// install should be judged against the running version alone.
+pub fn installed_version() -> Option<String> {
+    let bin = crate::paths::privileged_helper_bin();
+    Candidate::read(&bin).ok()?.verified_version().ok()
+}
+
+/// The version an incoming candidate must not be older than: the newer of what
+/// is **running** and what is already **installed**.
+///
+/// Taking only the running version — which is what this did first — leaves the
+/// rollback the whole check exists to close, because installing does not
+/// restart anything. The attacker (the installing user, whom the socket's uid
+/// gate admits by design) waits for an update to put V+1 in the store while the
+/// process is still V, then hands back their kept, genuinely signed copy of V.
+/// `V >= V` holds, the store is rewound, and the helper never advances — every
+/// future fix to it, including this one, is blocked forever, and they can repeat
+/// it after every update.
+///
+/// Comparing against the store as well closes that: once V+1 is on disk, V is
+/// older than the floor whatever the running process happens to be. Keeping the
+/// running version in the max as well matters for the opposite case — an empty
+/// or unreadable store must not lower the bar to nothing.
+fn rollback_floor(running_version: &str) -> String {
+    match installed_version() {
+        Some(installed) if signing::version_is_not_older(&installed, running_version) => installed,
+        _ => running_version.to_owned(),
     }
 }
 
@@ -240,7 +348,32 @@ pub fn ensure_dir() -> Result<PathBuf> {
 /// be churn and risk on a machine that never had the bug. `false` when the path
 /// cannot be stat'd, which keeps "cannot tell" out of the safe answer.
 pub fn is_root_owned_and_locked(path: &Path) -> bool {
-    assert_root_owned(path).is_ok()
+    assert_root_owned_chain(path).is_ok()
+}
+
+/// [`assert_root_owned`] applied to `path` **and every ancestor up to `/`**.
+///
+/// The ancestors are the whole point, and checking only the leaf was a real bug:
+/// **renaming a directory needs write permission on its parent, not on the
+/// directory itself.** A legacy `/usr/local/lib/veld` created under `sudo` is
+/// root-owned `0755` and looks safe in isolation — but on an Intel Mac with
+/// Homebrew, `/usr/local/lib` belongs to the console user, who can therefore
+/// `mv veld veld.old`, put their own `veld` in its place, and own the path
+/// launchd execs as root at the next boot. Exactly the pre-creation hazard
+/// [`crate::paths::privileged_helper_dir`] rejects `/usr/local` for; a leaf-only
+/// check would have let this function certify it as safe and skip the migration
+/// that fixes it.
+///
+/// Canonicalised first so the walk follows the real chain: on macOS `/var` is a
+/// symlink to `/private/var`, and walking the unresolved path would check
+/// directories that are not the ones being traversed.
+fn assert_root_owned_chain(path: &Path) -> Result<()> {
+    let resolved = std::fs::canonicalize(path)
+        .with_context(|| format!("cannot resolve {}", path.display()))?;
+    for ancestor in resolved.ancestors() {
+        assert_root_owned(ancestor)?;
+    }
+    Ok(())
 }
 
 /// Fail unless `path` is owned by root and writable by nobody else.
@@ -540,6 +673,66 @@ mod tests {
 
         assert_eq!(std::fs::read(&bin).unwrap(), b"the binary");
         assert_eq!(std::fs::read(&sig).unwrap(), vec![9u8; 64]);
+    }
+
+    /// A path that is not a regular file is refused at read.
+    ///
+    /// The FIFO is the case that matters: a plain `open(O_RDONLY)` on one blocks
+    /// until a writer appears, so without `O_NONBLOCK` this test would hang
+    /// rather than fail — which is exactly what it would do inside the root
+    /// daemon's blocking pool.
+    #[test]
+    fn a_path_that_is_not_a_regular_file_is_refused_without_blocking() {
+        let scratch = Scratch::new("fifo");
+        let fifo = scratch.path().join("veld-helper");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        // SAFETY: a plain libc call with a valid NUL-terminated path.
+        assert_eq!(unsafe { nix::libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        let err = Candidate::read(&fifo).unwrap_err().to_string();
+        assert!(err.contains("not a regular file"), "{err}");
+
+        // And a directory, the other shape a caller can name.
+        let dir = scratch.path().join("adir");
+        std::fs::create_dir(&dir).unwrap();
+        let err = Candidate::read(&dir).unwrap_err().to_string();
+        assert!(
+            err.contains("not a regular file") || err.contains("cannot read"),
+            "{err}"
+        );
+    }
+
+    /// A root-owned directory inside a user-owned parent is NOT safe.
+    ///
+    /// This is the `/usr/local/lib/veld` shape on a Homebrew Intel Mac: the
+    /// directory itself is `root:wheel 0755`, and the user can still rename it
+    /// aside and substitute their own, because renaming needs write on the
+    /// *parent*. A leaf-only check calls this safe and skips the migration.
+    #[test]
+    fn a_root_owned_directory_under_a_user_owned_parent_is_not_locked() {
+        let scratch = Scratch::new("chain");
+        let inner = scratch.path().join("veld");
+        std::fs::create_dir_all(&inner).unwrap();
+        // The scratch parent is owned by the test user, so even if `inner` were
+        // root-owned the chain is broken. It is enough to assert the walk
+        // *reaches* the parent and refuses there.
+        let err = assert_root_owned_chain(&inner).unwrap_err().to_string();
+        assert!(err.contains("owned by uid"), "{err}");
+    }
+
+    /// The real store's parent chain is root-owned on this machine — the
+    /// property `paths::privileged_helper_dir` is chosen for. Skipped rather
+    /// than failed where the store does not exist yet, since the check is about
+    /// the parents.
+    #[test]
+    fn the_store_parents_are_root_owned() {
+        let parent = crate::paths::privileged_helper_dir();
+        let parent = parent.parent().expect("the store has a parent");
+        assert!(
+            is_root_owned_and_locked(parent),
+            "{} must be root-owned with no group/other write for the store to be safe",
+            parent.display()
+        );
     }
 
     /// An unsigned candidate is refused before its version is ever consulted —

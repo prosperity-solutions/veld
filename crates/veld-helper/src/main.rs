@@ -29,8 +29,10 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `#[used]` and `#[unsafe(no_mangle)]` are both load-bearing and neither is
 /// decoration: nothing in the program *reads* this, so without them the
 /// optimiser drops it and the shipped helper carries no version at all — an
-/// artifact every future helper would refuse to install. `a_release_build_carries_exactly_one_version_record`
-/// in `tests/version_record.rs` is what stops that shipping.
+/// artifact every future helper would refuse to install.
+/// `a_built_helper_carries_exactly_one_version_record` in
+/// `tests/version_record.rs` is what stops that shipping in a debug build, and
+/// `release.yml`'s packaging step checks the cross-compiled artifact that ships.
 #[used]
 #[unsafe(no_mangle)]
 pub static VELD_HELPER_VERSION_RECORD: [u8; veld_core::signing::VERSION_RECORD_LEN] =

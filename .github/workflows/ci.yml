@@ -308,7 +308,29 @@ jobs:
                           "not guarded `github.event_name == 'push'`. The signing "
                           "key must never be reachable from a PR run (issue #339)"
                       )
+          # The version-record guard in `release.yml`'s packaging step (issue
+          # #262) has the same "gate that cannot fail" problem `signing-smoke`
+          # has: nothing else in CI notices if it is deleted, and what it
+          # prevents is a release carrying a helper with no version inside it —
+          # an artifact NO privileged install can ever update onto, whose only
+          # repair is asking every user for sudo.
+          release = yaml.safe_load(open(".github/workflows/release.yml"))
+          pkg = [
+              step
+              for job in release["jobs"].values()
+              for step in (job.get("steps") or [])
+              if step.get("name") == "Package client binaries"
+          ]
+          if not pkg:
+              sys.exit("release.yml: the `Package client binaries` step is gone; the "
+                       "helper version-record check went with it")
+          if "veld-helper version record" not in pkg[0].get("run", ""):
+              sys.exit("release.yml: `Package client binaries` no longer checks that the "
+                       "shipped helper carries a version record. Without it a release can "
+                       "ship a helper no privileged install can update onto.")
+
           print("signing-smoke intact")
+          print("release.yml version-record check intact")
           PY
 
       # `install.sh` is the largest program in this repo that nothing checked.

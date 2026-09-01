@@ -131,7 +131,7 @@ fn invoking_uid() -> Option<u64> {
 impl Diagnostics {
     async fn gather(&mut self) {
         self.update_in_progress = veld_core::update_lock::current();
-        self.gather_installation();
+        self.gather_installation().await;
         self.gather_services().await;
         self.gather_checks().await;
         self.gather_tip();
@@ -139,7 +139,7 @@ impl Diagnostics {
 
     // -- Installation --------------------------------------------------------
 
-    fn gather_installation(&mut self) {
+    async fn gather_installation(&mut self) {
         let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
         // Binary
@@ -152,8 +152,20 @@ impl Diagnostics {
         let lib = veld_core::paths::lib_dir();
         self.lib_dir = tilde_path(&lib);
 
-        // Helper
-        let helper_bin = lib.join("veld-helper");
+        // Helper.
+        //
+        // The path the SERVICE actually names, when there is one, and only
+        // `lib_dir()` otherwise. A privileged install serves the helper from a
+        // root-owned directory (#262) and `install.sh`'s inert copy in the lib
+        // dir is deleted once that has happened — so guessing from `lib_dir()`
+        // would report `not found` for the binary on a perfectly healthy
+        // machine, and report a *version* for it on one mid-migration. This is
+        // the same rule the "Terminal URLs" row already applies to the daemon,
+        // and for the same reason: doctor must ask the question the service
+        // manager answers, not a similar-looking one.
+        let helper_bin = veld_core::setup::privileged_helper_program()
+            .await
+            .unwrap_or_else(|| lib.join("veld-helper"));
         self.helper_path = tilde_path(&helper_bin);
         self.helper_version =
             query_binary_version(&helper_bin).unwrap_or_else(|| "not found".into());
@@ -655,6 +667,60 @@ impl Diagnostics {
                          `veld update` (or `veld setup privileged`). Do NOT force a restart: \
                          `launchctl kill`/`systemctl restart` would run this unverified binary \
                          as root, which is exactly what the gate is refusing"
+                    ),
+                }),
+            }
+        }
+
+        // Is the privileged helper actually out of the installing user's reach?
+        //
+        // Without this row, a migration that was refused or that failed is
+        // visible only as a `warn!` in the helper's own log — and the state it
+        // leaves behind is the #247 escalation itself: a root daemon whose
+        // binary the user can overwrite, exec'd at the next boot. The whole
+        // point of #262 is that this stops being true, so "it did not happen"
+        // has to be reportable rather than silent.
+        //
+        // Asked of the path the **service manager** serves, not of the store's
+        // existence: a store containing a binary launchd is not pointed at is
+        // exactly the half-migrated state this row exists to catch.
+        if mode.as_deref() == Some("privileged") {
+            let program = veld_core::setup::privileged_helper_program().await;
+            match program {
+                // No registration at all is a different failure, already
+                // reported by `check_helper_managed` above. Saying it twice in
+                // different words would send somebody chasing two problems.
+                None => {}
+                Some(path) if veld_core::paths::is_privileged_helper_path(&path) => {
+                    self.checks.push(Check {
+                        pass: true,
+                        label: format!(
+                            "Privileged helper runs from a root-owned directory ({})",
+                            tilde_path(&path)
+                        ),
+                    });
+                }
+                Some(path) if helper_dir_is_locked(&path) => {
+                    // A legacy system-paths install: not the new store, but the
+                    // user cannot write it either, so there is nothing wrong.
+                    self.checks.push(Check {
+                        pass: true,
+                        label: format!(
+                            "Privileged helper runs from a root-owned directory ({})",
+                            tilde_path(&path)
+                        ),
+                    });
+                }
+                Some(path) => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "The privileged veld-helper runs as root from {}, which you can write \
+                         \u{2014} anything running as you could replace it and gain root at the \
+                         next reboot. It moves itself to {} on its next restart; if this \
+                         persists, the helper's log says why, and `sudo veld setup privileged` \
+                         does it now",
+                        tilde_path(&path),
+                        tilde_path(&veld_core::paths::privileged_helper_dir()),
                     ),
                 }),
             }
@@ -1783,6 +1849,19 @@ fn unreportable_gate_reason() -> &'static str {
     "this helper predates the check and cannot report it. Its socket may or may not be gated \
      by an `--allow-uid` in its service definition. Run `veld update`; the new helper gates \
      itself and reports it."
+}
+
+/// Whether the directory holding `helper` is one only root can write.
+///
+/// Wraps `veld_core::helper_store::is_root_owned_and_locked` with the "take the
+/// parent" step, so doctor asks the same question the helper's own migration
+/// asks — including the walk up the ancestors, which is what makes a
+/// `/usr/local/lib/veld` under a Homebrew-owned `/usr/local/lib` come out as
+/// *not* locked.
+fn helper_dir_is_locked(helper: &Path) -> bool {
+    helper
+        .parent()
+        .is_some_and(veld_core::helper_store::is_root_owned_and_locked)
 }
 
 fn tilde_path(path: &Path) -> String {
