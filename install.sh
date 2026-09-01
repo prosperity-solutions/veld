@@ -1191,13 +1191,16 @@ fi
 # install has succeeded, so a migrated machine stops carrying a root-daemon-shaped
 # binary in a user-writable directory.
 #
-# `|| true`: a helper that refuses the new binary has already said why, and the
-# rest of the install (CLI, daemon, Caddy) is still worth completing.
-# Both halves are required. The `.sig` copy above already treats the signature
-# as optional (a `VELD_VERSION` pinned to a pre-signing release has none), and
-# handing the helper a binary with no signature beside it would surface
-# "no readable 64-byte signature" mid-install for a case that should be the
-# silent no-op path.
+# Both halves of the guard are required. The `.sig` copy above already treats the
+# signature as optional (a `VELD_VERSION` pinned to a pre-signing release has
+# none), and handing the helper a binary with no signature beside it would
+# surface "no readable 64-byte signature" mid-install for a case that should be
+# the silent no-op path.
+#
+# A refusal is recorded rather than fatal, and the recording is the point: the
+# CLI, daemon and Caddy halves are still worth completing, but the restart
+# section below must not then promise that the helper will pick up a binary it
+# has just rejected.
 HELPER_INSTALL_OK="1"
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   if ! "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper"; then
