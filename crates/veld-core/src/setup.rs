@@ -4026,6 +4026,40 @@ mod tests {
         assert!(!body.contains("--allow-uid"), "{body}");
     }
 
+    /// The systemd unit is byte-for-byte what the pre-#262 inline code wrote.
+    ///
+    /// The macOS half of this refactor can be checked against a real plist on a
+    /// developer machine; the Linux half cannot, and Linux is the platform where
+    /// a wrong `ExecStart`, a lost `Restart=always` or a lost `KillMode=process`
+    /// would be discovered by a user rather than by us. Hence an exact-text
+    /// assertion rather than a `contains` sweep.
+    #[test]
+    fn the_helper_unit_is_unchanged_by_the_extraction() {
+        let unit = super::helper_systemd_unit(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            Some(ME),
+        );
+        assert_eq!(
+            unit,
+            "[Unit]\nDescription=Veld Helper\n\n[Service]\n\
+             ExecStart=/x/lib/veld/veld-helper --allow-uid 501 --caddy-bin /x/lib/veld/caddy\n\
+             Restart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
+        );
+
+        // And with no gate to carry, the flag is absent rather than invented —
+        // the argument order for everything else is unchanged.
+        let ungated = super::helper_systemd_unit(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            None,
+        );
+        assert!(
+            ungated.contains("ExecStart=/x/lib/veld/veld-helper --caddy-bin /x/lib/veld/caddy\n"),
+            "{ungated}"
+        );
+    }
+
     /// The store path is not somewhere the installing user can write, and is not
     /// under their home. Cheap, and it is the entire claim of #262.
     #[test]
