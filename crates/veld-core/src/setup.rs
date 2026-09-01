@@ -716,12 +716,6 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
          the only thing holding it up, but it is the intended mechanism. -->
     <key>KeepAlive</key>
     <true/>
-    <!-- WatchPaths is a backstop, not the mechanism. Since #262 the binary is
-         replaced by rename() rather than written in place, and a rename
-         *replaces the vnode* this watch is on rather than writing to it — which
-         is the case launchd handles least reliably. The helper's own poller
-         (watch_own_binary) is what actually notices an install; do not remove it
-         on the strength of this key. -->
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
@@ -1134,6 +1128,12 @@ fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32
          A SuccessfulExit=false variant would leave it dead after every update. -->
     <key>KeepAlive</key>
     <true/>
+    <!-- WatchPaths is a backstop, not the mechanism. Since #262 the binary is
+         replaced by rename() rather than written in place, and a rename
+         *replaces the vnode* this watch is on rather than writing to it — which
+         is the case launchd handles least reliably. The helper's own poller
+         (watch_own_binary) is what actually notices an install; do not remove it
+         on the strength of this key. -->
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
@@ -3979,6 +3979,51 @@ mod tests {
         // second template would be free to drop.
         assert!(unit.contains("Restart=always"), "{unit}");
         assert!(unit.contains("KillMode=process"), "{unit}");
+    }
+
+    /// The helper plist is byte-for-byte what the pre-#262 inline code wrote.
+    ///
+    /// The template was extracted out of `install_helper_macos` so the helper's
+    /// own migration could reuse it, and `allow_uid` became an `Option`. Both
+    /// are the kind of refactor that is "obviously" behaviour-preserving right
+    /// up until a stray newline or a dropped key changes what launchd reads for
+    /// a **root** daemon on every existing install. This golden text is the
+    /// plist this machine's shipped 16.58.3 actually has on disk, so it pins the
+    /// extraction against a real artifact rather than against itself.
+    #[test]
+    fn the_helper_plist_is_unchanged_by_the_extraction() {
+        let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.veld.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/x/lib/veld/veld-helper</string>
+        <string>--caddy-bin</string>
+        <string>/x/lib/veld/caddy</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+"#;
+        let body = super::helper_plist_body(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            None,
+        );
+        assert!(body.starts_with(expected), "{body}");
+        // The keys launchd needs, and the log beside the binary.
+        assert!(body.contains("<key>KeepAlive</key>\n    <true/>"), "{body}");
+        assert!(
+            body.contains("<string>/x/lib/veld/veld-helper.log</string>"),
+            "{body}"
+        );
+        assert!(body.trim_end().ends_with("</plist>"), "{body}");
+        // `None` writes no gate argument at all — never an invented uid, which
+        // would admit only root and lock the user's own CLI out.
+        assert!(!body.contains("--allow-uid"), "{body}");
     }
 
     /// The store path is not somewhere the installing user can write, and is not
