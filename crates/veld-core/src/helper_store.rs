@@ -262,6 +262,16 @@ impl Candidate {
         // that will refuse to relaunch onto itself. A stale binary beside a new
         // signature is the same refusal, one release earlier, and the next
         // install repairs it.
+        //
+        // The same order is what makes this safe against the running helper's
+        // own binary watcher, which is a live race and not a hypothetical: the
+        // watcher polls the **binary** and exits so the service manager
+        // relaunches onto it. Writing the binary first would give it a window in
+        // which the new binary sits beside the previous release's signature, and
+        // the relaunch gate would refuse — leaving a helper that stays on the old
+        // version and logs a signature mismatch until something else moves. With
+        // the signature already in place, the moment the watcher can see a change
+        // is the moment the pair is consistent.
         write_atomically(&sig, &self.sig, SIG_MODE)?;
         write_atomically(&bin, &self.bytes, BIN_MODE)?;
         Ok(version)
