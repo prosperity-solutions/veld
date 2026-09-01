@@ -164,6 +164,72 @@ do
   fi
 done
 
+# --- 3b. The privileged-helper install handoff (issue #262) ------------------
+#
+# On a privileged install the helper is served from a ROOT-OWNED directory, so
+# this script — running as the user — cannot write it. It hands the download to
+# the running root helper instead, through one CLI subcommand. That subcommand
+# name and its flag are a contract across the same boundary section 1 guards for
+# environment variables, and it fails in the same silent way: rename
+# `_helper-install` or `--binary` on the Rust side and this script still runs,
+# still exits 0, still copies an INERT binary into the lib dir — and the
+# privileged helper is never updated again on any migrated machine. Nothing else
+# notices. `bash -n`, shellcheck and every Rust test stay green, because both
+# halves are individually valid.
+#
+# That outcome is the one #338's rule 2 exists to prevent: a release that wedges
+# the updater leaves sudo as the only repair channel.
+HELPER_INSTALL_CMD='_helper-install'
+if grep -q -- "veld\" ${HELPER_INSTALL_CMD} --binary" "$SCRIPT"; then
+  ok "install.sh hands the helper to the root helper via \`${HELPER_INSTALL_CMD} --binary\`"
+else
+  bad "install.sh no longer invokes \`${HELPER_INSTALL_CMD} --binary\` — a migrated privileged install would stop receiving helper updates"
+fi
+
+# The invocation must be `set -e`-safe. This script runs under `set -euo
+# pipefail`, which exempts a command on the left of `||` but NOT one whose exit
+# status is read afterwards with `$?`. Written the plain way, a refused helper
+# install — or the exit 2 an older CLI returns for an unknown subcommand, which
+# is the *expected* path on `veld update --target-version <older>` — aborts the
+# whole install before the services are restarted, silently, mid-update.
+if grep -A 2 -- "${HELPER_INSTALL_CMD} --binary" "$SCRIPT" | grep -q '||'; then
+  ok "the ${HELPER_INSTALL_CMD} call is \`set -e\`-safe"
+else
+  bad "the ${HELPER_INSTALL_CMD} call is not guarded by \`||\` — under \`set -e\` a refusal aborts the install"
+fi
+
+MAIN_RS="$REPO_ROOT/crates/veld/src/main.rs"
+if grep -q "name = \"${HELPER_INSTALL_CMD}\"" "$MAIN_RS"; then
+  ok "the CLI still declares the \`${HELPER_INSTALL_CMD}\` subcommand"
+else
+  bad "crates/veld/src/main.rs no longer declares \`${HELPER_INSTALL_CMD}\`, but install.sh still calls it"
+fi
+
+# The flag is checked on the Rust side too: clap derives `--binary` from the
+# field name, so a rename there is invisible at this file's other end.
+if grep -q 'InternalHelperInstall' "$MAIN_RS" && grep -A 6 'InternalHelperInstall' "$MAIN_RS" | grep -q 'binary:'; then
+  ok "the CLI still takes the helper path as \`--binary\`"
+else
+  bad "crates/veld/src/main.rs no longer takes \`--binary\` for ${HELPER_INSTALL_CMD}"
+fi
+
+# The store's two paths are hardcoded in install.sh's switch-to-user-paths
+# cleanup, duplicating `paths::privileged_helper_dir()`. Change the Rust and this
+# script silently stops removing the directory it orphans — root-owned files with
+# nothing left able to delete them, which is the leftover `veld uninstall` cannot
+# reach on that path (its escalation keys off `setup.json`, which the same branch
+# clears). Same class as section 1's env-var names, same fix: pin both sides.
+PATHS_RS="$REPO_ROOT/crates/veld-core/src/paths.rs"
+for store_dir in /var/db/veld-helper /var/lib/veld-helper; do
+  if ! grep -q "rm -rf ${store_dir}" "$SCRIPT"; then
+    bad "install.sh no longer removes ${store_dir} when switching off privileged paths"
+  elif ! grep -q "\"${store_dir}\"" "$PATHS_RS"; then
+    bad "${store_dir} is in install.sh but no longer in paths.rs — the two have drifted"
+  else
+    ok "install.sh and paths.rs agree on ${store_dir}"
+  fi
+done
+
 # --- 4. The prompt gate's truth table, under a real pty ----------------------
 #
 # `desktop_can_ask` is the gate in front of the only question this script asks.

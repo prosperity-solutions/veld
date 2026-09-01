@@ -131,7 +131,7 @@ fn invoking_uid() -> Option<u64> {
 impl Diagnostics {
     async fn gather(&mut self) {
         self.update_in_progress = veld_core::update_lock::current();
-        self.gather_installation();
+        self.gather_installation().await;
         self.gather_services().await;
         self.gather_checks().await;
         self.gather_tip();
@@ -139,7 +139,7 @@ impl Diagnostics {
 
     // -- Installation --------------------------------------------------------
 
-    fn gather_installation(&mut self) {
+    async fn gather_installation(&mut self) {
         let cli_version = env!("CARGO_PKG_VERSION").to_string();
 
         // Binary
@@ -152,8 +152,30 @@ impl Diagnostics {
         let lib = veld_core::paths::lib_dir();
         self.lib_dir = tilde_path(&lib);
 
-        // Helper
-        let helper_bin = lib.join("veld-helper");
+        // Helper.
+        //
+        // The path the SERVICE actually names, when there is one, and only
+        // `lib_dir()` otherwise. A privileged install serves the helper from a
+        // root-owned directory (#262) while `install.sh` keeps writing the
+        // lib-dir copy on every run, so the two agree after a successful update
+        // and diverge **exactly when the handoff was refused** — which is
+        // precisely the state a user runs doctor to understand. Guessing from
+        // `lib_dir()` would then report the new version for a helper still
+        // running the old one. This is the same rule the "Terminal URLs" row
+        // already applies to the daemon, and for the same reason: doctor must
+        // ask the question the service manager answers, not a similar-looking
+        // one.
+        // Asked of the service manager for a **privileged** install only. An
+        // unprivileged one has its own user-level helper in the lib dir, and a
+        // machine that was once privileged can still have a system registration
+        // lying around — reporting that as this install's helper would name a
+        // binary the user's veld does not run.
+        let privileged = super::read_setup_mode().as_deref() == Some("privileged");
+        let helper_bin = match privileged {
+            true => veld_core::setup::privileged_helper_program().await,
+            false => None,
+        }
+        .unwrap_or_else(|| lib.join("veld-helper"));
         self.helper_path = tilde_path(&helper_bin);
         self.helper_version =
             query_binary_version(&helper_bin).unwrap_or_else(|| "not found".into());
@@ -170,11 +192,15 @@ impl Diagnostics {
         self.caddy_exists = caddy.exists();
 
         // Config
-        let config_path = dirs::home_dir()
-            .map(|h| h.join(".veld").join("setup.json"))
+        // One resolver for both, so the Mode row and every mode-gated check
+        // below agree. Doctor used to build this path itself, which under `sudo`
+        // reads root's empty home while `read_setup_mode` (used by the rows
+        // further down) reads the invoking user's — a report that says "Not
+        // configured" and then behaves as privileged.
+        let config_path = veld_core::setup::setup_json_path()
             .unwrap_or_else(|| PathBuf::from("~/.veld/setup.json"));
         self.config_path = tilde_path(&config_path);
-        self.config_mode = read_mode(&config_path);
+        self.config_mode = veld_core::setup::read_setup_mode().unwrap_or_default();
 
         // Veld Desktop. Optional on macOS, updated by `veld update` when the user
         // wants it, and able to be stale in a way nothing else here would show —
@@ -655,6 +681,76 @@ impl Diagnostics {
                          `veld update` (or `veld setup privileged`). Do NOT force a restart: \
                          `launchctl kill`/`systemctl restart` would run this unverified binary \
                          as root, which is exactly what the gate is refusing"
+                    ),
+                }),
+            }
+        }
+
+        // Is the privileged helper actually out of the installing user's reach?
+        //
+        // Without this row, a migration that was refused or that failed is
+        // visible only as a `warn!` in the helper's own log — and the state it
+        // leaves behind is the #247 escalation itself: a root daemon whose
+        // binary the user can overwrite, exec'd at the next boot. The whole
+        // point of #262 is that this stops being true, so "it did not happen"
+        // has to be reportable rather than silent.
+        //
+        // Asked of the path the **service manager** serves, not of the store's
+        // existence: a store containing a binary launchd is not pointed at is
+        // exactly the half-migrated state this row exists to catch.
+        if mode.as_deref() == Some("privileged") {
+            let program = veld_core::setup::privileged_helper_program().await;
+            match program {
+                // No registration at all is a different failure, already
+                // reported by `check_helper_managed` above. Saying it twice in
+                // different words would send somebody chasing two problems.
+                None => {}
+                // Both passing arms require the file to actually be there.
+                // Without that, a plist naming a store whose binary is gone
+                // takes the first arm (the check is lexical) or the second (the
+                // directory is root-owned and still stats fine) and doctor
+                // reports green for a machine whose root daemon cannot exec at
+                // all — the opposite of this row's job.
+                Some(path) if !path.is_file() => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "The privileged veld-helper service names {}, but there is no \
+                         binary there \u{2014} it cannot start. Run `veld update`, or \
+                         `sudo veld setup privileged` if that does not repair it",
+                        tilde_path(&path)
+                    ),
+                }),
+                Some(path) if veld_core::paths::is_privileged_helper_path(&path) => {
+                    self.checks.push(Check {
+                        pass: true,
+                        label: format!(
+                            "Privileged helper runs from a root-owned directory ({})",
+                            tilde_path(&path)
+                        ),
+                    });
+                }
+                Some(path) if helper_dir_is_locked(&path) => {
+                    // A legacy system-paths install: not the new store, but the
+                    // user cannot write it either, so there is nothing wrong.
+                    self.checks.push(Check {
+                        pass: true,
+                        label: format!(
+                            "Privileged helper runs from a root-owned directory ({})",
+                            tilde_path(&path)
+                        ),
+                    });
+                }
+                Some(path) => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "The privileged veld-helper runs as root from {}, which you can write \
+                         \u{2014} anything running as you could replace it and gain root at the \
+                         next reboot. It moves itself to {} on its next restart; if this \
+                         persists, {} says why, and `sudo veld setup privileged` \
+                         does it now",
+                        tilde_path(&path),
+                        tilde_path(&veld_core::paths::privileged_helper_dir()),
+                        helper_log_hint(),
                     ),
                 }),
             }
@@ -1785,6 +1881,37 @@ fn unreportable_gate_reason() -> &'static str {
      itself and reports it."
 }
 
+/// Where to tell a user to look for the privileged helper's own output.
+///
+/// macOS writes a file beside the binary; the Linux unit sets no
+/// `StandardOutput=`, so systemd journals it and there is no such file. Naming
+/// a path that does not exist is worse than naming none.
+fn helper_log_hint() -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "the helper's log ({})",
+            tilde_path(&veld_core::paths::service_log_path(
+                &veld_core::paths::privileged_helper_bin()
+            ))
+        )
+    } else {
+        format!("`journalctl -u {}`", veld_core::setup::HELPER_SERVICE_LINUX)
+    }
+}
+
+/// Whether the directory holding `helper` is one only root can write.
+///
+/// Wraps `veld_core::helper_store::is_root_owned_and_locked` with the "take the
+/// parent" step, so doctor asks the same question the helper's own migration
+/// asks — including the walk up the ancestors, which is what makes a
+/// `/usr/local/lib/veld` under a Homebrew-owned `/usr/local/lib` come out as
+/// *not* locked.
+fn helper_dir_is_locked(helper: &Path) -> bool {
+    helper
+        .parent()
+        .is_some_and(veld_core::helper_store::is_root_owned_and_locked)
+}
+
 fn tilde_path(path: &Path) -> String {
     if let Some(home) = dirs::home_dir() {
         if let Ok(suffix) = path.strip_prefix(&home) {
@@ -1810,23 +1937,6 @@ fn query_binary_version(path: &Path) -> Option<String> {
     } else {
         None
     }
-}
-
-/// Read the mode from `~/.veld/setup.json`.
-fn read_mode(path: &Path) -> String {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return "not configured".to_string(),
-    };
-    let value: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(_) => return "not configured".to_string(),
-    };
-    value
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("not configured")
-        .to_string()
 }
 
 /// What is holding this machine awake, as one phrase.
@@ -2400,6 +2510,93 @@ fn colorize_status(status: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// No string literal in this file is continued onto the next line without a
+    /// `\`.
+    ///
+    /// That is the actual defect, and it is worth stating precisely because the
+    /// first version of this test asserted something narrower and passed while
+    /// the bug was present. A Rust literal spanning two source lines joins them
+    /// **only** if the first ends with a `\`; without one, the newline and the
+    /// next line's indentation become part of the string. The symptom is a
+    /// diagnostic printed with a twenty-space gap mid-sentence — visible only to
+    /// somebody already trying to fix a broken install, and invisible to the
+    /// compiler, to clippy and to every other test.
+    ///
+    /// It happened twice while writing one row, which is why checking the source
+    /// is worth the crudeness. Asserting on rendered labels instead would need a
+    /// live daemon, a launchd job and a filesystem for most of them.
+    #[test]
+    fn no_string_literal_is_continued_without_a_backslash() {
+        let src = include_str!("doctor.rs");
+        let mut offenders = Vec::new();
+        let mut in_string = false;
+        let mut in_raw = false;
+
+        for (n, line) in src.lines().enumerate() {
+            if in_raw {
+                if line.contains("\"#") {
+                    in_raw = false;
+                }
+                continue;
+            }
+            if !in_string && line.trim_start().starts_with("//") {
+                continue;
+            }
+            // A raw literal spans lines by design and needs no continuation.
+            if line.contains("r#\"") && !line.contains("\"#") {
+                in_raw = true;
+                continue;
+            }
+
+            // Character literals are skipped whole, so a `'"'` in the code does
+            // not read as opening a string. Only the exact `'x'` / `'\x'`
+            // shapes are treated as one — a bare `'` is far more often a
+            // lifetime, and swallowing to the next quote would eat the line.
+            let chars: Vec<char> = line.chars().collect();
+            let mut escaped = false;
+            let mut i = 0;
+            while i < chars.len() {
+                let c = chars[i];
+                if !in_string && c == '\'' {
+                    if chars.get(i + 2) == Some(&'\'') {
+                        i += 3;
+                        continue;
+                    }
+                    if chars.get(i + 1) == Some(&'\\') && chars.get(i + 3) == Some(&'\'') {
+                        i += 4;
+                        continue;
+                    }
+                }
+                match c {
+                    '\\' if !escaped => escaped = true,
+                    '"' if !escaped => {
+                        in_string = !in_string;
+                        escaped = false;
+                    }
+                    _ => escaped = false,
+                }
+                i += 1;
+            }
+
+            if in_string {
+                // Still open at end of line: legitimate only with a trailing
+                // `\`, which is what joins the two halves.
+                if !line.trim_end().ends_with('\\') {
+                    offenders.push(format!("{}: {}", n + 1, line.trim()));
+                    // Do not cascade: report once and assume it closes.
+                    in_string = false;
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "these lines leave a string literal open with no `\\` continuation, so the \
+             newline and the next line's indentation end up inside the message:\n{}",
+            offenders.join("\n")
+        );
+    }
+
     use super::*;
     use std::time::Duration;
     use veld_core::tls_health::TlsHealth;

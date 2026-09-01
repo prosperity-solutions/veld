@@ -1177,6 +1177,65 @@ if [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   $NEED_SUDO chmod 644 "${LIB_DIR}/veld-helper.sig"
 fi
 
+# In privileged mode the helper is served from a ROOT-OWNED directory (issue
+# #262) — the point being that this script, running as the user, cannot write
+# it. So instead of copying, hand the download to the already-root helper over
+# its socket: it verifies the org signature, and refuses anything older than the
+# newer of the running and the installed helper, before installing. That is what
+# keeps updates sudo-free (issue #338's rule 1) on an install whose whole purpose
+# is to be unwritable.
+#
+# Deliberately unconditional, and deliberately quiet. The command is a no-op on
+# every install this does not apply to — unprivileged, or privileged but not yet
+# migrated — because on those the copy above IS the update and there is nothing
+# for a user to act on.
+#
+# The lib-dir copy above is deliberately LEFT in place on a migrated machine even
+# though nothing executes it; see `_WHY_THE_LIB_DIR_COPY_STAYS` in
+# `crates/veld/src/commands/helper_install.rs`. Deleting it would strand an older
+# CLI's `veld setup privileged`, which has no way to find the store.
+#
+# Both halves of the guard are required. The `.sig` copy above already treats the
+# signature as optional (a `VELD_VERSION` pinned to a pre-signing release has
+# none), and handing the helper a binary with no signature beside it would
+# surface "no readable 64-byte signature" mid-install for a case that should be
+# the silent no-op path.
+# Empty until the handoff has actually been attempted and accepted. Defaulting
+# to "1" meant "we did not try" read as "it worked": a tarball with a helper but
+# no `.sig` — the documented `VELD_VERSION`-pinned-to-a-pre-signing-release case
+# — left a migrated install printing "will restart itself to pick up the new
+# binary" while the store kept the old one. That is the false reassurance the
+# else-branch below exists to remove.
+HELPER_INSTALL_OK=""
+# Separate from OK, because "we never tried" and "we tried and it refused" need
+# different words. Conflating them made the no-`.sig` case — where nothing runs
+# and nothing prints — say "see the error above" with no error above it.
+HELPER_INSTALL_TRIED=""
+if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
+  HELPER_INSTALL_TRIED="1"
+  # `|| HELPER_INSTALL_RC=$?` rather than a bare call followed by `$?`: this
+  # script runs under `set -e`, which exempts a command on the left of `||` but
+  # NOT one whose status is read afterwards. Written the plain way, any refusal —
+  # or the exit 2 below, which is the *expected* path on an older CLI — would
+  # abort the whole install before the services are restarted.
+  HELPER_INSTALL_RC=0
+  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper" \
+    || HELPER_INSTALL_RC=$?
+  # Exit 2 is clap's "unrecognized subcommand": the CLI just installed is OLDER
+  # than this script and has no `_helper-install`. That happens on
+  # `veld update --target-version <older>`, where the script always comes from
+  # the current release but the binary does not. Such a CLI predates the
+  # root-owned store, so its install is the lib-dir copy above and this is
+  # correctly a no-op — not a refusal to warn about.
+  if [ "$HELPER_INSTALL_RC" -eq 0 ] || [ "$HELPER_INSTALL_RC" -eq 2 ]; then
+    HELPER_INSTALL_OK="1"
+  fi
+  # Anything else is a refusal, and it is recorded rather than fatal: the CLI,
+  # daemon and Caddy halves of this install are still worth completing, and the
+  # command has already printed why. What must NOT happen is the restart section
+  # below going on to promise that the helper will pick up a binary it rejected.
+fi
+
 # --- Restart running services (picks up new binaries) ---
 
 # Detect install mode from setup.json to determine how to restart the helper.
@@ -1205,6 +1264,12 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
       if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
         sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
         sudo rm -f "$HELPER_PLIST" 2>/dev/null || true
+        # The root-owned helper directory goes with the daemon that used it
+        # (issue #262). Removed here, under the sudo this branch already holds,
+        # because after this point `setup.json` no longer says "privileged" and
+        # `veld uninstall` will not escalate — the directory would otherwise
+        # survive as root-owned files with no veld able to delete them.
+        sudo rm -rf /var/db/veld-helper 2>/dev/null || true
         echo "System LaunchDaemon stopped and removed."
       else
         echo "Warning: could not stop system LaunchDaemon (sudo unavailable)."
@@ -1218,6 +1283,8 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
       if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
         sudo systemctl stop veld-helper 2>/dev/null || true
         sudo systemctl disable veld-helper 2>/dev/null || true
+        # See the macOS branch above.
+        sudo rm -rf /var/lib/veld-helper 2>/dev/null || true
         echo "System service stopped and disabled."
       else
         echo "Warning: could not stop system veld-helper service (sudo unavailable)."
@@ -1252,12 +1319,17 @@ fi
 # in crates/veld-core/src/setup.rs); this path never got the fix, which is why an
 # update usually ended with a dead daemon and a manual `veld setup` to revive it.
 #
-# A job that is already registered does not need re-registering: only `veld setup`
-# writes these plists, so an update changes the binary and not the definition
-# launchd holds. The consequence is worth stating rather than discovering: because
-# this no longer re-bootstraps, an update is no longer a point where a plist file
-# that is newer than launchd's registration converges. `veld setup` is now the only
-# one — which is where such a mismatch comes from in the first place (a bootstrap
+# A job that is already registered does not need re-registering: an update
+# changes the binary and not the definition launchd holds. The consequence is
+# worth stating rather than discovering: because this no longer re-bootstraps, an
+# update is no longer a point where a plist file that is newer than launchd's
+# registration converges.
+#
+# Two writers of the privileged helper's plist now exist, not one. `veld setup`
+# is still the deliberate convergence point, and the helper's own one-time
+# migration onto its root-owned directory (issue #262) is the other — that one
+# re-registers itself, from a detached child, and `veld doctor` reports the
+# drift if it does not. So a stale registration is still repaired by `veld setup` — which is where such a mismatch comes from in the first place (a bootstrap
 # that lost the race and fell back to kickstarting the stale registration, the
 # `BootstrapOutcome::KickstartedStale` warning), and that warning already tells the
 # user to re-run setup.
@@ -1320,7 +1392,18 @@ if [ "$OS" = "macos" ]; then
     # safeguard (see veld-helper caddy.rs).
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -z "$EMBEDDED" ] && [ -f "$HELPER_PLIST" ]; then
-      if sudo -n true 2>/dev/null; then
+      # The refusal test comes FIRST, above the sudo/no-sudo split. Below it, a
+      # passwordless-sudo machine would SIGTERM the root helper to re-run the
+      # very binary the store still holds, and print only "Restarting…" — the
+      # "was NOT updated" line would never appear on exactly the machines where
+      # a restart achieves nothing.
+      if [ -n "$HELPER_INSTALL_TRIED" ] && [ -z "$HELPER_INSTALL_OK" ]; then
+        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      elif [ -z "$HELPER_INSTALL_OK" ]; then
+        # Never attempted: this release carries no signature for the helper, so
+        # there was nothing to hand over and no error to point at.
+        echo "The privileged veld-helper was not updated: this release ships no signature for it."
+      elif sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
       else
@@ -1344,8 +1427,17 @@ else
   # Embedded: `veld update` owns the privileged restart (see the macOS branch).
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ] && [ -z "$EMBEDDED" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
-      echo "Restarting veld-helper service (privileged)..."
-      $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+      if [ -n "$HELPER_INSTALL_OK" ]; then
+        echo "Restarting veld-helper service (privileged)..."
+        $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+      elif [ -n "$HELPER_INSTALL_TRIED" ]; then
+        # Same rule as the macOS branch: the store still holds the OLD binary,
+        # so restarting would only re-run it. Say so rather than implying the
+        # helper moved.
+        echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      else
+        echo "The privileged veld-helper was not updated: this release ships no signature for it."
+      fi
     fi
   elif [ -z "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     if systemctl --user is-active --quiet veld-helper 2>/dev/null; then

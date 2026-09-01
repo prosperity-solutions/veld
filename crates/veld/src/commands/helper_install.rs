@@ -1,0 +1,134 @@
+//! `veld _helper-install` — hand a freshly downloaded helper to the running
+//! root helper so it can install it into its root-owned directory (#262).
+//!
+//! # Why the installer cannot just copy the file any more
+//!
+//! It used to. `install.sh` wrote `veld-helper` into `$HOME/.local/lib/veld` and
+//! the root LaunchDaemon ran it from there — which is the whole of #247: a
+//! directory the installing user can write, exec'd as root at every boot. Now the
+//! privileged helper is served from a directory only root can write, so the
+//! unprivileged installer cannot put anything in it.
+//!
+//! Rather than reach for `sudo` — which #338's rule 1 forbids, because a security
+//! fix behind a password prompt reaches almost nobody — the installer downloads to
+//! a path it *can* write and asks the **already-root** helper to install it. The
+//! helper verifies the org signature, and refuses anything older than the newer
+//! of the running and the installed helper, before the bytes move. So the caller
+//! being untrusted costs nothing: all it supplies is a filename.
+//!
+//! # Silent on every path that is not this one
+//!
+//! `install.sh` calls this unconditionally, so most invocations are on machines
+//! this does not apply to: unprivileged installs, privileged installs still
+//! serving from the lib dir, and machines with no helper running. All of those
+//! exit 0 with nothing printed, because on them `install.sh`'s own copy is still
+//! the mechanism and there is nothing for a user to act on. Only a machine that
+//! *is* served from the root-owned store, and where the install failed, says
+//! anything — and that one has to, because on it the copy `install.sh` made will
+//! never be executed.
+
+use std::path::PathBuf;
+
+use crate::output;
+
+/// Exit code, so `install.sh` can carry on regardless — see the module doc.
+pub async fn run(binary: PathBuf) -> i32 {
+    // `read_setup_mode` resolves the invoking user's home under `sudo` — see
+    // `veld_core::setup::read_setup_mode`. That matters here because
+    // `curl … | sudo bash` would otherwise read root's empty `$HOME`, answer
+    // "not privileged", and silently leave the store on the old binary while the
+    // CLI and daemon moved to the new release.
+    if super::read_setup_mode().as_deref() != Some("privileged") {
+        return 0;
+    }
+
+    // The path the *service manager* actually serves, never a guess from
+    // `paths::lib_dir()`. Whether this install has been migrated is a fact about
+    // the plist, and a machine carrying both a `~/.local` and a `/usr/local`
+    // tree would have a guess answer for the wrong one.
+    let Some(program) = veld_core::setup::privileged_helper_program().await else {
+        return 0;
+    };
+    if !veld_core::paths::is_privileged_helper_path(&program) {
+        // Not migrated yet: the helper is still served from a directory the
+        // installer can write, so the copy it already made is the update. The
+        // helper's own startup migration moves this install on its next
+        // restart, and the release after that takes this branch instead.
+        return 0;
+    }
+
+    if !binary.is_file() {
+        output::print_error(
+            &format!("no helper binary to install at {}", binary.display()),
+            false,
+        );
+        return 1;
+    }
+
+    let client = match veld_core::helper::HelperClient::connect_privileged().await {
+        Ok(c) => c,
+        Err(e) => {
+            // The one case that genuinely needs a person: the binary lives where
+            // only root can write it and no root helper is answering, so nothing
+            // unprivileged can complete this update. Name the repair rather than
+            // the error.
+            output::print_error(
+                &format!(
+                    "the privileged veld-helper is not answering ({e}), and its binary lives in a \
+                     root-owned directory this installer cannot write. Run \
+                     `sudo veld setup privileged` to reinstall it."
+                ),
+                false,
+            );
+            return 1;
+        }
+    };
+
+    match client.install_helper(&binary).await {
+        Ok(response) => {
+            let version = response
+                .data
+                .as_ref()
+                .and_then(|d| d.get("installed_version"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("the new version");
+            output::print_info(&format!(
+                "veld-helper {version} installed into {}",
+                veld_core::paths::privileged_helper_dir().display()
+            ));
+            0
+        }
+        Err(e) => {
+            output::print_error(
+                &format!("the privileged veld-helper refused the new binary: {e}"),
+                false,
+            );
+            1
+        }
+    }
+}
+
+/// Why the now-inert copy in the user-writable lib dir is **left alone**.
+///
+/// It is tempting to delete it — #262 lists "a root auto-restarting binary in a
+/// user directory is exactly what an attacker greps for" as its third gap, and
+/// after migration that copy is executed by nothing: the service names the
+/// store, and the binary watcher watches the store.
+///
+/// It stays because deleting it bricks a repair this diff cannot reach.
+/// `setup::which_self` looks in the lib dir, then beside the CLI, then returns a
+/// bare `"veld-helper"`. **Every already-shipped CLI has that behaviour and
+/// cannot be changed.** So an older `veld` — a second copy in `/usr/local/bin`,
+/// one left by a pinned downgrade — running `sudo veld setup privileged` on a
+/// machine where the lib-dir copy had been removed would boot out the working
+/// root job and write `<string>veld-helper</string>` into the plist: a service
+/// launchd cannot exec, with no binary left on disk for a retry to find, and no
+/// unprivileged way back.
+///
+/// The gap that remains is cosmetic rather than exploitable. Gap 3 is about a
+/// binary that gets *executed as root*; once the service definition names the
+/// store, this file is a stale copy and nothing more. Trading a real bricking
+/// path for that is the wrong way round, and #338's rule 2 says so.
+///
+/// Revisit once no supported CLI predates `fallback_helper_path`.
+const _WHY_THE_LIB_DIR_COPY_STAYS: () = ();

@@ -30,7 +30,7 @@ pub async fn run(
 
         // Resolve paths while we're still the real user (before sudo changes HOME/PATH).
         let resolved_helper_bin =
-            veld_core::setup::which_self("veld-helper").unwrap_or_else(|_| "veld-helper".into());
+            veld_core::setup::which_privileged_helper().unwrap_or_else(|_| "veld-helper".into());
         let resolved_user_socket = veld_core::helper::user_socket_path();
         let resolved_caddy_bin = veld_core::paths::caddy_bin();
 
@@ -58,7 +58,7 @@ pub async fn run(
 
     // Use the pre-resolved paths passed via args, or fall back to resolving now.
     let helper_bin_path = helper_bin.unwrap_or_else(|| {
-        veld_core::setup::which_self("veld-helper").unwrap_or_else(|_| "veld-helper".into())
+        veld_core::setup::which_privileged_helper().unwrap_or_else(|_| "veld-helper".into())
     });
     let user_socket_path = user_socket.unwrap_or_else(veld_core::helper::user_socket_path);
     let caddy_bin_path = caddy_bin.unwrap_or_else(veld_core::paths::caddy_bin);

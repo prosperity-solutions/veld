@@ -75,8 +75,9 @@ pub fn set_owner_only(_path: &Path) -> std::io::Result<()> {
 ///
 /// The **helper's** rule, and only the helper's — see [`daemon_log_path_in`] for why
 /// the daemon cannot share it. In privileged mode the helper is a root
-/// `LaunchDaemon`, so root writing to a root-owned lib dir is exactly right, and
-/// this is where `veld-helper.log` has always been.
+/// `LaunchDaemon` served from [`privileged_helper_dir`], so this lands in a
+/// root-owned directory — which is exactly right for a file only root writes,
+/// and still readable without `sudo` because that directory is `0755`.
 ///
 /// `/tmp` when the binary has no parent, which only a relative bare filename
 /// produces.
@@ -176,6 +177,76 @@ pub fn sleep_marker_dir() -> PathBuf {
     }
 }
 
+/// Where the **privileged** helper binary lives: a directory the installing user
+/// cannot write (#262).
+///
+/// This is the whole of #247's fix. The default privileged install ran the root
+/// LaunchDaemon out of `$HOME/.local/lib/veld`, so any process with the user's
+/// privileges could overwrite the binary and get root at the next reboot, when
+/// launchd execs whatever sits at the plist's path. #261's signing stopped the
+/// *running* helper relaunching onto a swap; nothing verifies at process start,
+/// and nothing can — the process doing the checking would be the attacker's
+/// binary. Removing the writable file is what removes the escalation.
+///
+/// **Why not `/usr/local/lib/veld`**, the obvious address and the one
+/// [`lib_dir`] already knows. It is not reliably root-owned on macOS: Homebrew
+/// on Intel Macs takes ownership of `/usr/local`, so on a large slice of the
+/// install base an unprivileged attacker can *pre-create* `/usr/local/lib/veld`
+/// as themselves, and "we create it root-owned" fixes nothing about a directory
+/// that is already there. `/var/db` (`root:wheel`) and `/var/lib` (`root:root`)
+/// have a root-owned parent on every machine, so pre-creation there requires
+/// root — which makes it not an attack. It also keeps `veld doctor`'s shipped
+/// "No stale system install" row honest: that row fails when
+/// `/usr/local/lib/veld` exists and is not the active lib dir, so putting the
+/// helper there would have made it fail for every migrated user.
+///
+/// **Why a sibling of [`sleep_marker_dir`] rather than a subdirectory of it.**
+/// Same reasoning about the parent, and the same two paths — but that directory
+/// is `0700`, and this one must be world-*readable*: `veld doctor` runs as the
+/// user and reads this binary and its `.sig` to report the signature row. Two
+/// directories with one job each, rather than one directory whose mode has to
+/// serve both.
+pub fn privileged_helper_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/db/veld-helper")
+    } else {
+        PathBuf::from("/var/lib/veld-helper")
+    }
+}
+
+/// The privileged helper binary inside [`privileged_helper_dir`].
+pub fn privileged_helper_bin() -> PathBuf {
+    privileged_helper_dir().join("veld-helper")
+}
+
+/// Whether `path` is the helper inside the root-owned directory — i.e. whether
+/// this install has been migrated off the user-writable location.
+///
+/// **Purely lexical, and deliberately so.** The question is about the *service
+/// definition*: does the thing launchd or systemd was told to exec live in the
+/// store? That is true or false whether or not the file is presently there.
+///
+/// An earlier version canonicalised both sides, which made a **missing store
+/// binary** answer "not migrated" — the same as a lib-dir install. The
+/// consequence was the opposite of what the callers wanted: `veld
+/// _helper-install` returned 0 in silence for a machine whose root daemon has no
+/// binary to exec, so the one loud message it exists to print ("the privileged
+/// veld-helper is not answering … run `sudo veld setup privileged`") was
+/// unreachable, and `veld doctor` reported the same machine green.
+///
+/// The `/private` arm is macOS's `/var` symlink: `launchctl print` echoes back
+/// whatever string the plist holds, and this crate always writes the `/var`
+/// spelling, but a definition written by hand or resolved elsewhere may carry
+/// the resolved one.
+pub fn is_privileged_helper_path(path: &Path) -> bool {
+    let bin = privileged_helper_bin();
+    if path == bin {
+        return true;
+    }
+    path.strip_prefix("/private")
+        .is_ok_and(|rest| Path::new("/").join(rest) == bin)
+}
+
 pub fn dnsmasq_conf_dir() -> PathBuf {
     lib_dir().join("dnsmasq.d")
 }
@@ -212,6 +283,45 @@ pub fn caddy_log_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// The migrated-path check is lexical, so a **missing** store binary still
+    /// reads as migrated.
+    ///
+    /// This is the fail-open that made `veld _helper-install` return 0 in
+    /// silence, and `veld doctor` report green, for a machine whose root daemon
+    /// had no binary to exec — the two places that exist to say so loudly.
+    #[test]
+    fn a_missing_store_binary_still_reads_as_the_privileged_helper_path() {
+        let bin = super::privileged_helper_bin();
+        assert!(
+            !bin.exists(),
+            "this test assumes no store on the test machine"
+        );
+        assert!(super::is_privileged_helper_path(&bin));
+    }
+
+    /// macOS resolves `/var` to `/private/var`; both spellings are the store.
+    #[test]
+    fn both_spellings_of_the_store_path_are_recognised() {
+        let bin = super::privileged_helper_bin();
+        let private = std::path::PathBuf::from("/private")
+            .join(bin.strip_prefix("/").expect("the store path is absolute"));
+        assert!(super::is_privileged_helper_path(&private), "{private:?}");
+    }
+
+    /// A lib-dir helper is not the store's, and neither is a lookalike.
+    #[test]
+    fn a_user_writable_helper_is_not_the_privileged_helper_path() {
+        assert!(!super::is_privileged_helper_path(std::path::Path::new(
+            "/Users/u/.local/lib/veld/veld-helper"
+        )));
+        assert!(!super::is_privileged_helper_path(std::path::Path::new(
+            "/usr/local/lib/veld/veld-helper"
+        )));
+        // A sibling in the same directory is not the helper.
+        let sibling = super::privileged_helper_dir().join("veld-daemon");
+        assert!(!super::is_privileged_helper_path(&sibling));
+    }
     use super::*;
 
     #[test]

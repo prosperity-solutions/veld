@@ -143,7 +143,13 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     }
 
     // Find the helper binary.
-    let helper_bin = which_self("veld-helper")?;
+    // The auto-bootstrap serves whichever helper this install actually has. A
+    // migrated privileged machine's is in the root-owned store, and `which_self`
+    // alone would answer with a bare name there if the lib-dir copy is gone.
+    let helper_bin = match read_setup_mode().as_deref() {
+        Some("privileged") => which_privileged_helper()?,
+        _ => which_self("veld-helper")?,
+    };
 
     // Spawn the helper as a background process.
     eprintln!("  Starting helper...");
@@ -207,9 +213,66 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 
 /// Read the persisted setup mode from `~/.veld/setup.json`, if present.
 /// Returns `"privileged"`, `"unprivileged"`, `"auto"`, or `None` when unset.
+/// The recorded setup mode, falling back to the **invoking** user's home when
+/// this process is running under `sudo`.
+///
+/// `$HOME` under `sudo` is root's, which has no `setup.json` — so without the
+/// fallback every sudo-run caller reads "no mode recorded" and takes whatever
+/// branch that implies. That is load-bearing in three places since #262:
+/// `veld doctor`'s helper row and `veld version`'s candidate list both gate the
+/// root-owned store on it (a privileged machine would report a helper it does
+/// not run), and `which_self` gates the store candidate the same way. On Linux
+/// `sudo` resets `HOME` by default, so this is not a hypothetical there.
+///
+/// The `$HOME` answer still wins when there is one: a user with their own
+/// `setup.json` is the ordinary case, and `SUDO_USER` is only consulted when
+/// the current home has nothing to say.
+/// The `setup.json` [`read_setup_mode`] actually reads.
+///
+/// Exposed so that anything *displaying* the config location names the file the
+/// mode was read from. `veld doctor` had its own `dirs::home_dir()`-based path
+/// and its own reader, which under `sudo` disagreed with `read_setup_mode` — the
+/// report would print "Not configured" in its Mode row while every check gated
+/// on the mode behaved as privileged.
+pub fn setup_json_path() -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    if let Some(path) = home.clone().map(json_in).filter(|p| p.is_file()) {
+        return Some(path);
+    }
+    let real = resolve_real_user_home()?;
+    if Some(&real) == home.as_ref() {
+        // Nothing there, but it is still the file this user's install *would*
+        // use — callers display it, so answer with it rather than nothing.
+        return home.map(json_in);
+    }
+    Some(json_in(real))
+}
+
+/// `<home>/.veld/setup.json`.
+fn json_in(home: PathBuf) -> PathBuf {
+    home.join(".veld").join("setup.json")
+}
+
 pub fn read_setup_mode() -> Option<String> {
-    let path = dirs::home_dir()?.join(".veld").join("setup.json");
-    let content = std::fs::read_to_string(path).ok()?;
+    let home = dirs::home_dir();
+    if let Some(mode) = home.clone().and_then(read_mode_at) {
+        return Some(mode);
+    }
+    // Only when it is a *different* directory. `resolve_real_user_home` falls
+    // back to `$HOME` when `SUDO_USER` is unset, so without this the common
+    // case — no `setup.json` at all, on an unprivileged or auto install — reads
+    // the same missing file twice on every call, and `read_setup_mode` is on
+    // paths as hot as `veld start` and the daemon's pty setup.
+    let real = resolve_real_user_home()?;
+    if Some(&real) == home.as_ref() {
+        return None;
+    }
+    read_mode_at(real)
+}
+
+/// [`read_setup_mode`] for one home directory.
+fn read_mode_at(home: PathBuf) -> Option<String> {
+    let content = std::fs::read_to_string(home.join(".veld").join("setup.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value
         .get("mode")
@@ -857,8 +920,103 @@ pub async fn install_helper_with_bin(
 /// Install (or verify) the Veld helper, then verify it is reachable and
 /// start Caddy through it.
 pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
-    let veld_helper_bin = which_self("veld-helper")?;
+    let veld_helper_bin = which_privileged_helper()?;
     install_helper_inner(veld_helper_bin, None).await
+}
+
+/// Copy `bin` into the root-owned helper store and return the path to serve
+/// from, or hand `bin` straight back when this install is not a candidate.
+///
+/// Falls back to `bin` for every failure rather than propagating one. Setup's
+/// job is to end with a working privileged helper; a store that could not be
+/// written is a machine that keeps the shape it has today, which is the
+/// pre-existing state rather than a new one. The refusal is logged, and
+/// `veld doctor`'s signature row is where a user sees the consequence.
+///
+/// **The version floor still applies here**, and that is a change from the first
+/// version of this function, which passed the candidate's own version as the
+/// floor and so compared a value against itself. `Candidate::install` now
+/// derives the floor from what is already in the store, so an older release's
+/// `veld setup privileged` cannot silently walk the root daemon backwards past
+/// every gate — it keeps the newer helper the store already holds and points the
+/// service definition at that.
+fn stage_helper_in_store(bin: &Path) -> PathBuf {
+    let store = crate::paths::privileged_helper_bin();
+    let candidate = match crate::helper_store::Candidate::read(bin) {
+        Ok(c) => c,
+        Err(_) => return fallback_helper_path(bin),
+    };
+    // The version this binary claims, not the one *this* process was compiled
+    // as: `veld setup` may be a different release from the helper it installs
+    // (a `veld setup privileged` run from an older CLI), and comparing against
+    // our own would refuse a perfectly good newer helper. The floor that does
+    // apply comes from the store, inside `install`.
+    let version = match candidate.verified_version() {
+        Ok(v) => v,
+        Err(_) => return fallback_helper_path(bin),
+    };
+    match candidate.install(&version) {
+        Ok(_) => store,
+        // Refused *specifically* because the store already holds something
+        // newer. Not a failure: serve what is there. Returning `bin` instead
+        // would point the service definition at the older binary this run
+        // brought, which is the downgrade the refusal just prevented, arriving
+        // by another door.
+        //
+        // Matched on the typed refusal rather than on "does the store still
+        // verify?", which is what this used to do and which quietly swallowed
+        // every other failure — a full disk, or `assert_root_owned_chain`
+        // finding the store's ownership no longer holds — behind a cheerful
+        // "keeping the helper already in …", with the real error dropped. This
+        // is the path `veld doctor` sends people to when it reports the helper
+        // directory unsafe, so a repair that reports nothing wrong while fixing
+        // nothing is the worst outcome it could have.
+        Err(e) if crate::helper_store::is_not_newer(&e) => {
+            tracing::info!(
+                "keeping the helper already in {}; {} ({version}) is not newer",
+                store.display(),
+                bin.display()
+            );
+            store
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %format!("{e:#}"),
+                "could not stage the helper in its root-owned directory; serving it from {}",
+                bin.display()
+            );
+            fallback_helper_path(bin)
+        }
+    }
+}
+
+/// What to point the service definition at when `bin` cannot be staged.
+///
+/// Normally `bin` itself — the pre-existing behaviour, for a local build or a
+/// machine where the store cannot be written.
+///
+/// **The exception is what makes `sudo veld setup privileged` still a repair.**
+/// When there is no lib-dir copy and no sibling — a machine whose copy was
+/// removed by hand, or one being repaired after an unusual install —
+/// [`which_self`] ends at a bare `veld-helper` with no path. Writing *that* into
+/// a service definition produces a job launchd cannot exec, turning the
+/// documented remedy for a broken privileged helper into the thing that breaks
+/// it. When the store already holds a properly signed helper, it is both the
+/// right answer and the one already running.
+///
+/// `which_self` has its own last-resort arm for the same case; this is the
+/// second half of that belt, for a `bin` that reached here by another route.
+fn fallback_helper_path(bin: &Path) -> PathBuf {
+    let store = crate::paths::privileged_helper_bin();
+    if !bin.is_file() && crate::signing::verify_binary_signed(&store) {
+        tracing::info!(
+            "no helper binary at {}; keeping the signed one already in {}",
+            bin.display(),
+            store.display()
+        );
+        return store;
+    }
+    bin.to_path_buf()
 }
 
 /// Shared implementation for `install_helper` and `install_helper_with_bin`.
@@ -873,6 +1031,46 @@ async fn install_helper_inner(
     // that user's uid down as `--allow-uid` so the helper rejects every other
     // peer — see the peer-credential gate in `veld-helper/src/main.rs`.
     let allow_uid = resolve_real_uid()?;
+
+    // Serve the helper from the root-owned store when we can (#262), so the
+    // service definition this writes never names a path the installing user can
+    // write. `veld setup privileged` already runs as root, so a fresh install
+    // gets there directly and never spends a moment in the vulnerable shape;
+    // existing installs are moved by the helper's own migration instead.
+    //
+    // **Only for a binary that carries the org's signature.** A locally built
+    // helper has none, and sealing an unverified binary into a root-owned
+    // directory would buy no boundary while making a developer's rebuild
+    // unwritable — the store would pin whichever build was current at setup
+    // time. Such an install stays exactly as it is today, and `veld doctor`'s
+    // signature row already says so.
+    let veld_helper_bin = stage_helper_in_store(&veld_helper_bin);
+
+    // Refuse **before** anything is torn down.
+    //
+    // `install_helper_macos` starts by booting the running LaunchDaemon out, so
+    // by the time a bad path reaches the plist there is no working service left
+    // to fall back to. `which_self`'s last resort is a bare `"veld-helper"` with
+    // no directory — which produces a definition launchd cannot exec, on a
+    // machine that had a working one a moment earlier. Failing here leaves the
+    // helper exactly as it was.
+    if !veld_helper_bin.is_absolute() {
+        // A relative path — in practice `which_self`'s last-resort bare
+        // `"veld-helper"` — resolves against whatever directory the service
+        // manager happens to start in, which is not this one. It would be
+        // written into the definition verbatim and fail to exec.
+        anyhow::bail!(
+            "cannot install a veld-helper named by a relative path ({}); no helper binary was \
+             found to install. Reinstall with `veld update`",
+            veld_helper_bin.display()
+        );
+    }
+    if !veld_helper_bin.is_file() {
+        anyhow::bail!(
+            "there is no veld-helper binary at {} to install — reinstall with `veld update`",
+            veld_helper_bin.display()
+        );
+    }
 
     // Register as a system service. No silent direct-spawn fallback here: a
     // directly-spawned root helper has no service manager behind it, so it
@@ -968,11 +1166,17 @@ async fn install_helper_inner(
 /// The `<key>ProgramArguments</key>` array of the privileged helper's macOS
 /// plist: the binary path, the `--allow-uid` gate (the installing user's uid),
 /// and the optional `--caddy-bin`. Pure so the wiring can be pinned by a test.
-fn helper_plist_program_args(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u32) -> String {
-    let mut program_args = format!(
-        "        <string>{}</string>\n        <string>--allow-uid</string>\n        <string>{allow_uid}</string>",
-        bin.display()
-    );
+fn helper_plist_program_args(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: Option<u32>,
+) -> String {
+    let mut program_args = format!("        <string>{}</string>", bin.display());
+    if let Some(uid) = allow_uid {
+        program_args.push_str(&format!(
+            "\n        <string>--allow-uid</string>\n        <string>{uid}</string>"
+        ));
+    }
     if let Some(caddy) = caddy_bin {
         program_args.push_str(&format!(
             "\n        <string>--caddy-bin</string>\n        <string>{}</string>",
@@ -982,16 +1186,10 @@ fn helper_plist_program_args(bin: &Path, caddy_bin: Option<&Path>, allow_uid: u3
     program_args
 }
 
-async fn install_helper_macos(
-    bin: &Path,
-    caddy_bin: Option<&Path>,
-    allow_uid: u32,
-) -> Result<(), anyhow::Error> {
-    let plist_path_buf = PathBuf::from(format!(
-        "/Library/LaunchDaemons/{}",
-        helper_plist_filename()
-    ));
-    let plist_path = plist_path_buf.as_path();
+/// The privileged helper's macOS LaunchDaemon plist, as text. Pure so the
+/// wiring can be pinned by a test and so the self-migration path (#262) writes
+/// exactly the same definition `veld setup privileged` does.
+fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32>) -> String {
     let label = HELPER_LABEL_MACOS;
 
     // Build ProgramArguments with --allow-uid (the peer-credential gate's
@@ -1004,7 +1202,7 @@ async fn install_helper_macos(
     // diagnose.
     let log_path = crate::paths::service_log_path(bin);
 
-    let plist = format!(
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1023,6 +1221,12 @@ async fn install_helper_macos(
          A SuccessfulExit=false variant would leave it dead after every update. -->
     <key>KeepAlive</key>
     <true/>
+    <!-- WatchPaths is a backstop, not the mechanism. Since #262 the binary is
+         replaced by rename() rather than written in place, and a rename
+         *replaces the vnode* this watch is on rather than writing to it — which
+         is the case launchd handles least reliably. The helper's own poller
+         (watch_own_binary) is what actually notices an install; do not remove it
+         on the strength of this key. -->
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
@@ -1036,11 +1240,59 @@ async fn install_helper_macos(
 "#,
         bin_path = bin.display(),
         log_path = log_path.display(),
-    );
+    )
+}
 
-    // Stop the running service first (required for upgrades). Use the modern
-    // `bootout` API — the legacy `unload` is deprecated and unreliable for
-    // system-domain LaunchDaemons.
+/// The privileged helper's Linux systemd unit, as text. Pure for the same
+/// reason as [`helper_plist_body`].
+fn helper_systemd_unit(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32>) -> String {
+    // --allow-uid is the peer-credential gate's allowed uid: the helper runs
+    // as root but its socket is world-writable so the unprivileged CLI (the
+    // installing user) can drive it, and every other peer must be rejected.
+    let mut exec_start = bin.display().to_string();
+    if let Some(uid) = allow_uid {
+        exec_start.push_str(&format!(" --allow-uid {uid}"));
+    }
+    if let Some(caddy) = caddy_bin {
+        exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
+    }
+    // KillMode=process: on stop/restart, only kill the helper itself, not its
+    // whole cgroup. The helper spawns Caddy as a child; the default
+    // control-group kill mode would SIGKILL Caddy whenever the helper is
+    // restarted (or exits to pick up a new binary), tearing down every URL.
+    // Leaving Caddy running mirrors the macOS behavior so a helper restart
+    // doesn't drop the proxy.
+    //
+    // **A second thing now depends on it** (#262): the detached child that
+    // re-registers this service after the helper migrates itself is in the same
+    // cgroup, and `setsid` does not move it out of one. Under the default kill
+    // mode that child would be killed by the very `systemctl restart` it is
+    // running, leaving the helper unregistered until the next boot. See
+    // `reload_and_restart_helper_unit`.
+    format!(
+        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
+    )
+}
+
+/// Boot a system-domain job out and wait for launchd to finish tearing it down.
+///
+/// Extracted from [`install_helper_macos`] because the helper's own migration
+/// (#262) has to do exactly this from a detached child, and the *waiting* half
+/// is the part that is easy to omit and expensive to get wrong: `bootout` can
+/// return before launchd is done, a `bootstrap` into that window fails with exit
+/// 5, and the kickstart fallback then targets a registration that is being
+/// removed — leaving no service loaded at all with every error swallowed.
+///
+/// Uses the modern `bootout` API; the legacy `unload` is deprecated and
+/// unreliable for system-domain LaunchDaemons.
+///
+/// **Not `#[cfg(target_os = "macos")]`, deliberately.** `install_helper_macos`
+/// is selected by a *runtime* `match std::env::consts::OS`, so its body is
+/// compiled on Linux too — a `cfg` here is a hard build failure on Linux rather
+/// than the tidy-up it looks like. (It was exactly that, briefly; local
+/// `cargo clippy` on a Mac cannot see it, and CI's Linux `Check & Lint` can.)
+/// `launchctl` simply does not exist there, and this function is never reached.
+pub async fn bootout_and_drain_system_job(label: &str) {
     let _ = Command::new("launchctl")
         .args(["bootout", &format!("system/{label}")])
         .stdin(std::process::Stdio::null())
@@ -1049,18 +1301,141 @@ async fn install_helper_macos(
         .status()
         .await;
 
-    // `bootout` can return before launchd finishes tearing the job down.
-    // Bootstrapping into that window fails with exit 5, and the kickstart
-    // fallback then targets a registration that is being removed — leaving no
-    // service loaded at all while every error is swallowed. Wait until the job
-    // is actually gone before re-registering.
     let removed =
         wait_for_launchd_job_removal("system", label, std::time::Duration::from_secs(10)).await;
     if !removed {
         tracing::warn!("old {label} job still registered after bootout; bootstrap may conflict");
     }
+}
 
-    std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
+/// Reload systemd's unit files and restart the privileged helper.
+///
+/// The Linux half of the helper's self-migration (#262). `daemon-reload` picks
+/// up the rewritten `ExecStart`; the restart brings the helper back on the new
+/// path.
+///
+/// Called from the **same detached child** macOS uses — the two platforms share
+/// one shape rather than diverging — and that child survives its own
+/// `systemctl restart` only because the unit carries `KillMode=process`.
+/// `setsid` takes it out of the parent's session, not out of its cgroup, and
+/// systemd's default `KillMode=control-group` would kill the client mid-job.
+/// The setting exists for Caddy; this depends on it too. See
+/// [`helper_systemd_unit`].
+#[cfg(not(target_os = "macos"))]
+pub async fn reload_and_restart_helper_unit() -> Result<(), anyhow::Error> {
+    run_cmd("systemctl", &["daemon-reload"]).await?;
+    run_cmd("systemctl", &["restart", HELPER_SERVICE_LINUX]).await
+}
+
+/// Where the privileged helper's macOS LaunchDaemon plist lives.
+pub fn helper_plist_path() -> PathBuf {
+    PathBuf::from(format!(
+        "/Library/LaunchDaemons/{}",
+        helper_plist_filename()
+    ))
+}
+
+/// Where the privileged helper's Linux systemd unit lives.
+pub fn helper_unit_path() -> PathBuf {
+    PathBuf::from(format!(
+        "/etc/systemd/system/{HELPER_SERVICE_LINUX}.service"
+    ))
+}
+
+/// The privileged helper's service definition, as text, for this platform.
+///
+/// Pure, and extracted from [`install_helper_macos`] / [`install_helper_linux`]
+/// so that the **helper's own migration** onto the root-owned store (#262) can
+/// re-point the service without a second copy of the template. Two templates
+/// for one file is how a `KeepAlive` or a `KillMode` silently stops applying to
+/// half the installs, and this one is a root daemon's definition.
+pub fn helper_service_definition(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: Option<u32>,
+) -> String {
+    if cfg!(target_os = "macos") {
+        helper_plist_body(bin, caddy_bin, allow_uid)
+    } else {
+        helper_systemd_unit(bin, caddy_bin, allow_uid)
+    }
+}
+
+/// Write the privileged helper's service definition, pointing it at `bin`.
+///
+/// Returns the path written. Written via a temporary in the same directory and
+/// renamed, because the alternative — truncate, then write — has a window in
+/// which the file on disk is a *partial* plist, and the thing that reads it next
+/// may be launchd at boot with no veld running to repair it.
+///
+/// This does not load, reload, or restart anything: the caller decides that, and
+/// for the self-migrating helper the caller is the process being replaced.
+pub fn write_helper_service_definition(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: Option<u32>,
+) -> Result<PathBuf, anyhow::Error> {
+    let path = if cfg!(target_os = "macos") {
+        helper_plist_path()
+    } else {
+        helper_unit_path()
+    };
+    let body = helper_service_definition(bin, caddy_bin, allow_uid);
+    // Appended, not `with_extension` — the idiom `helper_store::write_atomically`
+    // documents at length, because `with_extension` *replaces* an existing one
+    // and two files sharing a stem would then stage through a single temp path.
+    // Safe here today only because exactly one file is written per definition
+    // path; a second sidecar written alongside it would need this shape, so it
+    // is the shape used.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".veld-incoming");
+    let tmp = PathBuf::from(tmp);
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&tmp)
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        file.write_all(body.as_bytes())
+            .with_context(|| format!("failed to write {}", tmp.display()))?;
+        // Durable **before** the rename, for the same reason
+        // `helper_store::write_atomically` fsyncs: a rename is metadata and can
+        // outlive the data blocks it points at. Lose power in that window and
+        // boot finds a zero-length plist — launchd registers nothing, the root
+        // helper never starts, and its binary now sits where the user cannot
+        // repair it. This is the one file in the migration with no fallback.
+        file.sync_all()
+            .with_context(|| format!("failed to flush {}", tmp.display()))?;
+    }
+    std::fs::rename(&tmp, &path)
+        .with_context(|| format!("failed to move {} into place", tmp.display()))?;
+    // The directory entry, not just the file — see
+    // `helper_store::sync_parent_dir` for the crash this orders against. It
+    // matters most here: this is the rename that must NOT survive one whose
+    // partner (the store binary) did not.
+    if let Some(dir) = path.parent() {
+        if let Ok(handle) = std::fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
+    }
+    Ok(path)
+}
+
+async fn install_helper_macos(
+    bin: &Path,
+    caddy_bin: Option<&Path>,
+    allow_uid: u32,
+) -> Result<(), anyhow::Error> {
+    let plist_path_buf = helper_plist_path();
+    let plist_path = plist_path_buf.as_path();
+    let label = HELPER_LABEL_MACOS;
+
+    bootout_and_drain_system_job(label).await;
+
+    // Through the same atomic, fsync-ing writer the migration uses. Two writers
+    // for one root-daemon definition is how a durability rule ends up applying
+    // to half the installs — the same argument `helper_service_definition` makes
+    // about there being one template.
+    write_helper_service_definition(bin, caddy_bin, Some(allow_uid))
+        .context("failed to write helper LaunchDaemon plist")?;
 
     match bootstrap_launchd_job("system", label, plist_path, None, false).await? {
         BootstrapOutcome::Bootstrapped | BootstrapOutcome::LegacyLoaded => {}
@@ -1558,27 +1933,8 @@ async fn install_helper_linux(
     caddy_bin: Option<&Path>,
     allow_uid: u32,
 ) -> Result<(), anyhow::Error> {
-    let unit_path_buf = PathBuf::from(format!(
-        "/etc/systemd/system/{HELPER_SERVICE_LINUX}.service"
-    ));
-    let unit_path = unit_path_buf.as_path();
-    // --allow-uid is the peer-credential gate's allowed uid: the helper runs
-    // as root but its socket is world-writable so the unprivileged CLI (the
-    // installing user) can drive it, and every other peer must be rejected.
-    let mut exec_start = format!("{} --allow-uid {allow_uid}", bin.display());
-    if let Some(caddy) = caddy_bin {
-        exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
-    }
-    // KillMode=process: on stop/restart, only kill the helper itself, not its
-    // whole cgroup. The helper spawns Caddy as a child; the default
-    // control-group kill mode would SIGKILL Caddy whenever the helper is
-    // restarted (or exits to pick up a new binary), tearing down every URL.
-    // Leaving Caddy running mirrors the macOS behavior so a helper restart
-    // doesn't drop the proxy.
-    let unit = format!(
-        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
-    );
-    std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
+    write_helper_service_definition(bin, caddy_bin, Some(allow_uid))
+        .context("failed to write helper systemd unit")?;
 
     run_cmd("systemctl", &["daemon-reload"]).await?;
     // restart (not just enable) to pick up new binary on upgrades.
@@ -2808,6 +3164,25 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         }
     }
 
+    // Remove the root-owned directory the privileged helper is served from
+    // (#262).
+    //
+    // Outside every lib dir the loop above sweeps, and root-owned by design —
+    // which is exactly why it needs naming here. `veld uninstall` re-execs
+    // itself under `sudo` for a privileged install, so this runs as root and can
+    // remove it; without this line a machine that had veld would keep a
+    // root-owned binary and its signature forever, and a user with no veld left
+    // would have no supported way to delete them.
+    let helper_dir = crate::paths::privileged_helper_dir();
+    if helper_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&helper_dir) {
+            tracing::warn!(
+                path = %helper_dir.display(), error = %e,
+                "failed to remove the privileged helper directory"
+            );
+        }
+    }
+
     // Remove the privileged helper's keep-awake ownership marker.
     //
     // Root-owned and outside `lib_dir` on purpose (it authorises a root write, so
@@ -2919,6 +3294,35 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable,
 /// or in the veld lib directory.
+/// [`which_self`], plus the root-owned store as a last resort for the
+/// **privileged** helper (#262).
+///
+/// Separate from `which_self` rather than a mode check inside it, and the
+/// reason is that a mode check there does not work: `veld setup privileged`
+/// resolves the binary *before* it writes `setup.json`, so `read_setup_mode()`
+/// cannot yet say "privileged" on the one call path that needs the store — the
+/// gate would be permanently false exactly where it matters. Asking the caller
+/// to state its intent is both correct and shorter.
+///
+/// Last rather than first: `veld setup privileged` must still install a *newer*
+/// lib-dir binary over the store, which is what an update leaves behind, so
+/// preferring the store would pin the machine on whatever it already had. This
+/// arm is for the case where there is nothing else — a lib-dir copy removed by
+/// hand, or an auto-bootstrap on a migrated install — where the alternative is
+/// the bare `"veld-helper"` that produces a service definition launchd cannot
+/// exec.
+pub fn which_privileged_helper() -> Result<PathBuf, anyhow::Error> {
+    let found = which_self("veld-helper")?;
+    if found.is_absolute() && found.is_file() {
+        return Ok(found);
+    }
+    let store = crate::paths::privileged_helper_bin();
+    if crate::signing::verify_binary_signed(&store) {
+        return Ok(store);
+    }
+    Ok(found)
+}
+
 pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     // Prefer the canonical lib directory (where install.sh and veld update put
     // helper/daemon binaries). This avoids picking up stale copies that may
@@ -2937,6 +3341,17 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     if candidate.exists() {
         return Ok(candidate);
     }
+    // The root-owned store (#262), **after** the two above and only when it
+    // holds a properly signed helper.
+    //
+    // Last rather than first, deliberately: `veld setup privileged` must still
+    // install a *newer* lib-dir binary over the store, which is exactly what an
+    // update leaves behind, so preferring the store would pin the machine on
+    // whatever it already had. This arm is for the case where there is nothing
+    // else — a machine whose lib-dir copy was removed by hand, or an
+    // auto-bootstrap on a migrated install — where the alternative is the bare
+    // `"veld-helper"` below, which produces a service definition launchd cannot
+    // exec.
     // Fall back to PATH lookup.
     Ok(PathBuf::from(name))
 }
@@ -3655,7 +4070,8 @@ mod tests {
     /// The peer-credential gate's plist wiring.
     #[test]
     fn helper_plist_args_carry_allow_uid() {
-        let args = helper_plist_program_args(std::path::Path::new("/x/veld-helper"), None, 501);
+        let args =
+            helper_plist_program_args(std::path::Path::new("/x/veld-helper"), None, Some(501));
         assert!(args.contains("--allow-uid"));
         assert!(args.contains("501"));
         assert!(args.contains("/x/veld-helper"));
@@ -3663,11 +4079,143 @@ mod tests {
         let with_caddy = helper_plist_program_args(
             std::path::Path::new("/x/veld-helper"),
             Some(std::path::Path::new("/x/caddy")),
-            501,
+            Some(501),
         );
         assert!(with_caddy.contains("--caddy-bin"));
         assert!(with_caddy.contains("/x/caddy"));
         assert!(with_caddy.contains("--allow-uid"));
+    }
+
+    /// The service definition a migration writes must keep the peer-uid gate.
+    ///
+    /// **This is the #337 regression that would arrive as a side effect of
+    /// #262.** The gate is normally *derived* from the owner of the directory
+    /// the helper sits in, so that installs predating `--allow-uid` end up gated
+    /// with nobody running anything. Moving the helper into a root-owned
+    /// directory makes that derivation answer `0`, which is deliberately refused
+    /// as a gate — so a rewritten definition that dropped the flag would come
+    /// back **ungated**, and every test in this file would still pass.
+    ///
+    /// Asserted on both platforms' text, because the migration writes whichever
+    /// one it is running on and only one of them is exercised by any given CI
+    /// leg.
+    #[test]
+    fn a_definition_pointing_at_the_root_owned_store_still_carries_the_gate() {
+        let store = crate::paths::privileged_helper_bin();
+        let caddy = std::path::Path::new("/x/caddy");
+
+        let plist = super::helper_plist_body(&store, Some(caddy), Some(ME));
+        assert!(plist.contains(&store.display().to_string()), "{plist}");
+        assert!(plist.contains("<string>--allow-uid</string>"), "{plist}");
+        assert!(plist.contains(&format!("<string>{ME}</string>")), "{plist}");
+        assert!(plist.contains("/x/caddy"), "{plist}");
+
+        let unit = super::helper_systemd_unit(&store, Some(caddy), Some(ME));
+        assert!(unit.contains(&format!("--allow-uid {ME}")), "{unit}");
+        assert!(unit.contains(&store.display().to_string()), "{unit}");
+        assert!(unit.contains("--caddy-bin /x/caddy"), "{unit}");
+        // The two settings a helper restart depends on, which a hand-rolled
+        // second template would be free to drop.
+        assert!(unit.contains("Restart=always"), "{unit}");
+        assert!(unit.contains("KillMode=process"), "{unit}");
+    }
+
+    /// The helper plist is byte-for-byte what the pre-#262 inline code wrote.
+    ///
+    /// The template was extracted out of `install_helper_macos` so the helper's
+    /// own migration could reuse it, and `allow_uid` became an `Option`. Both
+    /// are the kind of refactor that is "obviously" behaviour-preserving right
+    /// up until a stray newline or a dropped key changes what launchd reads for
+    /// a **root** daemon on every existing install. This golden text is the
+    /// plist this machine's shipped 16.58.3 actually has on disk, so it pins the
+    /// extraction against a real artifact rather than against itself.
+    #[test]
+    fn the_helper_plist_is_unchanged_by_the_extraction() {
+        let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.veld.helper</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/x/lib/veld/veld-helper</string>
+        <string>--caddy-bin</string>
+        <string>/x/lib/veld/caddy</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+"#;
+        let body = super::helper_plist_body(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            None,
+        );
+        assert!(body.starts_with(expected), "{body}");
+        // The keys launchd needs, and the log beside the binary.
+        assert!(body.contains("<key>KeepAlive</key>\n    <true/>"), "{body}");
+        assert!(
+            body.contains("<string>/x/lib/veld/veld-helper.log</string>"),
+            "{body}"
+        );
+        assert!(body.trim_end().ends_with("</plist>"), "{body}");
+        // `None` writes no gate argument at all — never an invented uid, which
+        // would admit only root and lock the user's own CLI out.
+        assert!(!body.contains("--allow-uid"), "{body}");
+    }
+
+    /// The systemd unit is byte-for-byte what the pre-#262 inline code wrote.
+    ///
+    /// The macOS half of this refactor can be checked against a real plist on a
+    /// developer machine; the Linux half cannot, and Linux is the platform where
+    /// a wrong `ExecStart`, a lost `Restart=always` or a lost `KillMode=process`
+    /// would be discovered by a user rather than by us. Hence an exact-text
+    /// assertion rather than a `contains` sweep.
+    #[test]
+    fn the_helper_unit_is_unchanged_by_the_extraction() {
+        let unit = super::helper_systemd_unit(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            Some(ME),
+        );
+        assert_eq!(
+            unit,
+            "[Unit]\nDescription=Veld Helper\n\n[Service]\n\
+             ExecStart=/x/lib/veld/veld-helper --allow-uid 501 --caddy-bin /x/lib/veld/caddy\n\
+             Restart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n"
+        );
+
+        // And with no gate to carry, the flag is absent rather than invented —
+        // the argument order for everything else is unchanged.
+        let ungated = super::helper_systemd_unit(
+            std::path::Path::new("/x/lib/veld/veld-helper"),
+            Some(std::path::Path::new("/x/lib/veld/caddy")),
+            None,
+        );
+        assert!(
+            ungated.contains("ExecStart=/x/lib/veld/veld-helper --caddy-bin /x/lib/veld/caddy\n"),
+            "{ungated}"
+        );
+    }
+
+    /// The store path is not somewhere the installing user can write, and is not
+    /// under their home. Cheap, and it is the entire claim of #262.
+    #[test]
+    fn the_privileged_helper_lives_outside_any_user_writable_tree() {
+        let dir = crate::paths::privileged_helper_dir();
+        let shown = dir.display().to_string();
+        assert!(
+            shown.starts_with("/var/db/") || shown.starts_with("/var/lib/"),
+            "the privileged helper directory must sit under a root-owned parent, got {shown}"
+        );
+        // Not `/usr/local`: Homebrew on Intel Macs owns that tree as the console
+        // user, so an attacker can pre-create a directory there. See
+        // `paths::privileged_helper_dir`.
+        assert!(!shown.starts_with("/usr/local"), "{shown}");
+        // And not inside the `0700` keep-awake marker directory, which `veld
+        // doctor` (running as the user) could not read through.
+        assert_ne!(dir, crate::paths::sleep_marker_dir());
     }
 
     /// This user, in the fixture below.

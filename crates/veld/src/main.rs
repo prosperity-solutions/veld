@@ -755,6 +755,17 @@ enum Command {
         variant: String,
     },
 
+    /// Internal: hand a downloaded veld-helper to the running root helper, which
+    /// verifies its signature and version and installs it into its root-owned
+    /// directory (#262). Called by `install.sh`; a no-op on any install whose
+    /// helper is not served from that directory.
+    #[command(name = "_helper-install", hide = true)]
+    InternalHelperInstall {
+        /// The downloaded `veld-helper`, with its `.sig` beside it.
+        #[arg(long)]
+        binary: std::path::PathBuf,
+    },
+
     /// Internal (legacy): read stdin, prepend timestamps, append to a log
     /// file. Kept so detached pipelines started by a pre-SQLite veld keep
     /// working after an upgrade — if this subcommand disappeared, the running
@@ -1314,6 +1325,7 @@ async fn main() {
         },
 
         Command::Uninstall => commands::uninstall::run().await,
+        Command::InternalHelperInstall { binary } => commands::helper_install::run(binary).await,
 
         Command::Ui => commands::ui::run().await,
 
@@ -1703,6 +1715,18 @@ fn command_survives_an_update(command: &Command) -> bool {
             | Command::Init
             | Command::InternalLog { .. }
             | Command::InternalTimestamp { .. }
+            // **This one IS the update.** `install.sh` runs inside
+            // `veld update`'s own lock (`perform_update` → `run_install_script`
+            // with the guard still alive) and invokes `veld _helper-install` to
+            // hand the new privileged helper to the root helper — the only way a
+            // migrated install receives one at all (#262). Gating it makes the
+            // lock refuse the update its own run is performing: the command
+            // exits 75, install.sh reports the helper as not updated, and the
+            // root-owned store keeps the old binary on **every** future
+            // `veld update`, forever. That is the wedged updater #338's rule 2
+            // exists to prevent, and the only repairs left would be a bare
+            // `curl | bash` or a sudo `veld setup privileged`.
+            | Command::InternalHelperInstall { .. }
             // Neither touches the daemon, the helper or the installed binaries: one
             // writes a small file in this instance's own shim directory, the other
             // POSTs to localhost and ignores the answer. Both already fail silently,
@@ -2077,6 +2101,29 @@ mod update_gate_tests {
     /// re-enable `set` and `unset` during an update — a write aimed at a daemon
     /// that is being restarted — and a test that only checked the reads would
     /// still pass.
+    /// The privileged-helper handoff must not be blocked by the update lock,
+    /// because it runs **inside** the update that holds it.
+    ///
+    /// `veld update` takes the lock, then runs `install.sh`, which invokes
+    /// `veld _helper-install` — the only way a migrated privileged install ever
+    /// receives a new root helper (#262). Gated, that call exits 75, install.sh
+    /// records the helper as not updated, and the root-owned store keeps the old
+    /// binary on **every** future `veld update`, forever: the wedged updater
+    /// #338's rule 2 exists to prevent, repairable only by a bare `curl | bash`
+    /// or a sudo `veld setup privileged`.
+    ///
+    /// Nothing else would notice. The command is invisible to users, install.sh
+    /// swallows its status by design, and the message the user does see is the
+    /// update-lock banner rather than anything about the helper.
+    #[test]
+    fn the_privileged_helper_handoff_is_not_blocked_by_the_update_lock() {
+        assert!(command_survives_an_update(
+            &Command::InternalHelperInstall {
+                binary: std::path::PathBuf::from("/tmp/veld-helper"),
+            }
+        ));
+    }
+
     #[test]
     fn reading_a_setting_survives_an_update_but_writing_one_does_not() {
         let settings = |cmd| Command::Settings {
