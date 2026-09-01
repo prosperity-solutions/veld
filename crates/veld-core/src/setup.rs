@@ -222,7 +222,20 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 /// `setup.json` is the ordinary case, and `SUDO_USER` is only consulted when
 /// the current home has nothing to say.
 pub fn read_setup_mode() -> Option<String> {
-    read_mode_at(dirs::home_dir()?).or_else(|| read_mode_at(resolve_real_user_home()?))
+    let home = dirs::home_dir();
+    if let Some(mode) = home.clone().and_then(read_mode_at) {
+        return Some(mode);
+    }
+    // Only when it is a *different* directory. `resolve_real_user_home` falls
+    // back to `$HOME` when `SUDO_USER` is unset, so without this the common
+    // case — no `setup.json` at all, on an unprivileged or auto install — reads
+    // the same missing file twice on every call, and `read_setup_mode` is on
+    // paths as hot as `veld start` and the daemon's pty setup.
+    let real = resolve_real_user_home()?;
+    if Some(&real) == home.as_ref() {
+        return None;
+    }
+    read_mode_at(real)
 }
 
 /// [`read_setup_mode`] for one home directory.
@@ -1009,9 +1022,20 @@ async fn install_helper_inner(
     // no directory — which produces a definition launchd cannot exec, on a
     // machine that had a working one a moment earlier. Failing here leaves the
     // helper exactly as it was.
-    if !veld_helper_bin.is_absolute() || !veld_helper_bin.is_file() {
+    if !veld_helper_bin.is_absolute() {
+        // A relative path — in practice `which_self`'s last-resort bare
+        // `"veld-helper"` — resolves against whatever directory the service
+        // manager happens to start in, which is not this one. It would be
+        // written into the definition verbatim and fail to exec.
         anyhow::bail!(
-            "no veld-helper binary to install ({} is not a file) — reinstall with `veld update`",
+            "cannot install a veld-helper named by a relative path ({}); no helper binary was \
+             found to install. Reinstall with `veld update`",
+            veld_helper_bin.display()
+        );
+    }
+    if !veld_helper_bin.is_file() {
+        anyhow::bail!(
+            "there is no veld-helper binary at {} to install — reinstall with `veld update`",
             veld_helper_bin.display()
         );
     }
