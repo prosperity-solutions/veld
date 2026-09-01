@@ -1198,7 +1198,7 @@ fi
 # Both halves of the guard are required. The `.sig` copy above already treats the
 # signature as optional (a `VELD_VERSION` pinned to a pre-signing release has
 # none), and handing the helper a binary with no signature beside it would
-# surface "no readable 64-byte signature" mid-install for a case that should be
+# surface "no readable signature slot" mid-install for a case that should be
 # the silent no-op path.
 # Empty until the handoff has actually been attempted and accepted. Defaulting
 # to "1" meant "we did not try" read as "it worked": a tarball with a helper but

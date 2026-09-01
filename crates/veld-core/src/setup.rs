@@ -1008,7 +1008,13 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
 /// second half of that belt, for a `bin` that reached here by another route.
 fn fallback_helper_path(bin: &Path) -> PathBuf {
     let store = crate::paths::privileged_helper_bin();
-    if !bin.is_file() && crate::signing::verify_binary_signed(&store) {
+    // `is_org_binary`, not `verify_binary_signed`: the question here is "is the
+    // store's helper ours", not "may I relaunch onto it". A store binary signed
+    // only by a retired key is genuinely ours, and refusing it here would write
+    // the bare `"veld-helper"` below into a service definition launchd cannot
+    // exec — the bricking path this arm exists to prevent. See
+    // `signing::is_org_binary`.
+    if !bin.is_file() && crate::signing::is_org_binary(&store) {
         tracing::info!(
             "no helper binary at {}; keeping the signed one already in {}",
             bin.display(),
@@ -3317,7 +3323,11 @@ pub fn which_privileged_helper() -> Result<PathBuf, anyhow::Error> {
         return Ok(found);
     }
     let store = crate::paths::privileged_helper_bin();
-    if crate::signing::verify_binary_signed(&store) {
+    // `is_org_binary`, for the same reason as `fallback_helper_path`: this arm's
+    // alternative is the bare `"veld-helper"` that produces a service definition
+    // launchd cannot exec, and a store binary signed only by a retired key is
+    // still ours. See `signing::is_org_binary`.
+    if crate::signing::is_org_binary(&store) {
         return Ok(store);
     }
     Ok(found)

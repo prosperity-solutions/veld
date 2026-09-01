@@ -64,7 +64,7 @@ In **privileged** mode the helper is then served from a root-owned directory
 as root, so a binary the installing user could overwrite would be root on the next
 reboot. Updates still need no sudo — the installer hands the new binary to the
 running root helper, which verifies its signature and refuses anything older than
-itself before installing it.
+the newer of what is running and what is already installed.
 
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 

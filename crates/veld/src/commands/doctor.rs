@@ -668,19 +668,61 @@ impl Diagnostics {
             let path = veld_core::setup::privileged_helper_program()
                 .await
                 .unwrap_or_else(|| std::path::PathBuf::from(self.helper_path.clone()));
-            match veld_core::signing::relaunch_guard(&path) {
-                None => self.checks.push(Check {
+            //
+            // Three outcomes, not two (#261 slice C). A signature by a key this
+            // release has **retired** is a real refusal — the helper will not
+            // relaunch onto it — but the bytes are genuinely ours, and the advice
+            // for "somebody swapped your root binary" is the wrong advice for
+            // "the installer that put this here kept only the first signature
+            // slot". Printing the tampering message for it would send a user
+            // hunting a compromise that did not happen.
+            // Classified **once**: `classify_binary_signature` reads the whole
+            // ~26 MB helper and verifies it, so calling `relaunch_guard` afterwards
+            // for its message would do all of that twice — and worse, the two calls
+            // can disagree if an update lands between them, splicing the
+            // retired-key sentence into the middle of the tampering paragraph or
+            // printing "not signed" for a file that now verifies.
+            let verdict = veld_core::signing::classify_binary_signature(&path);
+            match verdict {
+                veld_core::signing::SigTrust::Active => self.checks.push(Check {
                     pass: true,
                     label: format!("Helper binary signature OK ({})", tilde_path(&path)),
                 }),
-                Some(reason) => self.checks.push(Check {
+                // Says what *this CLI* concluded, not what the running helper will
+                // do. The two can disagree: this row is judged against the key list
+                // compiled into the `veld` you just ran, and an install whose helper
+                // half was refused — or a `VELD_VERSION`-pinned reinstall — leaves
+                // the CLI and the helper on different releases with different key
+                // lists. Asserting the helper's behaviour here was wrong in exactly
+                // that case.
+                veld_core::signing::SigTrust::RetiredOnly => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "{reason} — the running helper is still the genuine one, but it will \
-                         refuse to update onto this file. Re-deploy a signed helper with \
-                         `veld update` (or `veld setup privileged`). Do NOT force a restart: \
-                         `launchctl kill`/`systemctl restart` would run this unverified binary \
-                         as root, which is exactly what the gate is refusing"
+                        "The helper at {} is signed with an org key that THIS veld ({}) has \
+                         retired. The binary itself is genuine: this happens when the helper \
+                         that installed it predated key rotation and kept only the first \
+                         signature slot. If the running helper is this same release it will \
+                         refuse to relaunch onto it, and refuse `restart` and `shutdown`, until \
+                         the signature is rewritten; updates keep working either way. Repair it \
+                         with `{}` — no password, and not `veld update`, which does nothing when \
+                         you are already on the latest release",
+                        tilde_path(&path),
+                        env!("CARGO_PKG_VERSION"),
+                        veld_core::signing::INSTALLER_COMMAND
+                    ),
+                }),
+                veld_core::signing::SigTrust::Untrusted => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "the binary at {} is not signed with the org's key (or its {} is \
+                         missing/invalid); refusing to relaunch onto it — the running helper is \
+                         still the genuine one, but it will refuse to update onto this file. \
+                         Re-deploy a signed helper with `veld update` (or `veld setup \
+                         privileged`). Do NOT force a restart: `launchctl kill`/`systemctl \
+                         restart` would run this unverified binary as root, which is exactly \
+                         what the gate is refusing",
+                        tilde_path(&path),
+                        tilde_path(&veld_core::signing::sig_path_for(&path))
                     ),
                 }),
             }
