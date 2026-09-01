@@ -1207,7 +1207,12 @@ fi
 # binary" while the store kept the old one. That is the false reassurance the
 # else-branch below exists to remove.
 HELPER_INSTALL_OK=""
+# Separate from OK, because "we never tried" and "we tried and it refused" need
+# different words. Conflating them made the no-`.sig` case — where nothing runs
+# and nothing prints — say "see the error above" with no error above it.
+HELPER_INSTALL_TRIED=""
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
+  HELPER_INSTALL_TRIED="1"
   # `|| HELPER_INSTALL_RC=$?` rather than a bare call followed by `$?`: this
   # script runs under `set -e`, which exempts a command on the left of `||` but
   # NOT one whose status is read afterwards. Written the plain way, any refusal —
@@ -1392,8 +1397,12 @@ if [ "$OS" = "macos" ]; then
       # very binary the store still holds, and print only "Restarting…" — the
       # "was NOT updated" line would never appear on exactly the machines where
       # a restart achieves nothing.
-      if [ -z "$HELPER_INSTALL_OK" ]; then
+      if [ -n "$HELPER_INSTALL_TRIED" ] && [ -z "$HELPER_INSTALL_OK" ]; then
         echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      elif [ -z "$HELPER_INSTALL_OK" ]; then
+        # Never attempted: this release carries no signature for the helper, so
+        # there was nothing to hand over and no error to point at.
+        echo "The privileged veld-helper was not updated: this release ships no signature for it."
       elif sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
@@ -1421,11 +1430,13 @@ else
       if [ -n "$HELPER_INSTALL_OK" ]; then
         echo "Restarting veld-helper service (privileged)..."
         $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
-      else
+      elif [ -n "$HELPER_INSTALL_TRIED" ]; then
         # Same rule as the macOS branch: the store still holds the OLD binary,
         # so restarting would only re-run it. Say so rather than implying the
         # helper moved.
         echo "The privileged veld-helper was NOT updated — see the error above. It keeps running the previous version."
+      else
+        echo "The privileged veld-helper was not updated: this release ships no signature for it."
       fi
     fi
   elif [ -z "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then

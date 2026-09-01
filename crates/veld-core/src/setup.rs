@@ -143,7 +143,13 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     }
 
     // Find the helper binary.
-    let helper_bin = which_self("veld-helper")?;
+    // The auto-bootstrap serves whichever helper this install actually has. A
+    // migrated privileged machine's is in the root-owned store, and `which_self`
+    // alone would answer with a bare name there if the lib-dir copy is gone.
+    let helper_bin = match read_setup_mode().as_deref() {
+        Some("privileged") => which_privileged_helper()?,
+        _ => which_self("veld-helper")?,
+    };
 
     // Spawn the helper as a background process.
     eprintln!("  Starting helper...");
@@ -914,7 +920,7 @@ pub async fn install_helper_with_bin(
 /// Install (or verify) the Veld helper, then verify it is reachable and
 /// start Caddy through it.
 pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
-    let veld_helper_bin = which_self("veld-helper")?;
+    let veld_helper_bin = which_privileged_helper()?;
     install_helper_inner(veld_helper_bin, None).await
 }
 
@@ -3288,6 +3294,35 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable,
 /// or in the veld lib directory.
+/// [`which_self`], plus the root-owned store as a last resort for the
+/// **privileged** helper (#262).
+///
+/// Separate from `which_self` rather than a mode check inside it, and the
+/// reason is that a mode check there does not work: `veld setup privileged`
+/// resolves the binary *before* it writes `setup.json`, so `read_setup_mode()`
+/// cannot yet say "privileged" on the one call path that needs the store — the
+/// gate would be permanently false exactly where it matters. Asking the caller
+/// to state its intent is both correct and shorter.
+///
+/// Last rather than first: `veld setup privileged` must still install a *newer*
+/// lib-dir binary over the store, which is what an update leaves behind, so
+/// preferring the store would pin the machine on whatever it already had. This
+/// arm is for the case where there is nothing else — a lib-dir copy removed by
+/// hand, or an auto-bootstrap on a migrated install — where the alternative is
+/// the bare `"veld-helper"` that produces a service definition launchd cannot
+/// exec.
+pub fn which_privileged_helper() -> Result<PathBuf, anyhow::Error> {
+    let found = which_self("veld-helper")?;
+    if found.is_absolute() && found.is_file() {
+        return Ok(found);
+    }
+    let store = crate::paths::privileged_helper_bin();
+    if crate::signing::verify_binary_signed(&store) {
+        return Ok(store);
+    }
+    Ok(found)
+}
+
 pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     // Prefer the canonical lib directory (where install.sh and veld update put
     // helper/daemon binaries). This avoids picking up stale copies that may
@@ -3317,18 +3352,6 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     // auto-bootstrap on a migrated install — where the alternative is the bare
     // `"veld-helper"` below, which produces a service definition launchd cannot
     // exec.
-    //
-    // Gated on the recorded mode as well as the name: `veld setup unprivileged`
-    // reaches this too, and handing it the store would write
-    // `/var/db/veld-helper/veld-helper` into a **user** LaunchAgent — a
-    // user-level helper permanently pinned to whatever the root store holds,
-    // which nothing on the unprivileged path ever advances.
-    if name == "veld-helper" && read_setup_mode().as_deref() == Some("privileged") {
-        let store = crate::paths::privileged_helper_bin();
-        if crate::signing::verify_binary_signed(&store) {
-            return Ok(store);
-        }
-    }
     // Fall back to PATH lookup.
     Ok(PathBuf::from(name))
 }
