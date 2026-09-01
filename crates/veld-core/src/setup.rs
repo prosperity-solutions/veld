@@ -933,12 +933,16 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
 /// machine where the store cannot be written.
 ///
 /// **The exception is what makes `sudo veld setup privileged` still a repair.**
-/// On a migrated install the lib-dir copy of the helper is deleted once the real
-/// one is in the store, so `which_self` finds nothing and hands this a bare
-/// `veld-helper` with no path. Writing *that* into a plist produces a service
-/// launchd cannot exec — turning the documented remedy for a broken privileged
-/// helper into the thing that breaks it. When the store already holds a properly
-/// signed helper, it is both the right answer and the one already running.
+/// When there is no lib-dir copy and no sibling — a machine whose copy was
+/// removed by hand, or one being repaired after an unusual install —
+/// [`which_self`] ends at a bare `veld-helper` with no path. Writing *that* into
+/// a service definition produces a job launchd cannot exec, turning the
+/// documented remedy for a broken privileged helper into the thing that breaks
+/// it. When the store already holds a properly signed helper, it is both the
+/// right answer and the one already running.
+///
+/// `which_self` has its own last-resort arm for the same case; this is the
+/// second half of that belt, for a `bin` that reached here by another route.
 fn fallback_helper_path(bin: &Path) -> PathBuf {
     let store = crate::paths::privileged_helper_bin();
     if !bin.is_file() && crate::signing::verify_binary_signed(&store) {

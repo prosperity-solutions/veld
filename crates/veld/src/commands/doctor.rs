@@ -156,13 +156,13 @@ impl Diagnostics {
         //
         // The path the SERVICE actually names, when there is one, and only
         // `lib_dir()` otherwise. A privileged install serves the helper from a
-        // root-owned directory (#262) and `install.sh`'s inert copy in the lib
-        // dir is deleted once that has happened — so guessing from `lib_dir()`
-        // would report `not found` for the binary on a perfectly healthy
-        // machine, and report a *version* for it on one mid-migration. This is
-        // the same rule the "Terminal URLs" row already applies to the daemon,
-        // and for the same reason: doctor must ask the question the service
-        // manager answers, not a similar-looking one.
+        // root-owned directory (#262), and the lib-dir copy `install.sh` leaves
+        // behind is the one an update stops advancing — so guessing from
+        // `lib_dir()` would report a version that drifts further from the truth
+        // with every release, for a binary nothing runs. This is the same rule
+        // the "Terminal URLs" row already applies to the daemon, and for the
+        // same reason: doctor must ask the question the service manager answers,
+        // not a similar-looking one.
         // Asked of the service manager for a **privileged** install only. An
         // unprivileged one has its own user-level helper in the lib dir, and a
         // machine that was once privileged can still have a system registration
