@@ -894,11 +894,21 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
     };
     match candidate.install(&version) {
         Ok(_) => store,
-        // Refused because the store already holds something newer. Not a
-        // failure: serve what is there. Returning `bin` instead would point the
-        // service definition at the *older* binary this run brought, which is
-        // the downgrade the refusal just prevented, arriving by another door.
-        Err(_) if crate::signing::verify_binary_signed(&store) => {
+        // Refused *specifically* because the store already holds something
+        // newer. Not a failure: serve what is there. Returning `bin` instead
+        // would point the service definition at the older binary this run
+        // brought, which is the downgrade the refusal just prevented, arriving
+        // by another door.
+        //
+        // Matched on the typed refusal rather than on "does the store still
+        // verify?", which is what this used to do and which quietly swallowed
+        // every other failure — a full disk, or `assert_root_owned_chain`
+        // finding the store's ownership no longer holds — behind a cheerful
+        // "keeping the helper already in …", with the real error dropped. This
+        // is the path `veld doctor` sends people to when it reports the helper
+        // directory unsafe, so a repair that reports nothing wrong while fixing
+        // nothing is the worst outcome it could have.
+        Err(e) if crate::helper_store::is_not_newer(&e) => {
             tracing::info!(
                 "keeping the helper already in {}; {} ({version}) is not newer",
                 store.display(),
@@ -1252,7 +1262,15 @@ pub fn write_helper_service_definition(
         helper_unit_path()
     };
     let body = helper_service_definition(bin, caddy_bin, allow_uid);
-    let tmp = path.with_extension("veld-incoming");
+    // Appended, not `with_extension` — the idiom `helper_store::write_atomically`
+    // documents at length, because `with_extension` *replaces* an existing one
+    // and two files sharing a stem would then stage through a single temp path.
+    // Safe here today only because exactly one file is written per definition
+    // path; a second sidecar written alongside it would need this shape, so it
+    // is the shape used.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".veld-incoming");
+    let tmp = PathBuf::from(tmp);
     {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp)

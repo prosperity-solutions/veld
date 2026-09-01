@@ -221,10 +221,11 @@ impl Candidate {
     fn approve(&self, pubkey: &[u8; 32], floor: &str) -> Result<String> {
         let version = self.verified_version_with(pubkey)?;
         if !signing::version_is_not_older(&version, floor) {
-            bail!(
-                "refusing to install veld-helper {version} over {floor}: a signature says who \
-                 built a binary, not how old it is, so an install may only move forward"
-            );
+            return Err(NotNewer {
+                candidate: version,
+                floor: floor.to_owned(),
+            }
+            .into());
         }
         Ok(version)
     }
@@ -294,6 +295,41 @@ impl Candidate {
 pub fn install_from(binary: &Path, running_version: &str) -> Result<String> {
     let _guard = install_lock();
     Candidate::read(binary)?.install_locked(running_version)
+}
+
+/// The refusal that means "this candidate is not newer", as opposed to any of
+/// the other ways an install can fail.
+///
+/// Carried as its own type inside the `anyhow` chain, and found with
+/// `downcast_ref`, because at least one caller has to treat it differently:
+/// `veld setup privileged` keeps the newer helper the store already holds and
+/// points the service definition at *that*, where any other failure means the
+/// store could not be written and must be reported. Distinguishing them by
+/// "does the store still verify?" instead — which is what this replaced — turns
+/// a full disk or a compromised directory into a cheerful "keeping the helper
+/// already in …", with the real error discarded.
+#[derive(Debug)]
+pub struct NotNewer {
+    pub candidate: String,
+    pub floor: String,
+}
+
+impl std::fmt::Display for NotNewer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "refusing to install veld-helper {} over {}: a signature says who built a binary, \
+             not how old it is, so an install may only move forward",
+            self.candidate, self.floor
+        )
+    }
+}
+
+impl std::error::Error for NotNewer {}
+
+/// Whether `error` is the version-floor refusal rather than a real failure.
+pub fn is_not_newer(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<NotNewer>().is_some()
 }
 
 /// The verified version of the helper currently in the store, if there is one.
@@ -529,6 +565,41 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("may only move forward"), "{err}");
+    }
+
+    /// The version refusal is **typed**, and every other failure is not.
+    ///
+    /// `veld setup privileged` branches on this to decide between "the store
+    /// already has something newer, serve that" and "the store could not be
+    /// written, say so". Inferring it from "does the store still verify?" — the
+    /// version this replaced — reported a full disk or a compromised store
+    /// directory as a cheerful version mismatch and dropped the real error.
+    #[test]
+    fn only_the_version_refusal_is_typed_as_such() {
+        let scratch = Scratch::new("typed");
+        let (key, pubkey) = test_key();
+
+        let old_bin = signed_helper(scratch.path(), "16.57.0", &key);
+        let refusal = Candidate::read(&old_bin)
+            .unwrap()
+            .approve(&pubkey, "16.58.3")
+            .unwrap_err();
+        assert!(is_not_newer(&refusal), "{refusal:#}");
+        // The message still reads well on its own — it is what the peer gets.
+        assert!(
+            refusal.to_string().contains("may only move forward"),
+            "{refusal}"
+        );
+
+        // A signature failure is a different kind of thing and must not be
+        // mistaken for "not newer".
+        let attacker = SigningKey::from_bytes(&[5u8; 32]);
+        let bad = signed_helper(scratch.path(), "99.0.0", &attacker);
+        let other = Candidate::read(&bad)
+            .unwrap()
+            .approve(&pubkey, "16.58.3")
+            .unwrap_err();
+        assert!(!is_not_newer(&other), "{other:#}");
     }
 
     /// The same helper, newer, is accepted — otherwise the rule above would be

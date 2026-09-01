@@ -198,10 +198,20 @@ jobs:
           # cross-compiled artifact that actually ships, and it is the one thing
           # a host-architecture test cannot speak for. Failing the release is the
           # cheap outcome; shipping is not.
+          # The magic and the field width below are hand-copied from
+          # `veld_core::signing` (VERSION_MAGIC_OBFUSCATED / VERSION_MAGIC_KEY /
+          # VERSION_FIELD_LEN) — there is no way to read Rust constants from a
+          # shell step. What stops that duplication rotting silently is the last
+          # assertion: the record must decode to the version this release is
+          # being cut as. Change the record's layout without changing these
+          # offsets and the extracted string stops matching, so the check fails
+          # loudly instead of quietly validating a prefix of the new format.
           python3 - <<'PYCHECK'
+          import os
           import sys
           magic = bytes(b ^ 0xA5 for b in bytes.fromhex(
               "ffa3297e793eedb20f1120c7f79c5cc2"))
+          expected = os.environ["EXPECTED_VERSION"]
           data = open("dist/veld-helper", "rb").read()
           hits = [i for i in range(len(data) - 15) if data[i:i + 16] == magic]
           versions = set()
@@ -215,7 +225,15 @@ jobs:
                   "veld_core::signing::version_record and the VELD_HELPER_VERSION_RECORD "
                   "static in crates/veld-helper/src/main.rs."
               )
-          print(f"veld-helper version record: {versions.pop()}")
+          found = versions.pop()
+          if found != expected:
+              sys.exit(
+                  f"dist/veld-helper's version record says {found!r} but this release is "
+                  f"{expected!r}. Either the record's layout changed and the offsets in this "
+                  "step no longer match veld_core::signing, or the binary was built before "
+                  "the version was stamped into Cargo.toml."
+              )
+          print(f"veld-helper version record: {found}")
           PYCHECK
           # veld-sign is a CI tool that must RUN on the runner, so it is built
           # for the host — never for ${{ matrix.target }}, whose binary is
@@ -225,6 +243,10 @@ jobs:
           tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
         env:
           SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          # Read by the version-record check above. Passed through the
+          # environment rather than interpolated into the heredoc so the heredoc
+          # stays quoted and the shell cannot touch the Python source.
+          EXPECTED_VERSION: ${{ needs.plan.outputs.new_release_version }}
 
       # Gateway: separate per-arch tarball, consumed by the docker-gateway job
       # and attached to the release for operators who run it outside Docker.
