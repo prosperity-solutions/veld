@@ -186,6 +186,18 @@ else
   bad "install.sh no longer invokes \`${HELPER_INSTALL_CMD} --binary\` — a migrated privileged install would stop receiving helper updates"
 fi
 
+# The invocation must be `set -e`-safe. This script runs under `set -euo
+# pipefail`, which exempts a command on the left of `||` but NOT one whose exit
+# status is read afterwards with `$?`. Written the plain way, a refused helper
+# install — or the exit 2 an older CLI returns for an unknown subcommand, which
+# is the *expected* path on `veld update --target-version <older>` — aborts the
+# whole install before the services are restarted, silently, mid-update.
+if grep -A 2 -- "${HELPER_INSTALL_CMD} --binary" "$SCRIPT" | grep -q '||'; then
+  ok "the ${HELPER_INSTALL_CMD} call is \`set -e\`-safe"
+else
+  bad "the ${HELPER_INSTALL_CMD} call is not guarded by \`||\` — under \`set -e\` a refusal aborts the install"
+fi
+
 MAIN_RS="$REPO_ROOT/crates/veld/src/main.rs"
 if grep -q "name = \"${HELPER_INSTALL_CMD}\"" "$MAIN_RS"; then
   ok "the CLI still declares the \`${HELPER_INSTALL_CMD}\` subcommand"

@@ -1203,8 +1203,14 @@ fi
 # has just rejected.
 HELPER_INSTALL_OK="1"
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
-  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper"
-  HELPER_INSTALL_RC=$?
+  # `|| HELPER_INSTALL_RC=$?` rather than a bare call followed by `$?`: this
+  # script runs under `set -e`, which exempts a command on the left of `||` but
+  # NOT one whose status is read afterwards. Written the plain way, any refusal —
+  # or the exit 2 below, which is the *expected* path on an older CLI — would
+  # abort the whole install before the services are restarted.
+  HELPER_INSTALL_RC=0
+  "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper" \
+    || HELPER_INSTALL_RC=$?
   # Exit 2 is clap's "unrecognized subcommand": the CLI just installed is OLDER
   # than this script and has no `_helper-install`. That happens on
   # `veld update --target-version <older>`, where the script always comes from
