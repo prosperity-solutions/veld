@@ -146,6 +146,22 @@ impl Candidate {
         // every other blocking task with it. Opening non-blocking lets the
         // regular-file check below run at all. It is a no-op for the regular
         // files this actually installs.
+        // Asked of the path **before** opening it, which is a separate job from
+        // the descriptor check below and not a duplicate of it. Some device
+        // nodes act on `open` itself: opening `/dev/watchdog` as root arms the
+        // hardware watchdog, and dropping the descriptor without the magic close
+        // reboots the machine on a default kernel. `O_NONBLOCK` and an `fstat`
+        // cannot help with that — by then the open has happened. This is a
+        // deliberate TOCTOU: losing the race costs nothing, because the
+        // descriptor check is what actually decides, and winning it avoids
+        // touching a device we were never meant to open.
+        if !std::fs::metadata(binary)
+            .context("cannot read the staged helper")?
+            .is_file()
+        {
+            bail!("the staged helper is not a regular file; refusing to install it");
+        }
+
         let file = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(nix::libc::O_NONBLOCK)

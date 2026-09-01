@@ -67,7 +67,24 @@ pub fn sig_path_for(binary: &Path) -> PathBuf {
 /// would fail a genuine signature closed. The bound is unchanged — the buffer is
 /// 64 bytes, so a larger `.sig` is still never read past that.
 fn read_detached_sig(binary: &Path) -> Option<[u8; 64]> {
-    let mut file = std::fs::File::open(sig_path_for(binary)).ok()?;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = sig_path_for(binary);
+    // `O_NONBLOCK`, and a regular-file check on the descriptor, for the same
+    // reason `helper_store::Candidate::read` does it to the binary: this path
+    // sits beside a binary in a directory the installing user can write, and on
+    // the install RPC it is a path they *name*. A plain `open(O_RDONLY)` on a
+    // **FIFO blocks until somebody opens the write end** — which would park the
+    // helper's binary watcher, `veld doctor`, or a blocking-pool thread of the
+    // root daemon, permanently and uncancellably.
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK)
+        .open(&path)
+        .ok()?;
+    if !file.metadata().ok()?.is_file() {
+        return None;
+    }
     let mut sig = [0u8; 64];
     file.read_exact(&mut sig).ok()?;
     Some(sig)
@@ -496,6 +513,28 @@ mod tests {
         for (i, byte) in magic.iter().enumerate() {
             assert_eq!(*byte, VERSION_MAGIC_OBFUSCATED[i] ^ VERSION_MAGIC_KEY);
         }
+    }
+
+    /// A FIFO where the signature should be is refused, not waited on.
+    ///
+    /// Without `O_NONBLOCK` this test hangs rather than fails — which is exactly
+    /// what the helper's binary watcher, `veld doctor`, and a blocking-pool
+    /// thread of the root daemon would do on a machine where somebody left one
+    /// in the lib dir.
+    #[test]
+    fn a_fifo_in_place_of_a_signature_is_refused_without_blocking() {
+        let dir = std::env::temp_dir().join(format!("veld-signing-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        std::fs::write(&binary, b"binary").unwrap();
+        let sig = sig_path_for(&binary);
+        let c = std::ffi::CString::new(sig.to_str().unwrap()).unwrap();
+        // SAFETY: a plain libc call with a valid NUL-terminated path.
+        assert_eq!(unsafe { nix::libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+
+        assert!(!verify_binary_signed(&binary));
+        assert!(relaunch_guard(&binary).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
