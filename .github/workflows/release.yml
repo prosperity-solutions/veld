@@ -214,10 +214,25 @@ jobs:
           expected = os.environ["EXPECTED_VERSION"]
           data = open("dist/veld-helper", "rb").read()
           hits = [i for i in range(len(data) - 15) if data[i:i + 16] == magic]
-          versions = set()
-          for i in hits:
-              field = data[i + 16:i + 48]
-              versions.add(field.rstrip(b"\0").decode("ascii", "replace"))
+          # Mirrors `veld_core::signing::parse_version_field`: a hit whose field
+          # is not printable ASCII followed by NUL padding is NOT a record, and
+          # the Rust reader skips it. Counting every occurrence of the magic
+          # instead would let one unlucky 16-byte sequence in a dependency — or
+          # a const-folded copy of the needle on some target — fail a release the
+          # runtime would read perfectly.
+          def field_version(raw):
+              end = raw.find(b"\0")
+              end = len(raw) if end < 0 else end
+              if end == 0 or raw[end:].strip(b"\0"):
+                  return None
+              try:
+                  text = raw[:end].decode("ascii")
+              except UnicodeDecodeError:
+                  return None
+              ok = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-+"
+              return text if all(c in ok for c in text) else None
+
+          versions = {v for v in (field_version(data[i + 16:i + 48]) for i in hits) if v}
           if len(versions) != 1:
               sys.exit(
                   f"dist/veld-helper carries {len(hits)} version record(s) resolving to "

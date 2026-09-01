@@ -1240,6 +1240,12 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
       if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
         sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
         sudo rm -f "$HELPER_PLIST" 2>/dev/null || true
+        # The root-owned helper directory goes with the daemon that used it
+        # (issue #262). Removed here, under the sudo this branch already holds,
+        # because after this point `setup.json` no longer says "privileged" and
+        # `veld uninstall` will not escalate — the directory would otherwise
+        # survive as root-owned files with no veld able to delete them.
+        sudo rm -rf /var/db/veld-helper 2>/dev/null || true
         echo "System LaunchDaemon stopped and removed."
       else
         echo "Warning: could not stop system LaunchDaemon (sudo unavailable)."
@@ -1253,6 +1259,8 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
       if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
         sudo systemctl stop veld-helper 2>/dev/null || true
         sudo systemctl disable veld-helper 2>/dev/null || true
+        # See the macOS branch above.
+        sudo rm -rf /var/lib/veld-helper 2>/dev/null || true
         echo "System service stopped and disabled."
       else
         echo "Warning: could not stop system veld-helper service (sudo unavailable)."

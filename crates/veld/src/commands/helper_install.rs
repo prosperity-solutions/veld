@@ -119,18 +119,26 @@ fn setup_mode() -> Option<String> {
     if let Some(mode) = super::read_setup_mode() {
         return Some(mode);
     }
-    let sudo_user = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())?;
-    let home = std::path::PathBuf::from(if cfg!(target_os = "macos") {
-        format!("/Users/{sudo_user}")
-    } else {
-        format!("/home/{sudo_user}")
-    });
-    let content = std::fs::read_to_string(home.join(".veld").join("setup.json")).ok()?;
+    let content =
+        std::fs::read_to_string(sudo_user_home()?.join(".veld").join("setup.json")).ok()?;
     let value: serde_json::Value = serde_json::from_str(&content).ok()?;
     value
         .get("mode")
         .and_then(|m| m.as_str())
         .map(str::to_owned)
+}
+
+/// The invoking user's home when this process is running under `sudo`.
+///
+/// `None` when it is not — every caller then falls back to the ordinary
+/// `$HOME`-based answer.
+fn sudo_user_home() -> Option<std::path::PathBuf> {
+    let user = std::env::var("SUDO_USER").ok().filter(|u| !u.is_empty())?;
+    Some(std::path::PathBuf::from(if cfg!(target_os = "macos") {
+        format!("/Users/{user}")
+    } else {
+        format!("/home/{user}")
+    }))
 }
 
 /// Delete the helper left in the user-writable lib dir.
@@ -151,7 +159,19 @@ fn setup_mode() -> Option<String> {
 /// Best-effort and silent. Failing to remove a file nothing runs is not worth
 /// failing an update over.
 fn remove_stale_lib_dir_helper() {
-    let stale = veld_core::paths::lib_dir().join("veld-helper");
+    // Resolved for the same user `setup_mode` resolved the mode for.
+    // `paths::lib_dir()` reads `$HOME`, which under `sudo` is root's — so on a
+    // sudo-run install the mode would be found via `SUDO_USER` and the install
+    // would proceed, while this looked in `/root/.local/lib/veld` and left the
+    // real user's copy exactly where it was. The two halves have to agree about
+    // whose install this is.
+    let lib = match sudo_user_home() {
+        Some(home) if !veld_core::paths::lib_dir().starts_with(&home) => {
+            home.join(".local").join("lib").join("veld")
+        }
+        _ => veld_core::paths::lib_dir(),
+    };
+    let stale = lib.join("veld-helper");
     if veld_core::paths::is_privileged_helper_path(&stale) {
         return;
     }

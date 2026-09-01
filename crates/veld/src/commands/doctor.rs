@@ -691,6 +691,19 @@ impl Diagnostics {
                 // reported by `check_helper_managed` above. Saying it twice in
                 // different words would send somebody chasing two problems.
                 None => {}
+                // Both passing arms require the file to actually be there.
+                // Without that, a plist naming a store whose binary is gone
+                // takes the first arm (the check is lexical) or the second (the
+                // directory is root-owned and still stats fine) and doctor
+                // reports green for a machine whose root daemon cannot exec at
+                // all — the opposite of this row's job.
+                Some(path) if !path.is_file() => self.checks.push(Check {
+                    pass: false,
+                    label: format!(
+                        "The privileged veld-helper service names {}, but there is no binary                          there — it cannot start. Run `veld update`, or `sudo veld setup                          privileged` if that does not repair it",
+                        tilde_path(&path)
+                    ),
+                }),
                 Some(path) if veld_core::paths::is_privileged_helper_path(&path) => {
                     self.checks.push(Check {
                         pass: true,
@@ -717,10 +730,11 @@ impl Diagnostics {
                         "The privileged veld-helper runs as root from {}, which you can write \
                          \u{2014} anything running as you could replace it and gain root at the \
                          next reboot. It moves itself to {} on its next restart; if this \
-                         persists, the helper's log says why, and `sudo veld setup privileged` \
+                         persists, {} says why, and `sudo veld setup privileged` \
                          does it now",
                         tilde_path(&path),
                         tilde_path(&veld_core::paths::privileged_helper_dir()),
+                        helper_log_hint(),
                     ),
                 }),
             }
@@ -1849,6 +1863,24 @@ fn unreportable_gate_reason() -> &'static str {
     "this helper predates the check and cannot report it. Its socket may or may not be gated \
      by an `--allow-uid` in its service definition. Run `veld update`; the new helper gates \
      itself and reports it."
+}
+
+/// Where to tell a user to look for the privileged helper's own output.
+///
+/// macOS writes a file beside the binary; the Linux unit sets no
+/// `StandardOutput=`, so systemd journals it and there is no such file. Naming
+/// a path that does not exist is worse than naming none.
+fn helper_log_hint() -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "the helper's log ({})",
+            tilde_path(&veld_core::paths::service_log_path(
+                &veld_core::paths::privileged_helper_bin()
+            ))
+        )
+    } else {
+        format!("`journalctl -u {}`", veld_core::setup::HELPER_SERVICE_LINUX)
+    }
 }
 
 /// Whether the directory holding `helper` is one only root can write.

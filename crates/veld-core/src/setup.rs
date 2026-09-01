@@ -716,6 +716,12 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
          the only thing holding it up, but it is the intended mechanism. -->
     <key>KeepAlive</key>
     <true/>
+    <!-- WatchPaths is a backstop, not the mechanism. Since #262 the binary is
+         replaced by rename() rather than written in place, and a rename
+         *replaces the vnode* this watch is on rather than writing to it — which
+         is the case launchd handles least reliably. The helper's own poller
+         (watch_own_binary) is what actually notices an install; do not remove it
+         on the strength of this key. -->
     <key>WatchPaths</key>
     <array>
         <string>{bin_path}</string>
@@ -1163,6 +1169,13 @@ fn helper_systemd_unit(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u
     // restarted (or exits to pick up a new binary), tearing down every URL.
     // Leaving Caddy running mirrors the macOS behavior so a helper restart
     // doesn't drop the proxy.
+    //
+    // **A second thing now depends on it** (#262): the detached child that
+    // re-registers this service after the helper migrates itself is in the same
+    // cgroup, and `setsid` does not move it out of one. Under the default kill
+    // mode that child would be killed by the very `systemctl restart` it is
+    // running, leaving the helper unregistered until the next boot. See
+    // `reload_and_restart_helper_unit`.
     format!(
         "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
     )
@@ -1198,10 +1211,17 @@ pub async fn bootout_and_drain_system_job(label: &str) {
 
 /// Reload systemd's unit files and restart the privileged helper.
 ///
-/// The Linux half of the helper's self-migration (#262). Unlike macOS this needs
-/// no detached child: `daemon-reload` picks up the rewritten `ExecStart`, and
-/// the unit's `Restart=always` brings the helper back on the new path after it
-/// exits — so the process being replaced can do the whole thing itself.
+/// The Linux half of the helper's self-migration (#262). `daemon-reload` picks
+/// up the rewritten `ExecStart`; the restart brings the helper back on the new
+/// path.
+///
+/// Called from the **same detached child** macOS uses — the two platforms share
+/// one shape rather than diverging — and that child survives its own
+/// `systemctl restart` only because the unit carries `KillMode=process`.
+/// `setsid` takes it out of the parent's session, not out of its cgroup, and
+/// systemd's default `KillMode=control-group` would kill the client mid-job.
+/// The setting exists for Caddy; this depends on it too. See
+/// [`helper_systemd_unit`].
 #[cfg(not(target_os = "macos"))]
 pub async fn reload_and_restart_helper_unit() -> Result<(), anyhow::Error> {
     run_cmd("systemctl", &["daemon-reload"]).await?;
@@ -1288,6 +1308,15 @@ pub fn write_helper_service_definition(
     }
     std::fs::rename(&tmp, &path)
         .with_context(|| format!("failed to move {} into place", tmp.display()))?;
+    // The directory entry, not just the file — see
+    // `helper_store::sync_parent_dir` for the crash this orders against. It
+    // matters most here: this is the rename that must NOT survive one whose
+    // partner (the store binary) did not.
+    if let Some(dir) = path.parent() {
+        if let Ok(handle) = std::fs::File::open(dir) {
+            let _ = handle.sync_all();
+        }
+    }
     Ok(path)
 }
 

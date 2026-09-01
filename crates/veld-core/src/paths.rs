@@ -222,18 +222,29 @@ pub fn privileged_helper_bin() -> PathBuf {
 /// Whether `path` is the helper inside the root-owned directory — i.e. whether
 /// this install has been migrated off the user-writable location.
 ///
-/// Compares canonicalised paths so a symlinked `/var` (macOS resolves it to
-/// `/private/var`) does not read as a different install. A path that cannot be
-/// canonicalised is not the store's, which is the fail-closed direction: it
-/// leaves the caller on the old, still-working copy path.
+/// **Purely lexical, and deliberately so.** The question is about the *service
+/// definition*: does the thing launchd or systemd was told to exec live in the
+/// store? That is true or false whether or not the file is presently there.
+///
+/// An earlier version canonicalised both sides, which made a **missing store
+/// binary** answer "not migrated" — the same as a lib-dir install. The
+/// consequence was the opposite of what the callers wanted: `veld
+/// _helper-install` returned 0 in silence for a machine whose root daemon has no
+/// binary to exec, so the one loud message it exists to print ("the privileged
+/// veld-helper is not answering … run `sudo veld setup privileged`") was
+/// unreachable, and `veld doctor` reported the same machine green.
+///
+/// The `/private` arm is macOS's `/var` symlink: `launchctl print` echoes back
+/// whatever string the plist holds, and this crate always writes the `/var`
+/// spelling, but a definition written by hand or resolved elsewhere may carry
+/// the resolved one.
 pub fn is_privileged_helper_path(path: &Path) -> bool {
-    match (
-        std::fs::canonicalize(path),
-        std::fs::canonicalize(privileged_helper_bin()),
-    ) {
-        (Ok(a), Ok(b)) => a == b,
-        _ => false,
+    let bin = privileged_helper_bin();
+    if path == bin {
+        return true;
     }
+    path.strip_prefix("/private")
+        .is_ok_and(|rest| Path::new("/").join(rest) == bin)
 }
 
 pub fn dnsmasq_conf_dir() -> PathBuf {
@@ -272,6 +283,45 @@ pub fn caddy_log_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    /// The migrated-path check is lexical, so a **missing** store binary still
+    /// reads as migrated.
+    ///
+    /// This is the fail-open that made `veld _helper-install` return 0 in
+    /// silence, and `veld doctor` report green, for a machine whose root daemon
+    /// had no binary to exec — the two places that exist to say so loudly.
+    #[test]
+    fn a_missing_store_binary_still_reads_as_the_privileged_helper_path() {
+        let bin = super::privileged_helper_bin();
+        assert!(
+            !bin.exists(),
+            "this test assumes no store on the test machine"
+        );
+        assert!(super::is_privileged_helper_path(&bin));
+    }
+
+    /// macOS resolves `/var` to `/private/var`; both spellings are the store.
+    #[test]
+    fn both_spellings_of_the_store_path_are_recognised() {
+        let bin = super::privileged_helper_bin();
+        let private = std::path::PathBuf::from("/private")
+            .join(bin.strip_prefix("/").expect("the store path is absolute"));
+        assert!(super::is_privileged_helper_path(&private), "{private:?}");
+    }
+
+    /// A lib-dir helper is not the store's, and neither is a lookalike.
+    #[test]
+    fn a_user_writable_helper_is_not_the_privileged_helper_path() {
+        assert!(!super::is_privileged_helper_path(std::path::Path::new(
+            "/Users/u/.local/lib/veld/veld-helper"
+        )));
+        assert!(!super::is_privileged_helper_path(std::path::Path::new(
+            "/usr/local/lib/veld/veld-helper"
+        )));
+        // A sibling in the same directory is not the helper.
+        let sibling = super::privileged_helper_dir().join("veld-daemon");
+        assert!(!super::is_privileged_helper_path(&sibling));
+    }
     use super::*;
 
     #[test]

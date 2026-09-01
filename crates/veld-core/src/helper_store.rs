@@ -66,10 +66,31 @@ use crate::signing;
 /// `()`, so there is no invariant a panicking holder could have broken, and
 /// refusing every future install because one panicked is the wedged updater
 /// #338's rule 2 forbids.
-fn install_lock() -> MutexGuard<'static, ()> {
+fn install_lock() -> Option<MutexGuard<'static, ()>> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     let lock = LOCK.get_or_init(|| Mutex::new(()));
-    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    match lock.try_lock() {
+        Ok(guard) => Some(guard),
+        // Poisoned but free: the data guarded is `()`, so there is no invariant
+        // a panicking holder could have broken, and refusing every future
+        // install because one panicked is the wedged updater #338 forbids.
+        Err(std::sync::TryLockError::Poisoned(p)) => Some(p.into_inner()),
+        Err(std::sync::TryLockError::WouldBlock) => None,
+    }
+}
+
+/// Take the install lock, or say why not.
+///
+/// **`try_lock`, not `lock`, and that is about threads rather than memory.** The
+/// helper serves this from `spawn_blocking`, so a *waiting* request holds a
+/// thread of tokio's blocking pool (512 by default) for as long as the holder
+/// runs. The caller is the uid-gated user — whom this module's doc correctly
+/// names as the attacker — so a few hundred concurrent `install_helper`
+/// requests would starve every other blocking task in the root daemon while the
+/// memory bound the lock was added for held perfectly. Refusing immediately
+/// costs an honest error and no thread.
+fn take_install_lock() -> Result<MutexGuard<'static, ()>> {
+    install_lock().context("another helper install is already in progress")
 }
 
 /// Largest candidate binary this will read. The release helper is ~6 MB, so
@@ -253,7 +274,7 @@ impl Candidate {
     /// [`crate::signing::version_is_not_older`]. Older ones are the whole reason
     /// this function takes `running_version` at all.
     pub fn install(&self, running_version: &str) -> Result<String> {
-        let _guard = install_lock();
+        let _guard = take_install_lock()?;
         self.install_locked(running_version)
     }
 
@@ -279,6 +300,15 @@ impl Candidate {
         // that will refuse to relaunch onto itself. A stale binary beside a new
         // signature is the same refusal, one release earlier, and the next
         // install repairs it.
+        //
+        // One consequence worth stating rather than discovering: a crash between
+        // the two renames leaves a pair that does not verify, which also makes
+        // `installed_version()` answer `None` — so `rollback_floor` drops back
+        // to the running version until the next install repairs it, briefly
+        // reopening the store-rewind window the floor exists to close. The
+        // window costs an attacker a crash they cannot cause and a race they
+        // cannot observe, which is why it is documented rather than closed with
+        // a second persisted marker that would have its own torn state.
         //
         // The same order is what makes this safe against the running helper's
         // own binary watcher, which is a live race and not a hypothetical: the
@@ -309,7 +339,7 @@ impl Candidate {
 /// needs to inspect a candidate before committing to it, but nothing that takes
 /// a path from outside should reach them directly.
 pub fn install_from(binary: &Path, running_version: &str) -> Result<String> {
-    let _guard = install_lock();
+    let _guard = take_install_lock()?;
     Candidate::read(binary)?.install_locked(running_version)
 }
 
@@ -482,11 +512,22 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     // writing over each other, and whichever renamed second winning. Appending
     // gives `veld-helper.incoming` and `veld-helper.sig.incoming`, which is the
     // same rule `signing::sig_path_for` follows and for the same reason.
+    //
+    // The pid makes it unique **across processes**, which the in-process
+    // `install_lock` cannot. `veld setup privileged` stages through here in the
+    // `veld` process while the helper serves `install_helper` in its own — a
+    // plausible pairing during a repair — and with one fixed name the second
+    // writer's `remove_file` unlinks the first's in-flight temp, after which the
+    // first renames whatever now sits at that name into place. The store would
+    // then hold one writer's binary beside the other's signature: a pair that
+    // never verifies, so the helper refuses every future self-relaunch and
+    // doctor's signature row goes red on an install nobody attacked.
     let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".incoming");
+    tmp.push(format!(".incoming.{}", std::process::id()));
     let tmp = PathBuf::from(tmp);
-    // A leftover from an interrupted install would otherwise be opened and
-    // truncated, which is fine, but removing it first also clears a stale mode.
+    // A leftover from an interrupted install by *this* pid would otherwise be
+    // opened and truncated, which is fine, but removing it first also clears a
+    // stale mode.
     let _ = std::fs::remove_file(&tmp);
     {
         let mut file = std::fs::File::create(&tmp)
@@ -502,6 +543,35 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     set_mode(&tmp, mode)?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("cannot move {} into place", tmp.display()))?;
+    sync_parent_dir(path)?;
+    Ok(())
+}
+
+/// Flush the directory entry created by a rename.
+///
+/// `sync_all` on the *file* makes its contents durable; it says nothing about
+/// the directory entry pointing at them, and on ext4 `data=writeback`, XFS and
+/// several network/overlay mounts two renames in two directories are not
+/// ordered against each other.
+///
+/// The unrecoverable combination is the one this exists to prevent: the service
+/// definition's rename survives a power cut and the store binary's does not.
+/// launchd is then pointed at a path with nothing at it, `KeepAlive` turns that
+/// into a permanent throttled retry, and the repair channel — an install RPC
+/// served by the helper that is no longer running — is gone. That is #338's
+/// wedged updater, reached by a power cut rather than by a bug.
+///
+/// Best-effort on the `open`: a filesystem that will not let us open a directory
+/// for syncing is not a reason to fail an install that has otherwise succeeded.
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(dir) = path.parent() else {
+        return Ok(());
+    };
+    if let Ok(handle) = std::fs::File::open(dir) {
+        handle
+            .sync_all()
+            .with_context(|| format!("cannot flush the directory entry in {}", dir.display()))?;
+    }
     Ok(())
 }
 

@@ -535,19 +535,16 @@ impl State {
         // teardown of the system helper goes through `launchctl bootout`
         // (SIGTERM), not this command, so refusing here never blocks uninstall.
         if self.privileged {
-            let exe = match std::env::current_exe() {
-                Ok(e) => e,
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        "refusing shutdown: cannot resolve own executable to verify it"
-                    );
+            let exe = match crate::own_exe() {
+                Some(e) => e,
+                None => {
+                    warn!("refusing shutdown: cannot resolve own executable to verify it");
                     return Handled::reply(Response::err(
                         "cannot resolve own executable to verify it before exiting",
                     ));
                 }
             };
-            if let Some(reason) = crate::signing::relaunch_guard(&exe) {
+            if let Some(reason) = crate::signing::relaunch_guard(exe) {
                 warn!(
                     reason,
                     "refusing shutdown: exiting would relaunch a tampered binary"

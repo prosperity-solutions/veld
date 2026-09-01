@@ -76,6 +76,25 @@ pub const REREGISTER_FLAG: &str = "--reregister-service";
 /// boot. Retrying is cheap and that outcome is not.
 const REREGISTER_ATTEMPTS: u32 = 3;
 
+/// Where a reader should look for this helper's own output, per platform.
+///
+/// macOS names a file because the plist does (`service_log_path`); the Linux
+/// unit sets no `StandardOutput=`, so systemd journals it and no such file
+/// exists. Saying "the helper's log" without this would point every Linux user
+/// at a path that is not there — including from the migration warning below and
+/// from `veld doctor`'s row.
+pub fn log_location_hint() -> String {
+    if cfg!(target_os = "macos") {
+        format!(
+            "{}",
+            veld_core::paths::service_log_path(&veld_core::paths::privileged_helper_bin())
+                .display()
+        )
+    } else {
+        format!("journalctl -u {}", veld_core::setup::HELPER_SERVICE_LINUX)
+    }
+}
+
 /// Re-register the privileged helper service from the definition already on
 /// disk, then exit. The `--reregister-service` entry point.
 pub async fn reregister_service() -> anyhow::Result<()> {
@@ -141,7 +160,10 @@ async fn reregister_once() -> anyhow::Result<()> {
 /// would come back ungated, so the uid is written down explicitly — see
 /// [`relocate`].
 pub async fn migrate_to_root_owned_dir(privileged: bool, caddy_bin: Option<&Path>, gate: &Gate) {
-    let exe = std::env::current_exe().ok();
+    // The cached path — see `crate::own_exe`. Migration is the very thing that
+    // replaces the binary by rename, so resolving it fresh here is how a Linux
+    // helper would end up reasoning about a `" (deleted)"` path.
+    let exe = crate::own_exe().map(Path::to_path_buf);
     let facts = Facts {
         privileged,
         exe_is_in_store: exe
@@ -182,6 +204,7 @@ pub async fn migrate_to_root_owned_dir(privileged: bool, caddy_bin: Option<&Path
                 Err(Failed(e)) => {
                     warn!(
                         error = %format!("{e:#}"),
+                        hint = %log_location_hint(),
                         "could not move the privileged helper into a root-owned directory; it \
                          keeps running from its current location and this will be retried on the \
                          next start"

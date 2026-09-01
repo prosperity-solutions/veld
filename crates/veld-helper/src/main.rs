@@ -83,6 +83,53 @@ struct HelperConfig {
     allow_uid: Option<u32>,
 }
 
+/// This process's own executable path, resolved **once** at startup.
+///
+/// **Resolving it again later is a Linux bug, not a style preference.** Since
+/// #262 the helper binary is replaced by `rename()` rather than written in
+/// place, which unlinks the running process's inode — and Linux's
+/// `/proc/self/exe`, which `std::env::current_exe()` reads, then answers
+/// `"/var/lib/veld-helper/veld-helper (deleted)"`. Every later caller
+/// (`restart_blocker`'s exec probe and signature gate, the binary watcher, the
+/// `shutdown` guard) would be asking about a path that does not exist, refuse
+/// for that reason, and never relaunch — killing the sudo-free self-update on
+/// Linux entirely, which is the delivery mechanism #338's rules exist to
+/// protect. macOS does not have the problem: `_NSGetExecutablePath` returns the
+/// path used to exec, and the new binary is at it.
+///
+/// Caching at startup is also the *right* value for the relaunch gate, which
+/// wants "the file the service manager will exec next", not "the inode I am".
+static OWN_EXE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
+/// [`OWN_EXE`], resolved on first use and then fixed for the life of the
+/// process. Call it early — `main` does — so the value predates any install.
+pub(crate) fn own_exe() -> Option<&'static Path> {
+    OWN_EXE
+        .get_or_init(|| {
+            std::env::current_exe()
+                .inspect_err(|e| {
+                    warn!(error = %e, "could not resolve own executable path");
+                })
+                .ok()
+                .map(strip_deleted_suffix)
+        })
+        .as_deref()
+}
+
+/// Drop a trailing `" (deleted)"` from a `/proc/self/exe` reading.
+///
+/// Belt to [`OWN_EXE`]'s braces: the cache is initialised before anything can
+/// replace the binary, so this should never fire. It is here because the cost of
+/// being wrong is a helper that refuses to ever relaunch, and because a future
+/// caller that resolves the path itself would otherwise reintroduce the bug
+/// silently.
+fn strip_deleted_suffix(path: PathBuf) -> PathBuf {
+    match path.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(real) => PathBuf::from(real),
+        None => path,
+    }
+}
+
 fn default_socket_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/veld-helper.sock")
@@ -130,9 +177,6 @@ fn parse_args() -> Result<HelperConfig> {
                 let path = args.get(i).context("--caddy-bin requires a value")?;
                 caddy_bin = Some(PathBuf::from(path));
             }
-            // Consumed above, before the process ever gets here; listed so the
-            // unknown-argument arm does not reject a flag this binary accepts.
-            migrate::REREGISTER_FLAG => {}
             "--allow-uid" => {
                 i += 1;
                 let value = args.get(i).context("--allow-uid requires a value")?;
@@ -166,11 +210,27 @@ async fn main() -> Result<()> {
     // on disk and exits. Migration spawns it on the freshly installed binary
     // (see `migrate`), detached, because on macOS the `bootout` half of a
     // re-registration kills the job that would otherwise be doing it.
-    if std::env::args().any(|a| a == migrate::REREGISTER_FLAG) {
+    // Matched as `argv[1]` **only**, and refused to a non-root caller.
+    //
+    // `args().any(...)` was wrong twice over: an argument *value* that happened
+    // to equal the flag (`--caddy-bin --reregister-service`) would trigger it,
+    // and the store binary is world-executable `0755`, so any local user could
+    // run it. The first thing this path does is `launchctl bootout
+    // system/dev.veld.helper`; today that fails for a non-root caller, but the
+    // only thing making it safe would be a check inside a different program.
+    if std::env::args().nth(1).as_deref() == Some(migrate::REREGISTER_FLAG) {
+        // SAFETY: `geteuid` takes no arguments and cannot fail.
+        if unsafe { libc::geteuid() } != 0 {
+            anyhow::bail!("{} may only be used by root", migrate::REREGISTER_FLAG);
+        }
         return migrate::reregister_service().await;
     }
 
     let config = parse_args()?;
+
+    // Resolved here, before the socket is bound and long before any install can
+    // replace the binary — see `OWN_EXE`.
+    let exe = own_exe();
 
     // Remove stale socket if it exists.
     if config.socket_path.exists() {
@@ -225,10 +285,7 @@ async fn main() -> Result<()> {
     // land on `UnreadableLibDir`, whose user-facing text names the directory —
     // so log the io error here or it is gone from the one place a support
     // transcript would look for it.
-    let exe = std::env::current_exe()
-        .inspect_err(|e| warn!(error = %e, "could not read own executable path; the peer-uid gate cannot be derived"))
-        .ok();
-    let gate = Gate::resolve(config.allow_uid, privileged, exe.as_deref());
+    let gate = Gate::resolve(config.allow_uid, privileged, exe);
     log_gate(&gate);
 
     // Kept before `config.caddy_bin` is moved into the handler: the migration
@@ -550,14 +607,11 @@ fn rejection_bytes() -> String {
 /// Poll the helper's own executable; when its size/mtime changes and settles,
 /// exit(0) so launchd's KeepAlive relaunches the freshly installed binary.
 async fn watch_own_binary() {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            warn!(error = %e, "could not resolve own executable path; binary self-restart disabled");
-            return;
-        }
+    let Some(exe) = own_exe() else {
+        warn!("could not resolve own executable path; binary self-restart disabled");
+        return;
     };
-    let baseline = binary_signature(&exe);
+    let baseline = binary_signature(exe);
     let mut interval = tokio::time::interval(BINARY_WATCH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Consume the immediate first tick so we don't compare against ourselves at t=0.
@@ -568,13 +622,13 @@ async fn watch_own_binary() {
     let mut ticks_since_warn: u32 = 0;
     loop {
         interval.tick().await;
-        let current = binary_signature(&exe);
+        let current = binary_signature(exe);
         if current.is_some() && current != baseline {
             // Debounce: `veld update` does cp + chmod + xattr + codesign — several
             // writes. Wait for the signature to settle before relaunching so we
             // don't exit mid-swap.
             tokio::time::sleep(Duration::from_secs(2)).await;
-            if binary_signature(&exe) == current {
+            if binary_signature(exe) == current {
                 // Keep polling when something blocks the exit: the checks can
                 // fail transiently (a bounded service query timing out, a write
                 // still in flight), and the binary still differs from baseline,
@@ -591,7 +645,7 @@ async fn watch_own_binary() {
                     // unchanged across the whole gate closes that window: if it
                     // moved, this tick's evidence is stale and the next one
                     // starts over.
-                    None if binary_signature(&exe) == current => {
+                    None if binary_signature(exe) == current => {
                         info!(
                             "helper binary changed on disk — exiting so launchd relaunches the new version"
                         );
@@ -637,11 +691,10 @@ pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
             "this helper is not managed by a service manager, so nothing would relaunch it".into(),
         );
     }
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return Some(format!("could not resolve own executable path: {e}")),
+    let Some(exe) = own_exe() else {
+        return Some("could not resolve own executable path".into());
     };
-    if !binary_executes(&exe).await {
+    if !binary_executes(exe).await {
         return Some(format!(
             "the binary at {} does not execute yet",
             exe.display()
@@ -652,7 +705,7 @@ pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
     // the #247 escalation. Shared by the watcher and the `restart` command so
     // neither can exit onto a binary the other refuses.
     if privileged {
-        if let Some(reason) = signing::relaunch_guard(&exe) {
+        if let Some(reason) = signing::relaunch_guard(exe) {
             return Some(reason);
         }
     }
