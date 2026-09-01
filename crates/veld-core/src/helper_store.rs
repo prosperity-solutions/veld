@@ -122,6 +122,11 @@ const SIG_MODE: u32 = 0o644;
 /// path it asked about; what it does not get to learn is what *root* saw there.
 /// The full chain, errno and all, still reaches the helper's own log.
 ///
+/// The rule is about the **caller-chosen** path only. Errors from
+/// [`write_atomically`] do name the store's own paths, which are fixed, public
+/// and documented — there is no oracle in telling somebody that
+/// `/var/db/veld-helper` is out of space.
+///
 /// Constructing one reads; [`Self::verified_version`] checks; [`Self::install`]
 /// writes what was read. See the module doc for why those must be three views of
 /// one set of bytes rather than three visits to one path.
