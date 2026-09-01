@@ -708,7 +708,9 @@ impl Diagnostics {
                 Some(path) if !path.is_file() => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "The privileged veld-helper service names {}, but there is no binary                          there \u{2014} it cannot start. Run `veld update`, or                          `sudo veld setup privileged` if that does not repair it",
+                        "The privileged veld-helper service names {}, but there is no \
+                         binary there \u{2014} it cannot start. Run `veld update`, or \
+                         `sudo veld setup privileged` if that does not repair it",
                         tilde_path(&path)
                     ),
                 }),

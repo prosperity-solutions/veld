@@ -1180,27 +1180,26 @@ fi
 # In privileged mode the helper is served from a ROOT-OWNED directory (issue
 # #262) — the point being that this script, running as the user, cannot write
 # it. So instead of copying, hand the download to the already-root helper over
-# its socket: it verifies the org signature and refuses anything older than
-# itself before installing. That is what keeps updates sudo-free (issue #338's
-# rule 1) on an install whose whole purpose is to be unwritable.
+# its socket: it verifies the org signature, and refuses anything older than the
+# newer of the running and the installed helper, before installing. That is what
+# keeps updates sudo-free (issue #338's rule 1) on an install whose whole purpose
+# is to be unwritable.
 #
 # Deliberately unconditional, and deliberately quiet. The command is a no-op on
 # every install this does not apply to — unprivileged, or privileged but not yet
 # migrated — because on those the copy above IS the update and there is nothing
-# for a user to act on. It also cleans up that now-inert copy once the real
-# install has succeeded, so a migrated machine stops carrying a root-daemon-shaped
-# binary in a user-writable directory.
+# for a user to act on.
+#
+# The lib-dir copy above is deliberately LEFT in place on a migrated machine even
+# though nothing executes it; see `_WHY_THE_LIB_DIR_COPY_STAYS` in
+# `crates/veld/src/commands/helper_install.rs`. Deleting it would strand an older
+# CLI's `veld setup privileged`, which has no way to find the store.
 #
 # Both halves of the guard are required. The `.sig` copy above already treats the
 # signature as optional (a `VELD_VERSION` pinned to a pre-signing release has
 # none), and handing the helper a binary with no signature beside it would
 # surface "no readable 64-byte signature" mid-install for a case that should be
 # the silent no-op path.
-#
-# A refusal is recorded rather than fatal, and the recording is the point: the
-# CLI, daemon and Caddy halves are still worth completing, but the restart
-# section below must not then promise that the helper will pick up a binary it
-# has just rejected.
 HELPER_INSTALL_OK="1"
 if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   # `|| HELPER_INSTALL_RC=$?` rather than a bare call followed by `$?`: this

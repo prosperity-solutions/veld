@@ -12,9 +12,9 @@
 //! Rather than reach for `sudo` — which #338's rule 1 forbids, because a security
 //! fix behind a password prompt reaches almost nobody — the installer downloads to
 //! a path it *can* write and asks the **already-root** helper to install it. The
-//! helper verifies the org signature and refuses anything older than the newer of
-//! the running and the installed helper, before the bytes move, so the fact that the caller is untrusted costs nothing: all the
-//! caller supplies is a filename.
+//! helper verifies the org signature, and refuses anything older than the newer
+//! of the running and the installed helper, before the bytes move. So the caller
+//! being untrusted costs nothing: all it supplies is a filename.
 //!
 //! # Silent on every path that is not this one
 //!
