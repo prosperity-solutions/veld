@@ -805,16 +805,38 @@ export function insetsIfEnabled(e: PaneEmulation): SafeAreaInsets | null {
  * than by a guard — [`insetsIfEnabled`] answers `null` — so the pane disables the
  * control there instead of offering one that does nothing.
  *
- * **What "on" cannot recover.** Switching off erases the numbers, and a drag has
- * by then renamed the device to [`CUSTOM_DEVICE`], so on a dragged tablet an
- * off-then-on round trip returns the *phone* set rather than the tablet's: with
- * neither an id nor numbers there is nothing left to recover the class from.
- * Accepted rather than fixed, because the chip reads "Custom" by that point and
- * the phone set is exactly the documented rule for a custom size — where the
- * alternative is a second persisted field, crossing the shell's hand-maintained
- * whitelist, to serve a three-click path. Pinned by a test so it is a known
- * property rather than a surprise. Note [`rotateEmulation`] *does* keep the class
- * there, because gutters that are still on are themselves the evidence.
+ * **What "on" cannot recover, and why that is a deferral rather than a design.**
+ * Switching off erases the numbers, and a drag has by then renamed the device to
+ * [`CUSTOM_DEVICE`], so on a dragged tablet an off-then-on round trip returns the
+ * *phone* set rather than the tablet's: with neither an id nor numbers there is
+ * nothing left to recover the class from. [`rotateEmulation`] keeps the class on
+ * that same emulation, because gutters still switched on are themselves the
+ * evidence — so the two menu items answer differently, and the difference is
+ * information loss rather than disagreement.
+ *
+ * This is **out of scope here, not correct.** Be clear about that, because the
+ * first draft of this comment argued it was fine on the grounds that the chip
+ * reads "Custom" by then, and that argument does not survive contact: "Custom" is
+ * the *size* label, it reads identically before and after the toggle, and it
+ * therefore cannot tell anyone that their tablet's gutters just became a phone's.
+ * This file's actual rule points the other way — [`resizeEmulation`] "keeps every
+ * flag … only the identity changes", and [`customEmulation`] inherits `safeArea`
+ * precisely so a 10px nudge cannot take it away — which makes the gutters the one
+ * behavioural claim that does *not* survive a rename. The pane says so where a
+ * user might read it (the device menu's own label), but as a consequence rather
+ * than a choice.
+ *
+ * The fix worth making is **not** a second persisted field: the class tag already
+ * exists and is `device`, which `resizeEmulation` throws away and [`insetClassOf`]
+ * then reconstructs from four numbers. Keeping the id through a drag and deriving
+ * "Custom" from a *size mismatch* against the row — [`emulationLabel`] holds both
+ * already — would answer this from `insetPairFor`'s first branch, delete
+ * `insetClassOf` rather than harden it, and remove the revision asymmetry that
+ * function documents. It is deferred because it is a redesign of what a dragged
+ * preset *is*, which reaches two controls with nothing to do with safe area (the
+ * device menu's tick and the pane bar's quick switch both test `device` for
+ * equality), and that is a change of its own and not a rider on this one.
+ * Meanwhile the behaviour is pinned by a test, so it is a known property.
  */
 export function withSafeArea(e: PaneEmulation, on: boolean): PaneEmulation {
   return { ...e, safeArea: on ? insetsIfEnabled(e) : null };
