@@ -2622,6 +2622,30 @@ already gone. Concretely:
 | The session was reaped after the detach grace | Buttons, next time you look at it. |
 | You dragged the pane to another window | Nothing — the shell is alive and moves with the pane. |
 
+#### Restarting a pane on purpose
+
+The table above is about panes whose command is already gone. `resume` is also
+what **Restart** runs for a pane that is still going, from the tab's right-click
+menu or `⌘K`:
+
+| Entry | What it runs | Offered when |
+|---|---|---|
+| **Restart and resume _label_** | Hangs up the process, then the `resume` command under the pane's existing token | The pane declares `resume` and the daemon holds a token for it |
+| **Restart from scratch** | Hangs up the process, then the launch command under a **new** token | Same — it is the second entry, not a replacement |
+| **Restart this terminal** | A new login shell, or the launch command for a pane with no `resume` | Everything else |
+
+Resume is the default of the two because of what it is for: applying a change to
+a coding agent's own configuration — a model, a permission mode, an MCP server —
+to the pane you have been working in, without starting the conversation over.
+The tool re-reads whatever it loads at startup; the transcript it comes back on
+is the one the token names.
+
+Restart **asks first** whenever a process is running, the same as closing a busy
+pane does, and *Restart from scratch* asks even on a pane that has already
+exited — minting a new token abandons a conversation the old one still points
+at, and that is a loss with nothing on screen to show for it. The scrollback
+stays as history in every case.
+
 #### When a pane closes itself
 
 `close_on_exit` defaults to **true**: a pane whose command exits with status `0`

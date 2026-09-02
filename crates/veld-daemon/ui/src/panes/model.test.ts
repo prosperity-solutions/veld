@@ -24,6 +24,9 @@ import {
   fileLabel,
   filePathIn,
   paneAnswerFor,
+  paneCanResume,
+  defaultRestartKind,
+  restartNeedsConfirmation,
   startPlanFor,
   takePendingStart,
   clampRatio,
@@ -2081,5 +2084,96 @@ describe("a pane showing a local file", () => {
     expect(legacy[1]?.docks[0].tabs[0]?.url).toBe(URL);
     expect(legacy[1]?.docks[0].tabs[0]).not.toHaveProperty("file");
     expect(filePathIn(ROOT, legacy[1]?.docks[0].tabs[0]?.url)).toBe("notes/deck.html");
+  });
+});
+
+describe("what Restart means for a pane", () => {
+  /** A plain terminal: no spec, so no token and nothing to resume, ever. */
+  const Plain = {
+    specId: undefined,
+    canResumeSpec: false,
+    ended: false,
+    launched: false,
+    resumable: false,
+  };
+  /** A config pane the daemon holds a token for. */
+  const Agent = {
+    specId: "claude",
+    canResumeSpec: true,
+    ended: false,
+    launched: true,
+    resumable: false,
+  };
+
+  it("never offers resume for a plain terminal", () => {
+    expect(paneCanResume(Plain)).toBe(false);
+    // Not even if a stale `resumable` set somehow names the tab: without a spec
+    // there is no resume command for the daemon to run, so the ticket would 409.
+    expect(paneCanResume({ ...Plain, resumable: true, launched: true })).toBe(false);
+  });
+
+  it("needs both a resume command and a token", () => {
+    expect(paneCanResume(Agent)).toBe(true);
+    // Declared but never launched, and absent from the fetched set: no token.
+    expect(paneCanResume({ ...Agent, launched: false })).toBe(false);
+    // A token but the pane dropped its `resume` from the config.
+    expect(paneCanResume({ ...Agent, canResumeSpec: false })).toBe(false);
+  });
+
+  it("takes the token from any of the three kinds of evidence", () => {
+    const noEvidence = { ...Agent, launched: false };
+    expect(paneCanResume(noEvidence)).toBe(false);
+    // `launched` — reached ready under a spec in this window.
+    expect(paneCanResume({ ...noEvidence, launched: true })).toBe(true);
+    // `ended` — a holder ran the command and it exited.
+    expect(paneCanResume({ ...noEvidence, ended: true })).toBe(true);
+    // `resumable` — the set fetched when the worktree was selected.
+    expect(paneCanResume({ ...noEvidence, resumable: true })).toBe(true);
+  });
+
+  it("defaults an agent pane's restart to resume, not to a new conversation", () => {
+    // The reason the feature exists: restart to pick up a settings change, and
+    // keep the conversation. A default of `fresh` here would spend money and
+    // lose context on every restart.
+    expect(defaultRestartKind({ specId: "claude", canResume: true })).toBe("resume");
+    // Nothing to resume — the pane can only start over.
+    expect(defaultRestartKind({ specId: "claude", canResume: false })).toBe("fresh");
+    // A plain terminal gets a login shell, never a config command.
+    expect(defaultRestartKind({ specId: undefined, canResume: false })).toBe("shell");
+    // `canResume` cannot be true without a spec (see above), but if it ever were,
+    // a plain terminal must still not be handed a resume it has no command for.
+    expect(defaultRestartKind({ specId: undefined, canResume: true })).toBe("shell");
+  });
+
+  it("confirms a restart that kills a running process", () => {
+    for (const kind of ["shell", "fresh", "resume"] as const) {
+      expect(
+        restartNeedsConfirmation({ live: true, kind, canResume: kind === "resume" }),
+      ).toBe(true);
+    }
+  });
+
+  it("confirms a fresh restart that throws away a resumable conversation", () => {
+    // Dead pane, so nothing is killed — but `fresh` abandons the token, which is
+    // a loss the user cannot see on screen and cannot undo.
+    expect(restartNeedsConfirmation({ live: false, kind: "fresh", canResume: true })).toBe(
+      true,
+    );
+  });
+
+  it("does not confirm a restart that destroys nothing", () => {
+    // An already-dead shell: a dialog here is a click that protects nothing.
+    expect(restartNeedsConfirmation({ live: false, kind: "shell", canResume: false })).toBe(
+      false,
+    );
+    // A dead config pane with no conversation to lose.
+    expect(restartNeedsConfirmation({ live: false, kind: "fresh", canResume: false })).toBe(
+      false,
+    );
+    // Resuming a pane whose process already exited is what the dead-pane card's
+    // own Resume button does with no dialog; the menu must not disagree with it.
+    expect(restartNeedsConfirmation({ live: false, kind: "resume", canResume: true })).toBe(
+      false,
+    );
   });
 });

@@ -236,7 +236,6 @@ import {
   pruneTerminals,
   noteExpectedResumes,
   releaseTerminal,
-  restartTerminal,
 } from "./panes/terminalHost";
 import {
   onBrowserAccelerator,
@@ -5306,7 +5305,18 @@ function AppInner(props: {
           id: "pane:close",
           group: "Panes",
           label: `Close the ${focused.title} pane`,
-          run: () => setLayout(closeTab(layout, focused.id)),
+          // Through the handle for the same reason the restart below is: this
+          // called `closeTab` directly and so was the one close path that hung
+          // up a busy terminal — an agent mid-turn, a running build — with no
+          // confirmation, while the × button, the tab menu and ⌘W all asked.
+          // `requestCloseTab`, not `closeActiveTab`: this entry is *labelled*
+          // with a tab's title, and "active" is re-read when the entry runs — a
+          // pane finishing under `close_on_exit`, or a tab push from another
+          // window, would move it between the palette opening and Enter, and
+          // close the neighbour under a label naming this one.
+          run: () => {
+            paneHandleRef.current?.requestCloseTab(focused.id);
+          },
         });
       }
       if (focused?.kind === "terminal") {
@@ -5314,8 +5324,16 @@ function AppInner(props: {
           id: "pane:restart-terminal",
           group: "Panes",
           label: "Restart this terminal",
-          hint: "keeps the scrollback",
-          run: () => restartTerminal(focused.id),
+          hint: "keeps the scrollback; asks before ending a running process",
+          // Through the handle, not `restartTerminal` directly: that is what
+          // gives the palette the same confirmation the tab menu has, and — for
+          // a config pane that can — makes this resume rather than start a new
+          // conversation. Calling the host function here was how the palette
+          // ended up being the one restart path that destroyed a session with
+          // no warning.
+          run: () => {
+            paneHandleRef.current?.requestRestartTab(focused.id);
+          },
         });
       }
       if (focused?.kind === "browser") {

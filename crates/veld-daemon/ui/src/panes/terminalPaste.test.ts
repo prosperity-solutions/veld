@@ -230,3 +230,34 @@ describe("shouldSwallowDrop", () => {
     expect(shouldSwallowDrop([TAB_MIME, "Files"], false)).toBe(false);
   });
 });
+
+/**
+ * The `restarting` flag's one clearing point.
+ *
+ * `Session.restarting` is what decides whether a connecting pane shows the
+ * full-pane "Restarting…" card or the corner `connecting…` chip, and it is set
+ * by three call sites but cleared by exactly one: `setState`, whenever the
+ * session leaves `connecting`. Clearing it there rather than at each outcome is
+ * load-bearing — a restart that fails to spawn lands in `error`, and a flag left
+ * set would cover the message saying why with a spinner that never resolves.
+ *
+ * A source assertion for the same reason the two above are: the flag lives in
+ * module-level session state behind a live WebSocket, which the `node` test
+ * environment cannot stand up, and nothing else in the build ties the set sites
+ * to the clear.
+ */
+describe("a restart's presentation flag", () => {
+  it("is cleared whenever the session stops connecting", () => {
+    expect(TERMINAL_HOST).toContain(
+      'if (state !== "connecting") s.restarting = null;',
+    );
+  });
+
+  it("clears it inside setState, not at an individual outcome", () => {
+    // Anchored on the function, so moving the line to (say) the `exit` handler —
+    // which would leave every *other* ending stuck on the overlay — fails here.
+    const body = /function setState\([\s\S]*?\n}/.exec(TERMINAL_HOST)?.[0];
+    expect(body, "setState not found — update this test with it").toBeTruthy();
+    expect(body).toContain("s.restarting = null");
+  });
+});

@@ -27,6 +27,7 @@ import { isMac } from "../shortcuts/registry";
 import {
   type PaneMount,
   parseLayouts,
+  type RestartKind,
   shouldCloseOnExit,
   startPlanFor,
   storedTerminalIds,
@@ -139,6 +140,10 @@ interface Session {
   ws: WebSocket | null;
   state: TerminalState;
   detail: string;
+  /** Set while a user-requested restart is in flight — see [`RestartKind`].
+   *  Cleared by [`setState`] the moment the session leaves `connecting`, so it
+   *  can never outlive the restart it describes. */
+  restarting: RestartKind | null;
   /**
    * The status the session's process exited with, or `null` if it has not
    * exited *as itself*.
@@ -295,6 +300,11 @@ function notify(s: Session): void {
 function setState(s: Session, state: TerminalState, detail = ""): void {
   s.state = state;
   s.detail = detail;
+  // A restart is over the moment the session stops connecting, whichever way it
+  // went — live, ended, or a spawn that failed. Clearing it here rather than at
+  // each of those call sites is what stops a "Restarting…" card outliving a
+  // restart that already failed and covering the error that says why.
+  if (state !== "connecting") s.restarting = null;
   notify(s);
 }
 
@@ -360,6 +370,9 @@ export function terminalStatus(id: string): {
   /** Whether this session ran under a token in this window — see
    *  [`Session.launched`]. */
   launched: boolean;
+  /** Non-null while a user-requested restart is in flight — see
+   *  [`RestartKind`]. Only ever set alongside `connecting`. */
+  restarting: RestartKind | null;
 } {
   const s = sessions.get(id);
   return s
@@ -368,8 +381,15 @@ export function terminalStatus(id: string): {
         detail: s.detail,
         exitCode: s.exitCode,
         launched: s.launched,
+        restarting: s.restarting,
       }
-    : { state: "absent", detail: "", exitCode: null, launched: false };
+    : {
+        state: "absent",
+        detail: "",
+        exitCode: null,
+        launched: false,
+        restarting: null,
+      };
 }
 
 /** How a session should start, or `null` to sit idle until the user says. */
@@ -718,6 +738,7 @@ function ensure(
       pane?.spec === undefined || (pane?.allowTerminalRenaming ?? false),
     state: "connecting",
     detail: "",
+    restarting: null,
     observer: null,
     generation: 0,
     reconnectLeft: null,
@@ -1298,13 +1319,14 @@ export function restartTerminal(id: string): void {
   // for one means the same thing "start fresh" does: run its launch command
   // again under a new identity.
   if (s.spec !== undefined) {
-    startTerminal(id, "fresh");
+    startTerminal(id, "fresh", "fresh");
     return;
   }
   cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
+  s.restarting = "shell";
   setState(s, "connecting");
   const generation = s.generation;
   void (async () => {
@@ -1371,8 +1393,18 @@ export function mountTerminal(
  * `fresh` on a pane that has already launched replaces its identity: the daemon
  * mints a new token, so the tool starts a new conversation rather than
  * reopening the old one. That is what "start fresh" has to mean.
+ *
+ * `restarting` is a *presentation* flag and nothing else: it says the user is
+ * replacing something they were already watching, so the pane can say
+ * "Restarting…" instead of the "connecting…" chip a first launch gets. Left
+ * `null` by the idle pane's own start buttons, which are not restarting
+ * anything.
  */
-export function startTerminal(id: string, mode: PaneLaunchMode): void {
+export function startTerminal(
+  id: string,
+  mode: PaneLaunchMode,
+  restarting: RestartKind | null = null,
+): void {
   const s = sessions.get(id);
   if (!s) return;
   // Same reason as `restartTerminal`: the pane id is reused, so everything the inbox knows
@@ -1383,6 +1415,7 @@ export function startTerminal(id: string, mode: PaneLaunchMode): void {
   s.ws?.close();
   s.ws = null;
   const generation = s.generation;
+  s.restarting = restarting;
   setState(s, "connecting");
   void (async () => {
     // The id is the reattach key, so a dead session under it has to go before a

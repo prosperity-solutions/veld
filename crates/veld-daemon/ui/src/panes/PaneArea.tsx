@@ -49,7 +49,7 @@
  * (`PlaceList.tsx`).
  */
 
-import { ActionIcon, Button, Menu, Modal, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Loader, Menu, Modal, Text, Tooltip } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
@@ -61,6 +61,7 @@ import {
   IconLogs,
   IconPlus,
   IconRefresh,
+  IconRefreshAlert,
   IconTerminal2,
   IconWindow,
   IconWorld,
@@ -114,6 +115,10 @@ import {
   parseTransferTabs,
   replaceTab,
   paneAnswerFor,
+  paneCanResume,
+  defaultRestartKind,
+  restartNeedsConfirmation,
+  type RestartKind,
   type PaneSessionAnswer,
   setRatio,
   splitWithTab,
@@ -176,6 +181,17 @@ import {
   terminalStatus,
   unmountTerminal,
 } from "./terminalHost";
+
+/** A tab whose restart is waiting on the user's confirmation. */
+interface PendingRestart {
+  tabId: string;
+  /** Which command the restart will run — see [`RestartKind`]. */
+  kind: RestartKind;
+  /** The pane's label, for the dialog's copy. */
+  label: string;
+  /** Whether a process is running right now, i.e. whether this kills one. */
+  live: boolean;
+}
 
 /**
  * One embedded-browser suspend for the whole tab-drag gesture.
@@ -309,6 +325,26 @@ export interface PaneAreaHandle {
    * common starting state of all, a worktree with one tab.
    */
   splitActiveTab(): void;
+  /**
+   * Close a *named* tab, through the busy-terminal confirmation.
+   *
+   * The sibling of [`closeActiveTab`] for a caller that already decided which
+   * tab it means. The command palette labels its entry with a tab's title, so it
+   * has to act on that tab: "active" is re-read when the entry runs, and a
+   * `close_on_exit` pane finishing or a cross-window tab push in between would
+   * make it close the neighbour under a label naming this one.
+   */
+  requestCloseTab(id: string): void;
+  /**
+   * Restart a *named* terminal, through the same confirmation its tab menu
+   * gives — and, for a config pane that can resume, resuming rather than
+   * starting a new conversation.
+   *
+   * Returns whether there was anything to restart, so a caller can stay silent
+   * rather than claim it did something: a browser pane, or a tab whose session
+   * has never been mounted, both answer `false`.
+   */
+  requestRestartTab(id: string): boolean;
 }
 
 export function PaneArea(props: {
@@ -416,6 +452,105 @@ export function PaneArea(props: {
   const [pendingClose, setPendingClose] = useState<string | null>(null);
 
   /**
+   * A terminal tab whose restart is waiting on a confirmation, or `null`.
+   *
+   * Dismissed only by the dialog's own Cancel, the same as [`pendingClose`].
+   */
+  const [pendingRestart, setPendingRestart] = useState<PendingRestart | null>(
+    null,
+  );
+
+  // Only counts for the worktree it was fetched for — see `paneAnswerFor`.
+  const paneAnswer = paneAnswerFor(props.paneSessions, props.worktreeId);
+
+  /**
+   * What Restart means for one terminal tab right now.
+   *
+   * Two questions, and they are separate: which *command* the restart runs, and
+   * whether it needs confirming. A plain terminal only ever gets a new login
+   * shell. A config pane with a live token gets its `resume` command by
+   * default — that is the whole point of Restart for an agent pane, and the
+   * reason this feature exists: it applies a settings change to a running tool
+   * without throwing away the conversation. `fresh` stays reachable from the
+   * same menu for when starting over is what you actually meant.
+   */
+  const restartPlan = (
+    tabId: string,
+  ): { kind: RestartKind; label: string; live: boolean; canResume: boolean } | null => {
+    const dock = dockOf(layout, tabId);
+    const tab =
+      dock === null ? null : layout.docks[dock].tabs.find((t) => t.id === tabId);
+    if (tab?.kind !== "terminal") return null;
+    const spec = tab.spec
+      ? props.panes.find((p) => p.id === tab.spec)
+      : undefined;
+    const { state, launched } = terminalStatus(tabId);
+    // **No session, nothing to restart.** Only a dock's *active* tab mounts a
+    // `TerminalPane`, and the host's registry is filled by that mount — so every
+    // other tab in the strip has no session until it is first selected, and a
+    // tab menu opens without selecting one. `startTerminal` and `restartTerminal`
+    // both return early for an unknown id, so offering the entries there would be
+    // a no-op — and, since `fresh` on a resumable pane confirms first, a *confirmed*
+    // no-op: the user answers "yes, discard the conversation" and nothing happens.
+    // Selecting the tab mounts it, and `startPlanFor` then decides what it starts.
+    if (state === "absent") return null;
+    const canResume = paneCanResume({
+      specId: tab.spec,
+      canResumeSpec: spec?.can_resume ?? false,
+      ended: state === "ended",
+      launched,
+      resumable: paneAnswer?.resumable.has(tabId) ?? false,
+    });
+    return {
+      kind: defaultRestartKind({ specId: tab.spec, canResume }),
+      label: spec?.label ?? tab.title,
+      live: state === "live",
+      canResume,
+    };
+  };
+
+  /** Actually do it, once nobody has to be asked. */
+  const runRestart = (tabId: string, kind: RestartKind) => {
+    if (kind === "shell") restartTerminal(tabId);
+    else startTerminal(tabId, kind === "resume" ? "resume" : "fresh", kind);
+  };
+
+  /**
+   * Restart a terminal tab, asking first when the restart actually destroys
+   * something.
+   *
+   * **Two ways it destroys, and either one earns the dialog.** A `live` session
+   * means a process is running that a restart hangs up — the build, the agent
+   * mid-turn. And `fresh` on a pane that *could* have resumed abandons a
+   * conversation the token still points at, which is a loss the user cannot see
+   * on screen and cannot undo.
+   *
+   * Everything else goes straight through: restarting an already-dead shell
+   * destroys nothing, and a dialog there is a click that protects nothing.
+   */
+  const requestRestart = (tabId: string, kind?: RestartKind) => {
+    const plan = restartPlan(tabId);
+    if (!plan) return;
+    const chosen = kind ?? plan.kind;
+    if (
+      !restartNeedsConfirmation({
+        live: plan.live,
+        kind: chosen,
+        canResume: plan.canResume,
+      })
+    ) {
+      runRestart(tabId, chosen);
+      return;
+    }
+    setPendingRestart({
+      tabId,
+      kind: chosen,
+      label: plan.label,
+      live: plan.live,
+    });
+  };
+
+  /**
    * Close a tab — asking first when it is a terminal running a foreground job.
    *
    * A terminal is not re-creatable state: closing it hangs up the shell and
@@ -501,6 +636,12 @@ export function PaneArea(props: {
       requestClose(id);
       return true;
     },
+    requestCloseTab: (id: string) => requestClose(id),
+    requestRestartTab: (id: string) => {
+      if (!restartPlan(id)) return false;
+      requestRestart(id);
+      return true;
+    },
     splitActiveTab: () => {
       // Minted once, outside the updater, for the same reason `newTab` does it:
       // an updater may run more than once for a single write. Unused on the move
@@ -537,6 +678,23 @@ export function PaneArea(props: {
     ? ([0, 1] as DockIndex[])
         .flatMap((i) => layout.docks[i].tabs)
         .find((t) => t.id === pendingClose)
+    : null;
+
+  /**
+   * The restart pending confirmation, re-derived against the layout as it is
+   * *now* — the same treatment [`pendingTab`] gets, and for a sharper reason.
+   *
+   * A dialog is a window of time in which everything else keeps moving:
+   * `PaneArea` is not keyed by worktree, sessions deliberately outlive a worktree
+   * switch, and no Mantine modal stops the app's own keyboard shortcuts. So the
+   * user can open "Restart from scratch" on one worktree's pane, step to another,
+   * and confirm — and a snapshot taken at click time would mint a new token for a
+   * conversation they can no longer see, with nothing on screen to say it
+   * happened. Re-deriving means a pane that has gone away takes its dialog with
+   * it instead.
+   */
+  const pendingRestartPlan = pendingRestart
+    ? restartPlan(pendingRestart.tabId)
     : null;
 
   /** Where the tab currently being dragged would land, or `null`. */
@@ -1060,6 +1218,7 @@ export function PaneArea(props: {
               layout={layout}
               onLayout={onLayout}
               requestClose={requestClose}
+              requestRestart={requestRestart}
               worktreeId={props.worktreeId}
               serviceUrls={props.serviceUrls}
               quicklinks={props.quicklinks}
@@ -1153,6 +1312,63 @@ export function PaneArea(props: {
           </div>
         </Modal>
       )}
+      {/* Confirm a restart that destroys something — see `requestRestart` for
+          which restarts those are. Portalled like the close confirm, so
+          overlayGuard hides any embedded browser pane underneath it. */}
+      {pendingRestart && pendingRestartPlan && (
+        <Modal
+          opened={true}
+          onClose={() => setPendingRestart(null)}
+          title={
+            pendingRestart.kind === "resume"
+              ? "Restart and resume this pane?"
+              : "Restart this terminal?"
+          }
+          centered={true}
+        >
+          <Text size="sm">
+            {pendingRestart.live
+              ? `This ends what is running in “${pendingRestart.label}” now.`
+              : `This replaces the session in “${pendingRestart.label}”.`}{" "}
+            {pendingRestart.kind === "resume"
+              ? "It then runs the pane's resume command, so the tool picks up where it left off — with any config it reads at startup applied again."
+              : pendingRestart.kind === "fresh"
+                ? "It then starts the pane over from the beginning. Anything the previous session was keeping — an agent conversation, for one — is not carried across, and this cannot be undone."
+                : "It then starts a new shell."}{" "}
+            The scrollback stays on screen as history.
+          </Text>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "flex-end",
+              gap: 8,
+              marginTop: 20,
+            }}
+          >
+            <Button variant="default" onClick={() => setPendingRestart(null)}>
+              Cancel
+            </Button>
+            <Button
+              color="red"
+              onClick={() => {
+                const { tabId, kind } = pendingRestart;
+                setPendingRestart(null);
+                // Belt to the render gate's braces: the gate can only re-run on a
+                // render, and the click answering the dialog does not wait for
+                // one. A null plan here means the pane went away between the last
+                // commit and this click.
+                if (restartPlan(tabId)) runRestart(tabId, kind);
+              }}
+            >
+              {pendingRestart.kind === "resume"
+                ? "Restart and resume"
+                : pendingRestart.kind === "fresh"
+                  ? "Restart from scratch"
+                  : "Restart terminal"}
+            </Button>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -1164,6 +1380,10 @@ function DockView(props: {
   onLayout: (next: PaneLayoutUpdate) => void;
   /** Close a tab, confirming first if a terminal has a foreground job. */
   requestClose: (tabId: string) => void;
+  /** Restart a terminal tab, with the confirmation `PaneArea` owns. An omitted
+   *  `kind` takes the default for that tab — `resume` for a config pane that
+   *  can, a fresh launch or a new shell otherwise. */
+  requestRestart: (tabId: string, kind?: RestartKind) => void;
   worktreeId: number;
   serviceUrls: Array<[string, string]>;
   /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
@@ -1275,6 +1495,57 @@ function DockView(props: {
 
   const bothDocks = dockVisible(layout, 0) && dockVisible(layout, 1);
 
+  /**
+   * The Restart entries for one terminal tab.
+   *
+   * **One entry, or two.** A plain terminal and a config pane with nothing to
+   * resume have a single meaning for "restart", and get one item. A config pane
+   * the daemon holds a token for has two genuinely different ones, so both are
+   * named rather than hidden behind a single word: *resume* keeps the
+   * conversation and re-reads whatever the tool loads at startup — which is what
+   * makes a settings change apply without losing an hour of context — and
+   * *from scratch* deliberately throws it away.
+   *
+   * Read at click time, not at render: the menu is built inside the handler, so
+   * `terminalStatus` here is the session's state now rather than at whatever
+   * render last committed.
+   */
+  const restartMenuItems = (tab: PaneTab) => {
+    const spec = tab.spec ? props.panes.find((p) => p.id === tab.spec) : undefined;
+    const { state, launched } = terminalStatus(tab.id);
+    const canResume = paneCanResume({
+      specId: tab.spec,
+      canResumeSpec: spec?.can_resume ?? false,
+      ended: state === "ended",
+      launched,
+      resumable: paneAnswer?.resumable.has(tab.id) ?? false,
+    });
+    if (!canResume) {
+      return [
+        {
+          key: "restart",
+          icon: <IconRefresh size={14} />,
+          title: "Restart this terminal",
+          onClick: () => props.requestRestart(tab.id),
+        },
+      ];
+    }
+    return [
+      {
+        key: "restart-resume",
+        icon: <IconRefresh size={14} />,
+        title: `Restart and resume ${spec?.label ?? "this pane"}`,
+        onClick: () => props.requestRestart(tab.id, "resume"),
+      },
+      {
+        key: "restart-fresh",
+        icon: <IconRefreshAlert size={14} />,
+        title: "Restart from scratch",
+        onClick: () => props.requestRestart(tab.id, "fresh"),
+      },
+    ];
+  };
+
   const tabMenu = (tab: PaneTab) =>
     showContextMenu([
       {
@@ -1311,16 +1582,7 @@ function DockView(props: {
             },
           ]
         : []),
-      ...(tab.kind === "terminal"
-        ? [
-            {
-              key: "restart",
-              icon: <IconRefresh size={14} />,
-              title: "Restart this terminal",
-              onClick: () => restartTerminal(tab.id),
-            },
-          ]
-        : []),
+      ...(tab.kind === "terminal" ? restartMenuItems(tab) : []),
       ...(tab.kind === "browser"
         ? [
             {
@@ -1670,6 +1932,7 @@ function DockView(props: {
             specId={active.spec}
             resumable={paneAnswer?.resumable.has(active.id) ?? false}
             panesKnown={paneAnswer !== null}
+            requestRestart={props.requestRestart}
             // Only the focused dock's terminal takes the keyboard. Both docks
             // mount on load, so focusing unconditionally handed it to whichever
             // mounted last — which after a reload was not the pane the user
@@ -2326,6 +2589,10 @@ function TerminalPane(props: {
    *  what to start before this is true. */
   panesKnown: boolean;
   takeFocus: boolean;
+  /** Restart this pane through `PaneArea`'s confirmation — the same entry point
+   *  the tab menu uses. The card below offers the *same* two actions the menu
+   *  does, so it has to ask the same questions; see `restartNeedsConfirmation`. */
+  requestRestart: (tabId: string, kind?: RestartKind) => void;
 }) {
   const { id, worktreeId, spec, specId, resumable, panesKnown } = props;
   // A plain terminal has nothing to look up, so it is ready immediately — and
@@ -2394,7 +2661,7 @@ function TerminalPane(props: {
     // biome-ignore lint/correctness/useExhaustiveDependencies: first-mount decision, see above.
   }, [id, worktreeId, ready]);
 
-  const { state, detail, launched } = terminalStatus(id);
+  const { state, detail, launched, restarting } = terminalStatus(id);
   // Whether the user has asked to see the terminal behind the panel.
   //
   // Reset on every state change, not just on `id`: after a resume the panel is
@@ -2404,25 +2671,35 @@ function TerminalPane(props: {
   // biome-ignore lint/correctness/useExhaustiveDependencies: `state` is the reset trigger, not a value read here.
   useEffect(() => setShowOutput(false), [id, state]);
   const dead = state === "ended" || state === "error";
-  const restart = useCallback(() => restartTerminal(id), [id]);
+  const requestRestart = props.requestRestart;
+  // Restart and "start fresh" go through the confirmation; Resume and Reconnect
+  // do not. The split is the one `restartNeedsConfirmation` draws and not a
+  // second policy: resuming and reattaching destroy nothing, while minting a new
+  // token abandons a conversation the old one still points at — and this card is
+  // where that is *most* reachable, one big button rather than a menu entry.
+  const restart = useCallback(() => requestRestart(id), [id, requestRestart]);
   const reconnect = useCallback(() => reconnectTerminal(id), [id]);
-  const startFresh = useCallback(() => startTerminal(id, "fresh"), [id]);
-  const startResume = useCallback(() => startTerminal(id, "resume"), [id]);
-  // A resume that cannot work must not be a button that looks like it can, so
-  // this needs the pane to still declare a resume command *and* the daemon to
-  // hold a token for it. Where the token knowledge comes from differs by state:
-  //
-  //  - `launched` is the strongest: this session reached `ready` under a spec
-  //    in *this* window, so the daemon recorded a token. It has to be here
-  //    because `resumable` is fetched once per worktree selection and never
-  //    refreshed — a pane that launched afterwards is simply absent from it,
-  //    and without `launched` such a pane hitting `error` offered only "Start
-  //    fresh", minting a new token and abandoning the conversation.
-  //  - `ended` means a holder ran the command and it exited, so a token exists.
-  //  - `resumable` is the fetched set, and the only evidence available for a
-  //    pane restored from storage that has not connected in this window.
-  const hasToken = launched || state === "ended" || resumable;
-  const canResume = Boolean(specId && hasToken && spec?.can_resume);
+  const startFresh = useCallback(
+    () => requestRestart(id, "fresh"),
+    [id, requestRestart],
+  );
+  // The third argument is the whole point of this call site: without it the most
+  // prominent Resume in the app is the one restart path that shows no progress —
+  // the card unmounts the moment the state leaves `ended`, leaving the 12px chip
+  // and the very invisibility the overlay exists to fix.
+  const startResume = useCallback(
+    () => startTerminal(id, "resume", "resume"),
+    [id],
+  );
+  // Shared with the tab menu's Restart entries — see `paneCanResume`, which is
+  // where the reasoning about where token knowledge comes from lives.
+  const canResume = paneCanResume({
+    specId,
+    canResumeSpec: spec?.can_resume ?? false,
+    ended: state === "ended",
+    launched,
+    resumable,
+  });
   const label = spec?.label ?? specId ?? "";
   // `error` means the pipe broke, not that the shell did — the session very
   // likely survives on the daemon (that is what the detach grace is for), so
@@ -2435,7 +2712,34 @@ function TerminalPane(props: {
   return (
     <div className="term-pane">
       <div className="term-slot" ref={slot} />
-      {state === "connecting" && <div className="term-status">connecting…</div>}
+      {/* A restart the user asked for gets the pane, not the corner chip.
+          The scrollback stays put across a restart, so a chip left the screen
+          looking exactly as it did before the click — same output, same prompt
+          — with a 12px "connecting…" as the only sign anything had happened.
+          For a pane whose whole point is that it takes a moment to come back
+          (an agent re-reading its config and its transcript), that is the one
+          state that has to be unmissable. A first connect keeps the chip: there
+          is nothing behind it to be confused with. */}
+      {state === "connecting" && restarting === null && (
+        <div className="term-status">connecting…</div>
+      )}
+      {state === "connecting" && restarting !== null && (
+        <div className="term-overlay">
+          <div className="term-card">
+            <Loader size="sm" />
+            <div className="term-card-title">
+              {restarting === "resume" ? "Resuming" : "Restarting"} {cardTitle}
+            </div>
+            <div className="term-card-detail">
+              {restarting === "resume"
+                ? "picking up where it left off"
+                : restarting === "fresh"
+                  ? "starting over from the beginning"
+                  : "starting a new shell"}
+            </div>
+          </div>
+        </div>
+      )}
       {/* A note about a terminal that is still running (dropped output, say).
           It goes here rather than into the terminal, which would corrupt a
           full-screen program's display — see writeNotice in terminalHost. */}
