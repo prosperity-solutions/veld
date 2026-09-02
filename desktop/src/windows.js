@@ -647,7 +647,15 @@ function syncZoom(record) {
   // used to be: everything below is platform-independent, and gating the whole
   // sync on a macOS-only cosmetic call left a zoomed /ide on Windows and Linux
   // with mispositioned native views and a top-bar inset that never moved.
-  if (typeof win.setWindowButtonPosition === "function") {
+  //
+  // **A detached window is excluded, and that is not the same guard.** It keeps a
+  // normal frame — no `titleBarStyle`, no `trafficLightPosition` (see
+  // `openWindow`) — so it has no custom traffic lights to reposition, and the
+  // method is documented only for a window whose title bar is hidden. This
+  // function now runs for detached windows (they hold browser panes, whose
+  // geometry the factor drives), which is exactly what makes the distinction
+  // load-bearing rather than incidental.
+  if (record.kind !== "detached" && typeof win.setWindowButtonPosition === "function") {
     win.setWindowButtonPosition({
       x: 13,
       y: trafficLightY(deps.topbarHeight, deps.trafficLightSize, zoom),
