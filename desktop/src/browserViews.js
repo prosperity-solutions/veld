@@ -256,40 +256,6 @@ function applyRadius(entry) {
 }
 
 /**
- * Re-place every one of this window's views for a new page zoom factor.
- *
- * **Called from the poll that already follows the factor** (`syncZoom` in
- * `windows.js`), rather than waiting for the page to re-measure its panes. A zoom
- * step does reflow the page and normally re-pushes every box — but "normally" is
- * a side effect, not a contract: a device that exactly fills its pane can round to
- * the same integer rect, and then a zoomed /ide leaves its native views over the
- * wrong region with nothing to correct it. Electron has no event covering every
- * way the factor can change (see `ZOOM_POLL_MS`), which is why this is pushed here
- * rather than derived per bounds call.
- */
-function syncWindowZoom(window, zoom) {
-  const entries = byWindow.get(window.id);
-  if (!entries) return;
-  const factor = zoomFactor(zoom);
-  for (const entry of entries.values()) {
-    if (entry.hostZoom === factor) continue;
-    entry.hostZoom = factor;
-    if (entry.view.webContents.isDestroyed()) continue;
-    // The last box the renderer sent, converted again. A view that has never been
-    // given one has nothing to re-place — its first bounds push will use the new
-    // factor anyway.
-    if (entry.cssRect) {
-      const rect = cssBoxToDip(entry.cssRect, factor);
-      if (rect.width >= 1 && rect.height >= 1) entry.view.setBounds(rect);
-    }
-    applyRadius(entry);
-    if (entry.emulation && emulationScale(entry.scale, factor) !== entry.metricsScale) {
-      applyMetrics(entry);
-    }
-  }
-}
-
-/**
  * Set or restore the user agent.
  *
  * The default is read off the view at creation rather than reconstructed: it is
@@ -1552,9 +1518,6 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       // zoom fires no event, so the first emulation would otherwise be applied at
       // the wrong factor and stay there until something moved.
       hostZoom: zoomFactor(window.webContents.getZoomFactor()),
-      // The last box the renderer sent, in its own CSS pixels, so a zoom change can
-      // re-place the view without waiting for the page to re-measure.
-      cssRect: null,
       // What `enableDeviceEmulation` / `setBorderRadius` were last given, in DIP —
       // the applied values, which move with the zoom while the renderer's do not.
       metricsScale: null,
@@ -1588,9 +1551,6 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     if (!found) return;
     const r = args?.rect;
     if (!r) return;
-    // Kept in the renderer's own CSS pixels as well as converted, because a later
-    // zoom change has to re-convert the same box (see `syncWindowZoom`) and the
-    // rounded DIP rect cannot be turned back into it.
     const css = {
       x: Number(r.x),
       y: Number(r.y),
@@ -1608,7 +1568,18 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     // the tab doesn't flash a 1px view.
     if (rect.width < 1 || rect.height < 1) return;
     const { entry } = found;
-    entry.cssRect = css;
+    // **The factor is recorded from the push, not pushed to us.** A zoom step
+    // reflows the page, which re-measures every pane and lands here — so this
+    // handler is where the shell learns the factor moved, and it is the only place
+    // that needs to. An earlier version had `windows.js`'s zoom poll re-place every
+    // view the moment the factor changed, from a cached copy of this box; that is
+    // wrong, not merely redundant. The window does not resize when its page zooms,
+    // so a view's correct DIP rect is *unchanged* by a zoom step — while the cached
+    // CSS box was measured against the old CSS viewport, so re-converting it at the
+    // new factor scales a rect that should have stood still (a pane filling a
+    // 1200-DIP window: 1200 CSS px at 1.0 and 800 at 1.5, both 1200 DIP, but the
+    // stale box gives 1800). It painted over the neighbouring pane for the one
+    // frame before the reflow push corrected it.
     entry.hostZoom = zoom;
     entry.view.setBounds(rect);
     // The screen's shape travels with its box, and through the same conversion:
@@ -2051,4 +2022,4 @@ function setVisible(entry, visible) {
   entry.view.setVisible(visible);
 }
 
-module.exports = { registerBrowserViewIpc, disposeWindow, syncWindowZoom };
+module.exports = { registerBrowserViewIpc, disposeWindow };

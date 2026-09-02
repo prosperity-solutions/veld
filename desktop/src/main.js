@@ -18,11 +18,7 @@ const {
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
-const {
-  registerBrowserViewIpc,
-  disposeWindow,
-  syncWindowZoom,
-} = require("./browserViews");
+const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 const { menuBarIconFrom, serialize } = require("./trayVisibility");
 const {
   focusPrimary,
@@ -262,11 +258,6 @@ initWindows({
   slotBase: SLOT_BASE,
   stateFile: path.join(app.getPath("userData"), "windows.json"),
   disposeWindow,
-  // A window's page zoom is an input to every embedded browser view's geometry,
-  // and `windows.js` owns the poll that follows it — this is the one place that
-  // knows the factor moved. See `syncZoom` there and `syncWindowZoom` in
-  // `browserViews.js`.
-  windowZoomChanged: syncWindowZoom,
 });
 
 /**

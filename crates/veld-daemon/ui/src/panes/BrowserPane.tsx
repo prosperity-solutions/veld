@@ -1183,11 +1183,16 @@ export function BrowserPane(props: {
   /**
    * Turn the responsive viewport on at whatever the pane can hold.
    *
-   * One owner for the "measured from the pane's own box, and genuinely skipped when
-   * there is none to measure" rule, because two controls now enter this state — the
-   * device menu's Responsive item and the quick switch. `state.device*` is the
-   * *screen's* drawn box, already inset and scaled, which is the
+   * Its own function for one rule: the size is measured from the *pane's* box, and
+   * the click is genuinely skipped when there is no box to measure. `state.device*`
+   * is the *screen's* drawn box, already inset and scaled, which is the
    * 172px-for-a-phone-at-50% answer `paneSize` exists to stop producing.
+   *
+   * **One caller now** — the device menu's Responsive item. It had two until the
+   * pane bar's quick switch became a phone (`applyPreset`), and the rule is worth
+   * keeping in one named place regardless: it is the whole difference between a
+   * responsive viewport that starts at the pane and one that starts at whatever the
+   * last device happened to be drawn at.
    */
   const enterResponsive = () => {
     const box = paneSize();
@@ -1862,9 +1867,9 @@ export function BrowserPane(props: {
                           <IconCheck size={14} />
                         ) : undefined
                       }
-                      // Shared with the quick switch, which enters the same state —
-                      // see `enterResponsive` for why it is measured from the pane's
-                      // own box and skipped when there is none.
+                      // See `enterResponsive` for why the size is measured from the
+                      // pane's own box, and why the click is skipped when there is
+                      // no box to measure.
                       onClick={enterResponsive}
                       rightSection={
                         <span className="menu-size faint">drag to resize</span>
