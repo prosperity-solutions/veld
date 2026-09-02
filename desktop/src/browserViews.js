@@ -200,7 +200,8 @@ function pushState(window, viewId, entry) {
  * **The factor applied is not the factor received.** The renderer's number is in
  * CSS pixels and the view it renders into is sized in DIP, so `emulationScale`
  * folds in the /ide page's own zoom — the same conversion `cssBoxToDip` does for
- * the box. See that function for what the missing factor looked like.
+ * the box. `emulationScale`'s own doc carries the numbers the missing factor
+ * produced.
  */
 function applyMetrics(entry) {
   const wc = entry.view.webContents;
@@ -1518,8 +1519,9 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       // zoom fires no event, so the first emulation would otherwise be applied at
       // the wrong factor and stay there until something moved.
       hostZoom: zoomFactor(window.webContents.getZoomFactor()),
-      // What `enableDeviceEmulation` / `setBorderRadius` were last given, in DIP —
-      // the applied values, which move with the zoom while the renderer's do not.
+      // What `enableDeviceEmulation` and `setBorderRadius` were last given: a
+      // render factor and a DIP length respectively, both of which move with the
+      // page's zoom while the renderer's own numbers stand still.
       metricsScale: null,
       appliedRadius: 0,
       touchActive: false,

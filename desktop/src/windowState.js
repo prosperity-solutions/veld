@@ -146,9 +146,9 @@ function zoomFactor(raw) {
  * never replaces it), so the factor is one keystroke from being anything.
  *
  * Here rather than inline in `browserViews.js` because it is the same arithmetic
- * as [`trafficLightY`], reached from three places now (a bounds push, a zoom
- * change, and the tests), and the failure mode is a view over the wrong region
- * rather than an exception.
+ * as [`trafficLightY`] and, like it, checkable without an Electron binary — the
+ * failure mode is a view over the wrong region rather than an exception, so it is
+ * worth being able to assert the numbers directly.
  */
 function cssBoxToDip(box, zoom) {
   const factor = zoomFactor(zoom);

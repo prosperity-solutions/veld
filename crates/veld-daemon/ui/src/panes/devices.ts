@@ -54,9 +54,9 @@ export const RESPONSIVE_DEVICE = "responsive";
  * away, and the device menu still has Responsive as a named item.
  *
  * An id rather than the preset itself, because the preset table is the one thing
- * this must not duplicate — `presetById` is the lookup, and `a quick device preset
- * exists` in the tests is the gate that keeps a renamed row from silently removing
- * the switch.
+ * this must not duplicate — `presetById` is the lookup, and the preset table's own
+ * `still contains the row the pane bar's quick switch applies` is the gate that
+ * keeps a renamed row from silently removing the switch.
  */
 export const QUICK_DEVICE = "phone";
 

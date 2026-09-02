@@ -1750,12 +1750,17 @@ export function BrowserPane(props: {
               // Mantine's Tooltip wires no `aria-describedby`, so anything stated
               // only there reaches sighted users only — and what this click discards
               // is exactly what someone who cannot see the chip needs told.
+              // Branch for branch with the tooltip above, deliberately: the two
+              // saying different things about what an iframe can give you is the
+              // exact failure the rule in the comment above describes.
               aria-label={
                 quickOn
                   ? `Turn off ${quickPreset.label}`
                   : emulation
                     ? `Replace ${emulationLabel(emulation)}, ${emulationSize(emulation)}, with ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}`
-                    : `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}`
+                    : iframeBackend
+                      ? `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height} — the size only; touch and the mobile user agent need the desktop app`
+                      : `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}, with touch and a mobile user agent`
               }
               aria-pressed={quickOn}
               onClick={() => (quickOn ? applyEmulation(null) : applyPreset(quickPreset))}
