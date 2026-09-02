@@ -302,6 +302,22 @@ describe("safe-area insets", () => {
     expect(resizeEmulation(wide, 402, 874).safeArea).toEqual(e.safeArea);
     // A device with its gutters off does not acquire any by being dragged.
     expect(resizeEmulation(withSafeArea(e, false), 900, 400).safeArea).toBeNull();
+    // Typing a landscape size into the custom-size fields is the same act as
+    // dragging past square, and used to disagree with it: the typed path inherited
+    // the gutters verbatim, so 900 × 400 read "Landscape" over a 59px *top* gutter
+    // while the dragged path had already been fixed.
+    expect(customEmulation(900, 400, e).safeArea).toEqual({
+      top: 0,
+      right: 59,
+      bottom: 21,
+      left: 59,
+    });
+    expect(customEmulation(900, 400, e).safeArea).toEqual(resizeEmulation(e, 900, 400).safeArea);
+    // And a same-orientation change touches nothing at all — a resize is not a
+    // rotation, so the numbers are only ever re-read when the shape turns over.
+    const odd = { ...e, device: CUSTOM_DEVICE, safeArea: { top: 7, right: 0, bottom: 3, left: 0 } };
+    expect(resizeEmulation(odd, 401, 901).safeArea).toEqual(odd.safeArea);
+    expect(customEmulation(401, 901, odd).safeArea).toEqual(odd.safeArea);
     // The resizable viewport is deliberately a plain desktop viewport: turning it
     // on must change how wide the page is and nothing about how it behaves.
     expect(responsiveEmulation(600, 400).safeArea).toBeNull();
@@ -339,15 +355,20 @@ describe("safe-area insets", () => {
     // silently rotates into the other's. Nothing but this asserts it, and the
     // failure is invisible: the wrong numbers are still plausible numbers.
     //
-    // Classes sharing one pair outright are fine and intended (the three tablets
-    // do), because recovering any of them returns the same pair object.
+    // Classes reserving the *same* gutters in both orientations are fine and
+    // intended, whether they share one object (as the three tablets do) or repeat
+    // the literal: value-recognition returns a pair with the same numbers either
+    // way, so rotating gives the same answer and the two are interchangeable. The
+    // `continue` below skips exactly that case, which is why it cannot fail on it.
     //
-    // **If this fails because a new class legitimately reserves the same gutters as
-    // an existing one, reuse that class's constant — do not delete the
-    // assertion.** Pointing the new row at the same `PresetInsets` makes the two
-    // indistinguishable *and* interchangeable, which is the state the recovery
-    // needs; writing a second identical literal makes them indistinguishable and
-    // not interchangeable, which is the bug.
+    // **So the only failure this can produce is a *partial* overlap** — one class
+    // sharing an orientation set with another while differing in the other, or one
+    // class's portrait equalling another's landscape. There, "reuse the constant"
+    // is impossible advice, because the orientations that differ cannot share one.
+    // The real answer at that moment: value-recognition cannot tell those two
+    // classes apart, so either change the numbers, or give `PaneEmulation` an
+    // explicit class tag and stop recognising by value (see the deferred follow-up
+    // in the PR body). Do not delete the assertion — the failure is real.
     const pairs = DEVICE_PRESETS.map((p) => p.insets).filter((i) => i !== null);
     const key = (i: { top: number; right: number; bottom: number; left: number }) =>
       `${i.top},${i.right},${i.bottom},${i.left}`;

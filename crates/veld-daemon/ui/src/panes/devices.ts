@@ -561,7 +561,7 @@ export function customEmulation(
   height: number,
   base?: PaneEmulation | null,
 ): PaneEmulation {
-  return {
+  const next: PaneEmulation = {
     device: CUSTOM_DEVICE,
     width: clampDevicePx(width),
     height: clampDevicePx(height),
@@ -578,6 +578,10 @@ export function customEmulation(
     // a viewport nobody called a handset has no sensor housing to reserve for.
     safeArea: base?.safeArea ?? null,
   };
+  // Typing a landscape size into the custom fields turns the device over exactly as
+  // dragging past square does, so the gutters follow the shape here too — see
+  // [`reorientSafeArea`], which is a no-op unless the orientation actually changed.
+  return base == null ? next : reorientSafeArea(base, next);
 }
 
 /**
@@ -830,20 +834,29 @@ export function reservesSafeArea(e: PaneEmulation): boolean {
  * and the home indicator gets shorter — so [`PresetInsets`] holds both sets and
  * this picks whichever matches the new shape.
  *
- * Shared by [`rotateEmulation`] and [`resizeEmulation`] because both change which
- * way up a device is held: rotating says so, and dragging a portrait phone past
- * square does the same thing without saying so. Leaving the second alone produced
- * an emulation at odds with itself — `orientationLabel` reading "Landscape" over a
- * 59px *top* gutter, which is a state no device can be in.
+ * **Shared by all three functions that can change which way up a device is held**
+ * — [`rotateEmulation`], [`resizeEmulation`] and [`customEmulation`]. Rotating
+ * says so; dragging a portrait phone past square does the same thing without
+ * saying so; and *typing* 900 × 400 into the custom-size fields is the same act
+ * again. Each one left alone produced an emulation at odds with itself —
+ * `orientationLabel` reading "Landscape" over a 59px *top* gutter, a state no
+ * device can be in — and the third was missed on the first attempt precisely
+ * because this list read as exhaustive while naming two of them.
  *
- * Three things it must not do, each of which it did at some point: acquire gutters
- * for a device that had them switched off (the first return); hand a device
- * *another class's* gutters (hence [`insetPairFor`] recovering the class by value
- * rather than reaching for a default); and rewrite a set no class in the table
- * produces, which belongs to whoever edited it (the second return).
+ * Four things it must not do, each of which it did at some point: acquire gutters
+ * for a device that had them switched off (the first return); **touch the numbers
+ * at all when the orientation has not changed** (the second — a resize is not a
+ * rotation, and without it a 1px drag re-resolved through the table and could
+ * rewrite a stored set whose orientation disagreed with its shape, which is
+ * exactly the "silently restate what a stored layout emulates" this file's header
+ * forbids); hand a device *another class's* gutters (hence [`insetPairFor`]
+ * recovering the class by value rather than reaching for a default); and rewrite a
+ * set no class in the table produces, which belongs to whoever edited it (the
+ * last return).
  */
 function reorientSafeArea(from: PaneEmulation, to: PaneEmulation): PaneEmulation {
   if (from.safeArea === null) return to;
+  if (orientationOf(from) === orientationOf(to)) return to;
   const pair = insetPairFor(from);
   if (pair === null) return to;
   return { ...to, safeArea: pair[orientationOf(to)] };
