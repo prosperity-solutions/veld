@@ -1582,6 +1582,18 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     // 1200-DIP window: 1200 CSS px at 1.0 and 800 at 1.5, both 1200 DIP, but the
     // stale box gives 1800). It painted over the neighbouring pane for the one
     // frame before the reflow push corrected it.
+    //
+    // **One state does not re-push, and it is a resize drag.** `syncGeometry` in
+    // `panes/browserHost.ts` early-returns while `state.resizing` — so the 400ms
+    // tick, the `resize` listener and every `ResizeObserver` are dead ends for the
+    // length of the gesture, and the only pusher left is `previewBrowserResize`,
+    // driven by pointer moves. Zoom with a handle held perfectly still and the DOM
+    // frame reflows in CSS pixels while this view keeps its old bounds, scale and
+    // radius, until the next pointer move or the button release. The *bounds* half
+    // of that predates this conversion — the rect has always been converted only
+    // here — and all three are corrected by the same push, which is why this is
+    // recorded rather than worked around. Do not read "the only place that needs
+    // to" as unconditional.
     entry.hostZoom = zoom;
     entry.view.setBounds(rect);
     // The screen's shape travels with its box, and through the same conversion:

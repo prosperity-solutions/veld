@@ -1213,6 +1213,17 @@ export function BrowserPane(props: {
    * and the user-agent template belong to `emulationForPreset`, but *which* Chrome
    * version to claim and *whether* to fit are the pane's, and two controls now pick
    * a preset — the device menu's list and the quick switch.
+   *
+   * **`fit` is inherited, including by the quick switch, and that is deliberate.**
+   * It is a preference about the *pane* rather than a property of the device (see
+   * the device menu's preset items), so a shortcut into that menu has to answer it
+   * the same way the menu does. The consequence is worth stating because the switch
+   * did not have it before: `enterResponsive` measured the pane, so it could not
+   * produce a viewport the pane cannot show, while a fixed 402 × 874 with fitting
+   * **off** in a pane narrower than `402 + 2 × DEVICE_PADDING` is cropped rather
+   * than scaled — which is exactly what fitting off means everywhere else, and is
+   * not a state a one-click switch may quietly overrule by flipping a preference
+   * the user set.
    */
   const applyPreset = (preset: DevicePreset) =>
     applyEmulation(
