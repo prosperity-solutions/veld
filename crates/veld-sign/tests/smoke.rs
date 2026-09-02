@@ -1109,3 +1109,235 @@ fn adhoc_sign(path: &Path) {
         stderr_of(&out)
     );
 }
+
+/// `--slots` is exactly `--key-env` per entry plus `--expect-slot-pubkeys`.
+///
+/// This is the flag `release.yml` uses, and it uses it because the whole argument
+/// is **derived** from `veld_core::signing::ORG_KEYS` at build time rather than
+/// hand-edited — which is what removed all three of the workflow edits a rotation
+/// used to need. The equivalence is what makes that safe to rely on: every guard
+/// in this file is written against the older spelling, and they only cover the
+/// release path if the two spellings really do produce the same thing.
+#[test]
+fn slots_is_the_same_signature_as_key_env_plus_expected_pubkeys() {
+    let dir = scratch("slots-flag");
+    let binary = dir.join("veld-helper");
+    let payload = b"macho/elf payload signed two ways";
+    std::fs::write(&binary, payload).unwrap();
+
+    let keys: Vec<SigningKey> = (0..3).map(|_| throwaway_key()).collect();
+    let vars: Vec<String> = (0..3).map(|i| format!("SIGNING_PRIVATE_KEY_{i}")).collect();
+    let spec = keys
+        .iter()
+        .zip(&vars)
+        .map(|(k, v)| format!("{}={v}", pubkey_hex(k)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let mut cmd = veld_sign();
+    cmd.args(["--slots", &spec]).arg(&binary);
+    for (k, v) in keys.iter().zip(&vars) {
+        cmd.env(v, k.to_pkcs8_pem(LineEnding::LF).unwrap().as_str());
+    }
+    let out = cmd.output().expect("run veld-sign");
+    assert!(out.status.success(), "signing failed: {}", stderr_of(&out));
+
+    let via_slots = std::fs::read(sig_path_for(&binary)).expect("signature written");
+    assert_eq!(via_slots.len(), 3 * SIG_SLOT_LEN);
+
+    // The same three keys through the older spelling must produce the same bytes.
+    let mut cmd = veld_sign();
+    for v in &vars {
+        cmd.args(["--key-env", v]);
+    }
+    cmd.args([
+        "--expect-slot-pubkeys",
+        &keys.iter().map(pubkey_hex).collect::<Vec<_>>().join(","),
+    ])
+    .arg(&binary);
+    for (k, v) in keys.iter().zip(&vars) {
+        cmd.env(v, k.to_pkcs8_pem(LineEnding::LF).unwrap().as_str());
+    }
+    let out = cmd.output().expect("run veld-sign");
+    assert!(out.status.success(), "signing failed: {}", stderr_of(&out));
+    let via_flags = std::fs::read(sig_path_for(&binary)).expect("signature written");
+    assert_eq!(
+        via_slots, via_flags,
+        "--slots must produce byte-identical output to the flags it stands for"
+    );
+
+    // And slot order is entry order, which is the compatibility contract.
+    for (i, key) in keys.iter().enumerate() {
+        let slot = &via_slots[i * SIG_SLOT_LEN..(i + 1) * SIG_SLOT_LEN];
+        assert!(
+            verify_data(&key.verifying_key().to_bytes(), payload, slot),
+            "slot {i} is not signed by --slots entry {i}"
+        );
+    }
+}
+
+/// A `--slots` entry whose secret holds a different key fails, naming neither.
+///
+/// The wrong-secret guard, reached through the release path. It is the check
+/// nothing else in the pipeline can make: a signature by a valid-but-unintended key
+/// is indistinguishable from a correct one without knowing which key was meant.
+#[test]
+fn a_slots_entry_whose_secret_holds_another_key_is_refused() {
+    let dir = scratch("slots-wrong-key");
+    let binary = dir.join("veld-helper");
+    std::fs::write(&binary, b"payload").unwrap();
+
+    let meant = throwaway_key();
+    let actual = throwaway_key();
+    let out = veld_sign()
+        .args([
+            "--slots",
+            &format!("{}=SIGNING_PRIVATE_KEY", pubkey_hex(&meant)),
+        ])
+        .arg(&binary)
+        .env(
+            "SIGNING_PRIVATE_KEY",
+            actual.to_pkcs8_pem(LineEnding::LF).unwrap().as_str(),
+        )
+        .output()
+        .expect("run veld-sign");
+
+    assert!(!out.status.success(), "a wrong key must fail the release");
+    assert!(
+        !sig_path_for(&binary).exists(),
+        "no .sig may be written when any slot's key is wrong"
+    );
+    let err = stderr_of(&out);
+    // The key the secret turned out to hold IS named — a public key, and the only
+    // way an operator can tell which key a secret holds without reading it. The
+    // **expected** value is not, because 64 hex characters cannot be told apart
+    // from a private seed, and neither is any part of the PEM.
+    assert!(
+        err.contains(&pubkey_hex(&actual)),
+        "the found public key is what tells the operator which key the secret \
+         holds: {err}"
+    );
+    assert!(
+        !err.contains(&pubkey_hex(&meant)),
+        "the expected value must never be echoed: {err}"
+    );
+    for line in actual
+        .to_pkcs8_pem(LineEnding::LF)
+        .unwrap()
+        .lines()
+        .filter(|l| !l.starts_with("-----"))
+    {
+        assert!(!err.contains(line), "veld-sign echoed key material: {err}");
+    }
+}
+
+/// A malformed `--slots` argument is a usage error that echoes neither half.
+///
+/// The left half of an entry is 64 characters this tool cannot tell apart from a
+/// hex-encoded private seed, and an entry that failed to split is one whose halves
+/// are not identified at all — so nothing from it is quoted back.
+#[test]
+fn a_malformed_slots_entry_echoes_nothing_from_it() {
+    let dir = scratch("slots-malformed");
+    let binary = dir.join("veld-helper");
+    std::fs::write(&binary, b"payload").unwrap();
+
+    let key = throwaway_key();
+    let pem = key.to_pkcs8_pem(LineEnding::LF).unwrap().to_string();
+    // No `=`: the whole entry is unidentified, and here it happens to be a PEM.
+    let out = veld_sign()
+        .args(["--slots", pem.trim()])
+        .arg(&binary)
+        .output()
+        .expect("run veld-sign");
+
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "a bad command line is EXIT_USAGE"
+    );
+    let err = stderr_of(&out);
+    for line in pem.lines().filter(|l| !l.starts_with("-----")) {
+        assert!(
+            !err.contains(line),
+            "veld-sign echoed a --slots entry: {err}"
+        );
+    }
+    assert!(
+        !sig_path_for(&binary).exists(),
+        "a usage error must not reach the signing path at all"
+    );
+}
+
+/// `--slots` and `--expect-slot-pubkeys` together is a usage error, in both orders.
+///
+/// `--slots` already carries the expected key for every slot. A step passing both
+/// is a half-finished edit, and letting one silently win is how a slot ends up
+/// checked against the wrong key — the mistake the expected list exists to catch.
+#[test]
+fn slots_and_expect_slot_pubkeys_together_is_refused() {
+    let dir = scratch("slots-both");
+    let binary = dir.join("veld-helper");
+    std::fs::write(&binary, b"payload").unwrap();
+    let hex = pubkey_hex(&throwaway_key());
+
+    for args in [
+        vec![
+            "--slots".to_owned(),
+            format!("{hex}=SIGNING_PRIVATE_KEY"),
+            "--expect-slot-pubkeys".to_owned(),
+            hex.clone(),
+        ],
+        vec![
+            "--expect-slot-pubkeys".to_owned(),
+            hex.clone(),
+            "--slots".to_owned(),
+            format!("{hex}=SIGNING_PRIVATE_KEY"),
+        ],
+    ] {
+        let out = veld_sign()
+            .args(&args)
+            .arg(&binary)
+            .output()
+            .expect("run veld-sign");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "both flags together must be EXIT_USAGE: {}",
+            stderr_of(&out)
+        );
+    }
+}
+
+/// `--slots` plus `--key-env` is a usage error that says so.
+///
+/// `--slots` carries every slot's key and secret, so a `--key-env` beside it is a
+/// half-finished edit. Without its own message it fell through to the count check
+/// and reported `--expect-slot-pubkeys names 1 key(s) but 2 were given` — naming a
+/// flag the caller never passed, on a release path where the first thing anyone
+/// suspects is the signing secret.
+#[test]
+fn slots_mixed_with_a_key_flag_names_the_right_flag() {
+    let dir = scratch("slots-mixed");
+    let binary = dir.join("veld-helper");
+    std::fs::write(&binary, b"payload").unwrap();
+    let hex = pubkey_hex(&throwaway_key());
+
+    for extra in [
+        vec!["--key-env".to_owned(), "SIGNING_PRIVATE_KEY_2".to_owned()],
+        vec!["--key-file".to_owned(), "/etc/veld/signing.pem".to_owned()],
+    ] {
+        let out = veld_sign()
+            .args(["--slots", &format!("{hex}=SIGNING_PRIVATE_KEY")])
+            .args(&extra)
+            .arg(&binary)
+            .output()
+            .expect("run veld-sign");
+        let err = stderr_of(&out);
+        assert_eq!(out.status.code(), Some(2), "must be EXIT_USAGE: {err}");
+        assert!(
+            err.contains("--slots carries every slot's key and secret"),
+            "the message must name --slots, not the flag the caller never passed: {err}"
+        );
+    }
+}

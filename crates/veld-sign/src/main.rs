@@ -14,6 +14,18 @@
 //! first, because a wrong key in a later slot ships invisibly and wedges the whole
 //! fleet one release afterwards.
 //!
+//! **`--slots <hex>=<VAR>,…` is the release path**, and it is exactly one
+//! `--key-env <VAR>` per entry plus an `--expect-slot-pubkeys` of the hex halves —
+//! `slots_is_the_same_signature_as_key_env_plus_expected_pubkeys` pins the
+//! equivalence, which is what lets every guard here be written against the older
+//! spelling and still cover the path that ships. It exists because `release.yml`
+//! **derives** that whole argument from `veld_core::signing::ORG_KEYS` at build
+//! time instead of carrying a hand-edited copy: rotating a key is then a source
+//! edit and a new secret, with no workflow edit at all. Pairing the expected key
+//! with the variable that supplies it in one token is what makes the derivation
+//! safe — the two cannot drift apart, and an entry that went missing cannot shift
+//! every later key one slot to the left, which would move slot 0.
+//!
 //! The running root helper (`veld-helper`) verifies that signature against the
 //! keys **it** has compiled in — any slot under any of them — before ever
 //! relaunching onto a changed on-disk binary (see
@@ -59,8 +71,8 @@ use std::process::ExitCode;
 use ed25519_dalek::Signer;
 use ed25519_dalek::pkcs8::DecodePrivateKey;
 
-const USAGE: &str = "usage: veld-sign (--key-env <VAR> | --key-file <path>)... \
-[--expect-slot-pubkeys <hex>[,<hex>...]] <binary>";
+const USAGE: &str = "usage: veld-sign (--slots <hex>=<VAR>[,<hex>=<VAR>...] | \
+(--key-env <VAR> | --key-file <path>)... [--expect-slot-pubkeys <hex>[,<hex>...]]) <binary>";
 
 /// Most keys this will sign with, and therefore most slots it will write.
 ///
@@ -785,6 +797,7 @@ fn sig_path_for(binary: &Path) -> PathBuf {
 fn main() -> ExitCode {
     let mut sources: Vec<KeySource> = Vec::new();
     let mut expect_slots: Option<Vec<String>> = None;
+    let mut slots_given = false;
     let mut binary: Option<PathBuf> = None;
 
     let mut args = std::env::args().skip(1);
@@ -810,6 +823,12 @@ fn main() -> ExitCode {
                 // would be silently ignored — which is the shape of mistake that
                 // puts the wrong key in a slot, the one thing this flag exists to
                 // catch.
+                Some(_) if slots_given => {
+                    return usage(
+                        "--slots already carries the expected key for every slot; \
+                         do not also pass --expect-slot-pubkeys",
+                    );
+                }
                 Some(_) if expect_slots.is_some() => {
                     return usage(
                         "--expect-slot-pubkeys may be given only once; it takes a \
@@ -818,6 +837,66 @@ fn main() -> ExitCode {
                 }
                 Some(v) => expect_slots = Some(v.split(',').map(|h| h.trim().to_owned()).collect()),
                 None => return usage("--expect-slot-pubkeys requires a value"),
+            },
+            // The whole slot layout as one argument: `<expected pubkey>=<VAR>`,
+            // comma-separated, in slot order. Exactly equivalent to one `--key-env
+            // <VAR>` per entry plus an `--expect-slot-pubkeys` of the hex halves —
+            // and that equivalence is the point, so every guard below, and every
+            // test of them, covers this path unchanged.
+            //
+            // It exists because `release.yml` **derives** this argument from
+            // `veld_core::signing::ORG_KEYS` at build time instead of carrying a
+            // hand-edited copy. Pairing each expected key with the secret that
+            // signs its slot in ONE token is what makes that derivation safe: the
+            // two halves cannot drift out of step with each other, and a missing
+            // secret cannot silently shift every later key one slot to the left —
+            // which would re-shear slot 0, the one thing the format cannot survive.
+            "--slots" => match args.next() {
+                // Refused a second time for the same reason
+                // `--expect-slot-pubkeys` is: a step carrying two is a
+                // half-finished edit whose first list would be silently ignored.
+                Some(_) if slots_given => {
+                    return usage(
+                        "--slots may be given only once; it takes a comma-separated \
+                         list of <hex>=<VAR>, one per slot, in slot order",
+                    );
+                }
+                Some(v) => {
+                    slots_given = true;
+                    if expect_slots.is_some() {
+                        return usage(
+                            "--slots already carries the expected key for every slot; \
+                             do not also pass --expect-slot-pubkeys",
+                        );
+                    }
+                    let mut expected = Vec::new();
+                    for entry in v.split(',') {
+                        // `split_once`, not `split`: a hex key cannot contain `=`,
+                        // so the first one is the separator. A *second* `=` is
+                        // absorbed into the variable name rather than refused —
+                        // exactly as `--key-env "V=X"` would be, so the two
+                        // spellings stay equivalent. Nothing automated can produce
+                        // one: `tests/signing-slots.py` holds every secret name to
+                        // an environment-variable charset.
+                        let Some((hex, var)) = entry.trim().split_once('=') else {
+                            // Neither half is echoed. The right half could be a
+                            // variable name, but the left half is 64 characters that
+                            // this tool cannot tell apart from a hex-encoded private
+                            // seed — and an entry that failed to split is one whose
+                            // halves are not identified at all.
+                            return usage(
+                                "every --slots entry must be written <hex>=<VAR>: the \
+                                 expected 32-byte public key as 64 hexadecimal \
+                                 characters, then the name of the environment \
+                                 variable holding that key's PKCS#8 PEM",
+                            );
+                        };
+                        expected.push(hex.trim().to_owned());
+                        sources.push(KeySource::Env(var.trim().to_owned()));
+                    }
+                    expect_slots = Some(expected);
+                }
+                None => return usage("--slots requires a value"),
             },
             // A PEM begins with `-`, so a key handed over positionally lands
             // here rather than as the <binary> argument.
@@ -834,7 +913,18 @@ fn main() -> ExitCode {
     };
 
     if sources.is_empty() {
-        return usage("provide --key-env or --key-file");
+        return usage("provide --slots, --key-env or --key-file");
+    }
+    // `--slots` carries the whole layout, so anything adding to `sources` beside it
+    // is a half-finished edit. Refused by name rather than left to the count check
+    // below, which would report "--expect-slot-pubkeys names 1 key(s) but 2 were
+    // given" — naming a flag the caller never passed, on a release path where the
+    // first place anyone looks is the signing secret.
+    if slots_given && sources.len() != expect_slots.as_ref().map_or(0, Vec::len) {
+        return usage(
+            "--slots carries every slot's key and secret; do not also pass --key-env \
+             or --key-file",
+        );
     }
     // Kept a usage error, as it always was. With one key it meant "which one?";
     // with several the order would answer that, but a step naming both flags is
@@ -883,13 +973,29 @@ fn main() -> ExitCode {
             .iter()
             .all(|h| h.len() == 64 && h.chars().all(|c| c.is_ascii_hexdigit()))
     {
-        return usage(
-            "every entry in --expect-slot-pubkeys needs exactly 64 hexadecimal characters (a \
-             raw 32-byte ed25519 public key), comma-separated in slot order. No value is \
-             repeated here because a 64-character hex argument cannot be told apart from a \
-             private seed; derive each one with `openssl pkey -in <key>.pem -pubout -outform \
-             DER | tail -c 32 | xxd -p -c 32`",
-        );
+        // Blamed on the flag the caller actually passed. `--slots` desugars into
+        // this list, so without the branch a mistyped `<hex>=<VAR>` was reported as
+        // a malformed `--expect-slot-pubkeys`, describing a comma-separated shape
+        // the caller never wrote. Same class as the `--slots`-plus-key-flag case
+        // above: a message naming a flag nobody passed sends the reader to the
+        // signing secret, which is the expensive place to look first.
+        let derive = "derive each one with `openssl pkey -in <key>.pem -pubout -outform DER \
+                      | tail -c 32 | xxd -p -c 32`";
+        return usage(&if slots_given {
+            format!(
+                "the key half of every --slots entry needs exactly 64 hexadecimal characters \
+                 (a raw 32-byte ed25519 public key), written <hex>=<VAR>. No value is repeated \
+                 here because a 64-character hex argument cannot be told apart from a private \
+                 seed; {derive}"
+            )
+        } else {
+            format!(
+                "every entry in --expect-slot-pubkeys needs exactly 64 hexadecimal characters \
+                 (a raw 32-byte ed25519 public key), comma-separated in slot order. No value \
+                 is repeated here because a 64-character hex argument cannot be told apart \
+                 from a private seed; {derive}"
+            )
+        });
     }
 
     // Read every key before signing anything, so a failure on the last one costs

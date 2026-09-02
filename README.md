@@ -66,6 +66,12 @@ reboot. Updates still need no sudo — the installer hands the new binary to the
 running root helper, which verifies its signature and refuses anything older than
 the newer of what is running and what is already installed.
 
+That signature is checked against a list of org keys compiled into the helper, so
+the key can be **replaced without asking anyone to run anything** — two releases,
+and the old key keeps working until the second one. If you hold the key, the
+procedure is [docs/signing-key-rotation.md](docs/signing-key-rotation.md), and
+it is two releases, one new GitHub secret and one row of Rust.
+
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
 Setup is optional — commands auto-bootstrap on first use with HTTPS on port 18443.

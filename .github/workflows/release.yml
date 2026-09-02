@@ -257,61 +257,81 @@ jobs:
           # for the host — never for ${{ matrix.target }}, whose binary is
           # cross-compiled (aarch64 on an x86_64 runner) and cannot execute here.
           cargo build --release -p veld-sign
-          # `--key-env` is REPEATABLE and the order is the slot order (issue #261
-          # slice C). `<binary>.sig` carries one 64-byte signature per key, and
-          # slot 0 belongs to the org's original key forever: every helper shipped
-          # up to v16.59.0 verifies bytes 0..64 against that key and nothing else,
-          # so a release whose slot 0 is anything else is a release NO privileged
-          # install can relaunch onto — repairable only with sudo on every
-          # machine, which is the one outcome #338's rules forbid.
+          # **Rotating an org key needs no edit to this file.** The whole slot
+          # layout — which keys a release is signed by, in which slot, and which
+          # secret supplies each private half — is read out of
+          # `crates/veld-core/src/signing.rs`'s ORG_KEYS table, which is the same
+          # reviewed source the helper's own keyring is compiled from. Adding a key
+          # is one row there plus one new repository secret; nothing here changes.
+          # `docs/signing-key-rotation.md` is the runbook.
           #
-          # To rotate, in the same release: generate the new key offline, add it to
-          # the repo secrets, then FOUR edits —
-          #   1. a SECOND `--key-env <NEW_SECRET>` line BELOW this one (never
-          #      above: order is slot order and slot 0 cannot move);
-          #   2. a matching `<NEW_SECRET>:` entry in this step's own `env:` block
-          #      further down, taking its value from `secrets.<NEW_SECRET>` the same
-          #      way the existing line does. (Written in prose rather than as the
-          #      expression, so this comment needs no escaping to keep Actions from
-          #      evaluating it.) Easy to miss, and the symptom is the release dying
-          #      at this step *after merge* — `veld-sign` reads the key by variable
-          #      NAME, so a flag with no matching `env:` entry looks exactly like an
-          #      unset secret;
-          #   3. the new public key APPENDED to `--expect-slot-pubkeys` below,
-          #      comma-separated, in slot order — not optional: it is the only check
-          #      that a secret holds the key the keyring names, and for a later slot
-          #      that mistake ships invisibly and wedges the fleet one release on;
-          #   4. the new public key in the keyring in
-          #      `crates/veld-core/src/signing.rs`, with RELEASE_SIG_SLOTS bumped.
-          # Then `cargo fmt --all`. Retirement is a LATER release. Full runbook:
-          # `docs/signing-key-rotation.md`. `ci.yml`'s `schema` job fails a pull
-          # request for every one of those four going wrong: a flag count that stops
-          # matching `veld_core::signing::RELEASE_SIG_SLOTS`, a `--key-env` with no
-          # matching `env:` entry (or written with `=` rather than a space), a secret
-          # name without the shared prefix the leak gate matches on, and an
-          # `--expect-slot-pubkeys` list that does not equal `ORG_REQUIRED_SLOT_KEYS`
-          # element for element and in order.
+          # `--slots` takes `<expected public key hex>=<VARIABLE>` per slot, in slot
+          # order. Pairing the two halves in one token is what makes deriving them
+          # safe: they cannot drift apart, and a row that went missing cannot shift
+          # every later key one slot to the left — which would move slot 0, and slot
+          # 0 belongs to the org's original key forever. Every helper shipped up to
+          # v16.59.0 verifies bytes 0..64 against that one key and nothing else, so
+          # a release whose slot 0 is anything else is a release NO privileged
+          # install can relaunch onto, repairable only with sudo on every machine —
+          # the one outcome #338's rules forbid.
           #
-          # `--expect-slot-pubkeys` is the check nothing else in the pipeline can
-          # make: if a signing secret is ever re-uploaded, rotated or created holding
-          # a *different but valid* key, the PEM parses, a signature is written and
-          # the release publishes — a signature by the wrong key is indistinguishable
-          # from a correct one without knowing which key was meant.
+          # The expected-key half is the check nothing else in the pipeline can
+          # make: if a signing secret is ever re-uploaded, rotated or created
+          # holding a *different but valid* key, the PEM parses, a signature is
+          # written and the release publishes — a signature by the wrong key is
+          # indistinguishable from a correct one without knowing which key was
+          # meant. It covers EVERY slot, not just slot 0: a wrong key in a later
+          # slot ships invisibly (the release still installs everywhere via slot 0)
+          # and then wedges every privileged install one release later, when that
+          # key becomes the only one a helper accepts.
           #
-          # It lists EVERY slot's expected public key, comma-separated in slot order,
-          # not just slot 0's. A wrong key in slot 1 would ship invisibly (the
-          # release still installs everywhere via slot 0) and then wedge every
-          # privileged install one release later, when that key becomes the only one
-          # a helper accepts. `ci.yml` compares this list element-wise against
-          # `ORG_REQUIRED_SLOT_KEYS` in the source, so adding a key here without
-          # adding it there — or in the wrong order — fails a pull request.
-          ./target/release/veld-sign \
-            --key-env SIGNING_PRIVATE_KEY \
-            --expect-slot-pubkeys 9d75a4c55c02b46e53a30d1df884c8aaf0d3902306d1c6ee53603299a31b3156 \
-            dist/veld-helper
+          # Deriving it does not move the trust root anywhere. It reads git, not the
+          # secret store — the point is that a reviewer can still see in reviewed
+          # source which keys a release trusts and which it is signed by, and now
+          # they cannot disagree with each other.
+          #
+          # `ci.yml`'s `schema` job runs the same script on every pull request and
+          # checks each secret it names against this step's `env:` block below, so a
+          # key added to the table without its secret being listed fails a pull
+          # request instead of this push-only step, i.e. instead of failing after
+          # merge.
+          SLOTS="$(python3 tests/signing-slots.py)"
+          echo "signing slots: $SLOTS"
+          ./target/release/veld-sign --slots "$SLOTS" dist/veld-helper
           tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
         env:
+          # **The permanent roster. Do not edit this block to rotate a key.**
+          #
+          # Eight names, the signature format's own slot ceiling
+          # (`veld_core::signing::MAX_SIG_SLOTS`), listed once and never again.
+          # Which of them a release actually uses is decided by the ORG_KEYS table
+          # in `crates/veld-core/src/signing.rs`. A name no row names is simply an
+          # environment variable that is not there, and `veld-sign` never asks for
+          # it. A name a row DOES name must have its secret set — including a
+          # **retired** row, whose slot is still produced on every release.
+          # Deleting a retired key's secret breaks every release from then on, and
+          # nothing can warn about it, because secrets cannot be enumerated.
+          #
+          # Listed rather than looked up because a workflow cannot enumerate
+          # secrets: `ci.yml`'s own gate forbids `toJSON(secrets)` and any dynamic
+          # index into the secrets context on every workflow a pull request can
+          # start, deliberately. A fixed set of names whose presence at runtime
+          # drives behaviour is the shape that IS expressible.
+          #
+          # SIGNING_PRIVATE_KEY holds the org's ORIGINAL key and is never
+          # re-uploaded with different material — it is slot 0, which is a
+          # compatibility contract with every already-shipped helper. A new key goes
+          # in the next free number. Names are positional, never relative to now: an
+          # `_OLD`/`_CURRENT` pair reads as the obvious scheme and puts the second
+          # key in slot 0 on the second rotation, which strands the whole fleet.
           SIGNING_PRIVATE_KEY: ${{ secrets.SIGNING_PRIVATE_KEY }}
+          SIGNING_PRIVATE_KEY_2: ${{ secrets.SIGNING_PRIVATE_KEY_2 }}
+          SIGNING_PRIVATE_KEY_3: ${{ secrets.SIGNING_PRIVATE_KEY_3 }}
+          SIGNING_PRIVATE_KEY_4: ${{ secrets.SIGNING_PRIVATE_KEY_4 }}
+          SIGNING_PRIVATE_KEY_5: ${{ secrets.SIGNING_PRIVATE_KEY_5 }}
+          SIGNING_PRIVATE_KEY_6: ${{ secrets.SIGNING_PRIVATE_KEY_6 }}
+          SIGNING_PRIVATE_KEY_7: ${{ secrets.SIGNING_PRIVATE_KEY_7 }}
+          SIGNING_PRIVATE_KEY_8: ${{ secrets.SIGNING_PRIVATE_KEY_8 }}
           # Read by the version-record check above. Passed through the
           # environment rather than interpolated into the heredoc so the heredoc
           # stays quoted and the shell cannot touch the Python source.

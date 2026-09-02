@@ -28,6 +28,12 @@ reboot. Updates still need no sudo — the installer hands the new binary to the
 running root helper, which verifies its signature and refuses anything older than
 the newer of what is running and what is already installed.
 
+That signature is checked against a list of org keys compiled into the helper, so
+the key can be **replaced without asking anyone to run anything** — two releases,
+and the old key keeps working until the second one. If you hold the key, the
+procedure is `docs/signing-key-rotation.md`, and it is two releases, one new
+GitHub secret and one row of Rust.
+
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
 **Upgrading from an older veld:** `veld.json` must declare `"schemaVersion": "3"`; `"1"` and `"2"` no longer load. The load error names every change needed. See `docs/migrating-to-v3.md` for the complete rule set, then `veld lint` to verify. There is no v4: what v3 gained after shipping (`long_running`, port-less long-running nodes, `protocol`/`host` on a named port, the `settle` probe, per-port sharing consent) is additive, and `docs/adopting-long-running-and-ports.md` covers adopting it.

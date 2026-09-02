@@ -16,35 +16,302 @@ the operating manual.
 > is asking every user to run `sudo`. That is the outcome the whole #338 chain
 > exists to prevent, and this is the mechanism most able to cause it.
 
-## The 60-second version
+## The whole rotation, in order
+
+**Two releases. Never one.** This list is complete on its own — everything below it
+is the reasoning, not more steps. Every step here was executed against this repo,
+twice in a row, before it was written down.
+
+> A note on numbering, because a comment in the source will send you looking. The
+> `## Step 1/2/3` headings further down are the **three phases** — make the key,
+> add it, retire the old one — and that is what "step 2" or "step 3" means wherever
+> `crates/veld-core/src/signing.rs` and `.github/workflows/ci.yml` mention one. The
+> numbers in the list below are just the order of doing things. They are not the
+> same numbering, and nothing outside this file refers to them.
+>
+> Test-failure messages name **tests**, never step numbers, precisely so that this
+> cannot go stale: grep the name the failure gives you.
+
+Against the four-edits-plus-two-test-deletions procedure this replaces, what a
+rotation costs now:
+
+| | before | now |
+|---|---|---|
+| `crates/veld-core/src/signing.rs` | 3 edits (key constant, two lists, slot count) | **1 row appended** |
+| `.github/workflows/release.yml` | 3 edits (`--key-env`, its `env:` entry, the expected-key hex) | **none** |
+| tests to delete | 2, one per release | **none** |
+| GitHub secrets to set | 1 | 1 |
+| releases | 2 | 2 |
+
+### Release 1 — teach every helper the new key
+
+**1. Make the key, on a machine that is not the one that leaked.** macOS's
+`/usr/bin/openssl` is LibreSSL and **cannot do this**; use an OpenSSL 3.
 
 ```sh
-# 1. Generate the new key, air-gapped, and add its private half as a NEW secret.
-#    macOS's /usr/bin/openssl is LibreSSL and CANNOT do this — see step 1.
-openssl genpkey -algorithm ed25519 -out veld-signing-2.pem
-openssl pkey -in veld-signing-2.pem -pubout -outform DER | tail -c 32 | xxd -p -c 32
+OPENSSL=/opt/homebrew/opt/openssl@3/bin/openssl   # Intel Mac: /usr/local/opt/openssl@3/bin/openssl
+                                                  # Linux: openssl
+"$OPENSSL" version                                # must say OpenSSL, not LibreSSL
 
-# 2. ONE release that ADDS it — FOUR edits:
-#    - crates/veld-core/src/signing.rs: add ORG_KEY_2, put it in BOTH
-#      ORG_SIGNING_KEYRING and ORG_REQUIRED_SLOT_KEYS, bump RELEASE_SIG_SLOTS to 2
-#    - .github/workflows/release.yml: a second --key-env line BELOW the first
-#    - .github/workflows/release.yml: the matching entry in that step's env:
-#      block. Easy to miss; veld-sign reads a key by variable NAME, so a flag
-#      with no env: entry looks exactly like an unset secret.
-#    - .github/workflows/release.yml: APPEND the new public key hex to
-#      --expect-slot-pubkeys, comma-separated, in slot order. Not optional:
-#      it is what stops a secret holding the wrong key shipping invisibly.
-#    Then: cargo fmt --all, and delete ONE test —
-#    no_rotation_has_happened_yet_so_the_artifact_is_unchanged — and nothing
-#    else. Step 2 below says why.
-#
-# 3. Wait for that release to reach the fleet. Then a SECOND release that RETIRES
-#    the old key: remove ORG_KEY_1 from ORG_SIGNING_KEYRING only. It stays in
-#    ORG_REQUIRED_SLOT_KEYS and keeps its slot.
+"$OPENSSL" genpkey -algorithm ed25519 -out "$PWD/veld-signing-2.pem"
+"$OPENSSL" pkey -in "$PWD/veld-signing-2.pem" -pubout -outform DER \
+  | tail -c 32 | xxd -p -c 32
 ```
 
-Two releases. Never one. The reason is in [Why retirement is a separate
+That hex is the **new public key**. You paste it once, into the key constant in
+step 4. The same 32 bytes in the form `signing.rs` wants:
+
+```sh
+python3 -c "
+import sys, textwrap
+h = sys.argv[1]
+print(chr(10).join(textwrap.wrap(', '.join(f'0x{h[i:i+2]}' for i in range(0, len(h), 2)), 96)))
+" <the hex>
+```
+
+**2. Put the private half in the org vault, beside the original key.** Before the
+GitHub secret, not after. A repository secret **cannot be read back**, so the vault
+is the only copy anything can ever recover — and a retired key's slot keeps being
+signed forever (step 9), so losing its private half is a flag day, not an
+inconvenience. Delete the local `.pem` once the vault has it and the secret in
+step 3 is set.
+
+**3. Put the private half in a GitHub secret named `SIGNING_PRIVATE_KEY_2`.** This
+is the only step that is not a code change, and it needs **repository admin**. It
+is a **repository** secret — not an environment secret, not an org secret;
+`release.yml`'s `build` job has no `environment:`, so an environment secret would
+simply not be there.
+
+```sh
+# The whole PEM, including the BEGIN/END lines. `gh` reads the file, so nothing
+# lands in your shell history.
+gh secret set SIGNING_PRIVATE_KEY_2 < "$PWD/veld-signing-2.pem"
+
+gh secret list          # you see the NAME and a timestamp; never the value
+```
+
+By hand instead: **Settings → Secrets and variables → Actions → New repository
+secret**. Name `SIGNING_PRIVATE_KEY_2`, value = the entire file contents.
+
+**The name is not yours to choose, and it is not descriptive — it is positional.**
+`release.yml` carries a permanent roster of eight names,
+`SIGNING_PRIVATE_KEY` through `SIGNING_PRIVATE_KEY_8`, written once and never
+edited again. Take the next free number. Three things follow:
+
+- **Never re-upload `SIGNING_PRIVATE_KEY`.** It holds the org's *original* key and
+  it is slot 0, which every helper shipped up to v16.59.0 verifies bytes `0..64`
+  against and nothing else. Overwriting it is the single most expensive mistake
+  available in this procedure.
+- **Do not invent a name like `SIGNING_PRIVATE_KEY_OLD`.** A name relative to *now*
+  reads as the obvious scheme and is fatal on the **second** rotation: the second
+  key would land in slot 0, where no already-shipped helper has ever trusted it,
+  and the original key would have no slot at all. Positional names cannot do that.
+- **Setting the secret early is safe.** Nothing reads it until step 4's row names
+  it, so
+  releases in between are unaffected.
+
+**You cannot read a secret back**, so nothing can confirm the upload by inspection.
+What confirms it is the expected-key check at the **release** — step 7, after the
+merge, because that is the only moment anything can read the secret. If it holds a
+different key the release fails rather than publishing an artifact no installed
+helper would accept. **A green pull request says nothing about the secret**, which
+is why the local probe below is worth the one command. Check the file itself first — this is the last moment it is
+inspectable. **Run it from your veld checkout** (`-p veld-sign` resolves through
+the workspace):
+
+```sh
+# An ABSOLUTE path to the key: step 1 may have made it on another machine, and this
+# has to run from your veld checkout. The probe target needs a `.` in its name —
+# veld-sign will not print a path segment that could be a chunk of encoded key
+# material, so a bare /tmp/probe comes back as `<redacted: …>` in the SUCCESS line.
+printf 'x' > /tmp/veld-probe.bin
+cargo run -q -p veld-sign -- --key-file /absolute/path/to/veld-signing-2.pem \
+  /tmp/veld-probe.bin
+```
+
+It prints the public key of each slot it signed. That hex must equal the one from
+step 1. Any other outcome — wrong PEM label, encrypted key, OpenSSH format, a
+byte-order mark, the `.pub` by mistake — is named exactly by the error.
+
+**4. Append one row to `ORG_KEYS` in `crates/veld-core/src/signing.rs`.** This is
+the entire code change, and it is the only edit a rotation makes:
+
+```rust
+pub const ORG_KEY_2: PubKey = [
+    /* the 32 bytes from step 1 */
+];
+
+pub const ORG_KEYS: &[OrgKey] = &[
+    OrgKey {
+        key: ORG_KEY_1,
+        secret: "SIGNING_PRIVATE_KEY",
+        added_after: "0.0.0",
+        status: KeyStatus::Accepted,
+    },
+    OrgKey {
+        key: ORG_KEY_2,
+        secret: "SIGNING_PRIVATE_KEY_2",
+        // Cargo.toml's `version` right now — read it, do not copy this line.
+        added_after: "<Cargo.toml's version>",
+        status: KeyStatus::Accepted,
+    },
+];
+```
+
+**Append. Never reorder, never delete a row.** A row's position in this table *is*
+its slot in `<binary>.sig`, and slot position is the format's only key identifier.
+
+`added_after` is `Cargo.toml`'s `version` at the moment you write the row — the
+last release before the one this change will become. You can always know it, and
+that is what makes it useful: `Cargo.toml` still holds the *previous* release until
+semantic-release bumps it after your merge, so it is the one thing about the future
+release you can state truthfully. [The two-release rule, and its
+guard](#the-two-release-rule-and-its-guard) is what it is for.
+
+**5. `cargo fmt --all`.** A hand-written 32-byte array will not match rustfmt, and
+CI's `fmt --check` is a hard failure.
+
+**6. Open the pull request. Nothing else needs editing — check that nothing was.**
+
+```sh
+cargo test --workspace          # no test is deleted by a rotation any more
+python3 tests/signing-slots.py  # what release.yml will pass to veld-sign
+git status --short              # signing.rs, and nothing else
+```
+
+`tests/signing-slots.py` prints `<public key>=<secret name>` per slot, in slot
+order. Read it: the first entry must still be the original key and
+`SIGNING_PRIVATE_KEY`, and the new entry's hex must match step 1. That string is
+literally what `release.yml` hands `veld-sign`, derived from the table you just
+edited — which is why there is nothing to edit in the workflow, and why the
+workflow and the source cannot disagree.
+
+If something *is* wrong, a gate names the edit you missed. The ones you can hit:
+a secret name the permanent roster does not carry; a table row this repo's parser
+cannot read; `ORG_KEY_1` no longer first; two rows sharing a key or a secret; a
+secret name without the `SIGNING_` prefix the leak gate matches on.
+
+**7. Merge — and `feat:` or `fix:` in the squashed subject, or nothing ships.**
+Merging **is** releasing here: semantic-release cuts the version from the commit
+subject. A `chore:` or `docs:` subject publishes nothing, silently, with CI green,
+and you will believe the key is deployed when it is not. Check the Releases page
+before you go any further.
+
+At the release, `veld-sign` prints one line per slot naming the public key it
+signed with. That log is the record of which keys a published artifact is
+verifiable under.
+
+After this release:
+
+- helpers still on the old release accept it via slot 0 (the original key), install
+  it, and relaunch onto it — nothing is asked of any user;
+- helpers on this release accept anything signed by either key;
+- `veld doctor` on a machine that has taken it says which key verified — `signed by
+  org key 2 of 2`, the row number in `ORG_KEYS`.
+
+Nothing is retired yet, and nothing is safe yet. The leaked key still works. That
+is the point of the step: it moves the *knowledge* of the new key onto machines,
+using the only channel those machines trust.
+
+### Release 2 — stop accepting the old key
+
+**8. Wait.** Until you are willing to say the previous release has reached the
+machines you care about. There is no telemetry and this is not a check you can
+automate — see [Why retirement is a separate
 release](#why-retirement-is-a-separate-release).
+
+**9. Change the old key's `status`, in a second pull request.** One field:
+
+```rust
+    OrgKey {
+        key: ORG_KEY_1,
+        secret: "SIGNING_PRIVATE_KEY",
+        added_after: "0.0.0",
+        status: KeyStatus::Retired {
+            // Cargo.toml's `version` right now — which, because release 1 has
+            // shipped, is no longer what release 1's row says.
+            retired_after: "<Cargo.toml's version>",
+        },
+    },
+```
+
+The row stays. Its slot keeps being produced — harmless, since anyone holding the
+old key already holds it — and helpers on this release stop *accepting* it. Then
+`cargo fmt --all`, and `cargo test --workspace`, which is green: **no test is
+deleted here either.**
+
+> **Never delete a retired key's GitHub secret.** A retired row still gets a slot,
+> so `SIGNING_PRIVATE_KEY` is still read on every release *after* you retire it,
+> forever. Deleting it — the instinctive tidy-up on the day a key leaked, which is
+> the day you are reading this — makes every subsequent release die at the signing
+> step, push-only, after merge. And **nothing can warn you**: secrets cannot be
+> enumerated, which is the same limit the permanent roster exists to work around.
+> The key is already leaked; leaving it in the secret store costs nothing, because
+> what made it dangerous was helpers accepting it, and that is what you just
+> stopped.
+
+From here a leaked copy of the old key is no longer a way past the install gate or
+the relaunch gate.
+
+### The two-release rule, and its guard
+
+A release that both adds a key and retires one strands every helper whose only key
+was the retired one: it refuses the very artifact meant to move it forward, and the
+only repair is sudo on every machine.
+
+It is guarded twice, in two different places, because neither layer alone is
+enough. Both are worth knowing, because they fail differently.
+
+**Layer 1 — a plain unit test, no git, runs everywhere.**
+`one_release_never_both_adds_a_key_and_retires_one` reads the two dates. Both halves
+of the edit record `Cargo.toml`'s version at the time they were written, and
+`Cargo.toml` holds the *previous* release until semantic-release bumps it after the
+merge — so a combined edit written in one sitting puts the **same** version in both
+fields, and the test fails. `added_after_increases_down_the_table` stops the obvious
+way around it: a new row's date must be strictly later than the row above, which
+refuses row 0's `0.0.0` and every earlier row's version, the two stale values
+actually lying around to copy. This layer runs in `cargo test --workspace`, on your
+machine, and on a direct push to `main`.
+
+**Its hole, named rather than glossed:** if the branch's `Cargo.toml` moves between
+the two edits — an unrelated release lands, you update the branch, then retire — the
+two dates are both *honest* and *different*, neither equals the current version, and
+layer 1 sees nothing. The tree cannot tell "added last release" from "added in this
+pull request". Nothing written in the file can close that.
+
+**Layer 2 — the pull request's own diff.** `ci.yml`'s *One release never both adds a
+key and retires one* fails if this pull request's change to `signing.rs` both
+introduces an `OrgKey` row and introduces a `KeyStatus::Retired`. That is exact, and
+it is the layer that closes layer 1's hole. It reads the merge commit's own parents
+(`HEAD^1` is the base GitHub merged against, `HEAD` the result), which the job's
+`fetch-depth: 2` checkout already has — no fetch, and nothing from the event payload,
+whose `base.sha` goes stale exactly when the base branch moves mid-review, which is
+the situation this step is for. It does not run on a direct push to `main`, which is
+precisely the case layer 1 does cover.
+
+**What neither catches:** a value invented for `added_after` that is neither the
+truth nor anything already written down — a version between the previous row's and
+the current one. Nothing in the tree can prove a date honest, and a pull request that
+deletes a row rather than retiring it is a [flag day](#the-flag-day-probably-never)
+by another name. Closing those needs evidence only the release infrastructure can
+mint; that is a follow-up, not something this file pretends to have.
+
+### What is still not "just set a secret", and why
+
+Two things, and neither is an oversight:
+
+- **The `signing.rs` row.** A helper accepts a signature by a key **compiled into
+  it**; the only way to teach it a new key is to ship a binary carrying that key.
+  So the *signing* side can be entirely secret-driven and the *accepting* side is a
+  source change by construction. `release.yml` could be made to derive the keyring
+  from the secrets at build time — that is the tempting way to reach "that's it",
+  and it moves the trust root out of git, where a reviewer can see which keys a
+  release trusts, and into the CI secret store, where a compromised Actions run can
+  mint a keyring. It was considered and rejected. The trust root is still in git.
+- **The second release.** A machine that never installs release 1 lands in
+  `SigTrust::RetiredOnly` — see [The truncation
+  window](#the-truncation-window-and-why-it-is-fine). That is a property of
+  software already in the field, not a policy choice.
 
 ## What you are working with
 
@@ -72,9 +339,24 @@ Two facts about slot 0 that are not conventions but contracts:
   in the field; see [The truncation
   window](#the-truncation-window-and-why-it-is-fine).
 
-`RELEASE_SIG_SLOTS` in `crates/veld-core/src/signing.rs` is the number of slots a
-release must carry. `ci.yml`'s `schema` job fails a **pull request** if it stops
-matching the number of key flags in `release.yml`, so the two cannot drift.
+**`ORG_KEYS` in `crates/veld-core/src/signing.rs` is the single table all of this
+is read from.** One row per key, in slot order, each row carrying the public key,
+the GitHub secret whose private half signs that slot, when the row was added, and
+whether this build still accepts it. Everything else is a view of it:
+
+- `ORG_SIGNING_KEYRING` — the rows this build accepts. The trust root, compiled in.
+- `ORG_REQUIRED_SLOT_KEYS` — every row, in order. A release must carry a slot for
+  each, accepted or not.
+- `RELEASE_SIG_SLOTS` — `ORG_KEYS.len()`.
+- what `release.yml` passes `veld-sign` — derived at build time by
+  `tests/signing-slots.py`, which `ci.yml` runs on every pull request too.
+
+It is a table of records rather than two lists of keys for a reason worth knowing:
+two flat lists can only express *state*, so removing a key from a keyring destroyed
+every trace that the key was ever there, and a release that both added and retired
+one was undetectable in principle. A row that survives its own retirement is where
+that evidence lives — see [The two-release rule, and its
+guard](#the-two-release-rule-and-its-guard).
 
 ## Step 1 — generate the new key, off CI
 
@@ -97,8 +379,9 @@ OPENSSL=/opt/homebrew/opt/openssl@3/bin/openssl
 
 "$OPENSSL" genpkey -algorithm ed25519 -out "$PWD/veld-signing-2.pem"
 
-# The 32 raw public bytes as hex. This is the value --expect-slot-pubkeys takes
-# and the value veld-sign prints per slot, so all three must agree:
+# The 32 raw public bytes as hex. This is what goes in the ORG_KEYS row, what
+# veld-sign prints per slot, and what the derived --slots argument carries, so
+# all of them must agree:
 "$OPENSSL" pkey -in "$PWD/veld-signing-2.pem" -pubout -outform DER \
   | tail -c 32 | xxd -p -c 32
 
@@ -133,6 +416,12 @@ cargo run -q -p veld-sign -- --key-file /absolute/path/to/veld-signing-2.pem \
   --expect-slot-pubkeys <the hex> /tmp/veld-probe.bin
 ```
 
+(`--key-file` plus `--expect-slot-pubkeys` is the hand spelling. The release path
+uses `--slots <hex>=<VAR>`, which is exactly one of each per entry — the
+equivalence is pinned by `slots_is_the_same_signature_as_key_env_plus_expected_pubkeys`
+in `crates/veld-sign/tests/smoke.rs`, so probing this way really does exercise the
+path that ships.)
+
 (The filename needs a `.` in it. `veld-sign` will not print a path segment that
 could be a chunk of encoded key material, so a bare `/tmp/probe` comes back as
 `<redacted: …>` in the success line — nothing is wrong, but it reads alarmingly at
@@ -145,73 +434,72 @@ derived from the private key by the same code that signs releases.
 If you have an OpenSSH key, `ssh-keygen -p -m PKCS8 -f <key>` converts it; the
 tool will tell you so if you get it wrong.
 
-Add the private half as a **new** repository secret. Name it with the
-`SIGNING_` prefix — `SIGNING_PRIVATE_KEY_2` — because `ci.yml`'s
-"no PR-startable job reaches a signing secret" gate matches that prefix and will
-therefore cover the new secret automatically. A name without it is a secret
-nothing checks.
+Add the private half as a **new** repository secret, taking the next free number
+in the permanent roster: `SIGNING_PRIVATE_KEY_2`, then `_3`, up to `_8`. The
+`SIGNING_` prefix is not decoration — `ci.yml`'s "no PR-startable job reaches a
+signing secret" gate matches it, so every name in the roster is covered without an
+edit, and a name without it is a secret nothing checks. `release.yml` already lists
+all eight; you are filling one in, not adding one.
 
-**Do not overwrite `SIGNING_PRIVATE_KEY`.** The old key must keep signing slot 0.
-Overwriting it is the single most expensive mistake available here, and it is why
-`release.yml` passes `--expect-slot-pubkeys`: the release fails rather than
-publishing an artifact no installed helper can accept.
+**Do not overwrite `SIGNING_PRIVATE_KEY`.** It holds the original key, which must
+keep signing slot 0. Overwriting it is the single most expensive mistake available
+here, and it is why the release checks each slot's expected public key: the release
+fails rather than publishing an artifact no installed helper can accept.
 
 ## Step 2 — the release that adds the key
 
-One PR, **four** edits, one release:
+One PR, **one** edit, one release: append a row to `ORG_KEYS` in
+`crates/veld-core/src/signing.rs`, then `cargo fmt --all`. The exact shape is in
+[The whole rotation, in order](#the-whole-rotation-in-order) above; this section is
+why it is only one edit and what each part of it is load-bearing for.
 
-1. `crates/veld-core/src/signing.rs`
-   - add `pub const ORG_KEY_2: PubKey = [ ... ];` with the hex from step 1
-   - add it to `ORG_SIGNING_KEYRING` **and** to `ORG_REQUIRED_SLOT_KEYS`
-   - bump `RELEASE_SIG_SLOTS` to `2`
-2. `.github/workflows/release.yml`, in `Package client binaries`: add
-   `--key-env SIGNING_PRIVATE_KEY_2 \` **below** the existing `--key-env` line.
-   Order is slot order. Below, never above.
-3. `.github/workflows/release.yml`, in the **same step's `env:` block**: add
-   `SIGNING_PRIVATE_KEY_2: ${{ secrets.SIGNING_PRIVATE_KEY_2 }}`.
+```rust
+OrgKey {
+    key: ORG_KEY_2,                        // the constant you added above the table
+    secret: "SIGNING_PRIVATE_KEY_2",       // the secret from step 1
+    added_after: "<Cargo.toml's version>", // read it; a pasted literal is refused
+    status: KeyStatus::Accepted,
+}
+```
 
-   **This is the edit that gets forgotten**, and the symptom is the release dying
-   at the signing step *after* the PR has merged. GitHub does not expose
-   repository secrets as environment variables on their own, and `veld-sign` reads
-   a key by variable **name** — so a `--key-env` with no matching `env:` entry is
-   indistinguishable from a secret that never arrived. `ci.yml`'s `schema` job
-   fails a pull request for exactly this, and for a secret whose name does not
-   carry the `SIGNING_` prefix the leak gate matches on.
+- **`key`'s position in the table is its slot.** Append; never reorder. Slot 0 is a
+  contract with every already-shipped helper, and slot position is this format's
+  only key identifier, so moving a row silently re-points a signature at a
+  different key.
+- **`secret` binds the key to the private half that signs its slot, in source.**
+  This used to be implicit in the order of flags in `release.yml`, which is exactly
+  the kind of positional coupling this format keeps producing bugs from. `ci.yml`
+  checks every name here against the workflow's permanent `env:` roster on each
+  pull request, so a name the roster does not carry fails a PR rather than the
+  release.
+- **`added_after` is `Cargo.toml`'s version right now** — see [The two-release
+  rule, and its guard](#the-two-release-rule-and-its-guard).
+- **`status`** is `Accepted` here. Retirement is release 2 and nothing else.
 
-4. `.github/workflows/release.yml`, on the `--expect-slot-pubkeys` line:
-   **append the new key's hex**, comma-separated, in slot order —
-   `--expect-slot-pubkeys <ORG_KEY_1 hex>,<ORG_KEY_2 hex>`.
+**Three things that used to be edits and are not any more.** `RELEASE_SIG_SLOTS`,
+the `--key-env` flag and its `env:` entry, and the `--expect-slot-pubkeys` hex were
+all transcriptions of what the table already said. `RELEASE_SIG_SLOTS` is
+`ORG_KEYS.len()`; `release.yml` derives the whole slot layout with
+`tests/signing-slots.py` and lists the eight secret names permanently. A
+transcription in two files is a transcription that drifts, and the symptom of drift
+here is a release no privileged install can accept.
 
-   This is not optional and it is not cosmetic. That flag is the only thing that
-   catches a signing secret holding a valid key which is *not* the one you pasted
-   into the keyring — and for a **later** slot, that mistake ships invisibly,
-   because every already-shipped helper still verifies the release through slot 0.
-   It would then wedge every privileged install one release later, when that key
-   becomes the only one a helper accepts: fleet-wide, sudo-only. `ci.yml` compares
-   this list element-wise against `ORG_REQUIRED_SLOT_KEYS`, so leaving it at one
-   entry fails the pull request with `1 declared vs 2 required`.
+**And no test is deleted.** There used to be one —
+`no_rotation_has_happened_yet_so_the_artifact_is_unchanged` — that went red for a
+*correct* rotation and whose own doc comment told you to delete it. Which meant
+step 2 of a rotation was "delete a red test", rehearsed on the worst day available,
+next to permanent invariants that look identical when the whole file is red. It has
+been restated as `the_artifact_carries_exactly_one_slot_per_key`, which is true
+before and after every rotation. **If a test in `signing.rs` is red, the answer is
+never to delete it.**
 
-   Order matters: slot position is this format's only key identifier, and the gate
-   checks the order too.
-
-Then two housekeeping steps, both of which a simulated run of this procedure
-found the hard way:
-
-- **`cargo fmt --all`.** A hand-written 32-byte array will not match rustfmt, and
-  CI's `fmt --check` is a hard failure.
-- **Delete `no_rotation_has_happened_yet_so_the_artifact_is_unchanged`** from
-  `crates/veld-core/src/signing.rs`, and nothing else. It asserts that releases are
-  still byte-identical to the pre-rotation shape, which is exactly what you have
-  just stopped being true; it goes red for a correct change. It sits alone in its
-  own function for that reason. `a_one_key_signature_is_exactly_64_bytes` beside it
-  is a permanent invariant about the format and must survive.
-
-`cargo test -p veld-core -p veld-sign` should then be green, and `ci.yml`'s
-slot-layout gate should report `signature slots: 2`.
+`cargo test --workspace` should be green, and
+`python3 tests/signing-slots.py` should print your new key as the last entry with
+the original still first.
 
 After this release:
 
-- helpers still on the old release accept it via slot 0 (old key), install it,
+- helpers still on the old release accept it via slot 0 (the old key), install it,
   and relaunch onto it — nothing is asked of any user;
 - helpers on this release accept anything signed by either key.
 
@@ -221,34 +509,37 @@ using the only channel those machines trust.
 
 ## Step 3 — the release that retires the old key
 
-Wait until you are willing to say the previous release has reached the machines
-you care about. Then, one edit:
+Wait until you are willing to say the previous release has reached the machines you
+care about. Then, one field:
 
-- `crates/veld-core/src/signing.rs`: remove `ORG_KEY_1` from
-  `ORG_SIGNING_KEYRING`. **Leave it in `ORG_REQUIRED_SLOT_KEYS`, and leave
-  `RELEASE_SIG_SLOTS` at 2.**
+```rust
+    status: KeyStatus::Retired {
+        retired_after: "<Cargo.toml's version>", // read it; a pasted literal is refused
+    },
+```
 
-That is the whole retirement. Releases keep carrying a slot 0 signed by the old
-key — which is harmless, since anyone holding it already holds it — and helpers
-on this release stop *accepting* it. From here a leaked copy of the old key is no
-longer a way past the install gate or the relaunch gate.
+That is the whole retirement. **The row stays** — releases keep carrying a slot 0
+signed by the old key, which is harmless since anyone holding it already holds it —
+and helpers on this release stop *accepting* it. `ORG_REQUIRED_SLOT_KEYS` is every
+row of the table, so keeping the retired key's slot is not something you can forget;
+it is unrepresentable to drop it without deleting the row, which is [the flag
+day](#the-flag-day-probably-never) and not something a rotation does.
 
-Then `cargo fmt --all` again — removing an element can reflow the list — and
-`cargo test -p veld-core -p veld-sign`, which should be green apart from the one
-test named below.
+Then `cargo fmt --all` and `cargo test --workspace`, which is **green**. No test is
+deleted here either. `nothing_is_retired_yet` used to fail at exactly this point,
+with a comment telling you to delete it and nothing else in the file — a red test
+whose remedy was deletion, on the day this document says you are reading it under
+pressure. Its successor,
+`one_release_never_both_adds_a_key_and_retires_one`, goes red when a retirement is
+*unsafe* rather than whenever one happens, so it never needs deleting and it
+actually catches something. See [The two-release rule, and its
+guard](#the-two-release-rule-and-its-guard).
 
-`nothing_is_retired_yet` in `signing.rs` fails as soon as you do this, with a
-message pointing back here. That is deliberate. **Delete that one test function
-and nothing else in the file.**
-
-It is alone in its own function precisely so that this instruction is safe.
 `the_keyring_is_never_empty` and `every_accepted_key_is_one_releases_are_signed_by`
 sit beside it and must survive: the first is what catches a step 3 performed on a
 tree where step 2 was skipped, reverted or mis-merged, which ships a helper that
 trusts nothing — every candidate refused, every relaunch refused, `restart` and
-`shutdown` refused, and `sudo` the only repair. All three used to be one test, and
-deleting a red test is the natural reaction on the day this document says you are
-reading it under pressure.
+`shutdown` refused, and `sudo` the only repair.
 
 ## Why retirement is a separate release
 
@@ -363,24 +654,28 @@ slot 0.
 ## Things that will bite
 
 - **`release.yml`'s signing step is push-only.** Nothing in it runs on a pull
-  request. Everything that *can* be checked at PR time is:
-  `ci.yml`'s `schema` job pins the slot count against `RELEASE_SIG_SLOTS`; that
-  every `--key-env NAME` is written with a space and has a matching entry in that
-  step's `env:` block; that every such NAME carries the `SIGNING_` prefix the leak
-  gate matches on; **every** slot's expected key, element-wise and in order,
-  against `ORG_REQUIRED_SLOT_KEYS`, plus that `ORG_KEY_1` is still first;
-  `veld-sign`'s slot ceiling against `veld-core`'s; and the existence of each
+  request. Everything that *can* be checked at PR time is: every secret `ORG_KEYS`
+  names having an entry in that step's permanent `env:` roster; that roster
+  covering all `MAX_SIG_SLOTS` names, so a rotation never has to touch the workflow;
+  that the step still *derives* its slot layout and still passes `--slots`, rather
+  than hard-coding something; `ORG_KEY_1` still first; no two rows sharing a key or
+  a secret; every secret name carrying the `SIGNING_` prefix the leak gate matches
+  on; `veld-sign`'s slot ceiling against `veld-core`'s; and the existence of each
   rotation test in `crates/veld-sign/tests/smoke.rs` and of each rotation invariant
   in `crates/veld-core/src/signing.rs`. If you add a release-time guard, pin it
   there too.
-- **One thing is *not* gated, deliberately, and it is the rule this document
-  repeats most.** Nothing fails a pull request that both adds a key to
-  `ORG_SIGNING_KEYRING` and removes one in the same release — that is a property of
-  the *diff*, not of the tree, so checking it needs the merge base in a job that is
-  otherwise static checkout-only validation. Until the first retirement,
-  `nothing_is_retired_yet` catches it. **After that, review is the only thing
-  standing between you and it**, so if you are the reviewer of a rotation PR, this
-  is the line to check.
+- **The two-release rule now has a guard — two layers of one — and it is worth
+  knowing which layer covers what.** It used to be ungated entirely, and after the
+  first retirement nothing at all would have caught it. Layer 1 is
+  `one_release_never_both_adds_a_key_and_retires_one`, a plain test over the two
+  date fields: no git, runs locally and on a direct push to `main`, catches the
+  combined edit written in one sitting. Layer 2 is `ci.yml`'s *One release never
+  both adds a key and retires one*, which reads the pull request's own diff (the
+  merge commit against its first parent) and catches the case layer 1 structurally
+  cannot — a branch whose `Cargo.toml` moved
+  between the two edits, where both dates are honest. Neither catches an *invented*
+  `added_after`. Full account: [The two-release rule, and its
+  guard](#the-two-release-rule-and-its-guard).
 - **`veld doctor` judges by the CLI's key list, not the helper's, and after a
   rotation those can disagree.** They ship together so they normally match, but an
   update whose helper half was refused — or an `install.sh` run with `VELD_VERSION`
@@ -400,7 +695,19 @@ slot 0.
     Installation block before trusting this row.
 - **`veld-sign` writes nothing unless every key parses.** A half-written `.sig`
   would verify for one generation and no other, which no reader can detect, so it
-  fails before the first byte lands.
+  fails before the first byte lands. The same is true of a secret that is simply
+  not set: a key `ORG_KEYS` names and CI cannot read fails the release, naming the
+  variable. That is the loud half of the design — the source decides which slots
+  exist, and the secrets must be there to fill them.
+- **A secret set under a name `ORG_KEYS` does not name is simply unused**, so
+  uploading the new key before the source change merges cannot break an unrelated
+  release in between. Nothing warns about it either, so a typo in the secret's name
+  surfaces as "the release could not read `SIGNING_PRIVATE_KEY_2`", not as "you set
+  `SIGNING_PRIVATE_KEY_5`".
+- **The converse is the dangerous one: a retired key's secret is still read.** Its
+  row still gets a slot. Deleting the secret after retiring the key breaks every
+  release from then on, at the push-only signing step, and nothing can catch it at
+  pull-request time because secrets cannot be enumerated.
 - **The same key in two slots is refused.** It would be a release claiming to
   cover two generations while covering one.
 - **No error from `veld-sign` may contain key material, and a second key doubles

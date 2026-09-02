@@ -682,11 +682,24 @@ impl Diagnostics {
             // can disagree if an update lands between them, splicing the
             // retired-key sentence into the middle of the tampering paragraph or
             // printing "not signed" for a file that now verifies.
-            let verdict = veld_core::signing::classify_binary_signature(&path);
-            match verdict {
+            let verdict = veld_core::signing::classify_binary_signature_detail(&path);
+            match verdict.trust {
+                // Names the key, not just the verdict. During a rotation a helper's
+                // keyring and a release's slots move at different times, and "OK" is
+                // the same word whether this machine is on the key before the
+                // rotation or the one after — so the one row that could say where in
+                // the window a machine sits used to say nothing. The number is the
+                // key's row in `ORG_KEYS`, which is permanent: rows are appended and
+                // never reordered, so "org key 2 of 3" in an issue means the same
+                // thing a year later. Public keys, so there is nothing here that
+                // must not be printed.
                 veld_core::signing::SigTrust::Active => self.checks.push(Check {
                     pass: true,
-                    label: format!("Helper binary signature OK ({})", tilde_path(&path)),
+                    label: format!(
+                        "Helper binary signature OK ({}, signed by {})",
+                        tilde_path(&path),
+                        describe_org_key(verdict.key)
+                    ),
                 }),
                 // Says what *this CLI* concluded, not what the running helper will
                 // do. The two can disagree: this row is judged against the key list
@@ -698,8 +711,8 @@ impl Diagnostics {
                 veld_core::signing::SigTrust::RetiredOnly => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "The helper at {} is signed with an org key that THIS veld ({}) has \
-                         retired. The binary itself is genuine: this happens when the helper \
+                        "The helper at {} is signed with {}, an org key that THIS veld ({}) \
+                         has retired. The binary itself is genuine: this happens when the helper \
                          that installed it predated key rotation and kept only the first \
                          signature slot. If the running helper is this same release it will \
                          refuse to relaunch onto it, and refuse `restart` and `shutdown`, until \
@@ -707,6 +720,7 @@ impl Diagnostics {
                          with `{}` — no password, and not `veld update`, which does nothing when \
                          you are already on the latest release",
                         tilde_path(&path),
+                        describe_org_key(verdict.key),
                         env!("CARGO_PKG_VERSION"),
                         veld_core::signing::INSTALLER_COMMAND
                     ),
@@ -1952,6 +1966,30 @@ fn helper_dir_is_locked(helper: &Path) -> bool {
     helper
         .parent()
         .is_some_and(veld_core::helper_store::is_root_owned_and_locked)
+}
+
+/// Name an org signing key for a `veld doctor` row.
+///
+/// `org key 2 of 3` — the position in `veld_core::signing::ORG_KEYS`, which is the
+/// key's permanent identity (rows are appended, never reordered), plus a short hex
+/// prefix so the row can be matched against the table without counting. Public
+/// keys, so none of this is material that must not be printed.
+///
+/// `None` reaches here only for a verdict that verified under nothing, which the
+/// callers below do not pass; the fallback exists so a future third caller cannot
+/// print an empty parenthesis.
+fn describe_org_key(key: Option<veld_core::signing::PubKey>) -> String {
+    let Some(key) = key else {
+        return "no org key".to_owned();
+    };
+    let hex: String = key.iter().take(4).map(|b| format!("{b:02x}")).collect();
+    match veld_core::signing::org_key_position(&key) {
+        Some((n, total)) => format!("org key {n} of {total} ({hex}\u{2026})"),
+        // A key that verified but is not in this build's table cannot happen: the
+        // keyring IS the table. Reported rather than unwrapped, because the honest
+        // answer to "this should not happen" is to print what was seen.
+        None => format!("an org key not in this build's table ({hex}\u{2026})"),
+    }
 }
 
 fn tilde_path(path: &Path) -> String {
