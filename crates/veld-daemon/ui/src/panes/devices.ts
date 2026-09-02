@@ -713,21 +713,42 @@ function insetClassOf(insets: SafeAreaInsets): PresetInsets | null {
 }
 
 /**
- * Both orientations of the gutters this emulation's *own* class reserves, or
- * `null` where that cannot be answered.
+ * What a preset *id* says about gutters, as three answers rather than two.
  *
- * **Not `presetById(...)?.insets ?? FALLBACK`.** That reads as one question and is
- * two, because `??` fires on a row's own `null` as readily as on a missing row —
- * so a screen preset, whose `insets` is deliberately `null`, was treated as
- * having no class at all and inherited the phone set. Turning the gutters on for
- * a 1920-wide monitor produced `0 / 59 / 21 / 59`: twin 59px side notches on a
+ * - a [`PresetInsets`] — a known class that reserves gutters
+ * - `null` — a known class that reserves none, i.e. one of the screen presets
+ * - `undefined` — the id names no row in this build's table at all
+ *
+ * **The separation exists because `presetById(...)?.insets ?? FALLBACK` reads as
+ * one question and is two.** `??` fires on a row's own `null` as readily as on a
+ * missing row, so a screen preset — whose `insets` is deliberately `null` — was
+ * treated as having no class and inherited the phone set. Turning the gutters on
+ * for a 1920-wide monitor produced `0 / 59 / 21 / 59`: twin 59px side notches on a
  * desktop, contradicting this file, the pane's own menu copy, the README and
- * `llms-full.txt` at once. The two nulls are separated here, once, and every
- * caller reads them from this.
+ * `llms-full.txt` at once.
+ *
+ * Split out so the two readers below cannot drift: they want *different* answers
+ * for `undefined` — the toggle defaults, a rotation keeps what it has — but the
+ * same answer for the other two, and there was previously nothing forcing an edit
+ * to one to be made in the other. Returning three values rather than two means the
+ * compiler asks each caller what it does with each.
+ */
+function presetInsetPair(id: string): PresetInsets | null | undefined {
+  const preset = presetById(id);
+  return preset === null ? undefined : preset.insets;
+}
+
+/**
+ * Both orientations of the gutters this emulation's *own* class reserves, or
+ * `null` where that cannot be answered — the rotation and resize reading.
+ *
+ * Falls back to recognising the class from the stored numbers, because a drag has
+ * by then renamed the device and the numbers are the only evidence left. See
+ * [`insetClassOf`].
  */
 function insetPairFor(e: PaneEmulation): PresetInsets | null {
-  const preset = presetById(e.device);
-  if (preset !== null) return preset.insets;
+  const known = presetInsetPair(e.device);
+  if (known !== undefined) return known;
   return e.safeArea === null ? null : insetClassOf(e.safeArea);
 }
 
@@ -760,8 +781,11 @@ function insetPairFor(e: PaneEmulation): PresetInsets | null {
  * and refusing it would be this function inventing a rule the CSS does not have.
  */
 export function insetsIfEnabled(e: PaneEmulation): SafeAreaInsets | null {
-  const preset = presetById(e.device);
-  const pair = preset === null ? PHONE_INSETS : preset.insets;
+  const known = presetInsetPair(e.device);
+  // `undefined` is the only case that defaults; a known class reserving nothing
+  // answers `null` and must stay that way. See [`presetInsetPair`] for why those
+  // are two answers and not one.
+  const pair = known === undefined ? PHONE_INSETS : known;
   return pair === null ? null : pair[orientationOf(e)];
 }
 

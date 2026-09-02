@@ -85,9 +85,10 @@ describe("the preset table", () => {
         // "A non-null inset set is never all-zero" is relied on everywhere and was
         // enforced only inside the two sanitisers. A preset row of four zeros would
         // slip past them — `emulationForPreset` does not collapse one — and then
-        // `safeAreaLabel` renders "0 / 0" rather than `null`, so the menu shows the
-        // item *checked* with zero gutters, and a reload silently flips it to "Off"
-        // once `sanitizeEmulation` does collapse it. A row that reserves nothing
+        // `safeAreaLabel` returns a string (`"0 / 0 / 0 / 0"`) rather than `null`, so
+        // the menu shows the item *checked* with zero gutters, and a reload silently
+        // flips it to "Off" once `sanitizeEmulation` does collapse it. A row that
+        // reserves nothing
         // must say so with `insets: null`, which is what the screen presets do.
         expect(safeAreaLabel(insets)).not.toBeNull();
         expect(
@@ -376,10 +377,24 @@ describe("safe-area insets", () => {
     const small = resizeEmulation(emulationForPreset(presetById("phone-small")!), 355, 780);
     expect(rotateEmulation(small).safeArea).toEqual({ top: 0, right: 47, bottom: 21, left: 47 });
     // An id this build's table does not know — a layout stored by a future build —
-    // is the same case as a drag, and must not be re-classed either.
-    expect(rotateEmulation({ ...tablet, device: "tablet-2029" }).safeArea).toEqual(
-      tablet.safeArea,
+    // is the same case as a drag: recognised **by its numbers**, because that is
+    // what `insetClassOf` does. So it gets the matched class's other orientation,
+    // exactly as a known id would. Asserted on a *phone*, whose two orientations
+    // differ: the earlier version of this used the tablet, whose portrait and
+    // landscape sets are identical, so it would have passed whether the class was
+    // recognised or ignored and proved neither.
+    const phone = emulationForPreset(presetById("phone")!);
+    expect(rotateEmulation({ ...phone, device: "phone-2029" }).safeArea).toEqual(
+      rotateEmulation(phone).safeArea,
     );
+    expect(rotateEmulation({ ...phone, device: "phone-2029" }).safeArea).toEqual({
+      top: 0,
+      right: 59,
+      bottom: 21,
+      left: 59,
+    });
+    // What must *not* happen is inventing a class for numbers that match nothing —
+    // covered by "leaves a hand-edited inset set alone" below.
   });
 
   it("builds a natively-landscape class from its shape, not from the caller's flag", () => {
