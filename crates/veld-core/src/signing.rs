@@ -240,7 +240,7 @@ const _: () = assert!(ORG_KEYS.len() <= MAX_SIG_SLOTS);
 /// `the_keyring_is_never_empty` catches it, but only for somebody who runs the
 /// tests. An engineer who builds and installs locally bricks their own machine
 /// first and reads the test failure second.
-const _: () = assert!(accepted_key_count() > 0);
+const _: () = assert!(accepted_key_count(ORG_KEYS) > 0);
 
 /// The keys **this build accepts** a signature from — [`ORG_KEYS`]' accepted rows.
 ///
@@ -250,11 +250,14 @@ const _: () = assert!(accepted_key_count() > 0);
 /// when the binary it executes changes, and that transition is already governed
 /// by [`crate::helper_store`]'s version floor.
 ///
-/// Derived rather than hand-kept: a release that both adds a key here and removes
-/// one leaves any helper whose only key was the retired one unable to verify the
-/// very artifact meant to move it forward, and expressing both as edits to *one*
-/// row's status is what makes that combination checkable at all.
-pub const ORG_SIGNING_KEYRING: &[PubKey] = &accepted_keys::<{ accepted_key_count() }>();
+/// Derived rather than hand-kept: expressing an addition and a retirement as edits
+/// to *one* row's status is what makes the combination of the two checkable at all.
+/// What that combination costs is stated exactly — and asserted — by
+/// `a_combined_release_is_a_truncation_window_not_a_stranding`: not a refusal, but
+/// the truncation window on pre-v16.60.0 installers. See
+/// `docs/signing-key-rotation.md`'s "Why retirement is a separate release".
+pub const ORG_SIGNING_KEYRING: &[PubKey] =
+    &accepted_keys::<{ accepted_key_count(ORG_KEYS) }>(ORG_KEYS);
 
 /// The keys every release must still be **signed by**, whether or not this build
 /// would accept them — i.e. every row of [`ORG_KEYS`], in slot order.
@@ -264,7 +267,7 @@ pub const ORG_SIGNING_KEYRING: &[PubKey] = &accepted_keys::<{ accepted_key_count
 /// release that generation refuses. This being *every* row rather than a second
 /// hand-kept list is what makes "grows, never shrinks" a derivation instead of a
 /// convention: forgetting to keep a retired key's slot is now unrepresentable.
-pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &all_keys::<{ ORG_KEYS.len() }>();
+pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &all_keys::<{ ORG_KEYS.len() }>(ORG_KEYS);
 
 /// How many 64-byte slots `<binary>.sig` must carry for a release to be
 /// installable by every helper generation still in the field: one per row of
@@ -276,16 +279,24 @@ pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &all_keys::<{ ORG_KEYS.len() }>();
 /// home again.
 pub const RELEASE_SIG_SLOTS: usize = ORG_KEYS.len();
 
-/// How many rows of [`ORG_KEYS`] are [`KeyStatus::Accepted`].
+/// How many rows of `keys` are [`KeyStatus::Accepted`].
+///
+/// Takes the table rather than reading [`ORG_KEYS`] so that
+/// `the_derivation_keeps_a_retired_rows_slot` can hand it a table that HAS a
+/// retired row. Today's has none, which made "a retired row keeps its slot" — the
+/// property the two-release rule's whole cost analysis rests on — unfalsifiable:
+/// with every row accepted, the keyring and the required list coincide, so no test
+/// could tell a correct derivation from one that dropped retired rows. Found by
+/// mutating exactly that and watching all 47 tests stay green.
 ///
 /// A `const fn` rather than a `Vec` at runtime so [`ORG_SIGNING_KEYRING`] stays a
 /// `&'static [PubKey]` — every caller, including the root helper's relaunch gate,
 /// keeps taking a plain slice with no allocation on a path that runs on a timer.
-const fn accepted_key_count() -> usize {
+const fn accepted_key_count(keys: &[OrgKey]) -> usize {
     let mut n = 0;
     let mut i = 0;
-    while i < ORG_KEYS.len() {
-        if matches!(ORG_KEYS[i].status, KeyStatus::Accepted) {
+    while i < keys.len() {
+        if matches!(keys[i].status, KeyStatus::Accepted) {
             n += 1;
         }
         i += 1;
@@ -294,13 +305,13 @@ const fn accepted_key_count() -> usize {
 }
 
 /// The accepted rows' keys, in slot order. `N` must be [`accepted_key_count`].
-const fn accepted_keys<const N: usize>() -> [PubKey; N] {
+const fn accepted_keys<const N: usize>(keys: &[OrgKey]) -> [PubKey; N] {
     let mut out = [[0u8; 32]; N];
     let mut i = 0;
     let mut n = 0;
-    while i < ORG_KEYS.len() {
-        if matches!(ORG_KEYS[i].status, KeyStatus::Accepted) {
-            out[n] = ORG_KEYS[i].key;
+    while i < keys.len() {
+        if matches!(keys[i].status, KeyStatus::Accepted) {
+            out[n] = keys[i].key;
             n += 1;
         }
         i += 1;
@@ -309,11 +320,11 @@ const fn accepted_keys<const N: usize>() -> [PubKey; N] {
 }
 
 /// Every row's key, in slot order. `N` must be `ORG_KEYS.len()`.
-const fn all_keys<const N: usize>() -> [PubKey; N] {
+const fn all_keys<const N: usize>(keys: &[OrgKey]) -> [PubKey; N] {
     let mut out = [[0u8; 32]; N];
     let mut i = 0;
     while i < N {
-        out[i] = ORG_KEYS[i].key;
+        out[i] = keys[i].key;
         i += 1;
     }
     out
@@ -1597,11 +1608,19 @@ mod tests {
 
     /// **The two-release rule, as a test rather than as a warning in a runbook.**
     ///
-    /// Adding a key and retiring one must be two separate releases. A release that
-    /// does both strands every helper in the field whose only key was the retired
-    /// one: it refuses the very artifact meant to move it forward, and the only
-    /// repair is asking every user for sudo on every machine — the one outcome
-    /// #338's rules forbid.
+    /// Adding a key and retiring one must be two separate releases. **What a
+    /// release that does both actually costs**, since getting this wrong is how the
+    /// rule gets talked past: every helper still *accepts* it, because the retired
+    /// key keeps its slot. But a helper shipped up to v16.59.0 keeps only the first
+    /// 64 bytes of the `.sig` when it installs, so it writes the retired key's slot
+    /// into its store and comes up running a build whose keyring no longer holds
+    /// that key — [`SigTrust::RetiredOnly`]: `restart` and `shutdown` refused,
+    /// updates still working, no password, healed by the next release.
+    ///
+    /// Splitting the rotation removes the window entirely, because the adding
+    /// release's own keyring still holds the old key.
+    /// `a_combined_release_is_a_truncation_window_not_a_stranding` asserts all of
+    /// it, so this comment cannot drift back into the version that said "sudo".
     ///
     /// Nothing used to fail a pull request that did both. It looked like a property
     /// of the *diff* — removing a key from a flat list destroys, from the resulting
@@ -1648,10 +1667,13 @@ mod tests {
         assert!(
             added.is_empty() || retired.is_empty(),
             "this release adds {added:?} and retires {retired:?}, and it may not do \
-             both. A helper whose only key is a retired one would refuse the very \
-             artifact meant to move it forward, and sudo on every machine is the only \
-             repair. Ship the adding release first, wait for it to reach the fleet, \
-             then retire in a second release. See docs/signing-key-rotation.md"
+             both. Every helper would still accept it — the retired key keeps its \
+             slot — but a helper shipped up to v16.59.0 keeps only the first 64 bytes \
+             of the .sig when it installs, so it would come up on a store it cannot \
+             verify: restart and shutdown refused until the installer is re-run. \
+             Splitting the rotation removes that window, because the adding release \
+             still accepts the old key. Ship the adding release first, then retire in \
+             a second one. See docs/signing-key-rotation.md"
         );
     }
 
@@ -1957,6 +1979,151 @@ mod tests {
         let sig = slots(&[&k1, &k2], b"the genuine binary");
         assert!(verify_data_slots(&[p1, p2], b"the genuine binary", &sig));
         assert!(!verify_data_slots(&[p1, p2], b"a swapped binary", &sig));
+    }
+
+    /// **A retired row keeps its slot** — against a table that actually has one.
+    ///
+    /// This is the property everything about the two-release rule's *cost* rests
+    /// on: because [`ORG_REQUIRED_SLOT_KEYS`] is every row and not just the
+    /// accepted ones, a helper holding only the retired key still finds a slot it
+    /// can verify, so a combined release degrades that machine rather than
+    /// stranding it. See
+    /// `a_combined_release_is_a_truncation_window_not_a_stranding`.
+    ///
+    /// **It could not be tested against the live table, and that is why this exists
+    /// separately.** Today's `ORG_KEYS` has one row and it is accepted, so the
+    /// keyring and the required list are the same list — replacing the required
+    /// derivation with `ORG_SIGNING_KEYRING` outright left all 47 tests green. The
+    /// property would have started being checked on the day of the first
+    /// retirement, i.e. the day it first mattered, which is the same "test on a
+    /// timer" defect as the store-path precondition in [`crate::paths`]. So the
+    /// derivations take the table as a parameter and this hands them one with a
+    /// retired row in the middle.
+    #[test]
+    fn the_derivation_keeps_a_retired_rows_slot() {
+        const A: PubKey = [0xA1; 32];
+        const B: PubKey = [0xB2; 32];
+        const C: PubKey = [0xC3; 32];
+        // Retired in the MIDDLE, so an off-by-one in the accepted filter shows up as
+        // a wrong key rather than a short list.
+        const TABLE: &[OrgKey] = &[
+            OrgKey {
+                key: A,
+                secret: "SIGNING_PRIVATE_KEY",
+                added_after: "0.0.0",
+                status: KeyStatus::Accepted,
+            },
+            OrgKey {
+                key: B,
+                secret: "SIGNING_PRIVATE_KEY_2",
+                added_after: "1.0.0",
+                status: KeyStatus::Retired {
+                    retired_after: "2.0.0",
+                },
+            },
+            OrgKey {
+                key: C,
+                secret: "SIGNING_PRIVATE_KEY_3",
+                added_after: "2.0.0",
+                status: KeyStatus::Accepted,
+            },
+        ];
+
+        assert_eq!(
+            all_keys::<{ TABLE.len() }>(TABLE),
+            [A, B, C],
+            "every row gets a slot, retired ones included — this is what stops a \
+             combined release stranding the generation that holds only the retired key"
+        );
+        assert_eq!(
+            accepted_key_count(TABLE),
+            2,
+            "the retired row is not accepted"
+        );
+        assert_eq!(
+            accepted_keys::<{ accepted_key_count(TABLE) }>(TABLE),
+            [A, C],
+            "the keyring is the accepted rows in table order, and skipping a retired \
+             row must not shift a later key into its place"
+        );
+    }
+
+    /// **What a combined add-and-retire release actually costs**, asserted rather
+    /// than described — because the description was wrong, in the direction that
+    /// makes somebody talk themselves past the guard.
+    ///
+    /// Three prose copies of this rule (including the failure message of
+    /// `one_release_never_both_adds_a_key_and_retires_one`, and one that predates
+    /// the key table) said such a release "strands every helper whose only key was
+    /// the retired one — it refuses the very artifact meant to move it forward, and
+    /// sudo on every machine is the only repair". **That is not what happens.** The
+    /// retired key keeps its slot — [`ORG_REQUIRED_SLOT_KEYS`] is every row of
+    /// [`ORG_KEYS`], retired ones included — so a helper holding only that key
+    /// verifies slot 0 and installs the release quite happily.
+    ///
+    /// The real cost is narrower, and is the one `docs/signing-key-rotation.md`'s
+    /// "Why retirement is a separate release" has always named: **the truncating
+    /// installers.** A helper shipped up to v16.59.0 keeps only the first 64 bytes
+    /// of the `.sig` when it installs, so it writes the retired key's slot into its
+    /// store and then comes up running a build whose keyring no longer holds that
+    /// key. That is [`SigTrust::RetiredOnly`] — `restart` and `shutdown` refused,
+    /// updates still working, no password needed, and healed by the next release,
+    /// whose install path keeps every slot.
+    ///
+    /// Worth a rule, and worth a guard. Not worth the word "sudo", which belongs to
+    /// the case at the end of this test: dropping the row instead of retiring it,
+    /// which really does leave that helper with nothing to verify.
+    #[test]
+    fn a_combined_release_is_a_truncation_window_not_a_stranding() {
+        let (k1, p1) = gen_key(1);
+        let (k2, p2) = gen_key(2);
+        let binary = b"\x7fELF a release that both added and retired";
+
+        // The combined release: keyring {K2}, K1 retired — but every row still gets
+        // a slot, so K1's is still there.
+        let sig = slots(&[&k1, &k2], binary);
+
+        assert!(
+            verify_data_slots(&[p1], binary, &sig),
+            "a helper whose only key is the retired one ACCEPTS this release: the \
+             retired key keeps its slot. Nothing is stranded, and no prose about this \
+             rule may say otherwise"
+        );
+
+        // What the truncating installer leaves behind, and what the machine then
+        // reads it as once it is running the combined release.
+        let truncated = &sig[..SIG_SLOT_LEN];
+        assert_eq!(
+            classify_data(&[p2], &[p1], binary, truncated),
+            SigTrust::RetiredOnly,
+            "the cost of a combined release is the truncation window, not a refusal"
+        );
+        // Untruncated — every helper from v16.60.0 on — there is no window at all.
+        assert_eq!(
+            classify_data(&[p2], &[p1], binary, &sig),
+            SigTrust::Active,
+            "only the pre-v16.60.0 install path truncates, so only it pays this"
+        );
+
+        // And splitting the rotation is what removes the window: the adding
+        // release's own keyring still holds the old key, so the surviving slot 0
+        // verifies.
+        assert_eq!(
+            classify_data(&[p1, p2], &[], binary, truncated),
+            SigTrust::Active,
+            "the adding release accepts both keys, so a truncated store is fine — \
+             this is the whole reason retirement is a second release"
+        );
+
+        // The genuinely fatal edit, for contrast: DROPPING the row rather than
+        // retiring it stops producing the slot, and then that helper really does
+        // refuse, with sudo as the only repair. `ci.yml`'s two-release step reports
+        // that case separately, and its message is the one entitled to the word.
+        let dropped = slots(&[&k2], binary);
+        assert!(
+            !verify_data_slots(&[p1], binary, &dropped),
+            "with no slot for it, the helper holding only that key refuses"
+        );
     }
 
     /// A retired key is **diagnosed**, never accepted.

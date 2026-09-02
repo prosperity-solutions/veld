@@ -942,11 +942,22 @@ jobs:
               sys.exit(
                   f"{path}: this pull request both adds a key ({short(added)}) and retires "
                   f"one ({short(retired)}). Merging is releasing here, so that is ONE release "
-                  "doing both — and every helper whose only key is the retired one then "
-                  "refuses the very artifact meant to move it forward, with sudo on every "
-                  "machine as the only repair.\n\n"
+                  "doing both.\n\n"
+                  "What that costs, precisely, because the imprecise version of this message is "
+                  "one somebody talks themselves past: every helper still ACCEPTS such a "
+                  "release — the retired key keeps its slot. But a helper shipped up to "
+                  "v16.59.0 keeps only the first 64 bytes of the .sig when it installs, so it "
+                  "writes the retired key's slot into its store and then comes up running a "
+                  "build whose keyring no longer holds that key. Its restart and shutdown are "
+                  "refused until somebody re-runs the installer. No password, and it heals on "
+                  "the next release — but it is inflicted on the oldest machines in the fleet, "
+                  "and splitting the rotation removes it entirely, because the adding release "
+                  "still accepts the old key.\n\n"
                   "Split it: ship the adding release first, wait for it to reach the fleet, "
-                  "then retire in a second pull request. See docs/signing-key-rotation.md."
+                  "then retire in a second pull request. See docs/signing-key-rotation.md, and "
+                  "crates/veld-core/src/signing.rs's "
+                  "a_combined_release_is_a_truncation_window_not_a_stranding, which asserts "
+                  "every claim in this message."
               )
           print(f"{path}: {len(added)} key(s) added, {len(retired)} retired — not both")
           PY

@@ -255,9 +255,29 @@ the relaunch gate.
 
 ### The two-release rule, and its guard
 
-A release that both adds a key and retires one strands every helper whose only key
-was the retired one: it refuses the very artifact meant to move it forward, and the
-only repair is sudo on every machine.
+A release that both adds a key and retires one costs something real, and it is worth
+stating exactly, because the overstated version of this sentence is one a reader
+dismisses. **Nothing is stranded and nobody needs a password.** Every helper still
+*accepts* such a release: the retired key keeps its slot, because
+`ORG_REQUIRED_SLOT_KEYS` is every row of the table, retired rows included.
+
+What it does is inflict [the truncation
+window](#the-truncation-window-and-why-it-is-fine) on the oldest machines in the
+fleet, deliberately. A helper shipped up to v16.59.0 keeps only the first 64 bytes of
+the `.sig` when it installs, so it writes the retired key's slot into its store and
+comes up running a build whose keyring no longer holds that key: `restart` and
+`shutdown` refused until the installer is re-run, updates still working, and healed
+by the next release. Splitting the rotation removes the window completely, because
+the adding release's own keyring still holds the old key — which is the whole content
+of [Why retirement is a separate release](#why-retirement-is-a-separate-release).
+
+The word "sudo" belongs to a different mistake: **deleting** a row rather than
+retiring it. Then the slot stops being produced, a helper holding only that key has
+nothing to verify, and there is no repair but a password. The guard below reports
+those two cases separately.
+`a_combined_release_is_a_truncation_window_not_a_stranding` in
+`crates/veld-core/src/signing.rs` asserts all of it, so this paragraph cannot drift
+back to the version that conflated them.
 
 It is guarded twice, in two different places, because neither layer alone is
 enough. Both are worth knowing, because they fail differently.
