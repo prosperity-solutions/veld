@@ -108,9 +108,9 @@ const {
  *   dock for. Persisted and put back in its URL on restore: a bare dock has no
  *   rail, so without this it reopened against whatever the main window last
  *   selected and came back blank, with its real tabs unread in its own slot.
- * @property {number | null} trafficZoom  the last zoom factor this window's
- *   traffic lights were positioned for, so `syncTrafficLights` can skip a
- *   reposition when the factor has not moved. `null` until the first sync.
+ * @property {number | null} zoomFactor  the last page zoom factor this window
+ *   was synced for, so `syncZoom` can skip the work when it has not moved.
+ *   `null` until the first sync.
  */
 
 /** @type {Map<number, WindowRecord>} */
@@ -317,6 +317,7 @@ function pruneShowing() {
  *   slotBase: string,
  *   stateFile: string,
  *   disposeWindow: (win: BrowserWindow) => void,
+ *   windowZoomChanged: (win: BrowserWindow, zoom: number) => void,
  * }} */
 let deps = null;
 
@@ -605,21 +606,25 @@ function boundsOnScreen(bounds) {
 }
 
 /**
- * Bring this window's traffic lights into alignment with the current page zoom.
+ * Bring everything that scales with page zoom into alignment with the current
+ * factor: the traffic lights, the window's embedded browser views, and the page.
  *
  * The lights are OS-drawn at a fixed size while the top bar is CSS and scales
  * with the page's zoom factor, so as the page zooms the lights drift off the
- * bar's own controls — the drift `trafficLightY` exists to undo.
+ * bar's own controls — the drift `trafficLightY` exists to undo. The browser
+ * views are the other half: a native view's bounds are DIP and the renderer
+ * measures its panes in CSS pixels, so the factor is an input to every view's
+ * geometry (`syncWindowZoom` in `browserViews.js`).
  *
  * **Driven by a poll, not an event, because Electron has no event that covers
  * every way the zoom can change.** `zoom-changed` fires only for the mouse
  * wheel; the View menu's `zoomIn`/`zoomOut`/`resetZoom` roles and their
  * `⌘+`/`⌘−`/`⌘0` accelerators change the factor with no event at all, and a
  * window restored on a per-origin remembered zoom never fires anything. A short
- * poll that repositions when the factor *moved* is the one mechanism that
- * catches all of them. `getZoomFactor()` is a synchronous read of a cached
- * value — a few hundred per second across every window is noise next to the
- * 16ms cursor poll this file already runs.
+ * poll that acts when the factor *moved* is the one mechanism that catches all of
+ * them. `getZoomFactor()` is a synchronous read of a cached value — a few hundred
+ * per second across every window is noise next to the 16ms cursor poll this file
+ * already runs.
  */
 const ZOOM_POLL_MS = 100;
 // The rate: Chromium animates wheel zoom over roughly a couple of frames, so
@@ -627,20 +632,31 @@ const ZOOM_POLL_MS = 100;
 // while staying cheap enough to run for the lifetime of the window. There is
 // nothing more to it than that — it is a latency/cheapness balance, not a
 // measured value.
-function syncTrafficLights(record) {
+function syncZoom(record) {
   const win = record.win;
+  if (win.isDestroyed()) return;
+  const zoom = win.webContents.getZoomFactor();
+  if (zoom === record.zoomFactor) return;
+  record.zoomFactor = zoom;
   // `setWindowButtonPosition` exists on every platform but only does anything
   // where `titleBarStyle: "hiddenInset"` is honoured — macOS. The `typeof`
   // guard keeps a hypothetical Electron that drops the method from taking the
   // window down with it; the position is cosmetic on the other platforms anyway.
-  if (win.isDestroyed() || typeof win.setWindowButtonPosition !== "function") return;
-  const zoom = win.webContents.getZoomFactor();
-  if (zoom === record.trafficZoom) return;
-  record.trafficZoom = zoom;
-  win.setWindowButtonPosition({
-    x: 13,
-    y: trafficLightY(deps.topbarHeight, deps.trafficLightSize, zoom),
-  });
+  //
+  // **Guarded here rather than at the top of the function**, which is where it
+  // used to be: everything below is platform-independent, and gating the whole
+  // sync on a macOS-only cosmetic call left a zoomed /ide on Windows and Linux
+  // with mispositioned native views and a top-bar inset that never moved.
+  if (typeof win.setWindowButtonPosition === "function") {
+    win.setWindowButtonPosition({
+      x: 13,
+      y: trafficLightY(deps.topbarHeight, deps.trafficLightSize, zoom),
+    });
+  }
+  // The embedded browser views before the page: this re-places views the page has
+  // already told us about, and a page that re-measures in response to the zoom
+  // step lands on top of it with the same numbers.
+  deps.windowZoomChanged(win, zoom);
   // The page's CSS keeps the traffic-light inset — the gap before the first
   // control, the view switcher — fixed in DIP as the page zooms, so it needs to
   // know the factor. See `watchZoom` in the UI and `--topbar-zoom` in
@@ -697,7 +713,7 @@ function openWindow(options = {}) {
       : {
           titleBarStyle: "hiddenInset",
           // The creation-time position assumes the page starts at 100% zoom;
-          // `syncTrafficLights` (below) repositions it once the page reports
+          // `syncZoom` (below) repositions it once the page reports
           // its real factor — a window restored on a remembered zoom sits wrong
           // for at most a poll tick.
           trafficLightPosition: {
@@ -752,10 +768,10 @@ function openWindow(options = {}) {
     pendingAdopt: [],
     dropListener: "unknown",
     closing: false,
-    // Set by the first `syncTrafficLights`; null means "not yet synced", so
-    // the first poll after creation always positions — which matters when the
-    // page loaded at a remembered non-100% zoom.
-    trafficZoom: null,
+    // Set by the first `syncZoom`; null means "not yet synced", so the first
+    // poll after creation always runs — which matters when the page loaded at a
+    // remembered non-100% zoom.
+    zoomFactor: null,
   };
   windows.set(win.id, record);
 
@@ -827,15 +843,20 @@ function openWindow(options = {}) {
 
   // Page zoom is the opposite of full screen in one sense — the lights stay in
   // the content area, but the top bar that anchors them grows and shrinks with
-  // the page's zoom factor, so they drift off it. `syncTrafficLights` follows
-  // the factor and repositions them. See `ZOOM_POLL_MS` for why this is a poll
-  // rather than an event, and why the `did-finish-load` sync is a backstop for
-  // the per-origin zoom a window can be restored at.
-  if (!detached) {
-    const zoomTimer = setInterval(() => syncTrafficLights(record), ZOOM_POLL_MS);
-    win.on("closed", () => clearInterval(zoomTimer));
-    win.webContents.on("did-finish-load", () => syncTrafficLights(record));
-  }
+  // the page's zoom factor, so they drift off it. `syncZoom` follows the factor
+  // and repositions them. See `ZOOM_POLL_MS` for why this is a poll rather than
+  // an event, and why the `did-finish-load` sync is a backstop for the
+  // per-origin zoom a window can be restored at.
+  //
+  // **Every window, detached included.** This used to be `if (!detached)`, on the
+  // reasoning that a detached window keeps a normal frame and has no traffic
+  // lights to move — true, and no longer the only thing the factor drives: a
+  // detached window is a bare dock holding tabs pulled out of another one, so it
+  // holds browser panes, whose native views are placed in DIP from a box the page
+  // measures in CSS pixels.
+  const zoomTimer = setInterval(() => syncZoom(record), ZOOM_POLL_MS);
+  win.on("closed", () => clearInterval(zoomTimer));
+  win.webContents.on("did-finish-load", () => syncZoom(record));
 
   // Full screen is main-process knowledge: macOS moves the traffic lights out of
   // the content area, and the page's top bar has to give back the inset it holds
@@ -1212,7 +1233,7 @@ function registerWindowIpc(ipcMain) {
    * the top bar's traffic-light inset is `calc(100px / var(--topbar-zoom))`, so
    * a zoom arriving a tick late shows the view switcher at the wrong distance
    * from the lights on the first paint of a window restored at a remembered
-   * zoom. Changes arrive on `veld:window:zoom` (pushed by `syncTrafficLights`),
+   * zoom. Changes arrive on `veld:window:zoom` (pushed by `syncZoom`),
    * which is the only time the factor has moved.
    */
   ipcMain.on("veld:window:zoom", (event) => {
