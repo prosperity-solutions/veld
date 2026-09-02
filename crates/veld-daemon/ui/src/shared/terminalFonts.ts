@@ -37,11 +37,21 @@ export interface TerminalFont {
    *
    * A **static claim about the published font**, and it has to be: nothing in the
    * browser can read a font's OpenType tables. Measuring is not a way around it
-   * either: the substitution is glyph-for-glyph (`calt` into `SingleSubst`, never
-   * a `LigatureSubst`), so it is width-preserving by construction — which is what
-   * keeps the terminal grid still, and which leaves the one quantity the DOM
-   * exposes blind to it (measured: `=> != === ->` is 460.8047px in JetBrains Mono
-   * and 462.375px in Menlo, each identical with the features on and off).
+   * either — for the sequences this setting is about, the substitution is
+   * glyph-for-glyph, so it is width-preserving and the one quantity the DOM
+   * exposes is blind to it (measured: `=> != === ->` is 460.8047px in JetBrains
+   * Mono and 462.375px in Menlo, each identical with the features on and off).
+   *
+   * That width-preservation is **verified for the two bundled faces, not assumed
+   * of every font this flag is `true` for**. In both bundled faces `calt` reaches
+   * `SingleSubst` lookups only. Cascadia Code is the counterexample worth knowing:
+   * its `calt` also reaches a `MultipleSubst` and a `LigatureSubst` — but both are
+   * Arabic-script only (a lam-lam-heh ligature collapsing four cells into one, and
+   * a connector splitting one into two), and neither is reachable from ASCII. So
+   * the grid holds for the programming sequences this setting exists for, and a
+   * terminal rendering Arabic *in Cascadia Code with the switch on* is the one
+   * combination where it may not. Off is the default, and the off half pins `calt`
+   * to 0, so nothing here changes unless somebody asks for it.
    *
    * So the honest scope of this flag is the fonts *we* offer. A family the user
    * typed themselves is not classified at all — see {@link fontHasLigatures},
@@ -96,9 +106,17 @@ export const SYSTEM_FONTS: TerminalFont[] = [
     label: "Cascadia Code",
     stack: `"Cascadia Code", ${TAIL}`,
     bundled: false,
-    // The one ligature-capable font on this list. Microsoft ships the no-ligature
-    // cut under a *different* family name — Cascadia Mono — so this flag does not
-    // have to guess which build is installed.
+    // The one ligature-capable font on this list, and the only `true` here that
+    // is not a face we bundle — so it got the same GSUB dump rather than a
+    // reputation: `calt` present, `liga`/`clig`/`dlig` absent, which is what makes
+    // the `calt`-only rule in `terminalHost.ts` actually reach it. Its `calt` does
+    // also reach two width-changing lookups, but both are Arabic-only and
+    // unreachable from ASCII — see the note on {@link TerminalFont.ligatures}.
+    //
+    // Microsoft ships the no-ligature cut under a *different* family name —
+    // Cascadia Mono, confirmed as family `"Cascadia Mono"` against `"Cascadia
+    // Code"` in the release binaries — so this flag does not have to guess which
+    // build is installed. JetBrains does the same thing (`JetBrains Mono NL`).
     ligatures: true,
   },
   { label: "IBM Plex Mono", stack: `"IBM Plex Mono", ${TAIL}`, bundled: false, ligatures: false },
