@@ -391,19 +391,24 @@ async function applyCdpNow(window, viewId, entry) {
       }
     }
     if ((entry.touchActive || entry.mediaActive || stale) && dbg.isAttached()) {
+      // **The gutters are revoked first, and through [`applySafeArea`].** Two
+      // reasons, and the earlier arrangement — inlined last, inside the try below —
+      // got both wrong. It is the only one of these four overrides whose effect
+      // provably outlives the detach that follows, so it is the only one where
+      // skipping the call has a lasting consequence; and a throw from any of the
+      // three touch/media resets is a *normal* state here ("the session went away
+      // underneath us"), which meant the ordinary case could silently skip it.
+      // Going through the helper also means a rejection from the one EXPERIMENTAL
+      // method in the set gets logged and leaves `safeAreaApplied` set, so the next
+      // off-run retries, rather than being swallowed by the catch below.
+      if (await applySafeArea(dbg, null)) entry.safeAreaApplied = null;
       // Explicitly off before detaching. Detaching *should* drop the session's
       // overrides on its own, but "should" is the wrong footing for a page that
-      // would otherwise keep answering mouse drags with touch events — and for the
-      // safe-area gutters it is simply false: measured on Electron 43, the inset
-      // override outlives a detach in the frame that is loaded at the time. Without
-      // this call a pane that switches its gutters off keeps reporting them to the
-      // page until it next navigates.
+      // would otherwise keep answering mouse drags with touch events.
       try {
         await dbg.sendCommand("Emulation.setEmitTouchEventsForMouse", { enabled: false });
         await dbg.sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false });
         await dbg.sendCommand("Emulation.setEmulatedMedia", { features: [] });
-        await dbg.sendCommand("Emulation.setSafeAreaInsetsOverride", { insets: {} });
-        entry.safeAreaApplied = null;
       } catch {
         // The session went away underneath us — which is the state we wanted.
       }
@@ -885,9 +890,14 @@ function attachListeners(window, viewId, entry) {
     const first = !entry.frameReady;
     entry.frameReady = true;
     // A safe-area override is carried across a document swap by the *session*, not
-    // by the page — measured: it survives a cross-process navigation while the
-    // debugger is attached, and is dropped by one when it is not. So a navigation
-    // with no session is precisely where the page stops holding it.
+    // by the page. Measured on Electron 43, with the renderer process held
+    // constant so the two variables do not move together: with no session
+    // attached, a **cross-document** navigation drops the override and so does a
+    // reload, while a **same-document** (fragment) navigation preserves it. Both
+    // of the first two raise `did-navigate` and the third raises only
+    // `did-navigate-in-page`, so this listener fires in exactly the cases where
+    // the page has genuinely stopped holding the gutters — which is what makes it
+    // safe to write the record off here rather than only on a process swap.
     if (!wc.debugger.isAttached()) entry.safeAreaApplied = null;
     applyMetrics(entry);
     applyZoom(entry);

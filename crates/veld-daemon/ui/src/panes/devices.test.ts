@@ -266,6 +266,57 @@ describe("safe-area insets", () => {
     expect(responsiveEmulation(600, 400).safeArea).toBeNull();
   });
 
+  it("refuses to give a screen class gutters, even when asked directly", () => {
+    // The bug this pins: `presetById(...)?.insets ?? PHONE_INSETS` reads as one
+    // question and is two, because `??` fires on a *row's own* `null` exactly as it
+    // fires on a missing row. Every screen preset therefore inherited the phone
+    // set, and because 1920 > 1080 it inherited the *landscape* one — so one menu
+    // click put twin 59px side notches on a desktop viewport, contradicting this
+    // file, the pane's menu copy, the README and `llms-full.txt` at once. Only the
+    // *default* was covered before, which is why the suite stayed green.
+    for (const preset of DEVICE_PRESETS.filter((p) => p.group === "Screens")) {
+      const e = emulationForPreset(preset);
+      expect(e.safeArea).toBeNull();
+      expect(insetsFor(e)).toBeNull();
+      expect(withSafeArea(e, true).safeArea).toBeNull();
+      // Rotating one is not a way in either.
+      expect(rotateEmulation(withSafeArea(e, true)).safeArea).toBeNull();
+    }
+    // And the handheld classes still answer, or the guard above would be a way of
+    // turning the whole feature off by accident.
+    for (const preset of DEVICE_PRESETS.filter((p) => p.group !== "Screens")) {
+      expect(withSafeArea(emulationForPreset(preset), true).safeArea).not.toBeNull();
+    }
+  });
+
+  it("keeps a dragged device's own class when it is rotated", () => {
+    // `resizeEmulation` renames the device to `custom` while keeping every flag, so
+    // after a drag the id no longer says which class the stored numbers came from.
+    // Reaching for a default there handed a *tablet* a phone's landscape gutters:
+    // its home indicator became twin 59px side notches.
+    const tablet = emulationForPreset(presetById("tablet")!);
+    const dragged = resizeEmulation(tablet, 810, 1180);
+    expect(dragged.device).toBe(CUSTOM_DEVICE);
+    expect(rotateEmulation(dragged).safeArea).toEqual({ top: 0, right: 0, bottom: 20, left: 0 });
+    // A small phone keeps its own 47, not the middle class's 59.
+    const small = resizeEmulation(emulationForPreset(presetById("phone-small")!), 355, 780);
+    expect(rotateEmulation(small).safeArea).toEqual({ top: 0, right: 47, bottom: 21, left: 47 });
+    // An id this build's table does not know — a layout stored by a future build —
+    // is the same case as a drag, and must not be re-classed either.
+    expect(rotateEmulation({ ...tablet, device: "tablet-2029" }).safeArea).toEqual(
+      tablet.safeArea,
+    );
+  });
+
+  it("leaves a hand-edited inset set alone rather than re-classing it", () => {
+    // Numbers no class in the table produces belong to whoever wrote them. The
+    // recovery is a *recognition* of stored values, so when it recognises nothing
+    // the honest answer is to change nothing — never to substitute a class.
+    const odd = { top: 13, right: 0, bottom: 7, left: 0 };
+    const e = { ...emulationForPreset(presetById("phone")!), device: CUSTOM_DEVICE, safeArea: odd };
+    expect(rotateEmulation(e).safeArea).toEqual(odd);
+  });
+
   it("reads the gutters out for the menu, and says Off as nothing", () => {
     expect(safeAreaLabel(null)).toBeNull();
     expect(safeAreaLabel({ top: 59, right: 0, bottom: 34, left: 0 })).toBe("59 / 34");
