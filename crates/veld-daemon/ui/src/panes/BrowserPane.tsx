@@ -18,7 +18,6 @@ import {
   IconAlertTriangle,
   IconArrowLeft,
   IconArrowRight,
-  IconArrowsHorizontal,
   IconBookmark,
   IconBug,
   IconCheck,
@@ -82,6 +81,7 @@ import {
   DEVICE_GROUPS,
   DEVICE_PADDING,
   DEVICE_PRESETS,
+  type DevicePreset,
   HANDLE_CORNER_GAP,
   HANDLE_CORNER_HIT_BLEED,
   HANDLE_EDGE_GAP,
@@ -94,6 +94,7 @@ import {
   MIN_DEVICE_PX,
   type PaneEmulation,
   type PaneMedia,
+  QUICK_DEVICE,
   RESPONSIVE_DEVICE,
   chromeVersionFrom,
   clampZoom,
@@ -108,6 +109,7 @@ import {
   formatZoom,
   nextColorScheme,
   orientationLabel,
+  presetById,
   resizeEmulation,
   responsiveEmulation,
   rotateEmulation,
@@ -1198,6 +1200,23 @@ export function BrowserPane(props: {
     );
   };
 
+  /**
+   * Emulate a preset, keeping this pane's own answers to the two questions the
+   * preset table cannot hold.
+   *
+   * One owner for the same reason `enterResponsive` is one: the orientation reset
+   * and the user-agent template belong to `emulationForPreset`, but *which* Chrome
+   * version to claim and *whether* to fit are the pane's, and two controls now pick
+   * a preset — the device menu's list and the quick switch.
+   */
+  const applyPreset = (preset: DevicePreset) =>
+    applyEmulation(
+      emulationForPreset(preset, {
+        chrome: HOST_CHROME,
+        fit: emulation?.fit ?? true,
+      }),
+    );
+
   // ---- Quick switches -----------------------------------------------------
   //
   // The two things people do dozens of times an hour while working on a layout,
@@ -1211,11 +1230,15 @@ export function BrowserPane(props: {
   // the *absence* of an override (which is what lets the CDP session be released),
   // and Light is a real destination, because a light-only layout bug is as ordinary
   // as a dark one and sending someone back into the menu for it is the reach problem
-  // this switch exists to fix. Responsive's off is no emulation at all: it
+  // this switch exists to fix. The device switch's off is no emulation at all: it
   // deliberately does not restore a previously picked device, so the switch reads as
-  // one fact — "am I in the resizable viewport" — rather than as a history of the
-  // menu.
-  const responsiveOn = emulation?.device === RESPONSIVE_DEVICE;
+  // one fact — "am I on the phone" — rather than as a history of the menu.
+  //
+  // `quickSwitches.responsive` (and `browser.quickSwitch.responsive` behind it) names
+  // the *slot*, not what it applies — the key predates the switch becoming a phone
+  // and renaming it would be a settings migration for a word.
+  const quickPreset = presetById(QUICK_DEVICE);
+  const quickOn = emulation?.device === QUICK_DEVICE;
   const scheme = media?.["prefers-color-scheme"];
   // Achieved, not requested: `mediaSuspended` is the shell's own report that the
   // override is not in force because Chromium's debugger is held elsewhere. A switch
@@ -1681,134 +1704,59 @@ export function BrowserPane(props: {
           </span>
         </Tooltip>
 
-        {/* The quick switches, immediately before the control they are a shortcut
-            into, so the size question stays in one place on the bar. Both work in
-            the browser build only as far as the backend does: an iframe really is
-            that many CSS pixels wide, so responsive is real there, while
-            `Emulation.setEmulatedMedia` needs the debugger — so the colour scheme is
-            shown inert there, saying why in both its tooltip and its accessible
-            name. */}
-        {props.quickSwitches.responsive && (
+        {/* The device quick switch, immediately before the control it is a shortcut
+            into, so the size question stays in one place on the bar. Real in both
+            backends: an iframe really is that many CSS pixels wide, so a phone-sized
+            one is a phone-sized viewport — what it cannot claim there is touch and
+            the device pixel ratio, which the device menu states.
+
+            The colour-scheme switch sits on the *far* side of the device button
+            rather than beside this one, because it is not a size question: two
+            switches in a row read as one group, and the order the bar is read in is
+            session → what size → what the page looks like at that size. */}
+        {props.quickSwitches.responsive && quickPreset && (
           <Tooltip
             {...TIP}
             label={
-              responsiveOn
+              quickOn
                 ? "Stop emulating — the page is the pane again"
                 : emulation
-                  ? // A dragged preset or a hand-entered size is `custom`, not
-                    // `responsive` (`resizeEmulation`), so the switch reads off over a
-                    // viewport that already has draggable edges — and the click
-                    // *replaces* that size with a pane-measured one, which the layout
-                    // cannot undo. An off-looking toggle reads as costless, so the
-                    // cost is named here rather than discovered.
-                    `Replace ${emulationLabel(emulation)} (${emulationSize(emulation)}) with a responsive viewport at pane size`
-                  : "Responsive: drag the screen's edges to find where the layout breaks"
+                  ? // A dragged preset or a hand-entered size is `custom`, not the
+                    // preset it came from (`resizeEmulation`), so the switch reads off
+                    // over a viewport that is already phone-shaped — and the click
+                    // *replaces* that size, which the layout cannot undo. An
+                    // off-looking toggle reads as costless, so the cost is named here
+                    // rather than discovered.
+                    `Replace ${emulationLabel(emulation)} (${emulationSize(emulation)}) with ${quickPreset.label} (${quickPreset.width} × ${quickPreset.height})`
+                  : `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height}, touch and a mobile user agent — drag its edges from there`
             }
           >
             <ActionIcon
               size="sm"
-              variant={responsiveOn ? "light" : "subtle"}
-              color={responsiveOn ? "blue" : "gray"}
+              variant={quickOn ? "light" : "subtle"}
+              color={quickOn ? "blue" : "gray"}
               // The reason and the cost go in the *name*, not only the tooltip:
               // Mantine's Tooltip wires no `aria-describedby`, so anything stated
               // only there reaches sighted users only — and what this click discards
               // is exactly what someone who cannot see the chip needs told.
               aria-label={
-                responsiveOn
-                  ? "Turn off the responsive viewport"
+                quickOn
+                  ? `Turn off ${quickPreset.label}`
                   : emulation
-                    ? `Replace ${emulationLabel(emulation)}, ${emulationSize(emulation)}, with a responsive viewport at pane size`
-                    : "Turn on the responsive viewport"
+                    ? `Replace ${emulationLabel(emulation)}, ${emulationSize(emulation)}, with ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}`
+                    : `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}`
               }
-              aria-pressed={responsiveOn}
-              onClick={() => (responsiveOn ? applyEmulation(null) : enterResponsive())}
+              aria-pressed={quickOn}
+              onClick={() => (quickOn ? applyEmulation(null) : applyPreset(quickPreset))}
             >
-              <IconArrowsHorizontal size={14} />
+              <IconDeviceMobile size={14} />
             </ActionIcon>
           </Tooltip>
         )}
-        {/* **`data-disabled`, not `disabled`.** A real `<button disabled>` is styled
-            the same but dispatches no pointer events, so its Tooltip never opens —
-            Mantine puts the hover handlers on the child element itself, and adds no
-            `pointer-events: none` of its own. The explanation would be unreachable in
-            the one backend that needs it, which is the "control that silently does
-            nothing" this was meant to avoid. `data-disabled` is Mantine's own answer:
-            it drives the disabled *styling* through `mod` and leaves the element
-            hoverable, so the click has to be refused in the handler instead, and
-            `aria-disabled` carries what the missing attribute used to. The device
-            menu never hit this because it states its gaps in a `Menu.Label`, which
-            renders regardless of any item's state. */}
-        {props.quickSwitches.colorScheme && (
-          <Tooltip
-            {...TIP}
-            label={
-              iframeBackend
-                ? "Emulating the page's colour scheme needs the desktop app"
-                : schemeSuspended
-                  ? `${schemeLabel} is not in force — Chromium's debugger is in use elsewhere`
-                  : // Whose preference, and where the next click goes. "The page's"
-                    // is load-bearing: Veld themes itself light and dark too, and a
-                    // sun beside the device button would otherwise be taken for
-                    // that one.
-                    `The page's colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
-            }
-          >
-            <ActionIcon
-              size="sm"
-              variant={scheme ? "light" : "subtle"}
-              // Yellow rather than blue for a scheme that is set and not in force —
-              // the same distinction the device menu draws in words for touch.
-              color={scheme ? (schemeSuspended ? "yellow" : "blue") : "gray"}
-              // Not `aria-pressed`: three states are a cycle, not a pressed
-              // toggle, and a two-valued attribute would have to lie about one of
-              // them. The label carries the state instead, the way the app's own
-              // theme button does.
-              // Same rule as the responsive switch's name: `aria-disabled` with no
-              // reason is the screen-reader equivalent of the unreachable tooltip
-              // `bbaa9b7` fixed, so the reason belongs in the name too.
-              aria-label={
-                iframeBackend
-                  ? `Page colour scheme: ${schemeLabel} — needs the desktop app`
-                  : schemeSuspended
-                    ? `Page colour scheme: ${schemeLabel}, paused — Chromium's debugger is in use elsewhere`
-                    : `Page colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
-              }
-              data-disabled={iframeBackend || undefined}
-              aria-disabled={iframeBackend || undefined}
-              onClick={() => {
-                // `data-disabled` styles but does not disable, so the refusal lives
-                // here. Silent rather than a toast: the tooltip already answers it,
-                // and an error for clicking a control that looks inert is noise.
-                if (iframeBackend) return;
-                applyMedia(
-                  withMediaFeature(
-                    media,
-                    "prefers-color-scheme",
-                    nextColorScheme(scheme),
-                  ),
-                );
-              }}
-            >
-              {/* Sun and moon match the app's own theme button, because they answer
-                  the same question. System does **not** reuse its
-                  `IconDeviceDesktop` — that glyph sits one button away from the
-                  device picker here, where two monitor shapes next to each other
-                  would read as two device controls. */}
-              {scheme === "dark" ? (
-                <IconMoon size={14} />
-              ) : scheme === "light" ? (
-                <IconSun size={14} />
-              ) : (
-                <IconSunMoon size={14} />
-              )}
-            </ActionIcon>
-          </Tooltip>
-        )}
-
         {/* Device emulation and zoom. One menu, because they are one question —
             "what size is this page being shown at" — and because a pane is a
             narrow strip: the chrome is already six controls wide before this, plus
-            whichever quick switches are enabled. The
+            the device quick switch when that is enabled. The
             target carries the answer as text when there is one to carry, so the
             emulated size is readable without opening anything, and nothing is
             added to the bar while the pane is just a pane. */}
@@ -1843,11 +1791,12 @@ export function BrowserPane(props: {
                     emulation ? emulationLabel(emulation) : "pane size"
                   }, zoom ${formatZoom(zoom)}`}
                 >
-                  {emulation ? (
-                    <IconDeviceMobile size={14} />
-                  ) : (
-                    <IconDevices size={14} />
-                  )}
+                  {/* The same glyph whether or not a device is set. It used to
+                      switch to `IconDeviceMobile` while emulating, which is now the
+                      quick switch's own icon one button to the left — two identical
+                      phones side by side read as a mistake, and the chip and the
+                      `default` border already say a device is on. */}
+                  <IconDevices size={14} />
                   {emulation && (
                     // While dragging this is the size under the pointer, which is why the
                     // drag needs no readout of its own — and it keeps counting past the
@@ -1943,14 +1892,7 @@ export function BrowserPane(props: {
                               // nothing on screen saying why. `fit` does carry over,
                               // because that is a preference about the *pane* rather
                               // than a property of the device.
-                              onClick={() =>
-                                applyEmulation(
-                                  emulationForPreset(preset, {
-                                    chrome: HOST_CHROME,
-                                    fit: emulation?.fit ?? true,
-                                  }),
-                                )
-                              }
+                              onClick={() => applyPreset(preset)}
                               rightSection={
                                 <span className="menu-size faint">
                                   {preset.width} × {preset.height}
@@ -2234,6 +2176,84 @@ export function BrowserPane(props: {
             </Menu>
           </span>
         </Tooltip>
+
+        {/* **`data-disabled`, not `disabled`.** A real `<button disabled>` is styled
+            the same but dispatches no pointer events, so its Tooltip never opens —
+            Mantine puts the hover handlers on the child element itself, and adds no
+            `pointer-events: none` of its own. The explanation would be unreachable in
+            the one backend that needs it, which is the "control that silently does
+            nothing" this was meant to avoid. `data-disabled` is Mantine's own answer:
+            it drives the disabled *styling* through `mod` and leaves the element
+            hoverable, so the click has to be refused in the handler instead, and
+            `aria-disabled` carries what the missing attribute used to. The device
+            menu never hit this because it states its gaps in a `Menu.Label`, which
+            renders regardless of any item's state. */}
+        {props.quickSwitches.colorScheme && (
+          <Tooltip
+            {...TIP}
+            label={
+              iframeBackend
+                ? "Emulating the page's colour scheme needs the desktop app"
+                : schemeSuspended
+                  ? `${schemeLabel} is not in force — Chromium's debugger is in use elsewhere`
+                  : // Whose preference, and where the next click goes. "The page's"
+                    // is load-bearing: Veld themes itself light and dark too, and a
+                    // sun beside the device button would otherwise be taken for
+                    // that one.
+                    `The page's colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
+            }
+          >
+            <ActionIcon
+              size="sm"
+              variant={scheme ? "light" : "subtle"}
+              // Yellow rather than blue for a scheme that is set and not in force —
+              // the same distinction the device menu draws in words for touch.
+              color={scheme ? (schemeSuspended ? "yellow" : "blue") : "gray"}
+              // Not `aria-pressed`: three states are a cycle, not a pressed
+              // toggle, and a two-valued attribute would have to lie about one of
+              // them. The label carries the state instead, the way the app's own
+              // theme button does.
+              // Same rule as the device switch's name: `aria-disabled` with no
+              // reason is the screen-reader equivalent of the unreachable tooltip
+              // `bbaa9b7` fixed, so the reason belongs in the name too.
+              aria-label={
+                iframeBackend
+                  ? `Page colour scheme: ${schemeLabel} — needs the desktop app`
+                  : schemeSuspended
+                    ? `Page colour scheme: ${schemeLabel}, paused — Chromium's debugger is in use elsewhere`
+                    : `Page colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
+              }
+              data-disabled={iframeBackend || undefined}
+              aria-disabled={iframeBackend || undefined}
+              onClick={() => {
+                // `data-disabled` styles but does not disable, so the refusal lives
+                // here. Silent rather than a toast: the tooltip already answers it,
+                // and an error for clicking a control that looks inert is noise.
+                if (iframeBackend) return;
+                applyMedia(
+                  withMediaFeature(
+                    media,
+                    "prefers-color-scheme",
+                    nextColorScheme(scheme),
+                  ),
+                );
+              }}
+            >
+              {/* Sun and moon match the app's own theme button, because they answer
+                  the same question. System does **not** reuse its
+                  `IconDeviceDesktop` — the device picker is the button immediately
+                  to the left, where two monitor shapes next to each other would read
+                  as two device controls. */}
+              {scheme === "dark" ? (
+                <IconMoon size={14} />
+              ) : scheme === "light" ? (
+                <IconSun size={14} />
+              ) : (
+                <IconSunMoon size={14} />
+              )}
+            </ActionIcon>
+          </Tooltip>
+        )}
 
         {/* Detached, always — a docked inspector resizes the view from the inside
             while the renderer mirrors the pane's box from the outside, and the two
