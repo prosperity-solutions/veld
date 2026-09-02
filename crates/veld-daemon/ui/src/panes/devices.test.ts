@@ -315,9 +315,30 @@ describe("safe-area insets", () => {
     expect(customEmulation(900, 400, e).safeArea).toEqual(resizeEmulation(e, 900, 400).safeArea);
     // And a same-orientation change touches nothing at all — a resize is not a
     // rotation, so the numbers are only ever re-read when the shape turns over.
+    //
+    // **The fixture is a known id carrying a *stale* set, and that is the whole
+    // point.** An earlier version used a custom id with numbers matching no class,
+    // which proved nothing: `insetPairFor` returns `null` for those anyway, so the
+    // assertion passed byte-identically with the orientation guard deleted
+    // (verified by deleting it). A known id whose stored numbers disagree with what
+    // the table says for that same orientation — a layout stored before a table
+    // revision, the asymmetry `insetClassOf` documents — is the one shape that can
+    // tell the two paths apart: the guard leaves the stale 61 alone, and without it
+    // the table silently overwrites it with 59.
+    const stale = { ...e, safeArea: { top: 61, right: 0, bottom: 34, left: 0 } };
+    expect(presetById(stale.device)).not.toBeNull();
+    expect(resizeEmulation(stale, 380, 800).safeArea).toEqual({
+      top: 61,
+      right: 0,
+      bottom: 34,
+      left: 0,
+    });
+    expect(customEmulation(380, 800, stale).safeArea).toEqual(stale.safeArea);
+    // A set matching no class is preserved too, but for the *other* reason — there
+    // is no pair to re-read — so it is asserted separately rather than as evidence
+    // for the guard.
     const odd = { ...e, device: CUSTOM_DEVICE, safeArea: { top: 7, right: 0, bottom: 3, left: 0 } };
     expect(resizeEmulation(odd, 401, 901).safeArea).toEqual(odd.safeArea);
-    expect(customEmulation(401, 901, odd).safeArea).toEqual(odd.safeArea);
     // The resizable viewport is deliberately a plain desktop viewport: turning it
     // on must change how wide the page is and nothing about how it behaves.
     expect(responsiveEmulation(600, 400).safeArea).toBeNull();

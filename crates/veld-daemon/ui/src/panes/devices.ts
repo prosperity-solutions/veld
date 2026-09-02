@@ -874,7 +874,9 @@ export function reservesSafeArea(e: PaneEmulation): boolean {
  * forbids); hand a device *another class's* gutters (hence [`insetPairFor`]
  * recovering the class by value rather than reaching for a default); and rewrite a
  * set no class in the table produces, which belongs to whoever edited it (the
- * last return).
+ * *third* return — the fourth is the one that does the writing, and this label
+ * said "last" until round 2 inserted the orientation guard above it and shifted
+ * every ordinal below by one).
  */
 function reorientSafeArea(from: PaneEmulation, to: PaneEmulation): PaneEmulation {
   if (from.safeArea === null) return to;
