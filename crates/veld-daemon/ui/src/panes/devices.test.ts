@@ -29,7 +29,7 @@ import {
   edgePinned,
   emulationForPreset,
   emulationLabel,
-  insetsFor,
+  insetsIfEnabled,
   safeAreaLabel,
   sanitizeSafeArea,
   withSafeArea,
@@ -193,6 +193,23 @@ describe("rotate and label", () => {
 });
 
 describe("safe-area insets", () => {
+  it("keeps its clamp in step with the shell's hand-copied one", () => {
+    // `MAX_SAFE_AREA_PX` is duplicated by hand in `desktop/src/validate.js`, which
+    // is this repo's convention for the IPC boundary (`MIN_DEVICE_PX`, `MAX_UA_LEN`,
+    // `MAX_DEVICE_RADIUS` and `PANE_KINDS` are all mirrored the same way). The
+    // shell's copy is already pinned by `validate.test.js` clamping 100000 to a
+    // literal 200; this pins *this* side to the same literal, which the suites did
+    // not do — measured: raising this constant alone left all 364 pane tests green.
+    //
+    // Drift here is worse than in the size mirror it follows, and invisibly so. A
+    // width the shell won't apply shows up as a device that visibly stays put,
+    // whereas an inset the shell re-clamps leaves the menu printing this side's
+    // number while the page gets the shell's, and `safeAreaActive` still reports
+    // true — because it reports that the CDP command was *accepted*, not what the
+    // page ended up holding.
+    expect(MAX_SAFE_AREA_PX).toBe(200);
+  });
+
   it("gives every handheld class gutters and every screen none", () => {
     // The claim the feature rests on: a phone reserves space and a monitor does
     // not, so a screen preset stays a plain desktop viewport.
@@ -249,7 +266,7 @@ describe("safe-area insets", () => {
     // the control dead at the one size a fixed list cannot cover.
     const custom = customEmulation(500, 900);
     expect(custom.safeArea).toBeNull();
-    expect(withSafeArea(custom, true).safeArea).toEqual(insetsFor(custom));
+    expect(withSafeArea(custom, true).safeArea).toEqual(insetsIfEnabled(custom));
     expect(withSafeArea(custom, true).safeArea).toEqual({
       top: 59,
       right: 0,
@@ -300,7 +317,7 @@ describe("safe-area insets", () => {
     for (const preset of DEVICE_PRESETS.filter((p) => p.group === "Screens")) {
       const e = emulationForPreset(preset);
       expect(e.safeArea).toBeNull();
-      expect(insetsFor(e)).toBeNull();
+      expect(insetsIfEnabled(e)).toBeNull();
       expect(withSafeArea(e, true).safeArea).toBeNull();
       // Rotating one is not a way in either.
       expect(rotateEmulation(withSafeArea(e, true)).safeArea).toBeNull();
@@ -358,6 +375,58 @@ describe("safe-area insets", () => {
     );
   });
 
+  it("builds a natively-landscape class from its shape, not from the caller's flag", () => {
+    // Every insets-bearing row in the table is portrait-shaped today, which is what
+    // made `opts.landscape` and "wider than tall" look like one question. They are
+    // not, and a foldable-open or laptop class with gutters is where they part: the
+    // preset would be built with the *portrait* set while `orientationOf` — which
+    // every other reader uses — called the result landscape, so toggling the gutters
+    // off and on would flip the set with no rotation. Tested with a synthetic row,
+    // since adding a real one is a product decision this test should not make.
+    const foldable: DevicePreset = {
+      id: "foldable-open",
+      label: "Foldable (open)",
+      group: "Tablets",
+      width: 1000,
+      height: 700,
+      deviceScaleFactor: 2,
+      radius: 20,
+      insets: {
+        portrait: { top: 30, right: 0, bottom: 20, left: 0 },
+        landscape: { top: 0, right: 30, bottom: 12, left: 30 },
+      },
+      mobile: true,
+      touch: true,
+      ua: null,
+    };
+    // Landscape-shaped by default, so the *landscape* set, even at `landscape: false`.
+    const e = emulationForPreset(foldable);
+    expect(isLandscape(e)).toBe(true);
+    expect(e.safeArea).toEqual({ top: 0, right: 30, bottom: 12, left: 30 });
+    // And `landscape: true` turns it portrait-shaped, so the portrait set.
+    const turned = emulationForPreset(foldable, { landscape: true });
+    expect(isLandscape(turned)).toBe(false);
+    expect(turned.safeArea).toEqual({ top: 30, right: 0, bottom: 20, left: 0 });
+  });
+
+  it("loses a dragged device's class once its gutters are switched off", () => {
+    // Pinned as a known property, not fixed. Switching off erases the numbers, and
+    // the drag has already renamed the device to `custom` — so an off-then-on round
+    // trip has neither an id nor numbers to recover the class from and falls to the
+    // documented default for a classless size, the phone set. Accepted because the
+    // chip reads "Custom" by then and that default is exactly what a custom size is
+    // documented to get; the alternative is a second persisted field crossing the
+    // shell's hand-maintained whitelist to serve a three-click path.
+    const dragged = resizeEmulation(emulationForPreset(presetById("tablet")!), 810, 1180);
+    expect(dragged.safeArea).toEqual({ top: 0, right: 0, bottom: 20, left: 0 });
+    const cycled = withSafeArea(withSafeArea(dragged, false), true);
+    expect(cycled.safeArea).toEqual({ top: 59, right: 0, bottom: 34, left: 0 });
+    // Rotation keeps the class on the very same emulation, because gutters that are
+    // still switched on *are* the evidence. That asymmetry is information loss, not
+    // a contradiction — the two act on different states.
+    expect(rotateEmulation(dragged).safeArea).toEqual({ top: 0, right: 0, bottom: 20, left: 0 });
+  });
+
   it("leaves a hand-edited inset set alone rather than re-classing it", () => {
     // Numbers no class in the table produces belong to whoever wrote them. The
     // recovery is a *recognition* of stored values, so when it recognises nothing
@@ -367,10 +436,13 @@ describe("safe-area insets", () => {
     expect(rotateEmulation(e).safeArea).toEqual(odd);
   });
 
-  it("reads the gutters out for the menu, and says Off as nothing", () => {
+  it("reads the gutters out for the menu in CSS order, always four", () => {
     expect(safeAreaLabel(null)).toBeNull();
-    expect(safeAreaLabel({ top: 59, right: 0, bottom: 34, left: 0 })).toBe("59 / 34");
-    // All four once the sides are in play, which is what landscape looks like.
+    // Never a two-value form. CSS's own two-value shorthand means *vertical /
+    // horizontal*, so `59 / 34` is decoded by this exact audience as "59 top and
+    // bottom, 34 left and right" — wrong on both halves. Four values collide with
+    // nothing, because CSS's four-value order is universally this one.
+    expect(safeAreaLabel({ top: 59, right: 0, bottom: 34, left: 0 })).toBe("59 / 0 / 34 / 0");
     expect(safeAreaLabel({ top: 0, right: 59, bottom: 21, left: 59 })).toBe("0 / 59 / 21 / 59");
   });
 

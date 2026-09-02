@@ -537,7 +537,15 @@ export function emulationForPreset(
     radius: preset.radius,
     // Read for the orientation being applied, not rotated afterwards: see
     // [`PresetInsets`] for why the two sets are held separately.
-    safeArea: preset.insets === null ? null : preset.insets[landscape ? "landscape" : "portrait"],
+    //
+    // Keyed off the *resulting shape*, not off `opts.landscape`. Those answer the
+    // same question only while every insets-bearing row is portrait-shaped, which
+    // is true of the table today and is a property of nothing: give a
+    // natively-landscape class gutters — a foldable held open, a laptop — and this
+    // would build it with the portrait set while [`orientationOf`], which every
+    // other reader uses, called it landscape. The two would then disagree, and
+    // toggling the gutters off and on would flip the set with no rotation.
+    safeArea: preset.insets === null ? null : preset.insets[presetOrientation(preset, landscape)],
   };
 }
 
@@ -653,6 +661,15 @@ function orientationOf(e: PaneEmulation): keyof PresetInsets {
   return isLandscape(e) ? "landscape" : "portrait";
 }
 
+/** The same question for a preset row about to be applied, answered from the
+ *  shape it will produce rather than from the caller's flag — see
+ *  [`emulationForPreset`] for what disagreeing would cost. */
+function presetOrientation(preset: DevicePreset, landscape: boolean): keyof PresetInsets {
+  const width = landscape ? preset.height : preset.width;
+  const height = landscape ? preset.width : preset.height;
+  return width > height ? "landscape" : "portrait";
+}
+
 function sameInsets(a: SafeAreaInsets, b: SafeAreaInsets): boolean {
   return a.top === b.top && a.right === b.right && a.bottom === b.bottom && a.left === b.left;
 }
@@ -705,8 +722,14 @@ function insetPairFor(e: PaneEmulation): PresetInsets | null {
 }
 
 /**
- * The gutters "on" means for this emulation, held the way it is currently held,
- * or `null` for a device that reserves none.
+ * The gutters "on" *would* mean for this emulation, held the way it is currently
+ * held, or `null` for a device that reserves none.
+ *
+ * **Named for the hypothetical deliberately.** An earlier `insetsFor` read as "the
+ * gutters this emulation has", which is `e.safeArea` and is not what this returns:
+ * this ignores `e.safeArea` entirely and resolves through the table every time, so
+ * a caller after the *current* state would silently get the would-be-on value on a
+ * pane whose gutters are switched off.
  *
  * The preset's own when there is one, so picking Phone and toggling its insets
  * off and on again returns the numbers it arrived with — and `null` for a screen
@@ -726,7 +749,7 @@ function insetPairFor(e: PaneEmulation): PresetInsets | null {
  * installed PWA reads `env(safe-area-inset-*)` at whatever size its window is,
  * and refusing it would be this function inventing a rule the CSS does not have.
  */
-export function insetsFor(e: PaneEmulation): SafeAreaInsets | null {
+export function insetsIfEnabled(e: PaneEmulation): SafeAreaInsets | null {
   const preset = presetById(e.device);
   const pair = preset === null ? PHONE_INSETS : preset.insets;
   return pair === null ? null : pair[orientationOf(e)];
@@ -741,11 +764,28 @@ export function insetsFor(e: PaneEmulation): SafeAreaInsets | null {
  * different questions.
  *
  * Turning on a device that reserves nothing is a no-op by construction rather
- * than by a guard — [`insetsFor`] answers `null` — so the pane disables the
+ * than by a guard — [`insetsIfEnabled`] answers `null` — so the pane disables the
  * control there instead of offering one that does nothing.
+ *
+ * **What "on" cannot recover.** Switching off erases the numbers, and a drag has
+ * by then renamed the device to [`CUSTOM_DEVICE`], so on a dragged tablet an
+ * off-then-on round trip returns the *phone* set rather than the tablet's: with
+ * neither an id nor numbers there is nothing left to recover the class from.
+ * Accepted rather than fixed, because the chip reads "Custom" by that point and
+ * the phone set is exactly the documented rule for a custom size — where the
+ * alternative is a second persisted field, crossing the shell's hand-maintained
+ * whitelist, to serve a three-click path. Pinned by a test so it is a known
+ * property rather than a surprise. Note [`rotateEmulation`] *does* keep the class
+ * there, because gutters that are still on are themselves the evidence.
  */
 export function withSafeArea(e: PaneEmulation, on: boolean): PaneEmulation {
-  return { ...e, safeArea: on ? insetsFor(e) : null };
+  return { ...e, safeArea: on ? insetsIfEnabled(e) : null };
+}
+
+/** Whether this device reserves any gutters at all — false for a screen class.
+ *  What the pane's menu tests to decide whether the control means anything. */
+export function reservesSafeArea(e: PaneEmulation): boolean {
+  return insetsIfEnabled(e) !== null;
 }
 
 /**
@@ -782,15 +822,25 @@ export function rotateEmulation(e: PaneEmulation): PaneEmulation {
   return reorientSafeArea(e, { ...e, width: e.height, height: e.width });
 }
 
-/** `59 / 34` — the gutters, top-and-bottom first, in the order a reader scans a
- *  phone. All four when the sides are non-zero, which is what landscape looks
- *  like. `null` when nothing is reserved, so the menu can say "Off" itself. */
+/**
+ * `59 / 0 / 34 / 0` — the gutters in CSS order, top / right / bottom / left.
+ *
+ * **Always four, never a shortened form.** This began as `59 / 34` for the common
+ * case where the sides are zero, which is shorter and is misread by exactly the
+ * audience it is for: CSS's own two-value shorthand means *vertical / horizontal*,
+ * so a developer decodes `59 / 34` as "59 top and bottom, 34 left and right" —
+ * wrong on both halves, since there is no side inset at all in portrait and
+ * `top !== bottom` is the entire point of the number. The four-value form has no
+ * such collision: CSS's four-value order is universally this one. It is a menu
+ * readout, so a few extra characters cost nothing and the branch is gone.
+ *
+ * `null` when nothing is reserved, so the caller supplies its own word for that —
+ * the pane distinguishes "Off" (switched off, switchable back on) from "None" (a
+ * device with nothing to reserve).
+ */
 export function safeAreaLabel(insets: SafeAreaInsets | null): string | null {
   if (insets === null) return null;
-  const sides = insets.left !== 0 || insets.right !== 0;
-  return sides
-    ? `${insets.top} / ${insets.right} / ${insets.bottom} / ${insets.left}`
-    : `${insets.top} / ${insets.bottom}`;
+  return `${insets.top} / ${insets.right} / ${insets.bottom} / ${insets.left}`;
 }
 
 /** Whether an emulation is wider than it is tall. Used for the label and to

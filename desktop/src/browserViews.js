@@ -50,6 +50,9 @@ const {
 // The CSS-pixel → DIP arithmetic every native view's geometry goes through, in the
 // same Electron-free module as the top bar's own zoom maths, and tested there.
 const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
+// The one pure rule in the safe-area applier, in its own module for the same
+// reason: nothing here can be unit-tested, and that rule can.
+const { safeAreaPayload } = require("./safeArea");
 // The permission policy is likewise its own tested, Electron-free module.
 const permissions = require("./permissions");
 
@@ -492,38 +495,17 @@ async function applyCdpNow(window, viewId, entry) {
  * `touchActive` exists for, inverted. So it costs the pane its gutters and
  * nothing else.
  *
- * **The whole set, every run.** Each call *replaces* the previous one rather than
- * merging into it: sending `{top: 59}` alone leaves the other three at zero, and
- * — measured — a call carrying only an unrecognised field resets all four,
- * because the unknown key is dropped and the replacement still happens. So there
- * is no partial update to be had, and the off case is a call with an empty set
- * rather than an omission.
- *
- * **`env(safe-area-max-inset-*)` is set alongside, to the same numbers.** It is
- * the inset's value with dynamic browser UI fully retracted, so on a real device
- * it can only be greater than or equal to the inset. An emulated viewport has no
- * retracting UI, which makes the inset already its own maximum; leaving the `Max`
- * fields out would report `0px` for a maximum while the inset itself read `59px`,
- * a combination no handset can produce and one a page taking
- * `max(env(safe-area-inset-top), env(safe-area-max-inset-top))` would read as
- * zero headroom.
+ * The payload itself is [`safeAreaPayload`] in `safeArea.js`, pulled out because
+ * it is the only *pure* part of this feature's shell half and therefore the only
+ * part `npm test` can reach — this module needs an Electron runtime to load at
+ * all. Its two rules (all eight fields every time; each `Max` mirroring its
+ * inset) read like redundancy someone would tidy away, so they have a test there
+ * rather than only a comment here.
  */
 async function applySafeArea(dbg, insets) {
   try {
     await dbg.sendCommand("Emulation.setSafeAreaInsetsOverride", {
-      insets:
-        insets === null
-          ? {}
-          : {
-              top: insets.top,
-              topMax: insets.top,
-              right: insets.right,
-              rightMax: insets.right,
-              bottom: insets.bottom,
-              bottomMax: insets.bottom,
-              left: insets.left,
-              leftMax: insets.left,
-            },
+      insets: safeAreaPayload(insets),
     });
     // Whether the command was *accepted*, not whether it set anything. The caller
     // needs to know the page took the write even when the write was the reset,

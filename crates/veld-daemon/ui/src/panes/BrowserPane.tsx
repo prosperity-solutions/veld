@@ -104,13 +104,13 @@ import {
   edgePinned,
   emulationForPreset,
   emulationLabel,
-  insetsFor,
   emulationSize,
   formatPercent,
   formatZoom,
   nextColorScheme,
   orientationLabel,
   presetById,
+  reservesSafeArea,
   resizeEmulation,
   responsiveEmulation,
   rotateEmulation,
@@ -1045,7 +1045,7 @@ export function BrowserPane(props: {
   // build whose table said otherwise), because otherwise there would be no way
   // left to switch them off.
   const safeAreaOffered =
-    emulation !== null && (insetsFor(emulation) !== null || emulation.safeArea !== null);
+    emulation !== null && (reservesSafeArea(emulation) || emulation.safeArea !== null);
 
   const applyEmulation = (next: PaneEmulation | null) => {
     setBrowserEmulation(id, next);
