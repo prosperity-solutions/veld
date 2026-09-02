@@ -40,6 +40,27 @@ export const CUSTOM_DEVICE = "custom";
 export const RESPONSIVE_DEVICE = "responsive";
 
 /**
+ * The preset the pane bar's quick device switch applies.
+ *
+ * The switch used to enter [`RESPONSIVE_DEVICE`], which is the one emulation whose
+ * arrival looks like nothing happened: it starts at exactly what the pane can hold,
+ * so a click that costs a trip to the bar returned a page the same size with drag
+ * handles on it. A phone is what "show me this small" means, and it is also the
+ * answer to the question the switch is reached for — does this layout survive a
+ * phone — rather than a starting point for finding it.
+ *
+ * Nothing is lost by the change: dragging a preset's edge lands on
+ * [`CUSTOM_DEVICE`] (`resizeEmulation`), so the resizable viewport is one drag
+ * away, and the device menu still has Responsive as a named item.
+ *
+ * An id rather than the preset itself, because the preset table is the one thing
+ * this must not duplicate — `presetById` is the lookup, and the preset table's own
+ * `still contains the row the pane bar's quick switch applies` is the gate that
+ * keeps a renamed row from silently removing the switch.
+ */
+export const QUICK_DEVICE = "phone";
+
+/**
  * Bounds on an emulated viewport.
  *
  * The lower one is below any real device because rotating a 120-wide viewport is

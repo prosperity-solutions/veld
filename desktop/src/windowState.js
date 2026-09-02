@@ -122,6 +122,67 @@ function trafficLightY(topbarHeight, trafficLightSize, zoom) {
 }
 
 /**
+ * The page zoom factor to compute with, from whatever was read or received.
+ *
+ * `getZoomFactor()` cannot answer badly, but the factor also travels over IPC and
+ * sits in a window record that starts at `null` — and a zero or negative one
+ * collapses every box multiplied by it, which looks like a missing view rather
+ * than a bad number. 1 is the only safe reading of "we do not know how far this
+ * page is zoomed".
+ */
+function zoomFactor(raw) {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+
+/**
+ * A renderer's CSS-pixel box in the device-independent pixels a native view's
+ * bounds are measured in.
+ *
+ * The whole conversion between the two coordinate spaces an embedded browser pane
+ * straddles: the page measures its panes in CSS pixels, which page zoom stretches,
+ * while `WebContentsView.setBounds` is DIP relative to the window's content view,
+ * which it does not. Electron's default application menu supplies ⌘+/⌘− (this app
+ * never replaces it), so the factor is one keystroke from being anything.
+ *
+ * Here rather than inline in `browserViews.js` because it is the same arithmetic
+ * as [`trafficLightY`] and, like it, checkable without an Electron binary — the
+ * failure mode is a view over the wrong region rather than an exception, so it is
+ * worth being able to assert the numbers directly.
+ */
+function cssBoxToDip(box, zoom) {
+  const factor = zoomFactor(zoom);
+  return {
+    x: Math.round(Number(box?.x) * factor),
+    y: Math.round(Number(box?.y) * factor),
+    width: Math.round(Number(box?.width) * factor),
+    height: Math.round(Number(box?.height) * factor),
+  };
+}
+
+/**
+ * The factor an emulated viewport has to be rendered at inside its native view.
+ *
+ * `scale` is the renderer's own number (`deviceLayout` in `panes/devices.ts`): how
+ * far the emulated screen is shrunk to fit the pane, **in CSS pixels**. The view it
+ * renders into is sized in DIP by [`cssBoxToDip`], so the same factor has to reach
+ * `enableDeviceEmulation` or the two disagree by exactly the page's zoom — a
+ * 402-wide phone in a /ide at 150% paints 402 DIP of page into a 603 DIP view,
+ * which reads as a device frame two thirds full, and at 80% it paints 402 into 322
+ * and the page is clipped by its own frame.
+ *
+ * **Not clamped to 1 the way the wire value is.** `safeScale` caps the renderer's
+ * number there because emulation shrinks a screen to fit a pane and magnifying one
+ * is what page zoom is for; above 1 here is not magnification, it is the DIP a
+ * zoomed-in page's CSS pixel is worth.
+ */
+function emulationScale(scale, zoom) {
+  const n = Number(scale);
+  const base = Number.isFinite(n) && n > 0 ? n : 1;
+  return base * zoomFactor(zoom);
+}
+
+/**
  * One persisted window, or `null` if the entry is unusable.
  *
  * This parses a file this process wrote, so nothing here is adversarial — but it
@@ -517,6 +578,9 @@ module.exports = {
   restoreBudget,
   safeBounds,
   trafficLightY,
+  zoomFactor,
+  cssBoxToDip,
+  emulationScale,
   parseWindowRecord,
   parseWindowList,
   readLastMainBounds,

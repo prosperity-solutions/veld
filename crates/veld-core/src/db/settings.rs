@@ -1631,7 +1631,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // pane's chrome for everyone is a real question — the bar already carries
         // most of a browser's toolbar and has to read at 300px — but the alternative is
         // worse: a control defaulted off is a control nobody finds, and the whole
-        // point of these two is reach. The responsive viewport and the page's colour
+        // point of these two is reach. A phone-sized viewport and the page's colour
         // scheme are three levels deep in the device menu and are changed dozens of
         // times an hour while working on a layout.
         //

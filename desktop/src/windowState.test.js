@@ -18,6 +18,9 @@ const {
   parseWindowRecord,
   readLastMainBounds,
   releaseClaims,
+  zoomFactor,
+  cssBoxToDip,
+  emulationScale,
   restoreBudget,
   safeBounds,
   serializeWindowList,
@@ -51,6 +54,57 @@ test("trafficLightY centres the light on the zoomed bar", () => {
   // goes negative — the light no longer fits, which is a genuine limit of the
   // centring, not something to clamp into a wrong position.
   assert.ok(trafficLightY(bar, size, 0.25) < 0);
+});
+
+test("zoomFactor falls back to 1 for anything unusable", () => {
+  assert.equal(zoomFactor(1.5), 1.5);
+  assert.equal(zoomFactor(0.8), 0.8);
+  // A zero or negative factor would collapse every box multiplied by it, which
+  // reads as a missing view rather than a bad number.
+  assert.equal(zoomFactor(0), 1);
+  assert.equal(zoomFactor(-2), 1);
+  assert.equal(zoomFactor(NaN), 1);
+  assert.equal(zoomFactor(null), 1);
+  assert.equal(zoomFactor(undefined), 1);
+  assert.equal(zoomFactor("1.25"), 1.25);
+});
+
+test("cssBoxToDip scales a CSS box into the view's own pixels", () => {
+  const css = { x: 10, y: 20, width: 402, height: 874 };
+  // At 100% the two spaces coincide, which is why this was invisible for so long.
+  assert.deepEqual(cssBoxToDip(css, 1), css);
+  // A zoomed-in page's CSS pixel is worth more than a DIP, so the same box covers
+  // more of the window.
+  assert.deepEqual(cssBoxToDip(css, 1.5), { x: 15, y: 30, width: 603, height: 1311 });
+  assert.deepEqual(cssBoxToDip(css, 0.5), { x: 5, y: 10, width: 201, height: 437 });
+  // Rounded, because `setBounds` takes integers.
+  assert.deepEqual(cssBoxToDip({ x: 0, y: 0, width: 402, height: 874 }, 1.25), {
+    x: 0,
+    y: 0,
+    width: 503,
+    height: 1093,
+  });
+  // A bad factor is 1, never a collapsed box.
+  assert.deepEqual(cssBoxToDip(css, 0), css);
+});
+
+test("emulationScale folds the page zoom into the renderer's fit factor", () => {
+  // The renderer's number passes through untouched at 100%.
+  assert.equal(emulationScale(1, 1), 1);
+  assert.equal(emulationScale(0.5, 1), 0.5);
+  // The bug this exists for: a phone that fits its pane has `scale` 1, so a /ide
+  // at 150% asked Chromium to paint 1 DIP per CSS pixel into a view sized 1.5 —
+  // a device frame two thirds full. Above 1 is not magnification here, it is what
+  // one of the page's CSS pixels is worth.
+  assert.equal(emulationScale(1, 1.5), 1.5);
+  // And the inverse: at 80% the page was painted larger than the frame holding it.
+  assert.equal(emulationScale(1, 0.8), 0.8);
+  // A scaled-down device composes with the page zoom rather than replacing it.
+  assert.equal(emulationScale(0.5, 1.5), 0.75);
+  // Nonsense on either side reads as "we do not know", never as zero.
+  assert.equal(emulationScale(0, 1.5), 1.5);
+  assert.equal(emulationScale(NaN, 2), 2);
+  assert.equal(emulationScale(0.5, -1), 0.5);
 });
 
 test("isSuffix takes w2..w99 and nothing else", () => {

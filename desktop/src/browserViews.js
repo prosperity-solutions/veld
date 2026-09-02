@@ -47,6 +47,9 @@ const {
   safeUrl,
   safeZoom,
 } = require("./validate");
+// The CSS-pixel → DIP arithmetic every native view's geometry goes through, in the
+// same Electron-free module as the top bar's own zoom maths, and tested there.
+const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
 // The permission policy is likewise its own tested, Electron-free module.
 const permissions = require("./permissions");
 
@@ -193,6 +196,12 @@ function pushState(window, viewId, entry) {
  * the pane's padding and where the screen is centred. Deriving the factor here
  * from the box meant one number with two owners, which is a drift waiting to be a
  * half-off-screen device.
+ *
+ * **The factor applied is not the factor received.** The renderer's number is in
+ * CSS pixels and the view it renders into is sized in DIP, so `emulationScale`
+ * folds in the /ide page's own zoom — the same conversion `cssBoxToDip` does for
+ * the box. `emulationScale`'s own doc carries the numbers the missing factor
+ * produced.
  */
 function applyMetrics(entry) {
   const wc = entry.view.webContents;
@@ -208,10 +217,17 @@ function applyMetrics(entry) {
   if (!emulation) {
     if (!entry.emulated) return;
     entry.emulated = false;
+    entry.metricsScale = null;
     wc.disableDeviceEmulation();
     return;
   }
   entry.emulated = true;
+  // Recorded because `enableDeviceEmulation` relayouts the guest page, so every
+  // caller has to be able to ask "would this change anything" first — and the
+  // question is about the *applied* factor, which moves when the page zooms even
+  // though the renderer's number has not.
+  const scale = emulationScale(entry.scale, entry.hostZoom);
+  entry.metricsScale = scale;
   wc.enableDeviceEmulation({
     // `mobile` is Chromium's own word for viewport-meta handling, overlay
     // scrollbars and text autosizing — not for touch, which is separate below.
@@ -220,8 +236,24 @@ function applyMetrics(entry) {
     viewSize: { width: emulation.width, height: emulation.height },
     viewPosition: { x: 0, y: 0 },
     deviceScaleFactor: emulation.deviceScaleFactor,
-    scale: entry.scale,
+    scale,
   });
+}
+
+/**
+ * Clip the page to the emulated screen's corners.
+ *
+ * `entry.radius` is the renderer's number, already scaled to the size the screen
+ * is *drawn* at (`scaledRadius` in `panes/devices.ts`) — but in CSS pixels, like
+ * the box, so it needs the same zoom factor. `setBorderRadius` clips the page; the
+ * frame the renderer draws around it is what makes the corners visible, since a
+ * native view paints over any DOM inside its own rect.
+ */
+function applyRadius(entry) {
+  const radius = Math.round(entry.radius * zoomFactor(entry.hostZoom));
+  if (radius === entry.appliedRadius) return;
+  entry.appliedRadius = radius;
+  entry.view.setBorderRadius(radius);
 }
 
 /**
@@ -1481,6 +1513,17 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       defaultUserAgent: view.webContents.getUserAgent(),
       scale: 1,
       radius: 0,
+      // The /ide page's own zoom factor, which converts everything the renderer
+      // measures in CSS pixels into the DIP this view lives in. Seeded from the
+      // window rather than left at 1: a window restored on a remembered per-origin
+      // zoom fires no event, so the first emulation would otherwise be applied at
+      // the wrong factor and stay there until something moved.
+      hostZoom: zoomFactor(window.webContents.getZoomFactor()),
+      // What `enableDeviceEmulation` and `setBorderRadius` were last given: a
+      // render factor and a DIP length respectively, both of which move with the
+      // page's zoom while the renderer's own numbers stand still.
+      metricsScale: null,
+      appliedRadius: 0,
       touchActive: false,
       mediaActive: false,
       // Nothing has navigated yet, so the emulation calls are not safe to make —
@@ -1510,46 +1553,68 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     if (!found) return;
     const r = args?.rect;
     if (!r) return;
-    // The renderer measures in CSS pixels; `setBounds` is in DIP relative to the
-    // window's content view. Page zoom scales one and not the other, so without
-    // this a zoomed /ide puts every native view over the wrong region — which is
-    // the failure the renderer's geometry mirroring exists to prevent. Electron's
-    // default application menu supplies ⌘+/⌘− (this app never replaces it), so
-    // the zoom factor is one keystroke from being anything.
-    const zoom = event.sender.getZoomFactor();
-    const rect = {
-      x: Math.round(Number(r.x) * zoom),
-      y: Math.round(Number(r.y) * zoom),
-      width: Math.round(Number(r.width) * zoom),
-      height: Math.round(Number(r.height) * zoom),
+    const css = {
+      x: Number(r.x),
+      y: Number(r.y),
+      width: Number(r.width),
+      height: Number(r.height),
     };
-    if (!Object.values(rect).every(Number.isFinite)) return;
+    if (!Object.values(css).every(Number.isFinite)) return;
+    // Page zoom scales the renderer's CSS pixels and not a native view's bounds, so
+    // without this conversion a zoomed /ide puts every native view over the wrong
+    // region — the failure the renderer's geometry mirroring exists to prevent.
+    const zoom = zoomFactor(event.sender.getZoomFactor());
+    const rect = cssBoxToDip(css, zoom);
     // A zero or negative box is what a hidden or mid-layout pane reports; keep
     // the last good bounds and let visibility do the hiding, so returning to
     // the tab doesn't flash a 1px view.
     if (rect.width < 1 || rect.height < 1) return;
     const { entry } = found;
-    entry.view.setBounds(rect);
-    // The screen's shape travels with its box. `setBorderRadius` clips the *page*
-    // to the device's corners; the frame the renderer draws around it is what makes
-    // them visible, since a native view paints over any DOM inside its own rect.
-    const radius = safeRadius(args?.radius);
-    if (radius !== entry.radius) {
-      entry.radius = radius;
-      entry.view.setBorderRadius(radius);
-    }
-    // Re-emulate only when the factor actually moves: the renderer coalesces a
-    // splitter drag to one push per frame, and `enableDeviceEmulation` relayouts
-    // the guest page, so re-sending an unchanged scale would do that per frame.
+    // **The factor is recorded from the push, not pushed to us.** A zoom step
+    // reflows the page, which re-measures every pane and lands here — so this
+    // handler is where the shell learns the factor moved, and it is the only place
+    // that needs to. An earlier version had `windows.js`'s zoom poll re-place every
+    // view the moment the factor changed, from a cached copy of this box; that is
+    // wrong, not merely redundant. The window does not resize when its page zooms,
+    // so a view's correct DIP rect is *unchanged* by a zoom step — while the cached
+    // CSS box was measured against the old CSS viewport, so re-converting it at the
+    // new factor scales a rect that should have stood still (a pane filling a
+    // 1200-DIP window: 1200 CSS px at 1.0 and 800 at 1.5, both 1200 DIP, but the
+    // stale box gives 1800). It painted over the neighbouring pane for the one
+    // frame before the reflow push corrected it.
     //
-    // The factor is recorded whether or not a device is set. Recording it only while
-    // emulating meant a pane that spent a while at "Pane size" kept the *previous*
-    // device's factor, and the next `emulate` applied metrics with it — corrected
-    // only by luck, when the rect happened to change in the same breath.
-    const scale = safeScale(args?.scale);
-    const moved = scale !== entry.scale;
-    entry.scale = scale;
-    if (entry.emulation && moved) applyMetrics(entry);
+    // **One state does not re-push, and it is a resize drag.** `syncGeometry` in
+    // `panes/browserHost.ts` early-returns while `state.resizing` — so the 400ms
+    // tick, the `resize` listener and every `ResizeObserver` are dead ends for the
+    // length of the gesture, and the only pusher left is `previewBrowserResize`,
+    // driven by pointer moves. Zoom with a handle held perfectly still and the DOM
+    // frame reflows in CSS pixels while this view keeps its old bounds, scale and
+    // radius, until the next pointer move or the button release. The *bounds* half
+    // of that predates this conversion — the rect has always been converted only
+    // here — and all three are corrected by the same push, which is why this is
+    // recorded rather than worked around. Do not read "the only place that needs
+    // to" as unconditional.
+    entry.hostZoom = zoom;
+    entry.view.setBounds(rect);
+    // The screen's shape travels with its box, and through the same conversion:
+    // `scaledRadius` gave it in CSS pixels, `setBorderRadius` wants the view's own.
+    entry.radius = safeRadius(args?.radius);
+    applyRadius(entry);
+    // Re-emulate only when the applied factor actually moves: the renderer coalesces
+    // a splitter drag to one push per frame, and `enableDeviceEmulation` relayouts
+    // the guest page, so re-sending an unchanged scale would do that per frame.
+    // Compared against what was *applied* rather than what was last received, so a
+    // page zoom — which moves the applied factor while the renderer's number stands
+    // still — is not mistaken for "nothing changed".
+    //
+    // The renderer's factor is recorded whether or not a device is set. Recording it
+    // only while emulating meant a pane that spent a while at "Pane size" kept the
+    // *previous* device's factor, and the next `emulate` applied metrics with it —
+    // corrected only by luck, when the rect happened to change in the same breath.
+    entry.scale = safeScale(args?.scale);
+    if (entry.emulation && emulationScale(entry.scale, zoom) !== entry.metricsScale) {
+      applyMetrics(entry);
+    }
   });
 
   /**

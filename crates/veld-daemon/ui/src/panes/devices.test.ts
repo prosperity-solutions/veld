@@ -17,6 +17,7 @@ import {
   MAX_DEVICE_RADIUS,
   MIN_DEVICE_PADDING,
   MIN_DEVICE_PX,
+  QUICK_DEVICE,
   RESPONSIVE_DEVICE,
   ZOOM_STEPS,
   chromeVersionFrom,
@@ -96,6 +97,17 @@ describe("the preset table", () => {
       expect(preset.touch).toBe(true);
       expect(preset.mobile).toBe(true);
     }
+  });
+
+  it("still contains the row the pane bar's quick switch applies", () => {
+    // The switch is rendered only when this lookup answers, so a renamed or removed
+    // row would take a button off the bar with nothing failing to say so. Nothing
+    // ties the id to the table but this.
+    const preset = presetById(QUICK_DEVICE);
+    expect(preset).not.toBeNull();
+    // And it has to be a phone: the switch's whole promise is "show me this small",
+    // and its tooltip claims touch and a mobile user agent.
+    expect(preset?.group).toBe("Phones");
   });
 });
 
