@@ -42,6 +42,7 @@ describe("terminalPrefs", () => {
       "terminal.fontFamily": "Fira Code",
       "terminal.cursorStyle": "bar",
       "terminal.cursorBlink": false,
+      "terminal.ligatures": true,
       "terminal.scrollback": 1000,
       "terminal.bellVolume": 60,
       "terminal.shiftEnterNewline": false,
@@ -54,6 +55,7 @@ describe("terminalPrefs", () => {
       fontFamily: "Fira Code",
       cursorStyle: "bar",
       cursorBlink: false,
+      ligatures: true,
       scrollback: 1000,
       bellVolume: 60,
       shiftEnterNewline: false,
@@ -81,6 +83,7 @@ describe("terminalPrefs", () => {
     expect(p.fontSize).toBe(12);
     expect(p.scrollback).toBe(10000);
     expect(p.cursorStyle).toBe("block");
+    expect(p.ligatures).toBe(false);
   });
 
   it("rejects a wrong-typed value rather than passing it to xterm", () => {
@@ -88,10 +91,12 @@ describe("terminalPrefs", () => {
       "terminal.fontSize": "big" as unknown as number,
       "terminal.cursorBlink": 1 as unknown as boolean,
       "terminal.cursorStyle": "wobble",
+      "terminal.ligatures": "yes" as unknown as boolean,
     });
     expect(p.fontSize).toBe(12);
     expect(p.cursorBlink).toBe(true);
     expect(p.cursorStyle).toBe("block");
+    expect(p.ligatures).toBe(false);
   });
 
   it("rejects a non-finite font size", () => {

@@ -6,6 +6,7 @@ import {
   availableFonts,
   firstFamily,
   fontAvailable,
+  fontHasLigatures,
   matchFont,
 } from "./terminalFonts";
 
@@ -78,5 +79,43 @@ describe("matchFont", () => {
 
   it("returns null for a custom value", () => {
     expect(matchFont("Comic Mono, monospace", opts)).toBeNull();
+  });
+});
+
+describe("fontHasLigatures", () => {
+  it("answers from the flag for a font we offer", () => {
+    // Both bundled fonts, and exactly one system font, are the ligature-capable
+    // ones. Asserted through the resolver rather than by reading the flag, so the
+    // stack-matching is covered too.
+    expect(fontHasLigatures(BUNDLED_FONTS[0].stack, BUNDLED_FONTS)).toBe(true);
+    expect(fontHasLigatures("Menlo, ui-monospace, monospace", SYSTEM_FONTS)).toBe(
+      false,
+    );
+    expect(
+      fontHasLigatures('"Cascadia Code", ui-monospace, monospace', SYSTEM_FONTS),
+    ).toBe(true);
+  });
+
+  it("answers null — never false — for a family it cannot classify", () => {
+    // The load-bearing case. Nothing in a browser can read a font's OpenType
+    // tables, and these ligatures are width-preserving so measuring cannot
+    // substitute. `null` is what keeps the dialog showing the control for
+    // Iosevka, Monaspace, a Nerd-Font patch — all of which do have ligatures.
+    expect(fontHasLigatures("Iosevka, monospace", SYSTEM_FONTS)).toBeNull();
+    expect(fontHasLigatures("", SYSTEM_FONTS)).toBeNull();
+  });
+
+  it("matches the first family, so an added fallback still counts", () => {
+    // A user who appends a fallback to a listed font has still chosen that font;
+    // `matchFont` would call the stack custom, which would lose the answer.
+    expect(matchFont('"Fira Code Variable", Menlo', BUNDLED_FONTS)).toBeNull();
+    expect(fontHasLigatures('"Fira Code Variable", Menlo', BUNDLED_FONTS)).toBe(
+      true,
+    );
+  });
+
+  it("ignores quoting and case in the family name", () => {
+    expect(fontHasLigatures("menlo", SYSTEM_FONTS)).toBe(false);
+    expect(fontHasLigatures("'Cascadia Code'", SYSTEM_FONTS)).toBe(true);
   });
 });

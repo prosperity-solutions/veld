@@ -644,6 +644,7 @@ pub enum SettingKey {
     TerminalShell,
     TerminalFontSize,
     TerminalFontFamily,
+    TerminalLigatures,
     TerminalCursorStyle,
     TerminalCursorBlink,
     TerminalScrollback,
@@ -754,6 +755,11 @@ impl SettingKey {
         // ── Terminal › Appearance ────────────────────────────────────────────
         Self::TerminalFontSize,
         Self::TerminalFontFamily,
+        // Directly under the font, because it is a property *of* the font rather
+        // than of the terminal: it does nothing on a font without the tables, and
+        // the client hides it for the fonts it knows do not have them. Anything
+        // between the two would read as unrelated.
+        Self::TerminalLigatures,
         Self::TerminalCursorStyle,
         Self::TerminalCursorBlink,
         // ── Terminal › Behaviour ─────────────────────────────────────────────
@@ -822,6 +828,7 @@ impl SettingKey {
             Self::TerminalShell => "terminal.shell",
             Self::TerminalFontSize => "terminal.fontSize",
             Self::TerminalFontFamily => "terminal.fontFamily",
+            Self::TerminalLigatures => "terminal.ligatures",
             Self::TerminalCursorStyle => "terminal.cursorStyle",
             Self::TerminalCursorBlink => "terminal.cursorBlink",
             Self::TerminalScrollback => "terminal.scrollback",
@@ -891,6 +898,7 @@ impl SettingKey {
             "terminal.shell" => Self::TerminalShell,
             "terminal.fontSize" => Self::TerminalFontSize,
             "terminal.fontFamily" => Self::TerminalFontFamily,
+            "terminal.ligatures" => Self::TerminalLigatures,
             "terminal.cursorStyle" => Self::TerminalCursorStyle,
             "terminal.cursorBlink" => Self::TerminalCursorBlink,
             "terminal.scrollback" => Self::TerminalScrollback,
@@ -1034,6 +1042,7 @@ impl SettingKey {
                 clamp_i64(value, MIN_RUN_HISTORY_DAYS, MAX_RUN_HISTORY_DAYS).ok_or_else(bad)?,
             ),
             Self::TerminalCursorBlink
+            | Self::TerminalLigatures
             | Self::TerminalShiftEnterNewline
             | Self::TerminalOpenUrlsInApp
             | Self::TerminalInterceptSystemOpen
@@ -1589,6 +1598,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::TerminalFontFamily,
             Value::from("\"JetBrains Mono Variable\", \"JetBrains Mono\", ui-monospace, monospace"),
         ),
+        // Off, and this one is not the "match the previous release" rule talking —
+        // ligatures are a taste, and the two bundled fonts both have them, so
+        // defaulting on would redraw every existing user's terminal unasked.
+        (SettingKey::TerminalLigatures, Value::from(false)),
         (SettingKey::TerminalCursorStyle, Value::from("block")),
         (SettingKey::TerminalCursorBlink, Value::from(true)),
         (
@@ -2824,6 +2837,34 @@ mod tests {
                 "{key} accepted a string"
             );
         }
+    }
+
+    /// Ligatures default **off** and take a bool.
+    ///
+    /// The default is the assertion worth pinning. Both bundled fonts ship the
+    /// ligatures, so flipping this default is not a no-op for anybody — it would
+    /// redraw every existing user's terminal on upgrade, unasked. There is no
+    /// accessor to read it through: the key is consumed only by the client, like
+    /// `terminal.cursorBlink`, so the effective document is the observable.
+    #[test]
+    fn ligatures_default_off_and_reject_a_non_bool() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.settings().unwrap().get("terminal.ligatures"),
+            Some(&Value::from(false))
+        );
+
+        db.patch_settings(&patch(&[("terminal.ligatures", Value::from(true))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("terminal.ligatures"),
+            Some(&Value::from(true))
+        );
+
+        let err = db
+            .patch_settings(&patch(&[("terminal.ligatures", Value::from("calt"))]))
+            .unwrap_err();
+        assert!(matches!(err, DbError::InvalidSetting { .. }));
     }
 
     #[test]

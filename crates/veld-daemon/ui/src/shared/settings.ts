@@ -78,6 +78,9 @@ const FALLBACK = {
     '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace',
   cursorStyle: "block" as CursorStyle,
   cursorBlink: true,
+  // Off is both the shipped default and every previous release's behaviour, so
+  // this one needs none of the exception reasoning the switches below carry.
+  ligatures: false,
   scrollback: 10000,
   bellVolume: 75,
   shiftEnterNewline: true,
@@ -247,6 +250,9 @@ export interface TerminalPrefs {
   fontFamily: string;
   cursorStyle: CursorStyle;
   cursorBlink: boolean;
+  /** Draw sequences like `->` and `!=` as one combined symbol, where the font
+   *  has them. Applied as a CSS font-feature rule, not an xterm option. */
+  ligatures: boolean;
   scrollback: number;
   bellVolume: number;
   shiftEnterNewline: boolean;
@@ -271,6 +277,7 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
       FALLBACK.cursorStyle,
     ),
     cursorBlink: bool(doc, "terminal.cursorBlink", FALLBACK.cursorBlink),
+    ligatures: bool(doc, "terminal.ligatures", FALLBACK.ligatures),
     scrollback: num(doc, "terminal.scrollback", FALLBACK.scrollback),
     bellVolume: num(doc, "terminal.bellVolume", FALLBACK.bellVolume),
     shiftEnterNewline: bool(

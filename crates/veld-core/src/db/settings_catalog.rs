@@ -865,6 +865,32 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            // Sits under the font rather than beside the cursor: it configures what
+            // the *font* does, and the client hides it for a font it knows cannot.
+            // See `SettingKey::ALL`.
+            //
+            // `!=` and `===` rather than the obvious `->`: the UI font combines the
+            // dash-arrow family itself, so a literal `->` reaches the reader as `→`
+            // — one example already combined, in the help for a switch that is off.
+            // Both bundled terminal fonts combine these two and the UI font leaves
+            // them alone, so the sentence shows what it says.
+            //
+            // "symbol", not "glyph": in both bundled faces `calt` reaches only
+            // `SingleSubst` lookups, so `!=` becomes two alternate glyphs — a left
+            // half and a right half — rather than one merged glyph. That is exactly
+            // why the advance widths hold and the grid stays still. So these are
+            // strictly contextual alternates and not ligatures at all; the title
+            // keeps the word anyway, because that is what the font vendors and
+            // every editor call them and it is the word somebody hunting for this
+            // setting knows. Phrased as JetBrains' IDEs phrase it, which is where
+            // most people will have met the option — the "Enable" is redundant
+            // beside a switch, and is the price of matching what they searched for.
+            Self::TerminalLigatures => toggle_in(
+                "Enable font ligatures",
+                "Whether sequences like != and === are drawn as one combined symbol.",
+                Terminal,
+                APPEARANCE,
+            ),
             Self::TerminalCursorStyle => Spec {
                 title: "Cursor",
                 help: "The shape of a terminal's cursor. A full-screen program that sets its own \
@@ -884,7 +910,6 @@ impl SettingKey {
                 Terminal,
                 APPEARANCE,
             ),
-
             // ── Terminal › Behaviour ─────────────────────────────────────────
             Self::TerminalShell => Spec {
                 title: "Shell",

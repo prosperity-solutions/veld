@@ -31,6 +31,23 @@ export interface TerminalFont {
   stack: string;
   /** Bundled in the binary (always available) vs relying on the OS. */
   bundled: boolean;
+  /**
+   * Whether the font as published draws programming ligatures and contextual
+   * alternates (`calt`) — `=>`, `!=`, `===`.
+   *
+   * A **static claim about the published font**, and it has to be: nothing in the
+   * browser can read a font's OpenType tables. Measuring is not a way around it
+   * either: the substitution is glyph-for-glyph (`calt` into `SingleSubst`, never
+   * a `LigatureSubst`), so it is width-preserving by construction — which is what
+   * keeps the terminal grid still, and which leaves the one quantity the DOM
+   * exposes blind to it (measured: `=> != === ->` is 460.8047px in JetBrains Mono
+   * and 462.375px in Menlo, each identical with the features on and off).
+   *
+   * So the honest scope of this flag is the fonts *we* offer. A family the user
+   * typed themselves is not classified at all — see {@link fontHasLigatures},
+   * which answers `null` there rather than guessing.
+   */
+  ligatures: boolean;
 }
 
 /**
@@ -41,15 +58,20 @@ export interface TerminalFont {
 const TAIL = "ui-monospace, monospace";
 
 export const BUNDLED_FONTS: TerminalFont[] = [
+  // Both `true` from the font files themselves rather than from their reputation:
+  // a GSUB dump of the two woff2s we ship shows `calt` and no `liga` table in
+  // either, which is also why the renderer tags `calt` and not only `liga`.
   {
     label: "JetBrains Mono",
     stack: `"JetBrains Mono Variable", "JetBrains Mono", ${TAIL}`,
     bundled: true,
+    ligatures: true,
   },
   {
     label: "Fira Code",
     stack: `"Fira Code Variable", "Fira Code", ${TAIL}`,
     bundled: true,
+    ligatures: true,
   },
 ];
 
@@ -58,19 +80,35 @@ export const BUNDLED_FONTS: TerminalFont[] = [
  * a developer is to have one. Zero bytes; availability is checked at render time.
  */
 export const SYSTEM_FONTS: TerminalFont[] = [
-  { label: "SF Mono", stack: `"SF Mono", ${TAIL}`, bundled: false },
+  { label: "SF Mono", stack: `"SF Mono", ${TAIL}`, bundled: false, ligatures: false },
   {
     label: "Source Code Pro",
     stack: `"Source Code Pro", ${TAIL}`,
     bundled: false,
+    // The upstream family has no programming ligatures; the fork that added them
+    // is Fira Code, which is its own entry above.
+    ligatures: false,
   },
-  { label: "Menlo", stack: `Menlo, ${TAIL}`, bundled: false },
-  { label: "Monaco", stack: `Monaco, ${TAIL}`, bundled: false },
-  { label: "Consolas", stack: `Consolas, ${TAIL}`, bundled: false },
-  { label: "Cascadia Code", stack: `"Cascadia Code", ${TAIL}`, bundled: false },
-  { label: "IBM Plex Mono", stack: `"IBM Plex Mono", ${TAIL}`, bundled: false },
-  { label: "DejaVu Sans Mono", stack: `"DejaVu Sans Mono", ${TAIL}`, bundled: false },
-  { label: "Ubuntu Mono", stack: `"Ubuntu Mono", ${TAIL}`, bundled: false },
+  { label: "Menlo", stack: `Menlo, ${TAIL}`, bundled: false, ligatures: false },
+  { label: "Monaco", stack: `Monaco, ${TAIL}`, bundled: false, ligatures: false },
+  { label: "Consolas", stack: `Consolas, ${TAIL}`, bundled: false, ligatures: false },
+  {
+    label: "Cascadia Code",
+    stack: `"Cascadia Code", ${TAIL}`,
+    bundled: false,
+    // The one ligature-capable font on this list. Microsoft ships the no-ligature
+    // cut under a *different* family name — Cascadia Mono — so this flag does not
+    // have to guess which build is installed.
+    ligatures: true,
+  },
+  { label: "IBM Plex Mono", stack: `"IBM Plex Mono", ${TAIL}`, bundled: false, ligatures: false },
+  {
+    label: "DejaVu Sans Mono",
+    stack: `"DejaVu Sans Mono", ${TAIL}`,
+    bundled: false,
+    ligatures: false,
+  },
+  { label: "Ubuntu Mono", stack: `"Ubuntu Mono", ${TAIL}`, bundled: false, ligatures: false },
 ];
 
 /**
@@ -111,6 +149,37 @@ export function availableFonts(): TerminalFont[] {
     ...BUNDLED_FONTS,
     ...SYSTEM_FONTS.filter((f) => fontAvailable(firstFamily(f.stack))),
   ];
+}
+
+/**
+ * Whether the stored font stack draws ligatures — `null` when we cannot tell.
+ *
+ * Three answers, not two, and the third is the important one. A stack that
+ * matches an offered font answers from that font's {@link TerminalFont.ligatures}
+ * flag. A stack the user typed themselves matches nothing, and there is no way to
+ * inspect it (see that flag's note), so it answers `null` — *unknown*, never
+ * `false`.
+ *
+ * Callers must let unknown mean "show the control". Hiding it would strand every
+ * user of a ligature font we happen not to list — Iosevka, Monaspace, Victor
+ * Mono, a Nerd-Font patch — with a stored preference they can no longer reach,
+ * and the setting they wanted silently unavailable. That is the same direction
+ * `fontAvailable` takes for a missing API, and the same rule the dialog's
+ * hardware gates state for a probe that has not answered.
+ *
+ * Matched on the **first family** rather than the whole stack, because a user who
+ * appends a fallback to a listed font ("Fira Code", "Menlo", monospace) has still
+ * chosen Fira Code, and {@link matchFont} would call that stack custom.
+ */
+export function fontHasLigatures(
+  stack: string,
+  options: TerminalFont[] = availableFonts(),
+): boolean | null {
+  const want = firstFamily(stack).replace(/["']/g, "").toLowerCase();
+  const hit = options.find(
+    (f) => firstFamily(f.stack).replace(/["']/g, "").toLowerCase() === want,
+  );
+  return hit ? hit.ligatures : null;
 }
 
 /**
