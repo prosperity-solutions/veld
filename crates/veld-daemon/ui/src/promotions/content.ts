@@ -276,7 +276,7 @@ export const PROMOTIONS: Promotion[] = [
     eyebrow: "New",
     headline: "Test a safe-area layout without a phone",
     body:
-      "Pick a phone in a browser pane and the page reads the safe-area insets a real one reports, so a header or bottom bar pinned to them can be checked in place.",
+      "A header or bottom bar pinned to the safe area can be checked without a handset — emulate a phone and the page reads the same insets a real one reports.",
     glyph: "device",
   },
 ];

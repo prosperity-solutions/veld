@@ -82,6 +82,17 @@ describe("the preset table", () => {
           expect(insets[side]).toBeGreaterThanOrEqual(0);
           expect(insets[side]).toBeLessThanOrEqual(MAX_SAFE_AREA_PX);
         }
+        // "A non-null inset set is never all-zero" is relied on everywhere and was
+        // enforced only inside the two sanitisers. A preset row of four zeros would
+        // slip past them — `emulationForPreset` does not collapse one — and then
+        // `safeAreaLabel` renders "0 / 0" rather than `null`, so the menu shows the
+        // item *checked* with zero gutters, and a reload silently flips it to "Off"
+        // once `sanitizeEmulation` does collapse it. A row that reserves nothing
+        // must say so with `insets: null`, which is what the screen presets do.
+        expect(safeAreaLabel(insets)).not.toBeNull();
+        expect(
+          insets.top !== 0 || insets.right !== 0 || insets.bottom !== 0 || insets.left !== 0,
+        ).toBe(true);
       }
       // A UA is a header value — the same rule the shell enforces.
       if (preset.ua !== null) {

@@ -714,7 +714,12 @@ function insetPairFor(e: PaneEmulation): PresetInsets | null {
  * because someone clicked the item ([`insetPairFor`]).
  *
  * Where there is no class at all — a hand-entered or dragged size — "on" means
- * [`PHONE_INSETS`], on the same precedent [`withMobileUserAgent`] sets: the
+ * [`PHONE_INSETS`]. **The two paragraphs are disjoint cases, not competing rules**:
+ * a class that reserves nothing answers `null`, and only the *absence* of a class
+ * reaches the default below. Conflating them is what F1 was, so a reader who finds
+ * these two arguing with each other is reading a regression.
+ *
+ * The default follows the precedent [`withMobileUserAgent`] sets: the
  * toggle has to name a default rather than be unavailable at the one size a fixed
  * list cannot cover. Deliberately no width test on that: asking for phone gutters
  * on a wide viewport is a strange-looking request and a legitimate one, since an
