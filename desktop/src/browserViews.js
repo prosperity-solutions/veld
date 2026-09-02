@@ -521,6 +521,33 @@ async function applySafeArea(dbg, insets) {
 }
 
 /**
+ * Write off the record of a live safe-area override, but only once the session
+ * that would re-apply it is gone.
+ *
+ * **A shared helper because the two callers are siblings that disagreed.** Both
+ * `did-navigate` and `render-process-gone` mark the point where a page may have
+ * stopped holding its gutters, and the second one cleared the record
+ * unconditionally while the first checked the session — so a crash lost the
+ * record of an override that was still in force, and the next off-run then found
+ * `safeAreaApplied === null`, sent no reset, and detached. The gutters then came
+ * back on the following navigation, on a pane reporting safe area as off: the
+ * exact failure `safeAreaApplied` exists to prevent, reached by the one path that
+ * was not using it.
+ *
+ * **The attachment check is the whole rule, and it is measured.** The override
+ * lives in the *session*, not in the document: with the debugger attached it is
+ * re-applied to a brand-new renderer — verified across a forced renderer crash
+ * (the process id changed, nothing was re-sent, and the page still read `59px`)
+ * and across a cross-process navigation. With no debugger attached there is
+ * nothing to carry it, so a fresh document starts clean and there is genuinely
+ * nothing left to revoke.
+ */
+function forgetSafeAreaIfSessionGone(entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed() || !wc.debugger.isAttached()) entry.safeAreaApplied = null;
+}
+
+/**
  * Whether a change of emulation needs the page reloaded to be visible.
  *
  * Size and scale are live — Chromium relays out the emulated viewport and the
@@ -880,7 +907,7 @@ function attachListeners(window, viewId, entry) {
     // `did-navigate-in-page`, so this listener fires in exactly the cases where
     // the page has genuinely stopped holding the gutters — which is what makes it
     // safe to write the record off here rather than only on a process swap.
-    if (!wc.debugger.isAttached()) entry.safeAreaApplied = null;
+    forgetSafeAreaIfSessionGone(entry);
     applyMetrics(entry);
     applyZoom(entry);
     void applyTouch(window, viewId, entry);
@@ -906,8 +933,12 @@ function attachListeners(window, viewId, entry) {
   wc.on("render-process-gone", () => {
     entry.frameReady = false;
     entry.emulated = false;
-    // A new renderer starts with no overrides, so nothing is left to revoke.
-    entry.safeAreaApplied = null;
+    // **Not unconditional.** "A new renderer starts with no overrides" is only true
+    // when no debugger is attached to carry one across — measured otherwise: with
+    // the session attached, a forced crash produced a new renderer process that
+    // still reported the old gutters with nothing re-sent. Same rule as
+    // `did-navigate` above, and now literally the same line.
+    forgetSafeAreaIfSessionGone(entry);
   });
 
   // Electron's docs say opening DevTools detaches an attached debugger; on
