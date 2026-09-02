@@ -1284,11 +1284,13 @@ impl SettingKey {
 
             // ── Browser panes ────────────────────────────────────────────────
             Self::BrowserQuickSwitchResponsive => toggle(
-                "Responsive switch in the pane toolbar",
-                "One click into the resizable viewport, whose edges you drag to find where a \
-                 layout breaks. The switch's own off state is no emulation at all — it does not \
-                 go back to a device you picked earlier. Unchecking this hides the button; it \
-                 changes nothing a pane is currently emulating.",
+                "Phone switch in the pane toolbar",
+                "One click to the Phone preset — 402 × 874, touch and a mobile user agent — \
+                 whose edges you then drag to find where a layout breaks, so the resizable \
+                 viewport is one drag away. The switch's own off state is no emulation at all — \
+                 it does not go back to a device you picked earlier. In a browser tab the size \
+                 is real; touch and the user agent need Veld Desktop. Unchecking this hides the \
+                 button; it changes nothing a pane is currently emulating.",
                 Browser,
             ),
             Self::BrowserQuickSwitchColorScheme => toggle(

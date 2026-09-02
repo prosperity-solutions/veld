@@ -661,16 +661,22 @@ function syncZoom(record) {
       y: trafficLightY(deps.topbarHeight, deps.trafficLightSize, zoom),
     });
   }
-  // The embedded browser views before the page: this re-places views the page has
-  // already told us about, and a page that re-measures in response to the zoom
-  // step lands on top of it with the same numbers.
-  deps.windowZoomChanged(win, zoom);
   // The page's CSS keeps the traffic-light inset — the gap before the first
   // control, the view switcher — fixed in DIP as the page zooms, so it needs to
   // know the factor. See `watchZoom` in the UI and `--topbar-zoom` in
   // `styles.css`. Sent only when the factor moved, which is exactly when the
   // CSS inset has to move to hold its DIP width.
+  //
+  // **Sent before the views are re-placed, and the order is deliberate.**
+  // `record.zoomFactor` is already committed above, so the early return means this
+  // factor is announced exactly once — a throw from anything in between would
+  // strand `--topbar-zoom` at the old value forever, with no retry. The two are
+  // independent: the page re-measures because the zoom step reflowed it, not
+  // because of this message, so nothing is racing.
   win.webContents.send("veld:window:zoom", { zoom });
+  // The embedded browser views: re-placed from the box the page already sent, so a
+  // factor change lands without waiting for the page to re-measure.
+  deps.windowZoomChanged(win, zoom);
 }
 
 /**

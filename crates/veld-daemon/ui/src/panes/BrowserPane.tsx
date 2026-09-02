@@ -1728,7 +1728,13 @@ export function BrowserPane(props: {
                     // off-looking toggle reads as costless, so the cost is named here
                     // rather than discovered.
                     `Replace ${emulationLabel(emulation)} (${emulationSize(emulation)}) with ${quickPreset.label} (${quickPreset.width} × ${quickPreset.height})`
-                  : `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height}, touch and a mobile user agent — drag its edges from there`
+                  : iframeBackend
+                    ? // The size is real in an iframe and the rest is not, which is the
+                      // split this block's own comment states — so the copy has to make
+                      // it too, the way every other control on this bar does. Claiming
+                      // touch here would be the one unhedged promise on the bar.
+                      `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height} — the size is real here; touch and the mobile user agent need the desktop app`
+                    : `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height}, touch and a mobile user agent — drag its edges from there`
             }
           >
             <ActionIcon
