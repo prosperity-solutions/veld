@@ -403,6 +403,11 @@ build:
     cargo build
 
 test:
+    # The org key table's parser, before the Rust tests that compare against it.
+    # `just workflow-gates` also runs it, but a change to tests/signing-slots.py
+    # alone touches no workflow, so nothing would prompt that recipe and the first
+    # run would be after the PR is marked ready.
+    python3 tests/signing-slots.py --selftest
     {{clear_instance_env}} cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
@@ -477,6 +482,12 @@ workflow-gates:
     # gate out of the publish script and asserts the suite goes red.
     python3 tests/validate-release-publish.py --selftest
     python3 tests/validate-release-publish.py
+    # The parser release.yml and ci.yml both read the org key table with. Its own
+    # failure mode is a mis-parse that produces a SHORTER list than the table has,
+    # which is a release missing a slot — so its fixtures are mis-parses it must
+    # refuse, and they run before it is trusted for anything.
+    python3 tests/signing-slots.py --selftest
+    python3 tests/signing-slots.py
 
 # Check commit subjects against the pattern the `commits` job enforces. That job
 # is draft-guarded too, so without this a malformed subject is discovered only

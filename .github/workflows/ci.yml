@@ -138,6 +138,13 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          # Two commits, so that on a pull request the merge commit's own parents
+          # are present: `HEAD^1` is the base GitHub merged against and `HEAD^2` is
+          # the pull request head. `One release never both adds a key and retires
+          # one` below is the only step that needs it — everything else in this job
+          # is static and reads the tree.
+          fetch-depth: 2
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: "3.12"
@@ -160,6 +167,11 @@ jobs:
           # check trivially, which reads as a clean bill of health.
           python3 tests/validate-workflow-gates.py --selftest
           python3 tests/validate-workflow-gates.py
+          # Same rule for the org key table's parser: its fixtures are mis-parses
+          # it must refuse, and a parser that quietly returns a shorter list than
+          # the table has is a release missing a slot. Run before the slot-layout
+          # gate below trusts its output for anything.
+          python3 tests/signing-slots.py --selftest
       # Static, checkout-only and PyYAML-only, so it rides along with the gate
       # above — which is also where PyYAML is installed, so this step must stay
       # after it. What it guards is the release path itself: release.yml publishes
@@ -430,7 +442,7 @@ jobs:
       - name: Signature slot layout matches release.yml
         run: |
           python3 - <<'PY'
-          import pathlib, re, sys, yaml
+          import json, pathlib, re, subprocess, sys, yaml
 
           signing = pathlib.Path("crates/veld-core/src/signing.rs").read_text()
 
@@ -441,7 +453,13 @@ jobs:
                            "ci.yml read it (issue #261 slice C)")
               return int(m.group(1))
 
-          slots = rust_const("RELEASE_SIG_SLOTS", signing, "crates/veld-core/src/signing.rs")
+          # The signature format's slot ceiling, and therefore the size of the
+          # permanent secret roster in release.yml. `RELEASE_SIG_SLOTS` is no longer
+          # read here: it is `ORG_KEYS.len()` now, so a number in this file would be
+          # a third copy of something the table already says.
+          slots_ceiling = rust_const(
+              "MAX_SIG_SLOTS", signing, "crates/veld-core/src/signing.rs"
+          )
 
           release = yaml.safe_load(open(".github/workflows/release.yml"))
           pkg = [
@@ -461,51 +479,38 @@ jobs:
               line for line in run.splitlines() if not line.strip().startswith("#")
           )
 
-          # 1. One key flag per slot. A key added to the keyring or the
-          #    required-slot list in `crates/veld-core/src/signing.rs` — the two
-          #    constants RELEASE_SIG_SLOTS summarises — without a matching secret
-          #    produces a release
-          #    that omits a slot some helper generation accepts *only* that key
-          #    for — and that generation then refuses every future release.
-          flags = command.count("--key-env") + command.count("--key-file")
-          if flags != slots:
-              sys.exit(
-                  f"release.yml signs the helper with {flags} key(s) but "
-                  f"veld_core::signing::RELEASE_SIG_SLOTS says {slots}. Add or remove a "
-                  "`--key-env <SECRET>` line in `Package client binaries` to match, and "
-                  "read docs/signing-key-rotation.md before changing either."
-              )
+          # 1. Every key the source names has a secret this step can read.
+          #
+          #    `release.yml` no longer carries a key list at all: it derives the
+          #    whole slot layout from `ORG_KEYS` with `tests/signing-slots.py`, so
+          #    rotating needs no edit to that file. What still needs one — once,
+          #    ever — is the `env:` roster, because GitHub only exposes a secret to
+          #    a step that names it, and a workflow cannot enumerate secrets (the
+          #    leak gate above forbids the two ways of trying).
+          #
+          #    So the failure this replaces is unchanged in kind and better aimed:
+          #    it used to be "a `--key-env` with no `env:` entry", which was the
+          #    workflow checked against itself. It is now the SOURCE checked against
+          #    the workflow. veld-sign reads a key by variable NAME, so a name with
+          #    no `env:` entry is indistinguishable from an unset secret — and the
+          #    release dies at a push-only step, i.e. after merge.
+          rows = json.loads(
+              subprocess.run(
+                  [sys.executable, "tests/signing-slots.py", "--json"],
+                  capture_output=True, text=True, check=False,
+              ).stdout
+              or "[]"
+          )
+          if not rows:
+              # The script exits non-zero with its own message for every table it
+              # will not guess about; re-run it so that message is what CI prints,
+              # rather than this gate reporting an empty list as "no keys".
+              subprocess.run([sys.executable, "tests/signing-slots.py"], check=True)
+              sys.exit("tests/signing-slots.py produced no rows and did not say why")
 
-          # 2. Every `--key-env NAME` has a matching `env:` entry, and every NAME
-          #    carries the shared signing-secret prefix.
-          #
-          #    The first half: veld-sign reads a key by variable NAME, so a flag
-          #    with no `env:` entry is indistinguishable from an unset secret — the
-          #    release dies at this step, push-only, AFTER merge. Counting flags
-          #    alone let a PR go green on exactly that.
-          #
-          #    The second half turns a convention into an invariant. The leak gate
-          #    above matches signing secrets by prefix so that a rotation's second
-          #    key is covered without an edit; that only works if the name actually
-          #    carries the prefix, which until now was prose in a runbook. A key
-          #    added as `ORG_KEY_2_PEM` would reach a PR-startable job with neither
-          #    needle firing. Assembled at runtime, same reason as everywhere else
-          #    in this job.
           env_keys = set((pkg[0].get("env") or {}).keys())
-          prefix = "SIGN" + "ING_"
-          names = re.findall(r"--key-env\s+(\S+)", command)
-          # `--key-env=NAME` keeps the count right and yields no name, which would
-          # skip both checks below in silence — precisely the failure they exist to
-          # catch. veld-sign rejects that form as an unknown flag, so the release
-          # would die after merge.
-          if len(names) != command.count("--key-env"):
-              sys.exit(
-                  "release.yml: a `--key-env` in `Package client binaries` is not written as "
-                  "`--key-env <NAME>` (the `--key-env=NAME` form is rejected by veld-sign and "
-                  "is invisible to the checks below). Use a space."
-              )
-          for name in names:
-              if name not in env_keys:
+          for row in rows:
+              if row["secret"] not in env_keys:
                   # The remedy is described in prose on purpose, and the reason is
                   # worth stating without demonstrating it: GitHub's expression
                   # syntax, written out in a `run:` block, is EVALUATED before the
@@ -517,121 +522,132 @@ jobs:
                   # two blocked CI runs to get right, the second because it
                   # quoted the syntax while explaining not to.
                   sys.exit(
-                      f"release.yml: `Package client binaries` passes `--key-env {name}` but "
-                      f"its `env:` block has no {name} entry, so veld-sign sees an unset "
-                      f"variable and the release fails at the signing step. Add a {name} "
-                      f"entry to that step's env:, taking its value from the {name} secret "
-                      "the same way the existing line does."
+                      f"crates/veld-core/src/signing.rs: ORG_KEYS row {row['index']} names the "
+                      f"secret {row['secret']}, but `Package client binaries` has no {row['secret']} "
+                      "entry in its `env:` block — so veld-sign would see an unset variable and the "
+                      "release would fail at the signing step, which is push-only and therefore "
+                      f"after merge. Add a {row['secret']} entry to that step's env:, taking its "
+                      "value from the secret of the same name the way the existing lines do."
                   )
-              if not name.startswith(prefix):
+
+          # 2. The roster covers every slot the format allows, so a rotation never
+          #    has to touch `release.yml` at all.
+          #
+          #    Gate 1 above would catch a key with no `env:` entry — but it would
+          #    catch it as an edit the operator still has to make, which is the
+          #    thing this whole design removed. The roster is written once, to the
+          #    ceiling, and pinned here so it cannot be trimmed back to "just what
+          #    we use today" by someone tidying.
+          #
+          #    A name whose secret is unset costs nothing: it is an environment
+          #    variable that is not there, and veld-sign never asks for it unless
+          #    ORG_KEYS names it.
+          roster = ["SIGN" + "ING_PRIVATE_KEY"] + [
+              "SIGN" + f"ING_PRIVATE_KEY_{n}" for n in range(2, slots_ceiling + 1)
+          ]
+          # And each roster entry must take its value from the secret of the SAME
+          # name. Binding the second roster entry to the FIRST key's secret is a
+          # plausible copy-paste when the roster is written (the two names differ by
+          # one character, and this comment cannot spell either of them out: the
+          # leak gate above matches the shared prefix across every string in a
+          # PR-startable job, and found this line the first time it was written).
+          # It passes the presence check
+          # above, and the expected-key half of `--slots` then catches it — but at
+          # the push-only signing step, after merge, which is precisely the failure
+          # this job exists to move to pull-request time. The reference is matched
+          # by shape rather than quoted, because GitHub evaluates its expression
+          # syntax inside a `run:` block before the shell sees it — including in a
+          # comment or a string literal — and an invalid one fails the whole
+          # workflow at startup with zero jobs and no usable error.
+          #
+          #    Matched whole, not as a substring. Every roster name is a **prefix**
+          #    of the ones after it by construction, so a substring test accepts
+          #    slot 0 bound to a later slot's secret — and that is the fatal
+          #    direction: slot 0 signed by any other key is a release NO shipped
+          #    helper can relaunch onto. Built from the roster variable so this
+          #    block contains no signing-secret name for the leak gate to hit.
+          env_block = pkg[0].get("env") or {}
+          for name in roster:
+              value = str(env_block.get(name, ""))
+              wanted = re.compile(r"\$\{\{\s*secrets\." + re.escape(name) + r"\s*\}\}")
+              if name in env_block and not wanted.fullmatch(value.strip()):
                   sys.exit(
-                      f"release.yml: the signing secret {name!r} does not carry the shared "
-                      "signing-secret name prefix. The leak gate in this job matches that "
-                      "prefix so a rotation's second key is covered without an edit — a name "
-                      "without it is a secret that can reach a pull-request job unnoticed. "
-                      "Rename it, and see docs/signing-key-rotation.md step 1."
+                      f"release.yml: `Package client binaries` sets {name} from something "
+                      f"other than the {name} secret. Every roster entry must read the "
+                      "secret of its own name — a slot signed by another slot's key ships "
+                      "a release no installed helper can relaunch onto, and the check that "
+                      "catches it runs at the push-only signing step, after merge."
                   )
-
-          # 3. EVERY slot's expected public key, element-wise against the source.
-          #
-          #    Not just slot 0. A wrong key in slot 1 ships INVISIBLY — the release
-          #    still installs everywhere via slot 0 — and then wedges every
-          #    privileged install one release later, when that key becomes the only
-          #    one a helper accepts: refusing to relaunch, refusing `restart` and
-          #    `shutdown`, refusing every future candidate. Fleet-wide, sudo-only,
-          #    which is the one outcome #338 forbids. Before this check the only
-          #    thing in the way was the operator pasting the right hex.
-          #
-          #    Element-wise also makes the ORDER of `ORG_REQUIRED_SLOT_KEYS` a
-          #    checked property rather than a convention, which matters because slot
-          #    position is the format's only key identifier.
-          #
-          #    This parses Rust with a regex, so the question that matters is whether
-          #    a mis-parse can fail SILENTLY. Every shape tried fails loudly instead:
-          #    a comment inside the array, a nested path (`keys::ORG_KEY_1`), an
-          #    array-repeat (`&[K; 1]`), or bytes written inline all produce a name
-          #    that has no `pub const <name>: PubKey` and exit with "named by
-          #    ORG_REQUIRED_SLOT_KEYS but is not defined"; a trailing comma is
-          #    filtered; and the two lists come from different files, so a mis-parse
-          #    that dropped a key would make them differ rather than agree. Checked
-          #    against a rustfmt'd three-key list, which is the realistic future
-          #    shape.
-          m = re.search(r"--expect-slot-pubkeys\s+([0-9a-fA-F,]+)", command)
-          if not m:
+          missing = [n for n in roster if n not in env_keys]
+          if missing:
               sys.exit(
-                  "release.yml: `Package client binaries` no longer passes "
-                  "`--expect-slot-pubkeys <hex>[,<hex>...]` to veld-sign. Without it a signing "
-                  "secret holding a different valid key ships a release that no helper in the "
-                  "field can relaunch onto (issue #261 slice C)."
-              )
-          # Split exactly as veld-sign does (`v.split(',').map(trim)`), and do NOT
-          # filter empties. Filtering them made a stray comma a GREEN pull request
-          # and a dead release: the gate saw the right list while veld-sign saw an
-          # extra empty entry and exited at the push-only signing step, after merge.
-          # That is the same class as the `--key-env=NAME` check above.
-          declared = [h.strip().lower() for h in m.group(1).split(",")]
-          if any(not h for h in declared):
-              sys.exit(
-                  "release.yml: `--expect-slot-pubkeys` has an empty entry — a leading, "
-                  "trailing or doubled comma. veld-sign does not ignore it and would fail "
-                  "the release at the signing step, which is push-only and therefore after "
-                  "merge."
-              )
-          # And the count veld-sign actually enforces, which is one expected key per
-          # key flag. A duplicated entry in ORG_REQUIRED_SLOT_KEYS would otherwise
-          # match element-wise against a duplicated expect list and still die at
-          # release.
-          if len(declared) != flags:
-              sys.exit(
-                  f"release.yml: `--expect-slot-pubkeys` names {len(declared)} key(s) but "
-                  f"{flags} key flag(s) are passed. veld-sign requires one expected key per "
-                  "key, in slot order."
+                  f"release.yml: `Package client binaries` env: is missing {len(missing)} of the "
+                  f"{len(roster)} permanent signing-secret names (first: {missing[0]}). That block "
+                  "is written once to the signature format's slot ceiling and never edited again — "
+                  "it is what makes rotating a key a source edit plus a new secret, with no "
+                  "workflow change. See docs/signing-key-rotation.md."
               )
 
-          def key_hex(name):
-              # `re.escape`, because `name` comes out of the parsed array and is
-              # interpolated into a pattern. Without it, a key written inline as bytes
-              # or a comment carrying an unbalanced paren dies with a Python
-              # traceback instead of the message below — still loud, but not the
-              # message this gate's comment promises.
-              k = re.search(rf"pub const {re.escape(name)}: PubKey = \[(.*?)\];", signing, re.S)
-              if not k:
-                  sys.exit(f"crates/veld-core/src/signing.rs: `{name}` is named by "
-                           "ORG_REQUIRED_SLOT_KEYS but is not defined")
-              hexes = re.findall(r"0x([0-9a-fA-F]{2})", k.group(1))
-              if len(hexes) != 32:
-                  sys.exit(f"{name} parsed as {len(hexes)} bytes, expected 32")
-              return "".join(h.lower() for h in hexes)
+          # 3. The step really does derive the layout, and still checks it.
+          #
+          #    This is the gate with the most to lose, because what it protects is
+          #    now invisible in `release.yml`: there is no key list there to read.
+          #    Deleting the derivation and hard-coding something would look tidier
+          #    and would silently reintroduce every failure the element-wise check
+          #    used to catch — above all a signing secret holding a *different but
+          #    valid* key, which parses, signs, and publishes a release no helper in
+          #    the field can relaunch onto.
+          #
+          #    `--slots` is what carries the expected public key for EVERY slot, not
+          #    just slot 0: a wrong key in a later slot ships invisibly (the release
+          #    still installs everywhere via slot 0) and then wedges every privileged
+          #    install one release later, when that key becomes the only one a helper
+          #    accepts. Fleet-wide, sudo-only, which is the one outcome #338 forbids.
+          for needle, why in [
+              ("tests/signing-slots.py",
+               "the slot layout would stop coming from crates/veld-core/src/signing.rs, "
+               "which is the reviewed source the helper's own keyring is compiled from"),
+              ("--slots",
+               "veld-sign would be given no expected public key per slot, and a secret "
+               "holding a different valid key would ship a release no installed helper "
+               "can relaunch onto"),
+          ]:
+              if needle not in command:
+                  sys.exit(
+                      f"release.yml: `Package client binaries` no longer passes `{needle}` — {why} "
+                      "(issue #261 slice C). Read docs/signing-key-rotation.md before changing how "
+                      "that step signs."
+                  )
+          #    And the flags `--slots` replaced must NOT come back. Adding a
+          #    `--key-env` line is the old runbook's reflex and the first thing an
+          #    operator reaches for; veld-sign refuses the mix and writes no
+          #    signature, but it refuses at the push-only signing step, after merge.
+          for banned, why in [
+              ("--key-env",
+               "the slot layout comes from ORG_KEYS now; a key flag here is the old "
+               "procedure's reflex and veld-sign refuses it, but only at release time"),
+              ("--expect-slot-pubkeys",
+               "--slots already carries the expected key for every slot, and veld-sign "
+               "refuses both together"),
+          ]:
+              if banned in command:
+                  sys.exit(
+                      f"release.yml: `Package client binaries` passes `{banned}` alongside "
+                      f"`--slots`, which veld-sign refuses — {why}. Rotating a key needs NO edit "
+                      "to this file: append a row to ORG_KEYS in "
+                      "crates/veld-core/src/signing.rs and set the matching secret. See "
+                      "docs/signing-key-rotation.md."
+                  )
+          # **What is deliberately NOT checked here**, so nobody adds it back thinking
+          # it does something: comparing the script's `--slots` output against its own
+          # `--json` output. Both come from the same parse, so a parse that drops a row
+          # drops it identically on both sides — it reads like a cross-check and pins
+          # nothing. The parse is a *second implementation* of a value rustc already
+          # has, and the only thing that can catch it diverging is a comparison against
+          # the compiler: `the_slot_script_reads_the_same_table_the_compiler_does` in
+          # `crates/veld-core/src/signing.rs`, which runs in `cargo test --workspace`.
+          # Gate 6 below pins that test's existence.
 
-          req = re.search(
-              r"pub const ORG_REQUIRED_SLOT_KEYS: &\[PubKey\] = &\[(.*?)\];", signing, re.S
-          )
-          if not req:
-              sys.exit("crates/veld-core/src/signing.rs: `ORG_REQUIRED_SLOT_KEYS` is gone; it "
-                       "is the list of keys every release must be signed by")
-          expected = [key_hex(n.strip()) for n in req.group(1).split(",") if n.strip()]
-          if len(set(expected)) != len(expected):
-              sys.exit(
-                  "crates/veld-core/src/signing.rs: ORG_REQUIRED_SLOT_KEYS lists a key twice. "
-                  "RELEASE_SIG_SLOTS counts the distinct union, so the Rust tests stay green "
-                  "while veld-sign is handed a different number of keys than expected entries."
-              )
-          if declared != expected:
-              sys.exit(
-                  "release.yml's --expect-slot-pubkeys does not match "
-                  "veld_core::signing::ORG_REQUIRED_SLOT_KEYS, element for element and in "
-                  f"order ({len(declared)} declared vs {len(expected)} required). One side was "
-                  "edited without the other. Slot position is this format's only key "
-                  "identifier, and slot 0 is a compatibility contract with every "
-                  "already-shipped helper — neither side may change alone. See "
-                  "docs/signing-key-rotation.md."
-              )
-          if expected[0] != key_hex("ORG_KEY_1"):
-              sys.exit(
-                  "crates/veld-core/src/signing.rs: ORG_KEY_1 is no longer first in "
-                  "ORG_REQUIRED_SLOT_KEYS. Every helper shipped up to v16.59.0 verifies "
-                  "bytes 0..64 against it and nothing else."
-              )
 
           # 4. veld-sign's own slot ceiling. It deliberately does not depend on
           #    veld-core outside its tests (it must build fast for the host while
@@ -639,12 +655,25 @@ jobs:
           #    this is what stops the copy rotting. A ceiling above the reader's
           #    would write slots no helper ever looks at.
           sign_main = pathlib.Path("crates/veld-sign/src/main.rs").read_text()
-          if rust_const("MAX_SLOTS", sign_main, "crates/veld-sign/src/main.rs") != rust_const(
-              "MAX_SIG_SLOTS", signing, "crates/veld-core/src/signing.rs"
-          ):
+          if rust_const("MAX_SLOTS", sign_main, "crates/veld-sign/src/main.rs") != slots_ceiling:
               sys.exit(
                   "veld-sign's MAX_SLOTS and veld_core::signing::MAX_SIG_SLOTS disagree. "
                   "The signer would write slots the reader never reads."
+              )
+          #    `tests/signing-slots.py` carries a third copy, and it was the one with
+          #    no gate: raise MAX_SIG_SLOTS and everything stays green until somebody
+          #    appends the 9th row, which then fails with "no reader looks past slot
+          #    7" and tells them to raise a constant they already raised.
+          script_ceiling = re.search(
+              r"^MAX_SLOTS = (\d+)$", pathlib.Path("tests/signing-slots.py").read_text(), re.M
+          )
+          if not script_ceiling:
+              sys.exit("tests/signing-slots.py: `MAX_SLOTS` is gone; this gate reads it")
+          if int(script_ceiling.group(1)) != slots_ceiling:
+              sys.exit(
+                  f"tests/signing-slots.py's MAX_SLOTS ({script_ceiling.group(1)}) and "
+                  f"veld_core::signing::MAX_SIG_SLOTS ({slots_ceiling}) disagree. The script "
+                  "would refuse a table the readers accept, or accept one they do not."
               )
 
           # 5. The rotation format runs in production exactly once, on the worst
@@ -678,6 +707,16 @@ jobs:
               ("adhoc_resign_is_byte_idempotent_for_a_multi_slot_signature",
                "install.sh's macOS re-sign is unverified for the multi-slot shape "
                "otherwise, and this is the only macOS home for it"),
+              ("slots_is_the_same_signature_as_key_env_plus_expected_pubkeys",
+               "--slots is the flag the release actually uses, and every other guard in "
+               "that file is written against the spelling it stands for; without this "
+               "equivalence none of them cover the path that ships"),
+              ("a_slots_entry_whose_secret_holds_another_key_is_refused",
+               "the wrong-secret guard reached through the release path, which is the "
+               "only path a release takes"),
+              ("slots_and_expect_slot_pubkeys_together_is_refused",
+               "a step passing both is a half-finished edit, and letting one silently win "
+               "is how a slot ends up checked against the wrong key"),
           ]:
               if f"fn {name}" not in smoke:
                   sys.exit(f"crates/veld-sign/tests/smoke.rs: `{name}` is gone — {why} "
@@ -685,20 +724,64 @@ jobs:
 
           # 6. The invariants a rotation must NOT delete.
           #
-          #    `signing.rs` deliberately carries two TRIPWIRES that go red for a
-          #    correct rotation and whose docs tell the operator to delete them —
-          #    `nothing_is_retired_yet` and
-          #    `no_rotation_has_happened_yet_so_the_artifact_is_unchanged`. Beside
-          #    them sit permanent invariants that look identical when the whole
-          #    file is red. Deleting a red test is the natural reaction on the day
-          #    the runbook itself says you are reading it under pressure, and this
-          #    is the list that survives it. Each was in a bundled test until a
-          #    simulated rotation against this repo showed what deleting it cost.
+          #    `signing.rs` used to carry two TRIPWIRES that went red for a *correct*
+          #    rotation and whose own docs told the operator to delete them. That
+          #    made step 2 of a rotation "delete a red test", rehearsed on the worst
+          #    day available, beside permanent invariants that look identical when
+          #    the whole file is red. Both are gone: one was restated as a relation
+          #    that holds before and after every rotation
+          #    (`the_artifact_carries_exactly_one_slot_per_key`), and the other was
+          #    replaced by tests that go red when a retirement is *unsafe* rather
+          #    than whenever one happens
+          #    (`one_release_never_both_adds_a_key_and_retires_one` and the two
+          #    invariants that keep its dates honest).
+          #
+          #    **Nothing in this list is ever deleted by a rotation.** That is the
+          #    whole content of the list now, and it is a stronger statement than the
+          #    one it replaces: if a test in `signing.rs` is red, the answer is never
+          #    to delete it.
           invariants = pathlib.Path("crates/veld-core/src/signing.rs").read_text()
           for name, why in [
               ("a_one_key_signature_is_exactly_64_bytes",
-               "the permanent half of the byte-identical claim; its tripwire twin is "
-               "the half a rotation deletes"),
+               "the format claim a pre-rotation reader depends on: one key is still "
+               "exactly the 64 bytes that shipped before slots existed"),
+              ("the_artifact_carries_exactly_one_slot_per_key",
+               "the writer must emit one slot per ORG_KEYS row with no padding and no "
+               "holes; slot position is this format's only key identifier"),
+              ("one_release_never_both_adds_a_key_and_retires_one",
+               "this is the two-release rule itself — the only thing that fails a pull "
+               "request which both adds a key and retires one, which was unguarded "
+               "before it and is the mistake this whole runbook repeats most"),
+              ("the_slot_script_reads_the_same_table_the_compiler_does",
+               "tests/signing-slots.py is a second implementation of ORG_KEYS, read by "
+               "both workflows; this is the only comparison against what rustc actually "
+               "compiles, and a row the script misses is a slot the release omits"),
+              ("added_after_increases_down_the_table",
+               "without it the two-release guard is defeated by pasting row 0's 0.0.0 or "
+               "the previous row's version into a new row"),
+              ("every_secret_name_is_one_of_the_permanent_roster",
+               "a name outside the roster turns rotating back into a release.yml edit, "
+               "which is the whole thing this design removed"),
+              ("every_key_lifecycle_date_names_a_release_that_has_happened",
+               "the rule above is only as good as its two dates: a value newer than this "
+               "tree is somebody guessing at the version their merge will ship as, which "
+               "is the combined edit wearing a disguise"),
+              # The keyring constant is referred to by description rather than by
+              # name here, and that is not squeamishness: its name contains the
+              # signing-secret prefix as a substring, so the leak gate above — which
+              # matches that prefix across every string in a PR-startable job —
+              # fails this whole workflow if it is spelled out. Found by the gate
+              # itself while this list was being written.
+              ("the_derived_views_match_the_table",
+               "the keyring, the required-slot list and the slot count are const-fn "
+               "views of ORG_KEYS; one that quietly dropped a row would compile and "
+               "ship a release signed by a key no reader expects"),
+              ("no_key_and_no_secret_appears_twice",
+               "two rows sharing a secret means one slot is signed by the other row's "
+               "key — the invisible mis-pairing the secret field exists to prevent"),
+              ("every_secret_name_carries_the_signing_prefix",
+               "the leak gate in this job matches that prefix to prove no "
+               "pull-request-startable job can reach a signing secret"),
               ("the_keyring_is_never_empty",
                "without it, a retirement performed without its matching addition ships a "
                "helper that trusts nothing and leaves sudo as the only repair"),
@@ -730,11 +813,14 @@ jobs:
                "simplified away"),
           ]:
               if f"fn {name}" not in invariants:
-                  sys.exit(f"crates/veld-core/src/signing.rs: `{name}` is gone — {why}. If you "
-                           "are performing a rotation, docs/signing-key-rotation.md names the "
-                           "ONE test each step deletes; this is not one of them.")
+                  sys.exit(f"crates/veld-core/src/signing.rs: `{name}` is gone — {why}. A "
+                           "rotation deletes no test at all any more: if one here is red, the "
+                           "answer is never to delete it. See docs/signing-key-rotation.md.")
 
-          print(f"signature slots: {slots}; slot 0 pinned to ORG_KEY_1; rotation smoke tests intact")
+          print(
+              f"signature slots: {len(rows)} of at most {slots_ceiling}; slot 0 pinned to "
+              "ORG_KEY_1; roster and rotation smoke tests intact"
+          )
           print("signing.rs rotation invariants intact")
           PY
 
@@ -745,6 +831,126 @@ jobs:
       # no linter reads it. `--severity=warning` is where the file sits clean
       # today; the remaining `info` diagnostics are deliberate (`sudo` with a
       # `/dev/tty` redirect is the point of that line).
+      # ── The two-release rule, at the level it actually lives on ────────
+      #
+      # `one_release_never_both_adds_a_key_and_retires_one` in
+      # `crates/veld-core/src/signing.rs` catches the combined edit whenever both
+      # halves were written against the same release, which is the common shape
+      # and costs nothing — it runs in `cargo test --workspace`, locally and on a
+      # direct push to main, with no git and no network.
+      #
+      # **It has one hole, and this step is that hole's patch.** A branch whose
+      # `Cargo.toml` moves between the two edits — an unrelated release lands, the
+      # operator updates the branch, then retires — records two dates that are both
+      # *honest* and *different*. Neither equals the current version, so the static
+      # test sees no combined edit, and the release strands every helper whose only
+      # key was the retired one. The tree genuinely cannot tell "added last release"
+      # from "added in this pull request"; only the diff can.
+      #
+      # So this is deliberately the one piece of the schema job that reads git
+      # rather than the tree. It needs no fetch and no ref from the event payload:
+      # on a pull request `actions/checkout` checks out the **merge commit**
+      # (`refs/pull/N/merge`), whose first parent is the base branch tip GitHub
+      # merged against and whose second is the pull request's head. So
+      # `git diff HEAD^1 HEAD` is exactly this pull request's contribution — the
+      # job's checkout carries `fetch-depth: 2` for it, one extra commit.
+      #
+      # Deliberately not `github.event.pull_request.base.sha`: that value is the
+      # base as of the event, and it goes stale when the base branch moves without
+      # the pull request being synchronised — which here means an intervening
+      # release, i.e. precisely the situation this step exists for. A stale base
+      # would fold somebody else's merged rotation into this diff and fail an
+      # innocent pull request. `HEAD^1` is whatever GitHub actually merged against,
+      # recomputed for every run.
+      #
+      # Scoped to `pull_request`, because on a push there is no merge commit and no
+      # such thing as "this pull request's diff". The unit test in `signing.rs` is
+      # what still covers a direct push to main.
+      - name: One release never both adds a key and retires one
+        if: github.event_name == 'pull_request'
+        run: |
+          python3 - <<'PY'
+          import importlib.util, subprocess, sys
+
+          # The table is compared **parsed**, not as diff text. Matching added lines
+          # for `OrgKey {` and `KeyStatus::Retired` was the first version and it is
+          # wrong in both directions: it fires on any pull request that merely
+          # mentions the variant in a comment or a test (it fired on the one that
+          # introduced this file), and it would miss a row edited into a shape the
+          # regex does not recognise. Reusing the parser both workflows already read
+          # the table with means this gate sees exactly what a release will sign.
+          spec = importlib.util.spec_from_file_location("slots", "tests/signing-slots.py")
+          slots = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(slots)
+
+          path = "crates/veld-core/src/signing.rs"
+
+          def table(ref):
+              got = subprocess.run(
+                  ["git", "show", f"{ref}:{path}"], capture_output=True, text=True
+              )
+              if got.returncode != 0:
+                  return None
+              try:
+                  return slots.parse(got.stdout)
+              except slots.TableError:
+                  return None
+
+          # `HEAD^1` is the base GitHub merged against; `HEAD` is the merge result.
+          before, after = table("HEAD^1"), table("HEAD")
+          if after is None:
+              sys.exit(
+                  f"{path}: the key table in this pull request cannot be read. "
+                  "`python3 tests/signing-slots.py` says why, and a table the release "
+                  "cannot read is a release that signs nothing."
+              )
+          if before is None:
+              # One-time, and loud rather than silent: the base has no readable table,
+              # so this change introduces or restructures the table itself. There is no
+              # before-and-after to compare, and a change of that shape is one a human
+              # reads anyway.
+              print(
+                  f"{path}: the base has no readable ORG_KEYS, so this change introduces "
+                  "or restructures the table rather than rotating a key. Nothing to "
+                  "compare."
+              )
+              raise SystemExit(0)
+
+          was = {r["pubkey"]: r["status"] for r in before}
+          now = {r["pubkey"]: r["status"] for r in after}
+          added = sorted(k for k in now if k not in was)
+          retired = sorted(k for k in now if was.get(k) == "accepted" and now[k] == "retired")
+          dropped = sorted(k for k in was if k not in now)
+
+          def short(keys):
+              return ", ".join(k[:8] + "\u2026" for k in keys)
+
+          # A row that left the table stops producing its slot, which strands every
+          # helper generation that accepts only that key. Nothing else in the repo can
+          # see it: removing a row destroys the evidence it was ever there, which is
+          # the same shape as the combined edit below.
+          if dropped:
+              sys.exit(
+                  f"{path}: this pull request REMOVES {len(dropped)} row(s) from ORG_KEYS "
+                  f"({short(dropped)}). Rows are append-only: a row that leaves stops "
+                  "producing its slot, and every helper generation whose keyring holds only "
+                  "that key then refuses every future release, sudo-only. Retiring a key "
+                  "changes its `status` and keeps the row. Dropping one is the announced "
+                  "flag day in docs/signing-key-rotation.md, not something a rotation does."
+              )
+          if added and retired:
+              sys.exit(
+                  f"{path}: this pull request both adds a key ({short(added)}) and retires "
+                  f"one ({short(retired)}). Merging is releasing here, so that is ONE release "
+                  "doing both — and every helper whose only key is the retired one then "
+                  "refuses the very artifact meant to move it forward, with sudo on every "
+                  "machine as the only repair.\n\n"
+                  "Split it: ship the adding release first, wait for it to reach the fleet, "
+                  "then retire in a second pull request. See docs/signing-key-rotation.md."
+              )
+          print(f"{path}: {len(added)} key(s) added, {len(retired)} retired — not both")
+          PY
+
       - name: Shell scripts parse and lint
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck

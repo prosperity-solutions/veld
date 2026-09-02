@@ -239,7 +239,22 @@ pub fn privileged_helper_bin() -> PathBuf {
 /// spelling, but a definition written by hand or resolved elsewhere may carry
 /// the resolved one.
 pub fn is_privileged_helper_path(path: &Path) -> bool {
-    let bin = privileged_helper_bin();
+    names_the_same_binary(path, &privileged_helper_bin())
+}
+
+/// [`is_privileged_helper_path`]'s comparison, against an explicit `bin` rather
+/// than the store's.
+///
+/// Split out purely so the "never asks the filesystem" property is testable on
+/// **every** machine. Through [`is_privileged_helper_path`] alone it is not: the
+/// only path that must answer *true* is the real store binary, and whether that
+/// is present is a property of the machine — so on a maintainer's machine with a
+/// privileged install (which #262's own migration eventually creates), an
+/// implementation that canonicalised would answer true for the present store path
+/// and false for an absent sibling, i.e. it would pass. With this seam a test can
+/// hand over two paths that exist nowhere and still demand *true*, which
+/// canonicalising cannot produce.
+fn names_the_same_binary(path: &Path, bin: &Path) -> bool {
     if path == bin {
         return true;
     }
@@ -285,19 +300,75 @@ pub fn caddy_log_path() -> PathBuf {
 mod tests {
 
     /// The migrated-path check is lexical, so a **missing** store binary still
-    /// reads as migrated.
+    /// reads as migrated — and an *existing* one does too.
     ///
-    /// This is the fail-open that made `veld _helper-install` return 0 in
-    /// silence, and `veld doctor` report green, for a machine whose root daemon
-    /// had no binary to exec — the two places that exist to say so loudly.
+    /// That fail-open is what an implementation which canonicalised got wrong:
+    /// `canonicalize` errors on a path that is not there, so a machine whose root
+    /// daemon had no binary to exec read as "not migrated" — and `veld
+    /// _helper-install` returned 0 in silence while `veld doctor` went green, the
+    /// two places that exist to say so loudly.
+    ///
+    /// **This test used to assert `!bin.exists()` as a precondition**, which made
+    /// it fail on any machine that has a privileged install — and #262's own
+    /// migration guarantees a maintainer's machine eventually becomes one, so the
+    /// test was on a timer. The state of the machine was never part of the
+    /// property: [`is_privileged_helper_path`] is a comparison against a constant
+    /// and never touches the filesystem, which is the whole point. So the
+    /// machine's state is *recorded* here rather than asserted.
+    ///
+    /// **That rewrite alone was not enough, and the gap is worth naming**, because
+    /// it is invisible: with the precondition simply dropped, this test could no
+    /// longer fail on a machine that *has* a store. A canonicalising
+    /// implementation answers true for the present store path and false for the
+    /// absent sibling — both of which this test wants — so it passes. The
+    /// regression would then be caught only by a machine with no privileged
+    /// install, i.e. by CI's Linux runner and not by the maintainer's Mac, which
+    /// is the same "depends on the machine" defect pointing the other way.
+    /// [`names_the_same_binary`] below is the seam that closes it.
     #[test]
-    fn a_missing_store_binary_still_reads_as_the_privileged_helper_path() {
+    fn the_store_path_reads_as_migrated_either_way() {
         let bin = super::privileged_helper_bin();
+        let present = bin.exists();
         assert!(
-            !bin.exists(),
-            "this test assumes no store on the test machine"
+            super::is_privileged_helper_path(&bin),
+            "the store path must read as migrated regardless of the binary being \
+             there; it is there on this machine: {present}"
         );
-        assert!(super::is_privileged_helper_path(&bin));
+
+        // Exact, not "somewhere in the store": a sibling in the same directory is
+        // not the helper the service definition names.
+        let sibling = bin.with_file_name("veld-helper-absent");
+        assert!(
+            !super::is_privileged_helper_path(&sibling),
+            "{sibling:?} is not the store's helper"
+        );
+    }
+
+    /// The comparison never asks the filesystem — asserted on **every** machine.
+    ///
+    /// This is the half the test above cannot carry. Both paths here exist
+    /// nowhere: the directory is one this crate never writes, on macOS and on
+    /// Linux alike. A lexical comparison says they name the same binary; an
+    /// implementation that canonicalises gets an error from both sides and says
+    /// they do not. So this goes red for that regression on a machine with a
+    /// privileged install and on one without, which is the property the fail-open
+    /// documented on [`is_privileged_helper_path`] actually rests on.
+    #[test]
+    fn the_comparison_never_asks_the_filesystem() {
+        let absent = Path::new("/var/db/veld-helper-nowhere/veld-helper");
+        assert!(
+            super::names_the_same_binary(absent, absent),
+            "a path that is not there must still compare equal to itself; \
+             canonicalising is what breaks this"
+        );
+
+        // And the `/private` arm, on the same absent path — macOS's `/var`
+        // symlink spelling, which on Linux cannot resolve at all.
+        let absent_private = Path::new("/private/var/db/veld-helper-nowhere/veld-helper");
+        assert!(
+            super::names_the_same_binary(absent_private, absent),
+            "the /private spelling of an absent path must still read as the store"
+        );
     }
 
     /// macOS resolves `/var` to `/private/var`; both spellings are the store.

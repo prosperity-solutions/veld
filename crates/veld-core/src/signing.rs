@@ -94,7 +94,155 @@ pub const ORG_KEY_1: PubKey = [
     0xf0, 0xd3, 0x90, 0x23, 0x06, 0xd1, 0xc6, 0xee, 0x53, 0x60, 0x32, 0x99, 0xa3, 0x1b, 0x31, 0x56,
 ];
 
-/// The keys **this build accepts** a signature from.
+/// One org signing key, and everything about it that a release has to know.
+///
+/// **This table is the whole trust root, and rotating is appending to it.** Before
+/// it there were two hand-kept lists plus a hand-kept count, and a rotation edited
+/// all three plus three lines of `release.yml`; the count and the workflow's
+/// expected-key list were transcriptions of what the lists already said. They are
+/// derived now, so the transcription cannot rot and there is nothing left to
+/// forget.
+///
+/// It is a **table of records rather than two sets** for a second reason, and it is
+/// the load-bearing one. Two flat lists can only express *state*: removing a key
+/// from a keyring destroys, from the post-image, every trace that the key ever
+/// existed — so no static check can tell a retirement apart from a steady state
+/// that never held that key, and the two-release rule was therefore unguardable in
+/// principle. A row that **survives** its own retirement is the only place that
+/// evidence can live. See [`KeyStatus::Retired`].
+#[derive(Debug, Clone, Copy)]
+pub struct OrgKey {
+    /// The public half. This key's **slot index** in `<binary>.sig` is its index
+    /// in [`ORG_KEYS`], which is why rows are appended and never reordered.
+    pub key: PubKey,
+
+    /// The GitHub Actions secret holding the private half, which signs this key's
+    /// slot at release time.
+    ///
+    /// Recorded *here*, beside the key, rather than left implicit in the order of
+    /// flags in `release.yml`. That pairing is the thing this format has no room
+    /// for — slot position is its only key identifier — so a mis-pairing between a
+    /// key and the secret that signs its slot is invisible in the artifact and
+    /// fatal one release later. `ci.yml` checks every name here against the
+    /// workflow's `env:` block on every pull request.
+    ///
+    /// **Names are positional and immortal**, never relative to *now*.
+    /// `SIGNING_PRIVATE_KEY` holds the original key forever and is never
+    /// re-uploaded; a new key takes the next free number. A recency-based name — a
+    /// `_OLD`/`_CURRENT` pair — reads as the obvious scheme and is fatal on the
+    /// **second** rotation: slot 0 would then hold the second key, which no helper
+    /// shipped up to v16.59.0 has ever trusted, and the first key would have no
+    /// slot at all.
+    pub secret: &'static str,
+
+    /// `Cargo.toml`'s `version` at the moment this row was written — i.e. the
+    /// last release before the one that introduces this key. Copy it verbatim.
+    ///
+    /// **You can always know this, and that is the whole point.** `Cargo.toml`
+    /// holds the *previous* release until semantic-release bumps it after the
+    /// merge, so a pull request can never name the version it will itself ship as
+    /// — but it can always name the one it was written against. Together with
+    /// [`KeyStatus::Retired`]'s matching field, that is what makes the two-release
+    /// rule checkable from one file with no git history: see
+    /// `one_release_never_both_adds_a_key_and_retires_one`.
+    ///
+    /// [`ORG_KEY_1`] carries `0.0.0` because it predates this table and every
+    /// release in it.
+    pub added_after: &'static str,
+
+    /// Whether this build still accepts a signature by this key.
+    pub status: KeyStatus,
+}
+
+/// Whether a build accepts a key — and, once it does not, the evidence that
+/// retiring it was safe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyStatus {
+    /// This build accepts a signature by this key.
+    Accepted,
+
+    /// This build no longer accepts it. Releases keep carrying its slot, because
+    /// some helper generation in the field accepts *only* this key.
+    ///
+    /// **This variant is the two-release rule, mechanised**, and that is why it
+    /// carries a mandatory field instead of being a `bool`. A one-character flip is
+    /// the cheapest dangerous edit in the repository and invisible in a skim;
+    /// constructing a variant with a value in it is an act of authorship.
+    Retired {
+        /// `Cargo.toml`'s `version` at the moment this key was retired — the same
+        /// thing [`OrgKey::added_after`] records, for the other half of the edit.
+        /// Copy it verbatim.
+        ///
+        /// **The rule these two fields express:** no single release may both add a
+        /// key and retire one. A pull request that tried would have to write the
+        /// *same* version in both fields — the one `Cargo.toml` shows right now —
+        /// and `one_release_never_both_adds_a_key_and_retires_one` fails exactly
+        /// that. Neither needs git history; both are simply what the tree says.
+        ///
+        /// Not "the next version is unknowable": `release.yml`'s `plan` job runs
+        /// semantic-release in dry-run on every non-draft pull request and prints
+        /// it. The point is narrower and survives that — the tree cannot be made to
+        /// *say* the pull request has already shipped, and
+        /// `every_key_lifecycle_date_names_a_release_that_has_happened` refuses a
+        /// value newer than `Cargo.toml`, so writing the upcoming version is caught
+        /// too.
+        ///
+        /// **The hole this leaves, named rather than glossed:** if the branch's
+        /// `Cargo.toml` moves between the two edits — an unrelated release lands,
+        /// the branch is updated, then the retirement is written — the two dates
+        /// are both *honest* and *different*, neither equals the current version,
+        /// and the test sees nothing. The tree cannot tell "added last release"
+        /// from "added in this pull request", and nothing written in this file
+        /// can. `ci.yml`'s *One release never both adds a key and retires one* is
+        /// the layer that closes it, by reading the pull request's own diff; this
+        /// one is what still works on a direct push to `main`, where there is no
+        /// diff to read.
+        ///
+        /// What remains uncaught by both is a value *invented* for
+        /// `added_after` — neither the truth nor anything already written down.
+        /// `added_after_increases_down_the_table` removes the stale values that are
+        /// lying around to copy (row 0's `0.0.0`, any earlier row's version), so
+        /// what is left takes deliberate arithmetic. Nothing in the tree can prove
+        /// a date honest.
+        retired_after: &'static str,
+    },
+}
+
+/// Every org key, in slot order. **Append only; never reorder, never delete.**
+///
+/// Row 0 is [`ORG_KEY_1`] forever — see that constant for why its slot position is
+/// a compatibility contract rather than a convention.
+///
+/// * **Rotating** = append one row, `status: KeyStatus::Accepted`.
+/// * **Retiring** = change one row's status to [`KeyStatus::Retired`], in a
+///   **later** release. The row stays; its slot keeps being produced.
+///
+/// Deleting a row is the one edit nothing here can see, because it destroys the
+/// same evidence a retirement preserves. It also drops a slot, which strands every
+/// helper generation that accepts only that key — the announced flag day described
+/// in `docs/signing-key-rotation.md`, not something a rotation does.
+pub const ORG_KEYS: &[OrgKey] = &[OrgKey {
+    key: ORG_KEY_1,
+    secret: "SIGNING_PRIVATE_KEY",
+    // Predates this table and every release in it.
+    added_after: "0.0.0",
+    status: KeyStatus::Accepted,
+}];
+
+/// A release may not claim more slots than any reader looks at.
+const _: () = assert!(ORG_KEYS.len() <= MAX_SIG_SLOTS);
+
+/// **A build that trusts nothing must not compile.**
+///
+/// Flipping the last `Accepted` row to `Retired` is one field, and the result is a
+/// helper that refuses every relaunch, refuses `restart` and `shutdown`, refuses
+/// every candidate, and leaves sudo as the only repair —
+/// `the_keyring_is_never_empty` catches it, but only for somebody who runs the
+/// tests. An engineer who builds and installs locally bricks their own machine
+/// first and reads the test failure second.
+const _: () = assert!(accepted_key_count() > 0);
+
+/// The keys **this build accepts** a signature from — [`ORG_KEYS`]' accepted rows.
 ///
 /// A binary verifies when any slot of its `.sig` verifies under any key here, so
 /// this list is what "trusted" means for the helper that links it. It rides the
@@ -102,36 +250,74 @@ pub const ORG_KEY_1: PubKey = [
 /// when the binary it executes changes, and that transition is already governed
 /// by [`crate::helper_store`]'s version floor.
 ///
-/// **Rotating** = a release that adds a key here *and* a matching slot in
-/// `release.yml`. **Retiring** = a later release that removes a key from here
-/// while [`ORG_REQUIRED_SLOT_KEYS`] keeps producing its slot. Do those in two
-/// separate releases: a release that both adds and retires leaves any helper
-/// whose only key was the retired one unable to verify the very artifact meant to
-/// move it forward.
-pub const ORG_SIGNING_KEYRING: &[PubKey] = &[ORG_KEY_1];
+/// Derived rather than hand-kept: a release that both adds a key here and removes
+/// one leaves any helper whose only key was the retired one unable to verify the
+/// very artifact meant to move it forward, and expressing both as edits to *one*
+/// row's status is what makes that combination checkable at all.
+pub const ORG_SIGNING_KEYRING: &[PubKey] = &accepted_keys::<{ accepted_key_count() }>();
 
 /// The keys every release must still be **signed by**, whether or not this build
-/// would accept them.
+/// would accept them — i.e. every row of [`ORG_KEYS`], in slot order.
 ///
-/// A key stays here after it leaves [`ORG_SIGNING_KEYRING`], because some helper
-/// generation in the field accepts *only* that key and a release carrying no slot
-/// for it is a release that generation refuses. Dropping a key from this list is
-/// therefore a deliberate flag day that strands whatever remains of that
-/// generation on sudo — not a tidy-up. It is not something a rotation does.
-pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &[ORG_KEY_1];
+/// A key stays here after it stops being accepted, because some helper generation
+/// in the field accepts *only* that key and a release carrying no slot for it is a
+/// release that generation refuses. This being *every* row rather than a second
+/// hand-kept list is what makes "grows, never shrinks" a derivation instead of a
+/// convention: forgetting to keep a retired key's slot is now unrepresentable.
+pub const ORG_REQUIRED_SLOT_KEYS: &[PubKey] = &all_keys::<{ ORG_KEYS.len() }>();
 
 /// How many 64-byte slots `<binary>.sig` must carry for a release to be
-/// installable by every helper generation still in the field: one per distinct
-/// key across [`ORG_SIGNING_KEYRING`] and [`ORG_REQUIRED_SLOT_KEYS`].
+/// installable by every helper generation still in the field: one per row of
+/// [`ORG_KEYS`].
 ///
-/// Written out as a number rather than computed because it is read from **two**
-/// places that cannot evaluate Rust: `release.yml` passes exactly this many keys
-/// to `veld-sign`, and `ci.yml`'s `schema` job compares this constant against the
-/// number of key flags in that step — so a key added to the lists above without a
-/// matching secret fails a **pull request** instead of a release. The number is
-/// held honest against the lists themselves by
-/// `release_slot_count_matches_the_key_lists`.
-pub const RELEASE_SIG_SLOTS: usize = 1;
+/// It used to be a hand-written number, because it is read from **two** places
+/// that cannot evaluate Rust — `release.yml`'s signing step and `ci.yml`'s gate on
+/// it. Both now read [`ORG_KEYS`] itself, by the same regex, so the number has one
+/// home again.
+pub const RELEASE_SIG_SLOTS: usize = ORG_KEYS.len();
+
+/// How many rows of [`ORG_KEYS`] are [`KeyStatus::Accepted`].
+///
+/// A `const fn` rather than a `Vec` at runtime so [`ORG_SIGNING_KEYRING`] stays a
+/// `&'static [PubKey]` — every caller, including the root helper's relaunch gate,
+/// keeps taking a plain slice with no allocation on a path that runs on a timer.
+const fn accepted_key_count() -> usize {
+    let mut n = 0;
+    let mut i = 0;
+    while i < ORG_KEYS.len() {
+        if matches!(ORG_KEYS[i].status, KeyStatus::Accepted) {
+            n += 1;
+        }
+        i += 1;
+    }
+    n
+}
+
+/// The accepted rows' keys, in slot order. `N` must be [`accepted_key_count`].
+const fn accepted_keys<const N: usize>() -> [PubKey; N] {
+    let mut out = [[0u8; 32]; N];
+    let mut i = 0;
+    let mut n = 0;
+    while i < ORG_KEYS.len() {
+        if matches!(ORG_KEYS[i].status, KeyStatus::Accepted) {
+            out[n] = ORG_KEYS[i].key;
+            n += 1;
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Every row's key, in slot order. `N` must be `ORG_KEYS.len()`.
+const fn all_keys<const N: usize>() -> [PubKey; N] {
+    let mut out = [[0u8; 32]; N];
+    let mut i = 0;
+    while i < N {
+        out[i] = ORG_KEYS[i].key;
+        i += 1;
+    }
+    out
+}
 
 /// One slot of a detached signature file: a raw ed25519 signature.
 pub const SIG_SLOT_LEN: usize = 64;
@@ -225,9 +411,45 @@ pub fn verify_data(pubkey: &PubKey, data: &[u8], sig: &[u8]) -> bool {
 /// A trailing partial slot is ignored for the same reason. `sig` is expected to
 /// be bounded by the caller — [`read_detached_sig_slots`] is what does that.
 pub fn verify_data_slots(keyring: &[PubKey], data: &[u8], sig: &[u8]) -> bool {
+    verifying_key(keyring, data, sig).is_some()
+}
+
+/// [`verify_data_slots`], but naming the key that verified.
+///
+/// The verdict on its own answers "may root execute this", which is all the gates
+/// need. **Which** key answered it is what a person needs when a machine is
+/// somewhere unexpected in a rotation window: a helper's keyring and a release's
+/// slots are two lists that move at different times, and "signature OK" is the same
+/// sentence whether this machine is on the key before the rotation or the one
+/// after. `veld doctor` says which; nothing else does, and nothing on the machine
+/// records it.
+///
+/// A public key, so there is nothing here that must not be printed.
+pub fn verifying_key(keyring: &[PubKey], data: &[u8], sig: &[u8]) -> Option<PubKey> {
+    let mut found = None;
     any_slot_verifies(sig, |slot| {
-        keyring.iter().any(|key| verify_data(key, data, slot))
-    })
+        found = keyring
+            .iter()
+            .find(|key| verify_data(key, data, slot))
+            .copied();
+        found.is_some()
+    });
+    found
+}
+
+/// Where `key` sits in [`ORG_KEYS`], as a 1-based slot number, and how many rows
+/// there are — `(2, 3)` reads as "org key 2 of 3".
+///
+/// The index is the key's **permanent identity**: rows are appended and never
+/// reordered, so key 2 stays key 2 across every later rotation and retirement, and
+/// the number in a `veld doctor` row a user pastes into an issue means the same
+/// thing a year later. Falls back to `None` for a key that is not in the table,
+/// which is only reachable from a test.
+pub fn org_key_position(key: &PubKey) -> Option<(usize, usize)> {
+    ORG_KEYS
+        .iter()
+        .position(|k| &k.key == key)
+        .map(|i| (i + 1, ORG_KEYS.len()))
 }
 
 /// Whether any **distinct** 64-byte slot of `sig` satisfies `verify`.
@@ -485,12 +707,44 @@ fn retired_keys() -> Vec<PubKey> {
 /// [`classify_binary_signature`] against explicit lists, so the retired-key case
 /// is testable before any key has actually been retired.
 pub fn classify_data(active: &[PubKey], retired: &[PubKey], data: &[u8], sig: &[u8]) -> SigTrust {
-    if verify_data_slots(active, data, sig) {
-        SigTrust::Active
-    } else if verify_data_slots(retired, data, sig) {
-        SigTrust::RetiredOnly
+    classify_data_detail(active, retired, data, sig).trust
+}
+
+/// A [`SigTrust`] and, when one verified, the key that produced it.
+///
+/// One value rather than two calls, because classifying reads and hashes the whole
+/// ~26 MB binary: asking a second time for the key would double that, and the two
+/// answers can disagree if an update lands between them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SigVerdict {
+    pub trust: SigTrust,
+    /// The key a slot verified under — public, and `None` for
+    /// [`SigTrust::Untrusted`].
+    pub key: Option<PubKey>,
+}
+
+/// [`classify_data`], naming the key that answered.
+pub fn classify_data_detail(
+    active: &[PubKey],
+    retired: &[PubKey],
+    data: &[u8],
+    sig: &[u8],
+) -> SigVerdict {
+    if let Some(key) = verifying_key(active, data, sig) {
+        SigVerdict {
+            trust: SigTrust::Active,
+            key: Some(key),
+        }
+    } else if let Some(key) = verifying_key(retired, data, sig) {
+        SigVerdict {
+            trust: SigTrust::RetiredOnly,
+            key: Some(key),
+        }
     } else {
-        SigTrust::Untrusted
+        SigVerdict {
+            trust: SigTrust::Untrusted,
+            key: None,
+        }
     }
 }
 
@@ -537,6 +791,14 @@ pub fn classify_data(active: &[PubKey], retired: &[PubKey], data: &[u8], sig: &[
 /// window. `veld doctor` additionally knows when an update is in progress and is the
 /// right place to suppress the paragraph outright if this proves not enough.
 pub fn classify_binary_signature(binary: &Path) -> SigTrust {
+    classify_binary_signature_detail(binary).trust
+}
+
+/// [`classify_binary_signature`], naming the key that answered.
+///
+/// The one caller is `veld doctor`'s signature row. Everything that *gates* on a
+/// signature wants the verdict alone and takes [`classify_binary_signature`].
+pub fn classify_binary_signature_detail(binary: &Path) -> SigVerdict {
     classify_with_retry(|| classify_binary_signature_once(binary, MAX_VERIFIED_BINARY_BYTES))
 }
 
@@ -548,25 +810,34 @@ pub fn classify_binary_signature(binary: &Path) -> SigTrust {
 /// every refusal" with nothing red anywhere, handing an attacker a second race per
 /// tick against the pre-`stat` in [`read_regular_file_bounded`].
 /// `only_a_verification_failure_is_retried` counts them.
-fn classify_with_retry(mut pass: impl FnMut() -> Option<SigTrust>) -> SigTrust {
+fn classify_with_retry(mut pass: impl FnMut() -> Option<SigVerdict>) -> SigVerdict {
+    let untrusted = SigVerdict {
+        trust: SigTrust::Untrusted,
+        key: None,
+    };
     match pass() {
         // A read failed. Answer once; do not hand out a second race.
-        None => SigTrust::Untrusted,
-        Some(SigTrust::Untrusted) => pass().unwrap_or(SigTrust::Untrusted),
+        None => untrusted,
+        Some(v) if v.trust == SigTrust::Untrusted => pass().unwrap_or(untrusted),
         Some(settled) => settled,
     }
 }
 
 /// One pass of [`classify_binary_signature`]. `None` means a read failed, which is
 /// what separates a tear from an unreadable path — see there.
-fn classify_binary_signature_once(binary: &Path, limit: u64) -> Option<SigTrust> {
+fn classify_binary_signature_once(binary: &Path, limit: u64) -> Option<SigVerdict> {
     let sig = match read_detached_sig_slots_classified(binary) {
         SigRead::Slots(slots) => slots,
         // Read fine, no whole slot: a **torn** `.sig`, which is what the retry is
         // for. `install.sh` writes the lib-dir copy with `cp`, so the file really
         // does pass through zero length in place. Reporting this as a read failure
         // put it on the wrong side of the rule — see [`SigRead`].
-        SigRead::NoWholeSlot => return Some(SigTrust::Untrusted),
+        SigRead::NoWholeSlot => {
+            return Some(SigVerdict {
+                trust: SigTrust::Untrusted,
+                key: None,
+            });
+        }
         SigRead::Unreadable => return None,
     };
     // Read through the **same** shape as the `.sig` above, and that pairing is the
@@ -594,7 +865,7 @@ fn classify_binary_signature_once(binary: &Path, limit: u64) -> Option<SigTrust>
         // read failure so it is not retried.
         return None;
     }
-    Some(classify_data(
+    Some(classify_data_detail(
         ORG_SIGNING_KEYRING,
         &retired_keys(),
         &data,
@@ -1140,6 +1411,15 @@ mod tests {
         keys.iter().flat_map(|k| k.sign(data).to_bytes()).collect()
     }
 
+    /// A [`SigVerdict`] carrying just a trust level.
+    ///
+    /// The retry rule and the once-pass both branch on the trust level alone —
+    /// the key rides along for `veld doctor` and nothing else reads it — so the
+    /// tests below say what they mean and let this fill in the rest.
+    fn verdict(trust: SigTrust) -> SigVerdict {
+        SigVerdict { trust, key: None }
+    }
+
     /// **The compatibility contract, asserted rather than trusted.**
     ///
     /// Every helper shipped up to v16.59.0 reads exactly bytes `0..64` of the
@@ -1158,24 +1438,371 @@ mod tests {
         );
     }
 
-    /// [`RELEASE_SIG_SLOTS`] is read by two places that cannot evaluate Rust —
-    /// `release.yml`'s key flags and `ci.yml`'s gate on them — so it has to be
-    /// held honest against the lists it summarises.
+    /// The three derived views really are views of [`ORG_KEYS`].
+    ///
+    /// They used to be three hand-kept declarations that a rotation edited
+    /// separately, and the whole point of the table is that they are not any more.
+    /// A `const fn` that quietly dropped or duplicated a row would compile, and the
+    /// symptom would be a release signed by a key no reader expects — so the
+    /// derivations are re-done here the obvious way and compared.
     #[test]
-    fn release_slot_count_matches_the_key_lists() {
-        let mut all: Vec<PubKey> = ORG_SIGNING_KEYRING.to_vec();
-        for key in ORG_REQUIRED_SLOT_KEYS {
-            if !all.contains(key) {
-                all.push(*key);
+    fn the_derived_views_match_the_table() {
+        let all: Vec<PubKey> = ORG_KEYS.iter().map(|k| k.key).collect();
+        assert_eq!(
+            ORG_REQUIRED_SLOT_KEYS, all,
+            "every row of ORG_KEYS gets a slot, in table order"
+        );
+        // Structural, not a check: `RELEASE_SIG_SLOTS` **is** `ORG_KEYS.len()`, so
+        // this cannot fail. Kept as an executable statement of the property, which
+        // the deleted `release_slot_count_matches_the_key_lists` had to assert for
+        // real when the count was a hand-written number beside two independent
+        // lists. Written down because an assertion that cannot fail reads as a
+        // check, and the next reader deserves to know which it is.
+        const _: () = assert!(RELEASE_SIG_SLOTS == ORG_KEYS.len());
+
+        let accepted: Vec<PubKey> = ORG_KEYS
+            .iter()
+            .filter(|k| k.status == KeyStatus::Accepted)
+            .map(|k| k.key)
+            .collect();
+        assert_eq!(
+            ORG_SIGNING_KEYRING, accepted,
+            "the keyring is exactly the accepted rows, in table order"
+        );
+    }
+
+    /// **The Python parser and the compiler agree about `ORG_KEYS`.**
+    ///
+    /// `tests/signing-slots.py` reads this table with regexes so that
+    /// `release.yml` and `ci.yml` — neither of which can evaluate Rust — can know
+    /// what a release must be signed with. That makes it a **second
+    /// implementation** of a value the compiler already has, and the only thing
+    /// standing between the two is this test. Comparing the script's two output
+    /// modes against each other, which is what `ci.yml` used to do here, is
+    /// tautological: the same parse produces both, so a parse that drops a row
+    /// drops it identically on both sides.
+    ///
+    /// What that would cost, concretely: a row the parser misses is a slot the
+    /// release does not carry, while `ORG_REQUIRED_SLOT_KEYS` says it does. One
+    /// release later the generation whose keyring holds only that key finds no slot
+    /// that verifies, refuses every candidate, and needs sudo on every machine.
+    ///
+    /// Skipped rather than failed when `python3` is not on `PATH`, because a
+    /// missing interpreter is not a disagreement — CI has one, and `ci.yml`'s
+    /// slot-layout gate runs the script directly and fails loudly if it cannot.
+    #[test]
+    fn the_slot_script_reads_the_same_table_the_compiler_does() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root is two levels above this crate")
+            .to_path_buf();
+        let out = match std::process::Command::new("python3")
+            .arg("tests/signing-slots.py")
+            .arg("--tsv")
+            .current_dir(&root)
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Said out loud. A silent `ok` here is indistinguishable from
+                // having run, and this is the only comparison between the script
+                // and what rustc compiles. CI always has python3, and `ci.yml`'s
+                // slot-layout gate runs the script directly anyway.
+                eprintln!(
+                    "SKIPPED the_slot_script_reads_the_same_table_the_compiler_does: \
+                     no python3 on PATH, so the parser was NOT compared against ORG_KEYS"
+                );
+                return;
+            }
+            Err(e) => panic!("could not run tests/signing-slots.py: {e}"),
+        };
+        assert!(
+            out.status.success(),
+            "tests/signing-slots.py --tsv failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let tsv = String::from_utf8(out.stdout).expect("the script prints UTF-8");
+        let rows: Vec<Vec<&str>> = tsv
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.split('\t').collect())
+            .collect();
+
+        assert_eq!(
+            rows.len(),
+            ORG_KEYS.len(),
+            "tests/signing-slots.py sees {} row(s) where rustc sees {}. A row the \
+             script misses is a slot the release does not carry, and one release \
+             later the generation that accepts only that key refuses everything. \
+             Its output was:\n{tsv}",
+            rows.len(),
+            ORG_KEYS.len()
+        );
+        for (i, (row, key)) in rows.iter().zip(ORG_KEYS).enumerate() {
+            let hex: String = key.key.iter().map(|b| format!("{b:02x}")).collect();
+            let status = match key.status {
+                KeyStatus::Accepted => "accepted",
+                KeyStatus::Retired { .. } => "retired",
+            };
+            assert_eq!(
+                row.as_slice(),
+                [hex.as_str(), key.secret, key.added_after, status],
+                "row {i}: the script and the compiler disagree about this key"
+            );
+        }
+    }
+
+    /// Every row names a distinct key and a distinct secret.
+    ///
+    /// Two rows sharing a key would be a release claiming to cover two helper
+    /// generations while covering one — `veld-sign` refuses it outright, but at the
+    /// release, which is push-only and therefore after merge. Two rows sharing a
+    /// secret is the same mistake made by copy-paste: the second row's slot would be
+    /// signed by the first row's key, which is exactly the invisible mis-pairing the
+    /// `secret` field exists to prevent.
+    #[test]
+    fn no_key_and_no_secret_appears_twice() {
+        for (i, a) in ORG_KEYS.iter().enumerate() {
+            for b in &ORG_KEYS[i + 1..] {
+                assert_ne!(a.key, b.key, "ORG_KEYS lists the same public key twice");
+                assert_ne!(
+                    a.secret, b.secret,
+                    "two rows of ORG_KEYS name the same secret ({}), so one slot \
+                     would be signed by the other row's key",
+                    a.secret
+                );
             }
         }
-        assert_eq!(
-            RELEASE_SIG_SLOTS,
-            all.len(),
-            "RELEASE_SIG_SLOTS is what release.yml and ci.yml count key flags \
-             against; a key added to ORG_SIGNING_KEYRING or ORG_REQUIRED_SLOT_KEYS \
-             without bumping it ships a release missing a slot"
+    }
+
+    /// Every secret name carries the prefix the leak gate matches on.
+    ///
+    /// `ci.yml` proves no pull-request-startable job can reach a signing secret by
+    /// matching that prefix across every workflow. That only works if the names
+    /// actually carry it, which used to be prose in a runbook and is now a property
+    /// of the table the workflow reads.
+    #[test]
+    fn every_secret_name_carries_the_signing_prefix() {
+        for k in ORG_KEYS {
+            assert!(
+                k.secret.starts_with("SIGNING_"),
+                "{} does not carry the shared signing-secret prefix; ci.yml's leak \
+                 gate matches on it, so a name without it is a secret that can reach \
+                 a pull-request job unnoticed",
+                k.secret
+            );
+        }
+    }
+
+    /// **The two-release rule, as a test rather than as a warning in a runbook.**
+    ///
+    /// Adding a key and retiring one must be two separate releases. A release that
+    /// does both strands every helper in the field whose only key was the retired
+    /// one: it refuses the very artifact meant to move it forward, and the only
+    /// repair is asking every user for sudo on every machine — the one outcome
+    /// #338's rules forbid.
+    ///
+    /// Nothing used to fail a pull request that did both. It looked like a property
+    /// of the *diff* — removing a key from a flat list destroys, from the resulting
+    /// tree, every trace that the key was ever there — and the tripwire that
+    /// accidentally covered it (`nothing_is_retired_yet`) would have expired the
+    /// first time anything was ever retired.
+    ///
+    /// **What makes it a property of one file instead:** both halves of the edit
+    /// record `Cargo.toml`'s version at the moment they were written, and
+    /// `Cargo.toml` holds the *previous* release until semantic-release bumps it
+    /// after the merge. So the two halves of a combined edit necessarily carry the
+    /// **same** version — the one this tree shows right now — while two edits made
+    /// in two releases cannot. No git history, no merge base, no network: the whole
+    /// check is this tree.
+    ///
+    /// **This is one of two layers, and it is the weaker one.** It catches the
+    /// combined edit written in one sitting, which is the common shape, and it does
+    /// so with no git, no network and no CI — so it also covers a direct push to
+    /// `main`. It does **not** catch a branch whose `Cargo.toml` moved between the
+    /// two edits: those two dates are both honest and both differ from the current
+    /// version, and no test reading only this file can tell that apart from a
+    /// legitimate retirement. `ci.yml`'s *One release never both adds a key and
+    /// retires one* reads the pull request's diff and closes exactly that; see the
+    /// note on [`KeyStatus::Retired`].
+    ///
+    /// `added_after_increases_down_the_table` sits beside this one, refusing row 0's
+    /// `0.0.0` and every earlier row's version as a value for a new row — the stale
+    /// values that are actually lying around to copy.
+    #[test]
+    fn one_release_never_both_adds_a_key_and_retires_one() {
+        let now = env!("CARGO_PKG_VERSION");
+        let added: Vec<&str> = ORG_KEYS
+            .iter()
+            .filter(|k| k.added_after == now)
+            .map(|k| k.secret)
+            .collect();
+        let retired: Vec<&str> = ORG_KEYS
+            .iter()
+            .filter(|k| {
+                matches!(k.status, KeyStatus::Retired { retired_after } if retired_after == now)
+            })
+            .map(|k| k.secret)
+            .collect();
+        assert!(
+            added.is_empty() || retired.is_empty(),
+            "this release adds {added:?} and retires {retired:?}, and it may not do \
+             both. A helper whose only key is a retired one would refuse the very \
+             artifact meant to move it forward, and sudo on every machine is the only \
+             repair. Ship the adding release first, wait for it to reach the fleet, \
+             then retire in a second release. See docs/signing-key-rotation.md"
         );
+    }
+
+    /// A key's position is its row, 1-based, and every row has one.
+    ///
+    /// `veld doctor` prints this number, so it is a string a user pastes into an
+    /// issue and somebody reads a year later. It only means anything because rows
+    /// are append-only — nothing else pins that beyond row 0
+    /// (`org_key_1_holds_slot_zero_forever`), so a future edit that reordered the
+    /// table would silently renumber every key in every report already written.
+    #[test]
+    fn a_keys_position_is_its_row_and_never_moves() {
+        for (i, k) in ORG_KEYS.iter().enumerate() {
+            assert_eq!(
+                org_key_position(&k.key),
+                Some((i + 1, ORG_KEYS.len())),
+                "{} is row {i}, so it is org key {} of {}",
+                k.secret,
+                i + 1,
+                ORG_KEYS.len()
+            );
+        }
+        // A key this build does not carry has no position rather than a wrong one.
+        assert_eq!(org_key_position(&[0xAB; 32]), None);
+    }
+
+    /// `added_after` increases strictly down the table.
+    ///
+    /// **This is what stops the two-release guard being defeated by a paste.** That
+    /// guard compares each row's date against `Cargo.toml`'s version, so any *stale*
+    /// value in a newly added row slips past it — and the two most available stale
+    /// values are sitting in the table being edited: row 0's `0.0.0`, and the
+    /// previous row's version. Requiring each row to be strictly later than the one
+    /// above refuses both, which leaves no value a hurried operator can copy.
+    ///
+    /// Strict rather than non-decreasing: two keys added in one release is two
+    /// rotations at once, which the runbook does not describe and nobody should do
+    /// by accident. It costs nothing to forbid and it closes the equal-to-previous
+    /// paste.
+    #[test]
+    fn added_after_increases_down_the_table() {
+        for pair in ORG_KEYS.windows(2) {
+            let (prev, next) = (&pair[0], &pair[1]);
+            // Parsed before comparing. `Option` orders `None < Some(_)`, so
+            // comparing them directly makes an unparseable value in the *earlier*
+            // row pass vacuously, and an unparseable one in the *later* row fail
+            // with a message about ordering rather than about parsing.
+            // `every_key_lifecycle_date_names_a_release_that_has_happened` is what
+            // rejects the unparseable value itself; this just refuses to guess.
+            let (Some(a), Some(b)) = (
+                version_parts(prev.added_after),
+                version_parts(next.added_after),
+            ) else {
+                continue;
+            };
+            assert!(
+                b > a,
+                "{}'s added_after ({:?}) is not later than {}'s ({:?}). Rows are \
+                 appended in order, so each one was written against a later release \
+                 than the one above it. If you copied this value from another row or \
+                 from row 0's 0.0.0, that is the paste this check exists to refuse — \
+                 use Cargo.toml's version",
+                next.secret,
+                next.added_after,
+                prev.secret,
+                prev.added_after
+            );
+        }
+    }
+
+    /// Every secret name fits the permanent roster in `release.yml`.
+    ///
+    /// That roster is `SIGNING_PRIVATE_KEY` plus `_2`..`_8`, written once and never
+    /// edited — which is the whole promise that rotating needs no workflow change.
+    /// A name outside it (`SIGNING_KEY_2026`, say) passes the prefix rule, then
+    /// fails `ci.yml` with "add an entry to that step's env:" — telling the operator
+    /// to do the one thing the runbook says they never have to. Caught here instead,
+    /// where the name is being chosen.
+    #[test]
+    fn every_secret_name_is_one_of_the_permanent_roster() {
+        for (i, k) in ORG_KEYS.iter().enumerate() {
+            let expected = if i == 0 {
+                "SIGNING_PRIVATE_KEY".to_owned()
+            } else {
+                format!("SIGNING_PRIVATE_KEY_{}", i + 1)
+            };
+            assert_eq!(
+                k.secret, expected,
+                "ORG_KEYS row {i} names {:?}, but release.yml's permanent roster \
+                 calls that slot {expected:?}. Names are positional: the roster is \
+                 written once to the format's slot ceiling and never edited, so a \
+                 row must take the name for its own position",
+                k.secret
+            );
+        }
+    }
+
+    /// Neither half of that rule may cite a release that has not happened.
+    ///
+    /// The fields are `Cargo.toml`'s version at the time of the edit, so a value
+    /// *newer* than this tree is not a mistake with a benign reading — it is the
+    /// shape a combined edit takes when somebody guesses at the version their merge
+    /// will ship as, which is exactly what the rule above is stopping.
+    #[test]
+    fn every_key_lifecycle_date_names_a_release_that_has_happened() {
+        let now = version_parts(env!("CARGO_PKG_VERSION")).expect("our own version parses");
+        for k in ORG_KEYS {
+            let mut dates = vec![("added_after", k.added_after)];
+            if let KeyStatus::Retired { retired_after } = k.status {
+                dates.push(("retired_after", retired_after));
+                // Both parsed first, for the same reason as above: an unparseable
+                // value must be diagnosed by the loop below, which says what is
+                // wrong with it, not here with "older than", which is not.
+                if let (Some(r), Some(a)) =
+                    (version_parts(retired_after), version_parts(k.added_after))
+                {
+                    assert!(
+                        r >= a,
+                        "{}: retired_after {retired_after:?} is older than added_after {:?}",
+                        k.secret,
+                        k.added_after
+                    );
+                }
+            }
+            for (field, value) in dates {
+                let parsed = version_parts(value).unwrap_or_else(|| {
+                    panic!(
+                        "{}'s {field} is {value:?}, which is not an x.y.z version. It is \
+                         Cargo.toml's version at the moment you made the edit — copy it \
+                         verbatim",
+                        k.secret
+                    )
+                });
+                assert!(
+                    parsed <= now,
+                    "{}'s {field} is {value:?}, which is newer than this tree ({}). These \
+                     fields record the release an edit was made AGAINST, and a pull \
+                     request cannot know the version it will itself ship as",
+                    k.secret,
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+        }
+    }
+
+    /// `x.y.z` as a comparable tuple, or `None` if it is not that shape.
+    fn version_parts(v: &str) -> Option<(u64, u64, u64)> {
+        let mut it = v.split('.');
+        let mut next = || it.next()?.parse::<u64>().ok();
+        let parsed = (next()?, next()?, next()?);
+        it.next().is_none().then_some(parsed)
     }
 
     /// **This is the load-bearing test of the whole slice.**
@@ -1225,28 +1852,34 @@ mod tests {
         assert_eq!(SIG_SLOT_LEN, 64);
     }
 
-    /// **A tripwire, not an invariant — delete it on the release that rotates.**
+    /// The artifact carries exactly one slot per row of [`ORG_KEYS`], and nothing
+    /// else.
     ///
-    /// It asserts that *today's* artifact is byte-identical to the pre-rotation
-    /// one, which is why this mechanism could ship with the format change carrying
-    /// no risk at all: `RELEASE_SIG_SLOTS` is 1, so `veld-sign` writes exactly the
-    /// 64 bytes it always wrote and no shipped helper has anything to notice.
+    /// **This replaces a tripwire, and the replacement is the point.** The previous
+    /// version asserted `RELEASE_SIG_SLOTS * SIG_SLOT_LEN == 64` — i.e. that no
+    /// rotation had happened yet — and its own doc comment told the operator to
+    /// delete it on the release that rotates. A procedure whose step 2 is "delete
+    /// this red test" is a procedure that rehearses deleting red tests on the worst
+    /// day available, next to two permanent invariants that look identical when the
+    /// whole file is red.
     ///
-    /// That stops being true the moment a second key is added, and it goes red for
-    /// a *correct* change — which is the same trap the retirement-day tripwire had
-    /// before it was split out, and it was found the same way: by performing a
-    /// simulated rotation against this file. It is alone in its own function so
-    /// that deleting it takes nothing else with it, and
-    /// `docs/signing-key-rotation.md` step 2 names it.
+    /// What it was actually protecting is that the signing artifact's shape does not
+    /// change by accident, and that is a *relation* between the writer and the
+    /// table — true before any rotation, true after every one, and red for a
+    /// writer that pads, reorders or drops a slot. So it never needs deleting
+    /// again.
     #[test]
-    fn no_rotation_has_happened_yet_so_the_artifact_is_unchanged() {
+    fn the_artifact_carries_exactly_one_slot_per_key() {
+        let keys: Vec<_> = (0..ORG_KEYS.len())
+            .map(|i| gen_key(i as u8 + 1).0)
+            .collect();
+        let refs: Vec<_> = keys.iter().collect();
         assert_eq!(
-            RELEASE_SIG_SLOTS * SIG_SLOT_LEN,
-            64,
-            "a second key has been added, so releases are no longer byte-identical \
-             to the pre-rotation shape. That is expected on a rotation — see \
-             docs/signing-key-rotation.md step 2, then delete THIS test and \
-             nothing else in this file"
+            slots(&refs, b"payload").len(),
+            ORG_KEYS.len() * SIG_SLOT_LEN,
+            "a release must carry one 64-byte slot per row of ORG_KEYS, with no \
+             padding and no holes: slot position is this format's only key \
+             identifier"
         );
     }
 
@@ -1358,27 +1991,10 @@ mod tests {
         );
     }
 
-    /// Nothing is retired yet, so `retired_keys()` is empty.
-    ///
-    /// **This is the one test the runbook's step 3 tells you to delete**, and it
-    /// is alone in its own function for that reason: it used to be bundled with
-    /// the two invariants below, and deleting a red test — the natural reaction
-    /// on the day the runbook itself says you are reading it under pressure —
-    /// would have taken both of them with it silently.
-    #[test]
-    fn nothing_is_retired_yet() {
-        assert!(
-            retired_keys().is_empty(),
-            "a key has left ORG_SIGNING_KEYRING while ORG_REQUIRED_SLOT_KEYS still \
-             names it — that is a retirement. Read docs/signing-key-rotation.md \
-             step 3, then delete THIS test and nothing else in this file"
-        );
-    }
-
     /// The keyring is never empty.
     ///
-    /// **Do not delete this one on retirement day.** The runbook's step 3 is
-    /// literally "remove `ORG_KEY_1` from `ORG_SIGNING_KEYRING`"; doing that on a
+    /// **Do not delete this one on retirement day.** The runbook's retirement is
+    /// one field — the last accepted row's `status`; doing that on a
     /// tree where step 2 was skipped, reverted or mis-merged ships a helper that
     /// trusts nothing — every candidate refused, every relaunch refused, `restart`
     /// and `shutdown` refused, and sudo the only repair. Which is the wedged
@@ -1586,7 +2202,7 @@ mod tests {
                 "{len} bytes is a torn write, not an unreadable path"
             );
             assert_eq!(
-                classify_binary_signature_once(&binary, 4096),
+                classify_binary_signature_once(&binary, 4096).map(|v| v.trust),
                 Some(SigTrust::Untrusted),
                 "{len} bytes must be a verdict, so the retry applies"
             );
@@ -1652,7 +2268,8 @@ mod tests {
             classify_with_retry(|| {
                 calls += 1;
                 None
-            }),
+            })
+            .trust,
             SigTrust::Untrusted
         );
         assert_eq!(calls, 1, "an unreadable path must not get a second race");
@@ -1662,8 +2279,9 @@ mod tests {
         assert_eq!(
             classify_with_retry(|| {
                 calls += 1;
-                Some(SigTrust::Untrusted)
-            }),
+                Some(verdict(SigTrust::Untrusted))
+            })
+            .trust,
             SigTrust::Untrusted
         );
         assert_eq!(calls, 2, "the tear is what the retry is for");
@@ -1674,26 +2292,28 @@ mod tests {
             classify_with_retry(|| {
                 calls += 1;
                 if calls == 1 {
-                    Some(SigTrust::Untrusted)
+                    Some(verdict(SigTrust::Untrusted))
                 } else {
-                    Some(SigTrust::Active)
+                    Some(verdict(SigTrust::Active))
                 }
-            }),
+            })
+            .trust,
             SigTrust::Active
         );
         assert_eq!(calls, 2);
 
         // A settled verdict is never re-read, whichever it is.
-        for verdict in [SigTrust::Active, SigTrust::RetiredOnly] {
+        for trust in [SigTrust::Active, SigTrust::RetiredOnly] {
             let mut calls = 0;
             assert_eq!(
                 classify_with_retry(|| {
                     calls += 1;
-                    Some(verdict)
-                }),
-                verdict
+                    Some(verdict(trust))
+                })
+                .trust,
+                trust
             );
-            assert_eq!(calls, 1, "{verdict:?} is settled on the first pass");
+            assert_eq!(calls, 1, "{trust:?} is settled on the first pass");
         }
 
         // A second pass that cannot read falls back to the refusal rather than
@@ -1703,11 +2323,12 @@ mod tests {
             classify_with_retry(|| {
                 calls += 1;
                 if calls == 1 {
-                    Some(SigTrust::Untrusted)
+                    Some(verdict(SigTrust::Untrusted))
                 } else {
                     None
                 }
-            }),
+            })
+            .trust,
             SigTrust::Untrusted
         );
         assert_eq!(calls, 2);
