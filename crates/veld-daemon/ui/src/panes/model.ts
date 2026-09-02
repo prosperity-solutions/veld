@@ -1225,6 +1225,103 @@ export function startPlanFor(id: string, pane?: PaneMount): StartPlan {
  *   "ended" state: a takeover also ends a session, and a pane vanishing because
  *   another window claimed it is not tidying up.
  */
+/**
+ * Why a session is in `connecting`, when the user is the reason.
+ *
+ * A first connect and a restart look identical to the state machine and are
+ * nothing alike on screen: the first shows an empty pane filling in, the second
+ * throws away something the user was watching. Without the distinction a
+ * restart reads as a flicker — the scrollback stays put, a 12px chip says
+ * "connecting…", and nothing tells you the thing you just asked for is
+ * underway.
+ *
+ * Lives here rather than in `terminalHost` for the same reason [`StartPlan`]
+ * does: the decisions that consume it are pure, and the pure ones are the ones
+ * worth testing.
+ */
+export type RestartKind =
+  /** A plain terminal's login shell, replaced. */
+  | "shell"
+  /** A config pane relaunched under a new token — a new conversation. */
+  | "fresh"
+  /** A config pane relaunched under its existing token, via `resume`. */
+  | "resume";
+
+/**
+ * Whether a pane's `resume` command can actually be run for this tab.
+ *
+ * A resume that cannot work must not be an action that looks like it can, so
+ * this needs the pane to still declare a resume command *and* the daemon to
+ * hold a token for it. Where the token knowledge comes from differs by state:
+ *
+ *  - `launched` is the strongest: this session reached `ready` under a spec in
+ *    *this* window, so the daemon recorded a token. It has to be here because
+ *    `resumable` is fetched once per worktree selection and never refreshed — a
+ *    pane that launched afterwards is simply absent from it, and without
+ *    `launched` such a pane hitting `error` offered only "Start fresh", minting
+ *    a new token and abandoning the conversation.
+ *  - `ended` means a holder ran the command and it exited, so a token exists.
+ *  - `resumable` is the fetched set, and the only evidence available for a pane
+ *    restored from storage that has not connected in this window.
+ *
+ * Shared by the dead-pane card and the tab menu's Restart entries rather than
+ * derived twice: the two disagreeing is either a Resume that 409s, or one the
+ * user is never offered.
+ */
+export function paneCanResume(args: {
+  /** The tab's `ide.panes[].id`, or undefined for a plain terminal. */
+  specId: string | undefined;
+  /** Whether that pane still declares a `resume` command (`can_resume`). */
+  canResumeSpec: boolean;
+  /** Whether the session has ended — see above. */
+  ended: boolean;
+  launched: boolean;
+  resumable: boolean;
+}): boolean {
+  const hasToken = args.launched || args.ended || args.resumable;
+  return Boolean(args.specId && hasToken && args.canResumeSpec);
+}
+
+/**
+ * Whether a restart has to be confirmed before it runs.
+ *
+ * **Two ways a restart destroys, and either one earns the dialog.** A live
+ * session means a process is running that the restart hangs up — the build, the
+ * agent mid-turn. And `fresh` on a pane that *could* have resumed abandons a
+ * conversation the token still points at, which is a loss the user cannot see on
+ * screen and cannot undo.
+ *
+ * Everything else goes straight through. Restarting an already-dead shell
+ * destroys nothing, and a dialog there is a click that protects nothing — the
+ * same reasoning that makes the close confirmation fire only for a *busy*
+ * terminal rather than for every tab.
+ */
+export function restartNeedsConfirmation(args: {
+  /** Whether a process is running in the pane right now. */
+  live: boolean;
+  kind: RestartKind;
+  /** Whether `resume` was an option, i.e. whether `fresh` throws one away. */
+  canResume: boolean;
+}): boolean {
+  return args.live || (args.kind === "fresh" && args.canResume);
+}
+
+/**
+ * Which command Restart runs for a tab when the user did not pick.
+ *
+ * A config pane with a live token gets its `resume` command — that is the whole
+ * point of Restart for an agent pane: it applies a settings change to a running
+ * tool without throwing away the conversation. `fresh` stays reachable from the
+ * same menu for when starting over is what was actually meant.
+ */
+export function defaultRestartKind(args: {
+  specId: string | undefined;
+  canResume: boolean;
+}): RestartKind {
+  if (args.specId === undefined) return "shell";
+  return args.canResume ? "resume" : "fresh";
+}
+
 export function shouldCloseOnExit(pane: {
   spec: string | undefined;
   closeOnExit: boolean;

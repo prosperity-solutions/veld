@@ -256,6 +256,19 @@ const HOLDER_CONNECT_INTERVAL: Duration = Duration::from_millis(5);
 /// stall daemon startup while every session behind it waited to be adopted.
 const HOLDER_HELLO_TIMEOUT: Duration = Duration::from_secs(2);
 
+/// How long [`close_session`] waits for the holder it just hung up to actually
+/// go, before answering the client.
+///
+/// Generous next to what the teardown costs — a `HANGUP`, a SIGHUP to the shell
+/// and an unlink, all milliseconds — because the failure it prevents is not a
+/// slow close but a *wrong* one; see [`await_holder_gone`].
+const CLOSE_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How often that wait re-probes. Coarser than [`HOLDER_CONNECT_INTERVAL`]
+/// because each probe is a real handshake with a holder that is mid-shutdown,
+/// and nothing is waiting on the difference between 5 ms and 20 ms here.
+const CLOSE_DRAIN_INTERVAL: Duration = Duration::from_millis(20);
+
 /// Frames queued towards a holder. Keystrokes and resizes only, so this is
 /// deliberately small; the hangup does not queue behind them (see
 /// [`pump_to_holder`]).
@@ -1965,6 +1978,19 @@ async fn close_session(headers: HeaderMap, Path(id): Path<String>) -> Result<Sta
     // 204 either way: closing an already-gone session is the client and daemon
     // agreeing, not an error, and the UI has nothing useful to do with a 404.
     end_session(&id, "closed by the client").await;
+    // Only then answer: a client that reattaches under this id the moment it sees
+    // the 204 must not find the holder it just closed. See `await_holder_gone` —
+    // an already-gone session costs one unanswered probe here.
+    //
+    // **Yes, this handshake-probes immediately before a possible attach**, which
+    // [`released_worktree`] says in capitals not to do. The two are opposites, and
+    // that is the reconciliation: there, the probe precedes an attach that wants to
+    // *adopt* the holder, so consuming its post-mortem throws away the scrollback
+    // the release existed to preserve. Here the user has asked for the session to
+    // end — ending the holder is the outcome, not the cost. And the probe can only
+    // reach one whose daemon link is already gone: a holder with a link up answers
+    // probationally and keeps serving it (`holder::TAKEOVER_PROBATION`).
+    await_holder_gone(&id).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -3793,6 +3819,63 @@ async fn holder_is_alive(id: &str) -> bool {
         // about this one.
         Ok(attached) => attached.hello.session_id == id,
         Err(e) => !is_unanswered(&e),
+    }
+}
+
+/// Wait until nothing answers for this session id any more.
+///
+/// **The id is the reattach key, and a hangup is not instant.** `end_session`
+/// signals the writer task and returns; the holder then hangs up its pty, the
+/// shell takes a SIGHUP and the socket goes away — microseconds later, but
+/// later. A client that deletes a session and immediately attaches under the
+/// same id (which is exactly what Restart does, because the id is what the
+/// pane's resume token is filed under) lands in that window, and
+/// [`obtain_session`] finds the socket still answering and **adopts the dying
+/// holder** — reporting its SIGHUP as the new session's exit. The user asked for
+/// a restart and got `exit 129` on a pane that never ran.
+///
+/// So the delete does not answer until the id is free. That makes the HTTP
+/// contract true — a 204 means the session is gone, not that it has been asked
+/// to go — rather than making every caller learn to poll. A session with nothing
+/// to wait for costs one unanswered connect, which is why every ordinary tab
+/// close can afford this.
+///
+/// **The whole loop is bounded, not each probe.** [`holder_is_alive`] is a full
+/// handshake and can legitimately cost [`HOLDER_HELLO_TIMEOUT`] against a holder
+/// whose main loop is parked — so a deadline consulted only *between* probes
+/// would let two slow ones run the endpoint well past the bound it advertises.
+///
+/// **A timeout is not a graceful degradation, and the log says so.** It means a
+/// holder that will not go: a shell ignoring SIGHUP is the real case, and it is
+/// not cleaned up until the orphan grace, so the reattach that follows adopts it
+/// and the restart fails the way it did before this wait existed — only slower.
+/// Doing more here (a kill, or refusing the id) is a policy change for a
+/// pathological shell, deliberately not folded into this fix; the small version
+/// of it belongs in the holder, which signals on `HANGUP` and then arms no
+/// escalation until its 30-minute orphan deadline.
+///
+/// **There is deliberately no test for that path, and this is the note saying
+/// why.** One was written (`trap '' HUP` in the shell, then assert the endpoint
+/// still answers inside the bound) and removed: the shell it strands survives
+/// the test, the holder keeps it until the orphan grace, and it holds the test
+/// harness's stdout open — so the suite hung rather than failed, which is the
+/// one outcome worse than no coverage. The bound itself needs no test, being the
+/// `tokio::time::timeout` below; what wanted testing was the *degradation*, and
+/// that is untestable here until the holder escalates.
+async fn await_holder_gone(id: &str) {
+    let drained = tokio::time::timeout(CLOSE_DRAIN_TIMEOUT, async {
+        while holder_is_alive(id).await {
+            tokio::time::sleep(CLOSE_DRAIN_INTERVAL).await;
+        }
+    })
+    .await;
+    if drained.is_err() {
+        warn!(
+            session = %id,
+            "holder still answering {:?} after its session was closed; a reattach \
+             under this id will adopt it",
+            CLOSE_DRAIN_TIMEOUT
+        );
     }
 }
 
@@ -6801,6 +6884,131 @@ mod tests {
                 );
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+        }
+
+        /// The wait must not become a tax on the ordinary close.
+        ///
+        /// Every closed tab hits this endpoint, and only a *restart* re-attaches
+        /// afterwards — so `await_holder_gone` has to be free when there is
+        /// nothing to wait for. Both shapes are checked because they take
+        /// different routes through `end_session`: a session this daemon has a
+        /// registry entry for, and an id it has never heard of (which falls to
+        /// `hang_up_released_holder` and then probes a socket nobody is behind).
+        ///
+        /// Half the bound, not a tight number: the failure worth catching is
+        /// "this now waits the full drain on every close", and half separates that
+        /// cleanly while leaving ~60x head-room over a measured live close (24 ms)
+        /// for a loaded CI box. These are the only wall-clock assertions in the
+        /// file that could go red for a non-bug reason, so they get the slack.
+        #[tokio::test]
+        async fn closing_a_session_with_nothing_to_wait_for_returns_promptly() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            async fn close(id: &str) -> (StatusCode, Duration) {
+                let started = Instant::now();
+                let res = routes()
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("DELETE")
+                            .uri(format!("/api/pty/sessions/{id}"))
+                            .header("X-Veld-Request", "1")
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                (res.status(), started.elapsed())
+            }
+
+            // An id no session ever existed under.
+            let (status, elapsed) = close(&session_id()).await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert!(
+                elapsed < CLOSE_DRAIN_TIMEOUT / 2,
+                "closing an unknown session waited {elapsed:?}"
+            );
+
+            // A real session whose shell has already exited — the pane a
+            // `close_on_exit: false` tool leaves behind, closed by its × button.
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+            ws.send(WsMessage::Binary(b"exit\n".as_slice().into()))
+                .await
+                .unwrap();
+            read_control(&mut ws, "exit").await;
+
+            let (status, elapsed) = close(&sid).await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            assert!(
+                elapsed < CLOSE_DRAIN_TIMEOUT / 2,
+                "closing an already-exited session waited {elapsed:?}"
+            );
+        }
+
+        /// Restart: delete a **live** session and immediately re-attach under
+        /// the same id.
+        ///
+        /// The id is the reattach key and a pane's resume token is filed under
+        /// it, so a restart cannot pick a new one. That makes this the exact
+        /// window `await_holder_gone` exists to close: `end_session` only
+        /// *signals*, so without the wait the DELETE returned in about a
+        /// millisecond, the holder was still answering on its socket, and
+        /// `obtain_session` adopted the dying one — the new attach reported
+        /// `resumed: true` and then published the SIGHUP the old shell was
+        /// taking, as `exit 129`, on a pane that had never run.
+        ///
+        /// `resumed` is the assertion rather than the exit code: it is the
+        /// fingerprint of the adoption itself, and it fails even on a run where
+        /// the timing happens not to surface an exit frame.
+        #[tokio::test]
+        async fn a_restart_gets_a_new_holder_rather_than_the_one_it_just_closed() {
+            use axum::body::Body;
+            use tower::ServiceExt;
+
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            let first = read_control(&mut ws, "ready").await;
+            assert_eq!(first["resumed"], false, "a new session is not a resume");
+            // Something in the foreground, so the teardown has real work to do
+            // and the window this closes is as wide as it gets in practice.
+            ws.send(WsMessage::Binary(b"sleep 300\n".as_slice().into()))
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+
+            // Through the endpoint, not `end_session`: the wait is part of what
+            // DELETE promises, and a test that called the inner function would
+            // pass with the promise removed.
+            let res = routes()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/pty/sessions/{sid}"))
+                        .header("X-Veld-Request", "1")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+            // No sleep here on purpose — reattaching the instant the 204 lands
+            // is precisely what the UI does, and what used to break.
+            let mut again = open(addr, &sid, dir.path(), "").await;
+            let second = read_control(&mut again, "ready").await;
+            assert_eq!(
+                second["resumed"], false,
+                "the restart adopted the holder it had just closed"
+            );
+
+            end_session(&sid, "test cleanup").await;
         }
 
         /// The regression this module's `send_replace` comment describes.
