@@ -27,8 +27,21 @@ env:
 #     every main push its own group, which is what it had before this block
 #     existed: parallel, never superseded.
 #   * `github.workflow` is part of the key so CI and Release never share a group.
+#   * **The draft flag is part of the key too**, because a draft run and a
+#     ready-for-review run are not "the same PR pushed again" — they are two
+#     different questions, and one of them deliberately does nothing. Without it
+#     they share a group, so opening a draft and marking it ready in quick
+#     succession is a race: both events fire, one run cancels the other, and if the
+#     *draft* run wins then every job skips and the PR shows a green check summary
+#     for a run in which nothing executed. That is the silent green the Draft PRs
+#     block below spends twenty lines warning about, reachable without anybody
+#     misreading anything — and `/ship` opens a draft and flips it ready seconds
+#     apart every time, so it is not a rare interleaving. Splitting the key costs
+#     nothing: a draft run's jobs all skip, so letting one coexist with a ready
+#     run is a few seconds of ubuntu time, and superseding still works inside each
+#     half. On a `main` push the flag is empty and the key stays per-`sha`.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event.pull_request.draft }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # ── Draft PRs do not run CI ───────────────────────────────────────────
