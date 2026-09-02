@@ -27,6 +27,11 @@
  * - **Hardware facts.** Whether this machine has a battery is not a preference and
  *   no daemon catalog describes it as one, so the battery rows are filtered
  *   client-side in {@link HARDWARE_GATES}.
+ * - **Facts about a chosen value that only the client can know.** Whether the
+ *   selected font can draw ligatures is a property of a font file the daemon never
+ *   sees — it stores a CSS font-family string — so that row is filtered in
+ *   {@link CAPABILITY_GATES}. Same shape as the hardware gates and the same rule:
+ *   an unknown answer shows the row rather than hiding it.
  *
  * A shape this build has never heard of renders as a visible "cannot show this"
  * row rather than vanishing (`Unsupported` below). That is the one failure mode
@@ -105,8 +110,8 @@ import { searchTarget } from "../panes/model";
 import { Modal } from "./dialogs";
 import {
   availableFonts,
-  fontHasLigatures,
   matchFont,
+  showsLigatureRow,
   type TerminalFont,
 } from "../shared/terminalFonts";
 import {
@@ -1282,20 +1287,27 @@ const HARDWARE_GATES: Record<string, (m: Machine) => boolean> = {
  * as it was when a font that has them is selected again, which is better than
  * silently rewriting a preference the user set.
  */
-const CAPABILITY_GATES: Record<
-  string,
-  (settings: SettingsDoc | null, fonts: TerminalFont[]) => boolean
-> = {
-  // `!== false` rather than `=== true`: an unclassifiable custom family answers
-  // `null`, and unknown has to show the row. See `fontHasLigatures`.
-  //
-  // `?? ""` covers the document not having arrived yet, and lands on that same
-  // side: an empty stack matches nothing, so it reads as unknown and shows.
+type CapabilityGate = (
+  settings: SettingsDoc | null,
+  fonts: TerminalFont[],
+) => boolean;
+
+// The type is named rather than inlined so the declaration fits on one line, like
+// the four maps above it — and it has to. The Rust tripwire that checks these keys
+// (`every_setting_the_dialog_names_by_hand_exists`) finds a map by its declaration
+// and then skips exactly the *first* line to reach the entries. A multi-line
+// `Record<…>` type would leave a colon-bearing type line where an entry belongs,
+// and that tripwire fails loudly on a shape it cannot parse rather than skipping
+// it. For the same reason, do not write this map's name after the word `const`
+// anywhere above — including in a comment, which is how this note first broke it.
+const CAPABILITY_GATES: Record<string, CapabilityGate> = {
+  // The three-way rule and its `!== false` comparison live in `showsLigatureRow`,
+  // which is exported and tested; what belongs here is only the reach into the
+  // settings document. `?? ""` covers the document not having arrived yet, and an
+  // empty stack matches nothing — so a not-yet-loaded dialog reads as unknown and
+  // shows the row, the same side every other unknown lands on.
   "terminal.ligatures": (settings, fonts) =>
-    fontHasLigatures(
-      asString(settings?.["terminal.fontFamily"] ?? ""),
-      fonts,
-    ) !== false,
+    showsLigatureRow(asString(settings?.["terminal.fontFamily"] ?? ""), fonts),
 };
 
 /**

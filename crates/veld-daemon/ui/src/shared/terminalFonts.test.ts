@@ -8,6 +8,7 @@ import {
   fontAvailable,
   fontHasLigatures,
   matchFont,
+  showsLigatureRow,
 } from "./terminalFonts";
 
 describe("font lists", () => {
@@ -87,7 +88,9 @@ describe("fontHasLigatures", () => {
     // Both bundled fonts, and exactly one system font, are the ligature-capable
     // ones. Asserted through the resolver rather than by reading the flag, so the
     // stack-matching is covered too.
-    expect(fontHasLigatures(BUNDLED_FONTS[0].stack, BUNDLED_FONTS)).toBe(true);
+    for (const f of BUNDLED_FONTS) {
+      expect(fontHasLigatures(f.stack, BUNDLED_FONTS)).toBe(true);
+    }
     expect(fontHasLigatures("Menlo, ui-monospace, monospace", SYSTEM_FONTS)).toBe(
       false,
     );
@@ -117,5 +120,29 @@ describe("fontHasLigatures", () => {
   it("ignores quoting and case in the family name", () => {
     expect(fontHasLigatures("menlo", SYSTEM_FONTS)).toBe(false);
     expect(fontHasLigatures("'Cascadia Code'", SYSTEM_FONTS)).toBe(true);
+  });
+});
+
+describe("showsLigatureRow", () => {
+  it("hides the row only for a font we classify as incapable", () => {
+    expect(showsLigatureRow("Menlo, ui-monospace, monospace", SYSTEM_FONTS)).toBe(
+      false,
+    );
+    expect(showsLigatureRow(BUNDLED_FONTS[0].stack, BUNDLED_FONTS)).toBe(true);
+  });
+
+  it("shows the row for a family it cannot classify", () => {
+    // The assertion that makes `!== false` load-bearing. Tightening the gate to
+    // `=== true` passes every test above and fails these two: a ligature font we
+    // do not list would lose its control, along with any stored preference.
+    expect(showsLigatureRow("Iosevka, monospace", SYSTEM_FONTS)).toBe(true);
+    expect(showsLigatureRow('"Victor Mono", monospace', SYSTEM_FONTS)).toBe(true);
+  });
+
+  it("shows the row before the settings document has arrived", () => {
+    // The dialog passes `""` while `/api/settings` is still in flight. That is an
+    // unknown font, not an incapable one, so it takes the showing side — the same
+    // direction as every other unknown here.
+    expect(showsLigatureRow("", SYSTEM_FONTS)).toBe(true);
   });
 });

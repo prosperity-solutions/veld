@@ -88,6 +88,15 @@ export const BUNDLED_FONTS: TerminalFont[] = [
 /**
  * Monospace fonts common enough to be worth offering, in rough order of how likely
  * a developer is to have one. Zero bytes; availability is checked at render time.
+ *
+ * The `ligatures: false` entries are two different strengths of claim, and it is
+ * worth knowing which is which. Three are read from the binaries macOS ships: SF
+ * Mono carries no `liga`/`clig`/`dlig`/`calt` at all, and Menlo and Monaco have no
+ * `GSUB` table whatsoever. The other five — Source Code Pro, Consolas, IBM Plex
+ * Mono, DejaVu Sans Mono, Ubuntu Mono — rest on those families not shipping
+ * programming ligatures, not on a dump of a file we had to hand. That weaker claim
+ * is tolerable here and would not be for a `true`: a wrong `false` hides a control,
+ * while a wrong `true` offers a switch that does nothing.
  */
 export const SYSTEM_FONTS: TerminalFont[] = [
   { label: "SF Mono", stack: `"SF Mono", ${TAIL}`, bundled: false, ligatures: false },
@@ -188,6 +197,15 @@ export function availableFonts(): TerminalFont[] {
  * Matched on the **first family** rather than the whole stack, because a user who
  * appends a fallback to a listed font ("Fira Code", "Menlo", monospace) has still
  * chosen Fira Code, and {@link matchFont} would call that stack custom.
+ *
+ * So this deliberately disagrees with {@link matchFont}, which is what the font
+ * picker uses to choose between a preset and "Custom…". A stored `Menlo, monospace`
+ * reads as *custom* in the picker and as *Menlo* here, and both are right: they
+ * answer different questions — which preset this is, versus which font will
+ * actually draw. The disagreement stays safe in the hiding direction because the
+ * options handed in are already filtered by {@link availableFonts}: a first family
+ * that is not installed is not among them, so it answers `null` and shows the row,
+ * rather than answering `false` for a font the browser was never going to reach.
  */
 export function fontHasLigatures(
   stack: string,
@@ -198,6 +216,28 @@ export function fontHasLigatures(
     (f) => firstFamily(f.stack).replace(/["']/g, "").toLowerCase() === want,
   );
   return hit ? hit.ligatures : null;
+}
+
+/**
+ * Whether the settings dialog should show the ligature row for a stored stack.
+ *
+ * The whole rule is the comparison: `!== false`, never `=== true`. Three answers
+ * come back from {@link fontHasLigatures} and only one of them may hide the row —
+ * a font we classify and know cannot draw them. *Unknown* has to show, or every
+ * user of a ligature font we do not list (Iosevka, Monaspace, Victor Mono, a
+ * Nerd-Font patch) loses the control, and with it any way to reach a preference
+ * they may already have stored.
+ *
+ * A function of its own, and exported, so that comparison is pinned by a test.
+ * Tightening it to `=== true` compiles clean, passes every other test, and breaks
+ * exactly the case this setting was designed around — which is the kind of silent
+ * inversion the rest of this file's tripwires exist to catch.
+ */
+export function showsLigatureRow(
+  stack: string,
+  options: TerminalFont[] = availableFonts(),
+): boolean {
+  return fontHasLigatures(stack, options) !== false;
 }
 
 /**
