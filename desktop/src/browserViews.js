@@ -50,6 +50,9 @@ const {
 // The CSS-pixel → DIP arithmetic every native view's geometry goes through, in the
 // same Electron-free module as the top bar's own zoom maths, and tested there.
 const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
+// The one pure rule in the safe-area applier, in its own module for the same
+// reason: nothing here can be unit-tested, and that rule can.
+const { safeAreaPayload } = require("./safeArea");
 // The permission policy is likewise its own tested, Electron-free module.
 const permissions = require("./permissions");
 
@@ -63,15 +66,21 @@ const permissions = require("./permissions");
 const MAX_VIEWS_PER_WINDOW = 16;
 
 /**
+ * @typedef {{top: number, right: number, bottom: number, left: number}} SafeAreaInsets
+ */
+
+/**
  * @typedef {{width: number, height: number, deviceScaleFactor: number, mobile: boolean,
- *            touch: boolean, userAgent: string|null}} Emulation
+ *            touch: boolean, userAgent: string|null,
+ *            safeArea: SafeAreaInsets|null}} Emulation
  */
 
 /**
  * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
  *            media: Record<string, string>|null, scale: number, radius: number,
- *            touchActive: boolean, mediaActive: boolean,
+ *            touchActive: boolean, mediaActive: boolean, safeAreaActive: boolean,
+ *            safeAreaApplied: SafeAreaInsets|null,
  *            frameReady: boolean, emulated: boolean, dragging: boolean,
  *            touchQueue: Promise<void>|undefined}} Entry
  */
@@ -113,6 +122,7 @@ function stateOf(viewId, entry, error) {
       profile: entry.profile,
       touchActive: false,
       mediaActive: false,
+      safeAreaActive: false,
       devToolsOpen: false,
       ...(error === undefined ? {} : { error }),
     };
@@ -125,15 +135,16 @@ function stateOf(viewId, entry, error) {
     canGoBack: wc.navigationHistory.canGoBack(),
     canGoForward: wc.navigationHistory.canGoForward(),
     profile: entry.profile,
-    // The three things the pane cannot work out for itself: whether touch and the
-    // emulated media features are actually in force (both ride one debugger
-    // session, and something else can hold it — see [`applyCdpNow`]) and whether
-    // the inspector is open. The emulated size, the
+    // The four things the pane cannot work out for itself: whether touch, the
+    // emulated media features and the safe-area gutters are actually in force
+    // (all three ride one debugger session, and something else can hold it — see
+    // [`applyCdpNow`]) and whether the inspector is open. The emulated size, the
     // zoom and the scale are all the renderer's own. Flat primitives on purpose:
     // the renderer's `patch` compares values with `!==`, so a nested object would
     // count as changed on every event and re-render every pane.
     touchActive: entry.touchActive,
     mediaActive: entry.mediaActive,
+    safeAreaActive: entry.safeAreaActive,
     devToolsOpen: wc.isDevToolsOpened(),
     ...(error === undefined ? {} : { error }),
   };
@@ -178,7 +189,8 @@ function pushState(window, viewId, entry) {
 //    in *any* pane sharing the session. Without re-assertion a pane's zoom
 //    silently changes when you follow a link, and setting one pane's zoom moves
 //    its neighbour's.
-// 4. **Touch is the one thing that can be taken away.** It needs a CDP session
+// 4. **Touch, emulated media and the safe-area gutters are the things that can
+//    be taken away.** All three ride one CDP session. Touch needs a CDP session
 //    (`Emulation.setEmitTouchEventsForMouse` has no Electron API). Electron's docs
 //    say opening DevTools detaches an attached debugger; on Electron 43 it does
 //    not (the two sessions coexist — measured, not assumed). Both worlds are
@@ -323,11 +335,11 @@ function hasMediaOverrides(media) {
 /**
  * The body of [`applyTouch`], which now owns **everything CDP**.
  *
- * One function for touch and media because they share one debugger session and
- * the earlier split would have broken both: turning touch off detached the
- * session, which silently dropped a media override that was still meant to be in
- * force. So the attach is driven by whether *anything* wants it, and the detach
- * only happens when nothing does.
+ * One function for touch, media and the safe-area gutters because they share one
+ * debugger session and the earlier split would have broken both: turning touch off
+ * detached the session, which silently dropped a media override that was still
+ * meant to be in force. So the attach is driven by whether *anything* wants it,
+ * and the detach only happens when nothing does.
  *
  * **Never call this directly** — it awaits CDP round trips, and two interleaved
  * runs are exactly what the queue exists to prevent.
@@ -337,17 +349,62 @@ async function applyCdpNow(window, viewId, entry) {
   if (wc.isDestroyed()) return;
   const wantTouch = entry.emulation?.touch === true;
   const wantMedia = hasMediaOverrides(entry.media);
+  const insets = entry.emulation?.safeArea ?? null;
+  const wantSafeArea = insets !== null;
   const dbg = wc.debugger;
 
-  const report = (touch, media) => {
-    if (entry.touchActive === touch && entry.mediaActive === media) return;
+  const report = (touch, media, safeArea) => {
+    if (
+      entry.touchActive === touch &&
+      entry.mediaActive === media &&
+      entry.safeAreaActive === safeArea
+    ) {
+      return;
+    }
     entry.touchActive = touch;
     entry.mediaActive = media;
+    entry.safeAreaActive = safeArea;
     pushState(window, viewId, entry);
   };
 
-  if (!wantTouch && !wantMedia) {
-    if ((entry.touchActive || entry.mediaActive) && dbg.isAttached()) {
+  if (!wantTouch && !wantMedia && !wantSafeArea) {
+    // **`safeAreaApplied`, not `safeAreaActive`.** The gutters are the one override
+    // here that outlives a `detach` — measured on Electron 43 — so "what the pane
+    // reports" and "what the page still has" come apart in a way touch and media
+    // never do, and only the second decides whether there is anything to clear.
+    // The sequence that goes wrong if this reads the reported flag: the gutters are
+    // in force, something takes the debugger (which flips `safeAreaActive` to
+    // false, correctly, because the next navigation would drop them), and the user
+    // then switches them off — at which point every reported flag is already false,
+    // this branch does nothing, and the page keeps laying out inside a notch the
+    // pane says is gone until it happens to navigate.
+    const stale = entry.safeAreaApplied !== null;
+    // Attached *in order to clear*, which is the rule this file already states:
+    // the session is held while anything wants it, and a live override that has to
+    // be revoked wants it. This is not the eager detach the preamble warns about —
+    // it is its opposite, and it is the only path that reaches a page whose gutters
+    // have outlived the session that set them.
+    if (stale && !dbg.isAttached()) {
+      try {
+        dbg.attach("1.3");
+      } catch {
+        // Refused, so the override cannot be revoked from here. Not permanent: a
+        // cross-document navigation drops an override whose session is gone, and
+        // `did-navigate` writes `safeAreaApplied` off when there is no session.
+      }
+    }
+    if ((entry.touchActive || entry.mediaActive || stale) && dbg.isAttached()) {
+      // **The gutters are revoked first, and through [`applySafeArea`].** Two
+      // reasons, and the earlier arrangement — inlined last, inside the try below —
+      // got both wrong. It is the only one of these four overrides whose effect
+      // provably outlives the detach that follows, so it is the only one where
+      // skipping the call has a lasting consequence; and a throw from any of the
+      // three touch/media resets is a *normal* state here ("the session went away
+      // underneath us"), which meant the ordinary case could silently skip it.
+      // Going through the helper also means a rejection from the one EXPERIMENTAL
+      // method in the set gets logged and leaves `safeAreaApplied` set, so the next
+      // off-run retries, rather than being swallowed by the catch below.
+      if (await applySafeArea(dbg, null)) entry.safeAreaApplied = null;
       // Explicitly off before detaching. Detaching *should* drop the session's
       // overrides on its own, but "should" is the wrong footing for a page that
       // would otherwise keep answering mouse drags with touch events.
@@ -366,7 +423,7 @@ async function applyCdpNow(window, viewId, entry) {
         // Already gone.
       }
     }
-    report(false, false);
+    report(false, false, false);
     return;
   }
 
@@ -377,7 +434,7 @@ async function applyCdpNow(window, viewId, entry) {
     // DevTools is the usual one. Reported as suspended rather than as on, and
     // retried when DevTools closes.
     console.warn("[veld] CDP attach refused", error);
-    report(false, false);
+    report(false, false, false);
     return;
   }
 
@@ -406,7 +463,12 @@ async function applyCdpNow(window, viewId, entry) {
         value: entry.media[name],
       })),
     });
-    report(wantTouch, wantMedia);
+    // Recorded apart from what is reported: `safeAreaOk` says the command was
+    // accepted, `insets !== null` says gutters were asked for, and the page now
+    // holds whatever the two of them landed on.
+    const safeAreaOk = await applySafeArea(dbg, insets);
+    if (safeAreaOk) entry.safeAreaApplied = insets;
+    report(wantTouch, wantMedia, safeAreaOk && insets !== null);
   } catch (error) {
     // A command was refused, or the view is tearing down. The pane shows both as
     // suspended rather than as on — the same honesty `touchActive` has always
@@ -416,8 +478,73 @@ async function applyCdpNow(window, viewId, entry) {
     // "the CDP call threw" look identical from the pane, and only one of them is
     // veld's bug. This log is what identified exactly that.
     console.warn("[veld] CDP emulation command failed", error);
-    report(false, false);
+    report(false, false, false);
   }
+}
+
+/**
+ * Push the safe-area gutters onto an attached session, and say whether it took.
+ *
+ * **In its own try, and last, because it is the one EXPERIMENTAL command in the
+ * set.** `Emulation.setSafeAreaInsetsOverride` is real on Electron 43 — verified
+ * against the running binary's own `/json/protocol`, not the tip-of-tree docs —
+ * but an experimental method is one a future Chromium may rename or withdraw, and
+ * an unknown CDP method *rejects the promise* rather than failing loudly. Folded
+ * into [`applyCdpNow`]'s shared `catch` that rejection would report a working
+ * touch and media override as suspended too, which is the honesty pattern
+ * `touchActive` exists for, inverted. So it costs the pane its gutters and
+ * nothing else.
+ *
+ * The payload itself is [`safeAreaPayload`] in `safeArea.js`, pulled out because
+ * it is the only *pure* part of this feature's shell half and therefore the only
+ * part `npm test` can reach — this module needs an Electron runtime to load at
+ * all. Its two rules (all eight fields every time; each `Max` mirroring its
+ * inset) read like redundancy someone would tidy away, so they have a test there
+ * rather than only a comment here.
+ */
+async function applySafeArea(dbg, insets) {
+  try {
+    await dbg.sendCommand("Emulation.setSafeAreaInsetsOverride", {
+      insets: safeAreaPayload(insets),
+    });
+    // Whether the command was *accepted*, not whether it set anything. The caller
+    // needs to know the page took the write even when the write was the reset,
+    // because that is what tells it there is no longer an override to revoke.
+    return true;
+  } catch (error) {
+    // Logged for the same reason the shared catch logs: "the gutters did nothing"
+    // and "the CDP method is gone from this Chromium" look identical from the
+    // pane, and only one of them is veld's bug.
+    console.warn("[veld] safe-area inset override failed", error);
+    return false;
+  }
+}
+
+/**
+ * Write off the record of a live safe-area override, but only once the session
+ * that would re-apply it is gone.
+ *
+ * **A shared helper because the two callers are siblings that disagreed.** Both
+ * `did-navigate` and `render-process-gone` mark the point where a page may have
+ * stopped holding its gutters, and the second one cleared the record
+ * unconditionally while the first checked the session — so a crash lost the
+ * record of an override that was still in force, and the next off-run then found
+ * `safeAreaApplied === null`, sent no reset, and detached. The gutters then came
+ * back on the following navigation, on a pane reporting safe area as off: the
+ * exact failure `safeAreaApplied` exists to prevent, reached by the one path that
+ * was not using it.
+ *
+ * **The attachment check is the whole rule, and it is measured.** The override
+ * lives in the *session*, not in the document: with the debugger attached it is
+ * re-applied to a brand-new renderer — verified across a forced renderer crash
+ * (the process id changed, nothing was re-sent, and the page still read `59px`)
+ * and across a cross-process navigation. With no debugger attached there is
+ * nothing to carry it, so a fresh document starts clean and there is genuinely
+ * nothing left to revoke.
+ */
+function forgetSafeAreaIfSessionGone(entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed() || !wc.debugger.isAttached()) entry.safeAreaApplied = null;
 }
 
 /**
@@ -771,6 +898,16 @@ function attachListeners(window, viewId, entry) {
   const ready = () => {
     const first = !entry.frameReady;
     entry.frameReady = true;
+    // A safe-area override is carried across a document swap by the *session*, not
+    // by the page. Measured on Electron 43, with the renderer process held
+    // constant so the two variables do not move together: with no session
+    // attached, a **cross-document** navigation drops the override and so does a
+    // reload, while a **same-document** (fragment) navigation preserves it. Both
+    // of the first two raise `did-navigate` and the third raises only
+    // `did-navigate-in-page`, so this listener fires in exactly the cases where
+    // the page has genuinely stopped holding the gutters — which is what makes it
+    // safe to write the record off here rather than only on a process swap.
+    forgetSafeAreaIfSessionGone(entry);
     applyMetrics(entry);
     applyZoom(entry);
     void applyTouch(window, viewId, entry);
@@ -796,6 +933,12 @@ function attachListeners(window, viewId, entry) {
   wc.on("render-process-gone", () => {
     entry.frameReady = false;
     entry.emulated = false;
+    // **Not unconditional.** "A new renderer starts with no overrides" is only true
+    // when no debugger is attached to carry one across — measured otherwise: with
+    // the session attached, a forced crash produced a new renderer process that
+    // still reported the old gutters with nothing re-sent. Same rule as
+    // `did-navigate` above, and now literally the same line.
+    forgetSafeAreaIfSessionGone(entry);
   });
 
   // Electron's docs say opening DevTools detaches an attached debugger; on
@@ -809,11 +952,22 @@ function attachListeners(window, viewId, entry) {
     void applyTouch(window, viewId, entry);
   });
   wc.debugger.on("detach", () => {
-    // Both, because both ride this one session: a detach from any cause takes the
-    // media override with the touch emulation.
-    if (!entry.touchActive && !entry.mediaActive) return;
+    // All three, because all three ride this one session: a detach from any cause
+    // takes the media override and the safe-area gutters with the touch emulation.
+    //
+    // **Safe area is reported as gone even though, at this instant, it is not.**
+    // Measured on Electron 43: the inset override survives a `detach` in the frame
+    // that is currently loaded, and is then lost by the next cross-document
+    // navigation, because it is the *session* that re-applies it to a new render
+    // frame. So the alternative — keeping `safeAreaActive` true here because the
+    // page really is still getting its gutters — is a claim that silently stops
+    // being true the next time the user follows a link, with nothing watching to
+    // correct it. Reporting it off now is wrong for one frame; reporting it on
+    // would be wrong from the next navigation onwards and undetectably so.
+    if (!entry.touchActive && !entry.mediaActive && !entry.safeAreaActive) return;
     entry.touchActive = false;
     entry.mediaActive = false;
+    entry.safeAreaActive = false;
     push();
   });
 
@@ -1526,6 +1680,11 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       appliedRadius: 0,
       touchActive: false,
       mediaActive: false,
+      safeAreaActive: false,
+      // What the *page* was last successfully given, as against what the pane is
+      // asking for (`safeAreaActive`). The two come apart, and the gap is a bug if
+      // it is not tracked — see the off path in [`applyCdpNow`].
+      safeAreaApplied: null,
       // Nothing has navigated yet, so the emulation calls are not safe to make —
       // rule 2. The first `did-navigate` flips this and applies them.
       frameReady: false,

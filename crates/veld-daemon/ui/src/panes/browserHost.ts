@@ -116,6 +116,17 @@ export interface BrowserState {
   /** Whether the emulated media features are *actually* in force — same caveat as
    *  `touchActive`, and the same reason: they share one debugger session. */
   mediaActive: boolean;
+  /**
+   * Whether the safe-area gutters are *actually* in force.
+   *
+   * The third rider on that one debugger session, so the same caveat again — and
+   * the one whose honesty is worth the most, because it is the only one of the
+   * three whose absence a page cannot show you: a suspended touch override is
+   * visible the moment you drag, and a suspended colour scheme is visible at a
+   * glance, while `env(safe-area-inset-top)` quietly reading `0px` looks exactly
+   * like a layout that has no notch to clear.
+   */
+  safeAreaActive: boolean;
   /** Whether this pane's (detached) DevTools window is open. */
   devToolsOpen: boolean;
 }
@@ -736,6 +747,7 @@ export function browserStatus(id: string): BrowserState {
       resizing: false,
       touchActive: false,
       mediaActive: false,
+      safeAreaActive: false,
       devToolsOpen: false,
     }
   );
@@ -816,6 +828,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
       resizing: false,
       touchActive: false,
       mediaActive: false,
+      safeAreaActive: false,
       devToolsOpen: false,
     },
     listeners: new Set(),
@@ -1649,6 +1662,7 @@ if (desktop) {
     // scale is *not* here — it is this side's own number, pushed with the bounds.
     if (typeof payload.touchActive === "boolean") next.touchActive = payload.touchActive;
     if (typeof payload.mediaActive === "boolean") next.mediaActive = payload.mediaActive;
+    if (typeof payload.safeAreaActive === "boolean") next.safeAreaActive = payload.safeAreaActive;
     if (typeof payload.devToolsOpen === "boolean") next.devToolsOpen = payload.devToolsOpen;
     // A committed page is what makes a reload keep showing the old one rather
     // than a spinner over nothing.

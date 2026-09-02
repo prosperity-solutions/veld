@@ -79,6 +79,8 @@ const MAX_ZOOM = 3;
  *  rather than rendering into nothing. */
 const MIN_SCALE = 0.02;
 const MAX_DEVICE_RADIUS = 64;
+/** Mirrors `MAX_SAFE_AREA_PX` in the renderer's `panes/devices.ts`. */
+const MAX_SAFE_AREA_PX = 200;
 
 /**
  * A user-agent string the shell is willing to put in a request header, or `null`.
@@ -134,12 +136,40 @@ function safeEmulation(raw) {
     mobile: raw.mobile === true,
     touch: raw.touch === true,
     userAgent: safeUserAgent(raw.ua),
+    safeArea: safeAreaInsets(raw.safeArea),
     // No `fit`. It reaches this process on the wire and is deliberately dropped
     // here: fitting is a question about the *pane*, answered by `deviceLayout` in
     // the renderer, which then sends the resulting factor with the bounds. A
     // validated field with no reader is an invitation to make the shell re-derive
     // the scale, which is the two-owners drift that split ended.
   };
+}
+
+/**
+ * The safe-area gutters a pane asked for, normalised, or `null` for none.
+ *
+ * These become `Emulation.setSafeAreaInsetsOverride`, which is stricter than most
+ * of this file's targets and strict in both directions: a fractional or string
+ * inset is refused outright (`Invalid parameters`, which would reject the whole
+ * applier's round), a negative one is accepted and silently clamped to zero, and
+ * an absurd one is accepted *literally* — an inset of 100000 lays the page out
+ * inside a 100000px gutter. So integers, floored at 0 and capped, per side.
+ *
+ * All-zero collapses to `null`, keeping one representation of "no gutters" on
+ * this side of the wire too: the applier tests this to decide whether the shared
+ * debugger session is wanted at all, and two spellings of off would mean a
+ * session held for an override that does nothing.
+ */
+function safeAreaInsets(raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const side = (key) => {
+    const n = Number(raw[key]);
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(MAX_SAFE_AREA_PX, Math.max(0, Math.round(n)));
+  };
+  const insets = { top: side("top"), right: side("right"), bottom: side("bottom"), left: side("left") };
+  const any = insets.top !== 0 || insets.right !== 0 || insets.bottom !== 0 || insets.left !== 0;
+  return any ? insets : null;
 }
 
 /**

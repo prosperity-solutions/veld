@@ -955,6 +955,7 @@ describe("browser tabs", () => {
       ua: "Mozilla/5.0 (iPhone) Safari/604.1",
       fit: true,
       radius: 44,
+      safeArea: { top: 59, right: 0, bottom: 34, left: 0 },
     };
     const restored = restore({ id: "a", kind: "browser", title: "t", emulation, zoom: 1.25 });
     expect(restored?.emulation).toEqual(emulation);

@@ -87,6 +87,18 @@ export const MAX_DEVICE_RADIUS = 64;
 export const CUSTOM_RADIUS = 8;
 
 /**
+ * Ceiling on one safe-area inset, in the device's own pixels.
+ *
+ * Generous rather than tight — the largest real gutter is 62 — because the point
+ * of a bound here is that the number reaches Chromium at all: CDP accepts an
+ * inset of 100000 literally, and a page laid out inside a 100000px gutter is a
+ * pane you cannot get back without editing storage. Clamped rather than rejected
+ * ([`sanitizeSafeArea`]), since an inset that is merely too large is still
+ * recognisably an inset.
+ */
+export const MAX_SAFE_AREA_PX = 200;
+
+/**
  * Gap between the emulated screen and the pane's edge, in CSS pixels.
  *
  * Not decoration, and it carries three jobs. Without it an emulated viewport
@@ -148,6 +160,80 @@ export const MIN_DEVICE_PADDING =
     HANDLE_CORNER_GAP + HANDLE_CORNER_SIZE + HANDLE_CORNER_HIT_BLEED,
   ) + 1;
 
+// ---------------------------------------------------------------------------
+// Safe-area insets
+// ---------------------------------------------------------------------------
+//
+// The gutters a real handset reserves for its sensor housing and its home
+// indicator, which a page reads as `env(safe-area-inset-*)`. A layout that pins
+// a header to the top or a bar to the bottom is written against these, and until
+// they were emulated the only way to see whether that worked was on a phone.
+//
+// **What Chromium already reports without any of this.** Not "undefined" — the
+// four variables exist and are `0px`. Measured on Electron 43 with an
+// `env(x, 99px)` fallback probe plus a control on a variable that genuinely does
+// not exist, so the probe is known to be able to say UNDEF and never did. That
+// settles what "off" means here: a page written as
+// `env(safe-area-inset-top, 12px)` sees `0px` whether or not this feature is on,
+// so absent insets, explicitly-zero insets, and never-overridden insets are one
+// state to the page, and `null` is allowed to be the single representation of it
+// (the same load-bearing `null` [`PaneMedia`] has — it is what lets the shell
+// release the CDP session).
+
+/** The four gutters, in the device's own CSS pixels. */
+export interface SafeAreaInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
+}
+
+/** A device class's gutters, held each way up. */
+export interface PresetInsets {
+  portrait: SafeAreaInsets;
+  landscape: SafeAreaInsets;
+}
+
+/**
+ * The gutters each size class reserves, portrait and landscape.
+ *
+ * **Two orientations rather than one plus a rotation, because no rotation of the
+ * portrait numbers produces the landscape ones.** Turn a notched handset
+ * sideways and three separate things happen: the sensor-housing inset appears on
+ * *both* the left and the right (so the page does not reflow when you flip the
+ * device end-for-end), the home indicator shrinks (34 → 21, it is a shorter bar
+ * in landscape), and the top drops to nothing. A geometric transform of
+ * `{top, right, bottom, left}` can produce none of that, which is why
+ * [`rotateEmulation`] re-reads this table instead of turning the four numbers.
+ *
+ * Values are what a current device of each class actually reports, on the same
+ * terms as the sizes and the radii above: these are the notch/Dynamic-Island
+ * numbers, which are both the larger set and the one `env(safe-area-inset-*)`
+ * exists for. A layout that survives these survives an Android handset's
+ * edge-to-edge insets, which are smaller.
+ *
+ * Tablets are deliberately the same both ways up, and that is not an oversight:
+ * a tablet has no sensor-housing inset at all, only a home indicator, and its
+ * "bottom" rotates with the device — so unlike a phone there is nothing for a
+ * rotation to move.
+ */
+const SMALL_PHONE_INSETS: PresetInsets = {
+  portrait: { top: 47, right: 0, bottom: 34, left: 0 },
+  landscape: { top: 0, right: 47, bottom: 21, left: 47 },
+};
+const PHONE_INSETS: PresetInsets = {
+  portrait: { top: 59, right: 0, bottom: 34, left: 0 },
+  landscape: { top: 0, right: 59, bottom: 21, left: 59 },
+};
+const LARGE_PHONE_INSETS: PresetInsets = {
+  portrait: { top: 62, right: 0, bottom: 34, left: 0 },
+  landscape: { top: 0, right: 62, bottom: 21, left: 62 },
+};
+const TABLET_INSETS: PresetInsets = {
+  portrait: { top: 0, right: 0, bottom: 20, left: 0 },
+  landscape: { top: 0, right: 0, bottom: 20, left: 0 },
+};
+
 export interface DevicePreset {
   id: string;
   label: string;
@@ -183,6 +269,19 @@ export interface DevicePreset {
    * someone forgot to scale.
    */
   radius: number;
+  /**
+   * The gutters this class reserves, or `null` for a device that reserves none.
+   *
+   * `radius`'s sibling, and for the same reason — both are this class imitating
+   * the *shape* of the thing it stands for. The difference is what they are worth:
+   * the radius is how the pane looks, while these are a number the page can read,
+   * so a layout pinned to the safe area can be tested rather than only looked at.
+   *
+   * The screen classes carry `null` on purpose. A monitor has no sensor housing
+   * and no home indicator, and claiming a gutter it does not have would make
+   * every screen preset a worse desktop than the pane it replaced.
+   */
+  insets: PresetInsets | null;
   /**
    * UA template, or `null` to keep the shell's own.
    *
@@ -250,6 +349,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 780,
     deviceScaleFactor: 3,
     radius: 36,
+    insets: SMALL_PHONE_INSETS,
     mobile: true,
     touch: true,
     ua: MOBILE_UA,
@@ -262,6 +362,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 874,
     deviceScaleFactor: 3,
     radius: 44,
+    insets: PHONE_INSETS,
     mobile: true,
     touch: true,
     ua: MOBILE_UA,
@@ -274,6 +375,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 956,
     deviceScaleFactor: 3,
     radius: 48,
+    insets: LARGE_PHONE_INSETS,
     mobile: true,
     touch: true,
     ua: MOBILE_UA,
@@ -286,6 +388,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 1133,
     deviceScaleFactor: 2,
     radius: 20,
+    insets: TABLET_INSETS,
     mobile: true,
     touch: true,
     ua: TABLET_UA,
@@ -298,6 +401,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 1180,
     deviceScaleFactor: 2,
     radius: 22,
+    insets: TABLET_INSETS,
     mobile: true,
     touch: true,
     ua: TABLET_UA,
@@ -310,6 +414,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 1366,
     deviceScaleFactor: 2,
     radius: 22,
+    insets: TABLET_INSETS,
     mobile: true,
     touch: true,
     ua: TABLET_UA,
@@ -325,6 +430,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 982,
     deviceScaleFactor: 2,
     radius: 10,
+    insets: null,
     mobile: false,
     touch: false,
     ua: null,
@@ -337,6 +443,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 1080,
     deviceScaleFactor: 1,
     radius: 8,
+    insets: null,
     mobile: false,
     touch: false,
     ua: null,
@@ -349,6 +456,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     height: 1440,
     deviceScaleFactor: 1,
     radius: 8,
+    insets: null,
     mobile: false,
     touch: false,
     ua: null,
@@ -393,6 +501,22 @@ export interface PaneEmulation {
   fit: boolean;
   /** Screen corner radius in the device's own pixels; see `DevicePreset.radius`. */
   radius: number;
+  /**
+   * The gutters the page reads as `env(safe-area-inset-*)`, or `null` for none.
+   *
+   * **Resolved numbers, not a flag plus a lookup** — the same rule as the size and
+   * the radius, and for the reason this file's header gives: a stored flag whose
+   * numbers come from the preset table at apply time means a build that revises
+   * [`PHONE_INSETS`] silently changes what an old layout was emulating. So the
+   * four numbers travel with the tab, and [`rotateEmulation`] re-reads the table
+   * only because a rotation is a thing the user just did, not a restore.
+   *
+   * `null` rather than four zeros, even though a page cannot tell those apart
+   * (see the section comment above), because the shell tests this to decide
+   * whether the CDP session is wanted at all — exactly as it tests `PaneMedia`.
+   * One representation for "off" is what lets the debugger be released.
+   */
+  safeArea: SafeAreaInsets | null;
 }
 
 /** An emulation from a preset. `chrome` fills the UA template's `{chrome}`. */
@@ -411,6 +535,17 @@ export function emulationForPreset(
     ua: preset.ua === null ? null : resolveUserAgent(preset.ua, opts.chrome),
     fit: opts.fit ?? true,
     radius: preset.radius,
+    // Read for the orientation being applied, not rotated afterwards: see
+    // [`PresetInsets`] for why the two sets are held separately.
+    //
+    // Keyed off the *resulting shape*, not off `opts.landscape`. Those answer the
+    // same question only while every insets-bearing row is portrait-shaped, which
+    // is true of the table today and is a property of nothing: give a
+    // natively-landscape class gutters — a foldable held open, a laptop — and this
+    // would build it with the portrait set while [`orientationOf`], which every
+    // other reader uses, called it landscape. The two would then disagree, and
+    // toggling the gutters off and on would flip the set with no rotation.
+    safeArea: preset.insets === null ? null : preset.insets[presetOrientation(preset, landscape)],
   };
 }
 
@@ -426,7 +561,7 @@ export function customEmulation(
   height: number,
   base?: PaneEmulation | null,
 ): PaneEmulation {
-  return {
+  const next: PaneEmulation = {
     device: CUSTOM_DEVICE,
     width: clampDevicePx(width),
     height: clampDevicePx(height),
@@ -438,7 +573,15 @@ export function customEmulation(
     // A hand-entered size is a *window* unless it inherited a device's shape:
     // rounding a viewport nobody claimed is a phone would be decoration.
     radius: base?.radius ?? CUSTOM_RADIUS,
+    // Inherited for the same reason the touch flag is: nudging a phone's width by
+    // 10px must not quietly take its gutters away. Nothing when there is no base —
+    // a viewport nobody called a handset has no sensor housing to reserve for.
+    safeArea: base?.safeArea ?? null,
   };
+  // Typing a landscape size into the custom fields turns the device over exactly as
+  // dragging past square does, so the gutters follow the shape here too — see
+  // [`reorientSafeArea`], which is a no-op unless the orientation actually changed.
+  return base == null ? next : reorientSafeArea(base, next);
 }
 
 /**
@@ -462,6 +605,10 @@ export function responsiveEmulation(width: number, height: number): PaneEmulatio
     // than cropping it — the same rule as a screen preset too big for the pane.
     fit: true,
     radius: CUSTOM_RADIUS,
+    // Nothing, on the same argument as the DPR and the user agent above: turning
+    // the resizable viewport on must change how wide the page is and nothing about
+    // how it behaves. The menu item is there if you want gutters at this size.
+    safeArea: null,
   };
 }
 
@@ -475,12 +622,17 @@ export function responsiveEmulation(width: number, height: number): PaneEmulatio
  * phone keeps its rounded screen.
  */
 export function resizeEmulation(e: PaneEmulation, width: number, height: number): PaneEmulation {
-  return {
+  // The gutters follow the shape, because dragging past square is the other way of
+  // turning a device over — see [`reorientSafeArea`]. Affordable here because this
+  // runs *once, on pointer release*: the per-frame path during a live drag is
+  // `previewBrowserResize` in `browserHost.ts`, which never touches the stored
+  // emulation at all.
+  return reorientSafeArea(e, {
     ...e,
     device: e.device === RESPONSIVE_DEVICE ? RESPONSIVE_DEVICE : CUSTOM_DEVICE,
     width: clampDevicePx(width),
     height: clampDevicePx(height),
-  };
+  });
 }
 
 /**
@@ -508,10 +660,258 @@ export function withMobileUserAgent(
   return { ...e, ua: resolveUserAgent(template, chrome) };
 }
 
+/** `portrait` / `landscape`, as the key into a [`PresetInsets`]. */
+function orientationOf(e: PaneEmulation): keyof PresetInsets {
+  return isLandscape(e) ? "landscape" : "portrait";
+}
+
+/** The same question for a preset row about to be applied, answered from the
+ *  shape it will produce rather than from the caller's flag — see
+ *  [`emulationForPreset`] for what disagreeing would cost. */
+function presetOrientation(preset: DevicePreset, landscape: boolean): keyof PresetInsets {
+  const width = landscape ? preset.height : preset.width;
+  const height = landscape ? preset.width : preset.height;
+  return width > height ? "landscape" : "portrait";
+}
+
+function sameInsets(a: SafeAreaInsets, b: SafeAreaInsets): boolean {
+  return a.top === b.top && a.right === b.right && a.bottom === b.bottom && a.left === b.left;
+}
+
+/**
+ * The class whose gutters these are, recognised by value.
+ *
+ * The one thing that survives a drag. `resizeEmulation` renames the device to
+ * [`CUSTOM_DEVICE`] while keeping every flag — "a phone dragged narrower is still
+ * a phone" — so after a drag the id no longer says which class the stored numbers
+ * came from, and the numbers are the only evidence left. Without this a dragged
+ * tablet rotated into landscape was handed a *phone's* landscape gutters: its
+ * home indicator became twin 59px side notches.
+ *
+ * A recognition, not a resolution: it recovers the label for numbers that are
+ * already stored, and returns `null` for a set no class in the table produces
+ * (a hand-edited one), whose owner then keeps exactly what they wrote. So this
+ * cannot silently restate what a stored layout emulates, which is what
+ * this file's header rules out.
+ *
+ * **One asymmetry follows from that, and is invisible from either function
+ * alone.** Revise a class's gutters — say a phone's top from 59 to 61 — and a
+ * stored layout that still resolves *by id* rotates into the new number, because
+ * [`insetPairFor`] takes the preset row first; a *dragged* one carrying the old
+ * numbers no longer matches any row, so it keeps them. The same table revision
+ * therefore restates one stored layout and not the other, decided by whether the
+ * user once dragged an edge. That is consistent with the deliberate rule that a
+ * rotation is a live user action and a restore is not — it is simply not
+ * symmetric, and it is worth knowing before reading a bug report about it.
+ *
+ * Ambiguity is harmless by construction — the three tablet classes share one
+ * inset pair, so matching any of them returns the same pair.
+ */
+function insetClassOf(insets: SafeAreaInsets): PresetInsets | null {
+  for (const preset of DEVICE_PRESETS) {
+    const pair = preset.insets;
+    if (pair === null) continue;
+    if (sameInsets(pair.portrait, insets) || sameInsets(pair.landscape, insets)) return pair;
+  }
+  return null;
+}
+
+/**
+ * What a preset *id* says about gutters, as three answers rather than two.
+ *
+ * - a [`PresetInsets`] — a known class that reserves gutters
+ * - `null` — a known class that reserves none, i.e. one of the screen presets
+ * - `undefined` — the id names no row in this build's table at all
+ *
+ * **The separation exists because `presetById(...)?.insets ?? FALLBACK` reads as
+ * one question and is two.** `??` fires on a row's own `null` as readily as on a
+ * missing row, so a screen preset — whose `insets` is deliberately `null` — was
+ * treated as having no class and inherited the phone set. Turning the gutters on
+ * for a 1920-wide monitor produced `0 / 59 / 21 / 59`: twin 59px side notches on a
+ * desktop, contradicting this file, the pane's own menu copy, the README and
+ * `llms-full.txt` at once.
+ *
+ * Split out so the two readers below cannot drift: they want *different* answers
+ * for `undefined` — the toggle defaults, a rotation keeps what it has — but the
+ * same answer for the other two, and there was previously nothing forcing an edit
+ * to one to be made in the other. Returning three values rather than two means the
+ * compiler asks each caller what it does with each.
+ */
+function presetInsetPair(id: string): PresetInsets | null | undefined {
+  const preset = presetById(id);
+  return preset === null ? undefined : preset.insets;
+}
+
+/**
+ * Both orientations of the gutters this emulation's *own* class reserves, or
+ * `null` where that cannot be answered — the rotation and resize reading.
+ *
+ * Falls back to recognising the class from the stored numbers, because a drag has
+ * by then renamed the device and the numbers are the only evidence left. See
+ * [`insetClassOf`].
+ */
+function insetPairFor(e: PaneEmulation): PresetInsets | null {
+  const known = presetInsetPair(e.device);
+  if (known !== undefined) return known;
+  return e.safeArea === null ? null : insetClassOf(e.safeArea);
+}
+
+/**
+ * The gutters "on" *would* mean for this emulation, held the way it is currently
+ * held, or `null` for a device that reserves none.
+ *
+ * **Named for the hypothetical deliberately.** An earlier `insetsFor` read as "the
+ * gutters this emulation has", which is `e.safeArea` and is not what this returns:
+ * this ignores `e.safeArea` entirely and resolves through the table every time, so
+ * a caller after the *current* state would silently get the would-be-on value on a
+ * pane whose gutters are switched off.
+ *
+ * The preset's own when there is one, so picking Phone and toggling its insets
+ * off and on again returns the numbers it arrived with — and `null` for a screen
+ * class, which reserves nothing and must not acquire a phone's gutters just
+ * because someone clicked the item ([`insetPairFor`]).
+ *
+ * Where there is no class at all — a hand-entered or dragged size — "on" means
+ * [`PHONE_INSETS`]. **The two paragraphs are disjoint cases, not competing rules**:
+ * a class that reserves nothing answers `null`, and only the *absence* of a class
+ * reaches the default below. Conflating them is what F1 was, so a reader who finds
+ * these two arguing with each other is reading a regression.
+ *
+ * The default follows the precedent [`withMobileUserAgent`] sets: the
+ * toggle has to name a default rather than be unavailable at the one size a fixed
+ * list cannot cover. Deliberately no width test on that: asking for phone gutters
+ * on a wide viewport is a strange-looking request and a legitimate one, since an
+ * installed PWA reads `env(safe-area-inset-*)` at whatever size its window is,
+ * and refusing it would be this function inventing a rule the CSS does not have.
+ */
+export function insetsIfEnabled(e: PaneEmulation): SafeAreaInsets | null {
+  const known = presetInsetPair(e.device);
+  // `undefined` is the only case that defaults; a known class reserving nothing
+  // answers `null` and must stay that way. See [`presetInsetPair`] for why those
+  // are two answers and not one.
+  const pair = known === undefined ? PHONE_INSETS : known;
+  return pair === null ? null : pair[orientationOf(e)];
+}
+
+/**
+ * Turn the safe-area gutters on or off.
+ *
+ * Touch's sibling, not the user agent's: both are a claim about the device that a
+ * page can *read*, and both are worth changing independently of the size, because
+ * "does my header clear the notch" and "does my layout survive this width" are
+ * different questions.
+ *
+ * Turning on a device that reserves nothing is a no-op by construction rather
+ * than by a guard — [`insetsIfEnabled`] answers `null` — so the pane disables the
+ * control there instead of offering one that does nothing.
+ *
+ * **What "on" cannot recover, and why that is a deferral rather than a design.**
+ * Switching off erases the numbers, and a drag has by then renamed the device to
+ * [`CUSTOM_DEVICE`], so on a dragged tablet an off-then-on round trip returns the
+ * *phone* set rather than the tablet's: with neither an id nor numbers there is
+ * nothing left to recover the class from. [`rotateEmulation`] keeps the class on
+ * that same emulation, because gutters still switched on are themselves the
+ * evidence — so the two menu items answer differently, and the difference is
+ * information loss rather than disagreement.
+ *
+ * This is **out of scope here, not correct.** Be clear about that, because the
+ * first draft of this comment argued it was fine on the grounds that the chip
+ * reads "Custom" by then, and that argument does not survive contact: "Custom" is
+ * the *size* label, it reads identically before and after the toggle, and it
+ * therefore cannot tell anyone that their tablet's gutters just became a phone's.
+ * This file's actual rule points the other way — [`resizeEmulation`] "keeps every
+ * flag … only the identity changes", and [`customEmulation`] inherits `safeArea`
+ * precisely so a 10px nudge cannot take it away — which makes the gutters the one
+ * behavioural claim that does *not* survive a rename. The pane says so where a
+ * user might read it (the device menu's own label), but as a consequence rather
+ * than a choice.
+ *
+ * The fix worth making is **not** a second persisted field: the class tag already
+ * exists and is `device`, which `resizeEmulation` throws away and [`insetClassOf`]
+ * then reconstructs from four numbers. Keeping the id through a drag and deriving
+ * "Custom" from a *size mismatch* against the row — [`emulationLabel`] holds both
+ * already — would answer this from `insetPairFor`'s first branch, delete
+ * `insetClassOf` rather than harden it, and remove the revision asymmetry that
+ * function documents. It is deferred because it is a redesign of what a dragged
+ * preset *is*, which reaches two controls with nothing to do with safe area (the
+ * device menu's tick and the pane bar's quick switch both test `device` for
+ * equality), and that is a change of its own and not a rider on this one.
+ * Meanwhile the behaviour is pinned by a test, so it is a known property.
+ */
+export function withSafeArea(e: PaneEmulation, on: boolean): PaneEmulation {
+  return { ...e, safeArea: on ? insetsIfEnabled(e) : null };
+}
+
+/** Whether this device reserves any gutters at all — false for a screen class.
+ *  What the pane's menu tests to decide whether the control means anything. */
+export function reservesSafeArea(e: PaneEmulation): boolean {
+  return insetsIfEnabled(e) !== null;
+}
+
+/**
+ * Carry `from`'s gutters onto `to`, re-read for the orientation `to` is held at.
+ *
+ * **Re-read, never transformed.** A real handset's landscape insets are not a
+ * rotation of its portrait ones — the sensor housing lands on both sides at once
+ * and the home indicator gets shorter — so [`PresetInsets`] holds both sets and
+ * this picks whichever matches the new shape.
+ *
+ * **Shared by all three functions that can change which way up a device is held**
+ * — [`rotateEmulation`], [`resizeEmulation`] and [`customEmulation`]. Rotating
+ * says so; dragging a portrait phone past square does the same thing without
+ * saying so; and *typing* 900 × 400 into the custom-size fields is the same act
+ * again. Each one left alone produced an emulation at odds with itself —
+ * `orientationLabel` reading "Landscape" over a 59px *top* gutter, a state no
+ * device can be in — and the third was missed on the first attempt precisely
+ * because this list read as exhaustive while naming two of them.
+ *
+ * Four things it must not do, each of which it did at some point: acquire gutters
+ * for a device that had them switched off (the first return); **touch the numbers
+ * at all when the orientation has not changed** (the second — a resize is not a
+ * rotation, and without it a 1px drag re-resolved through the table and could
+ * rewrite a stored set whose orientation disagreed with its shape, which is
+ * exactly the "silently restate what a stored layout emulates" this file's header
+ * forbids); hand a device *another class's* gutters (hence [`insetPairFor`]
+ * recovering the class by value rather than reaching for a default); and rewrite a
+ * set no class in the table produces, which belongs to whoever edited it (the
+ * *third* return — the fourth is the one that does the writing, and this label
+ * said "last" until round 2 inserted the orientation guard above it and shifted
+ * every ordinal below by one).
+ */
+function reorientSafeArea(from: PaneEmulation, to: PaneEmulation): PaneEmulation {
+  if (from.safeArea === null) return to;
+  if (orientationOf(from) === orientationOf(to)) return to;
+  const pair = insetPairFor(from);
+  if (pair === null) return to;
+  return { ...to, safeArea: pair[orientationOf(to)] };
+}
+
 /** Swap width and height. The preset id is kept: it is still that device, held
- *  the other way round, and [`isLandscape`] tells the label which way. */
+ *  the other way round, and [`isLandscape`] tells the label which way. The
+ *  gutters move with it — see [`reorientSafeArea`]. */
 export function rotateEmulation(e: PaneEmulation): PaneEmulation {
-  return { ...e, width: e.height, height: e.width };
+  return reorientSafeArea(e, { ...e, width: e.height, height: e.width });
+}
+
+/**
+ * `59 / 0 / 34 / 0` — the gutters in CSS order, top / right / bottom / left.
+ *
+ * **Always four, never a shortened form.** This began as `59 / 34` for the common
+ * case where the sides are zero, which is shorter and is misread by exactly the
+ * audience it is for: CSS's own two-value shorthand means *vertical / horizontal*,
+ * so a developer decodes `59 / 34` as "59 top and bottom, 34 left and right" —
+ * wrong on both halves, since there is no side inset at all in portrait and
+ * `top !== bottom` is the entire point of the number. The four-value form has no
+ * such collision: CSS's four-value order is universally this one. It is a menu
+ * readout, so a few extra characters cost nothing and the branch is gone.
+ *
+ * `null` when nothing is reserved, so the caller supplies its own word for that —
+ * the pane distinguishes "Off" (switched off, switchable back on) from "None" (a
+ * device with nothing to reserve).
+ */
+export function safeAreaLabel(insets: SafeAreaInsets | null): string | null {
+  if (insets === null) return null;
+  return `${insets.top} / ${insets.right} / ${insets.bottom} / ${insets.left}`;
 }
 
 /** Whether an emulation is wider than it is tall. Used for the label and to
@@ -853,7 +1253,41 @@ export function sanitizeEmulation(raw: unknown): PaneEmulation | null {
     // Absent means fitting, which is what every emulation this build writes does
     // and the only setting under which a screen preset is usable in a pane.
     fit: e.fit !== false,
+    // Absent means no gutters, which is what every emulation written before this
+    // existed was getting from Chromium anyway (`0px`, not undefined).
+    safeArea: sanitizeSafeArea(e.safeArea),
   };
+}
+
+/**
+ * Accept a stored inset set, or `null`.
+ *
+ * Clamped per side rather than all-or-nothing: the four are independent numbers
+ * and one bad one is no reason to drop the other three. A set that survives with
+ * every side at zero collapses to `null`, because that is the same state to the
+ * page (see the section comment) and the shell needs one representation of it to
+ * decide whether the CDP session is wanted.
+ *
+ * Integers, because CDP rejects a fractional inset outright — `Invalid
+ * parameters`, measured — and a rejected command would take the whole applier's
+ * round with it.
+ */
+export function sanitizeSafeArea(raw: unknown): SafeAreaInsets | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const source = raw as Record<string, unknown>;
+  const side = (key: keyof SafeAreaInsets): number => {
+    const n = Number(source[key]);
+    if (!Number.isFinite(n)) return 0;
+    return Math.min(MAX_SAFE_AREA_PX, Math.max(0, Math.round(n)));
+  };
+  const insets: SafeAreaInsets = {
+    top: side("top"),
+    right: side("right"),
+    bottom: side("bottom"),
+    left: side("left"),
+  };
+  const any = insets.top !== 0 || insets.right !== 0 || insets.bottom !== 0 || insets.left !== 0;
+  return any ? insets : null;
 }
 
 /** Accept a stored zoom factor, or `null` for "the pane was at 100%". Stored

@@ -110,11 +110,14 @@ import {
   nextColorScheme,
   orientationLabel,
   presetById,
+  reservesSafeArea,
   resizeEmulation,
   responsiveEmulation,
   rotateEmulation,
+  safeAreaLabel,
   withMediaFeature,
   withMobileUserAgent,
+  withSafeArea,
   zoomStep,
 } from "./devices";
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
@@ -1023,6 +1026,27 @@ export function BrowserPane(props: {
   const mediaSuspended =
     !iframeBackend && media !== null && !state.mediaActive && state.loaded;
 
+  // The third rider on that session, and the one this pattern matters most for:
+  // touch not working shows up the moment you drag and a colour scheme not
+  // applying is visible at a glance, but gutters that quietly read `0px` look
+  // exactly like a page with no notch to clear. Gated on the emulation because
+  // the gutters are stored on it — unlike the media features, which are a
+  // question about the page and have nothing to do with emulating a phone.
+  const safeAreaSuspended =
+    !iframeBackend &&
+    emulation?.safeArea != null &&
+    !state.safeAreaActive &&
+    state.loaded;
+
+  // A screen class reserves no gutters at all, so "on" would mean nothing there.
+  // The item goes inert with the reason beside it rather than staying clickable
+  // and silently doing nothing — but it stays live whenever the emulation *has*
+  // gutters regardless of its class (a hand-edited layout, or one stored by a
+  // build whose table said otherwise), because otherwise there would be no way
+  // left to switch them off.
+  const safeAreaOffered =
+    emulation !== null && (reservesSafeArea(emulation) || emulation.safeArea !== null);
+
   const applyEmulation = (next: PaneEmulation | null) => {
     setBrowserEmulation(id, next);
     // `undefined`, not `null`: "no device" is the absence of the field, so a tab
@@ -1749,8 +1773,8 @@ export function BrowserPane(props: {
                       // split this block's own comment states — so the copy has to make
                       // it too, the way every other control on this bar does. Claiming
                       // touch here would be the one unhedged promise on the bar.
-                      `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height} — the size is real here; touch and the mobile user agent need the desktop app`
-                    : `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height}, touch and a mobile user agent — drag its edges from there`
+                      `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height} — the size is real here; touch, safe-area insets and the mobile user agent need the desktop app`
+                    : `${quickPreset.label}: ${quickPreset.width} × ${quickPreset.height}, touch, safe-area insets and a mobile user agent — drag its edges from there`
             }
           >
             <ActionIcon
@@ -1764,14 +1788,20 @@ export function BrowserPane(props: {
               // Branch for branch with the tooltip above, deliberately: the two
               // saying different things about what an iframe can give you is the
               // exact failure the rule in the comment above describes.
+              //
+              // **These strings enumerate what the click applies, so a preset
+              // gaining a property means editing all four of them** — the two
+              // above and the two here. Safe-area insets were added to the phone
+              // preset and to none of the four, which is `bbaa9b7`'s defect
+              // (a tooltip, then the `aria-label` beside it) a third time.
               aria-label={
                 quickOn
                   ? `Turn off ${quickPreset.label}`
                   : emulation
                     ? `Replace ${emulationLabel(emulation)}, ${emulationSize(emulation)}, with ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}`
                     : iframeBackend
-                      ? `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height} — the size only; touch and the mobile user agent need the desktop app`
-                      : `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}, with touch and a mobile user agent`
+                      ? `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height} — the size only; touch, safe-area insets and the mobile user agent need the desktop app`
+                      : `Emulate ${quickPreset.label}, ${quickPreset.width} × ${quickPreset.height}, with touch, safe-area insets and a mobile user agent`
               }
               aria-pressed={quickOn}
               onClick={() => (quickOn ? applyEmulation(null) : applyPreset(quickPreset))}
@@ -1994,6 +2024,53 @@ export function BrowserPane(props: {
                     >
                       Touch events
                     </Menu.Item>
+                    {/* Touch's sibling rather than the user agent's: both are a
+                    claim about the device that the page can *read*. A preset
+                    brings its class's real gutters (a phone's 59/34, a tablet's
+                    home indicator, nothing at all for a monitor), and this is
+                    what compares the layout with and without them. On a custom
+                    or responsive size, where there is no class to inherit from,
+                    "on" means the phone set — the same answer the mobile user
+                    agent gives to the same problem. */}
+                    <Menu.Item
+                      closeMenuOnClick={false}
+                      leftSection={
+                        emulation?.safeArea ? <IconCheck size={14} /> : undefined
+                      }
+                      disabled={!emulation || iframeBackend || !safeAreaOffered}
+                      onClick={() =>
+                        emulation &&
+                        applyEmulation(
+                          withSafeArea(emulation, emulation.safeArea === null),
+                        )
+                      }
+                      rightSection={
+                        <span className="menu-size faint">
+                          {/* "None" and "Off" are different answers and the
+                          difference is the whole point: one is a device that
+                          reserves nothing, the other is a device whose gutters
+                          you have switched off and can switch back on. */}
+                          {emulation
+                            ? (safeAreaLabel(emulation.safeArea) ??
+                              (safeAreaOffered ? "Off" : "None"))
+                            : ""}
+                        </span>
+                      }
+                    >
+                      Safe area insets
+                    </Menu.Item>
+                    {/* Stated, not merely disabled. A monitor has no sensor
+                    housing and no home indicator, so claiming a gutter would make
+                    every screen preset a worse desktop than the pane it replaced —
+                    and the way to get gutters at this size is a drag away, since a
+                    dragged preset becomes a custom size, which has no class to
+                    inherit from and therefore takes the phone set. */}
+                    {emulation && !iframeBackend && !safeAreaOffered && (
+                      <Menu.Label>
+                        A screen reserves no safe area — pick a phone or tablet, or
+                        drag an edge for a custom size
+                      </Menu.Label>
+                    )}
                     {/* Separate from the size, because "does my app serve the mobile
                     bundle at this width" and "does my layout survive this width" are
                     different questions — and a responsive or custom size has no
@@ -2039,6 +2116,16 @@ export function BrowserPane(props: {
                     {touchSuspended && (
                       <Menu.Label>
                         Touch is paused — Chromium's debugger is in use
+                        elsewhere
+                      </Menu.Label>
+                    )}
+                    {/* Same session, same honesty. Worth saying out loud here
+                    because the page cannot: `env(safe-area-inset-top)` falls back
+                    to `0px`, which is indistinguishable from a device that
+                    reserves nothing. */}
+                    {safeAreaSuspended && (
+                      <Menu.Label>
+                        Safe area is paused — Chromium's debugger is in use
                         elsewhere
                       </Menu.Label>
                     )}
@@ -2193,8 +2280,8 @@ export function BrowserPane(props: {
 
                     {iframeBackend && (
                       <Menu.Label>
-                        Sizes work in a browser tab; user agent, touch and zoom
-                        need the desktop app
+                        Sizes work in a browser tab; user agent, touch, safe
+                        area and zoom need the desktop app
                       </Menu.Label>
                     )}
                   </div>

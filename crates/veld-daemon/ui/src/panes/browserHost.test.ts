@@ -19,6 +19,7 @@ const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   resizing: false,
   touchActive: false,
   mediaActive: false,
+  safeAreaActive: false,
   devToolsOpen: false,
   ...over,
 });
