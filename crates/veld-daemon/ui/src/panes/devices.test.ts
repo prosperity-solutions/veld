@@ -261,6 +261,18 @@ describe("safe-area insets", () => {
     const e = emulationForPreset(presetById("phone")!);
     expect(resizeEmulation(e, 380, 800).safeArea).toEqual(e.safeArea);
     expect(customEmulation(380, 800, e).safeArea).toEqual(e.safeArea);
+    // But a drag *past square* is the other way of turning a device over, so the
+    // gutters follow the shape. Leaving them alone gave an emulation at odds with
+    // itself: `orientationLabel` reading "Landscape" over a 59px top gutter, which
+    // is a state no handset can be in.
+    const wide = resizeEmulation(e, 900, 400);
+    expect(isLandscape(wide)).toBe(true);
+    expect(wide.safeArea).toEqual({ top: 0, right: 59, bottom: 21, left: 59 });
+    // And back again, which is only a round trip because the class is recovered
+    // from the numbers once the id has become `custom`.
+    expect(resizeEmulation(wide, 402, 874).safeArea).toEqual(e.safeArea);
+    // A device with its gutters off does not acquire any by being dragged.
+    expect(resizeEmulation(withSafeArea(e, false), 900, 400).safeArea).toBeNull();
     // The resizable viewport is deliberately a plain desktop viewport: turning it
     // on must change how wide the page is and nothing about how it behaves.
     expect(responsiveEmulation(600, 400).safeArea).toBeNull();
@@ -286,6 +298,33 @@ describe("safe-area insets", () => {
     // turning the whole feature off by accident.
     for (const preset of DEVICE_PRESETS.filter((p) => p.group !== "Screens")) {
       expect(withSafeArea(emulationForPreset(preset), true).safeArea).not.toBeNull();
+    }
+  });
+
+  it("keeps every class's inset sets distinguishable, which is what rotation relies on", () => {
+    // `insetClassOf` recovers a dragged device's class by deep-equalling its stored
+    // four numbers against the table, because `resizeEmulation` has by then renamed
+    // the device to `custom` and the numbers are the only evidence left. That is
+    // only sound while no two *different* classes share an orientation set — add a
+    // preset whose gutters duplicate another class's and a dragged one of the two
+    // silently rotates into the other's. Nothing but this asserts it, and the
+    // failure is invisible: the wrong numbers are still plausible numbers.
+    //
+    // Classes sharing one pair outright are fine and intended (the three tablets
+    // do), because recovering any of them returns the same pair.
+    const pairs = DEVICE_PRESETS.map((p) => p.insets).filter((i) => i !== null);
+    const key = (i: { top: number; right: number; bottom: number; left: number }) =>
+      `${i.top},${i.right},${i.bottom},${i.left}`;
+    for (const a of pairs) {
+      for (const b of pairs) {
+        if (key(a.portrait) === key(b.portrait) && key(a.landscape) === key(b.landscape)) continue;
+        // Different pairs: no orientation of one may equal any orientation of the other.
+        for (const oa of [a.portrait, a.landscape]) {
+          for (const ob of [b.portrait, b.landscape]) {
+            expect(key(oa)).not.toBe(key(ob));
+          }
+        }
+      }
     }
   });
 

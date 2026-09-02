@@ -610,12 +610,17 @@ export function responsiveEmulation(width: number, height: number): PaneEmulatio
  * phone keeps its rounded screen.
  */
 export function resizeEmulation(e: PaneEmulation, width: number, height: number): PaneEmulation {
-  return {
+  // The gutters follow the shape, because dragging past square is the other way of
+  // turning a device over — see [`reorientSafeArea`]. Affordable here because this
+  // runs *once, on pointer release*: the per-frame path during a live drag is
+  // `previewBrowserResize` in `browserHost.ts`, which never touches the stored
+  // emulation at all.
+  return reorientSafeArea(e, {
     ...e,
     device: e.device === RESPONSIVE_DEVICE ? RESPONSIVE_DEVICE : CUSTOM_DEVICE,
     width: clampDevicePx(width),
     height: clampDevicePx(height),
-  };
+  });
 }
 
 /**
@@ -739,27 +744,37 @@ export function withSafeArea(e: PaneEmulation, on: boolean): PaneEmulation {
 }
 
 /**
- * Swap width and height. The preset id is kept: it is still that device, held
- * the other way round, and [`isLandscape`] tells the label which way.
+ * Carry `from`'s gutters onto `to`, re-read for the orientation `to` is held at.
  *
- * **The gutters are re-read, not turned.** A real handset's landscape insets are
- * not a rotation of its portrait ones — the sensor housing lands on both sides at
- * once and the home indicator gets shorter — so [`PresetInsets`] holds both sets
- * and this picks the other one.
+ * **Re-read, never transformed.** A real handset's landscape insets are not a
+ * rotation of its portrait ones — the sensor housing lands on both sides at once
+ * and the home indicator gets shorter — so [`PresetInsets`] holds both sets and
+ * this picks whichever matches the new shape.
  *
- * Three things it must not do, each of which it did at some point:
- * acquire gutters for a device that had them switched off (hence the first
- * return); hand a dragged device *another class's* gutters (hence
- * [`insetPairFor`] recovering the class by value rather than defaulting); and
- * rewrite a set no class in the table produces, which belongs to whoever edited
- * it (hence the second return).
+ * Shared by [`rotateEmulation`] and [`resizeEmulation`] because both change which
+ * way up a device is held: rotating says so, and dragging a portrait phone past
+ * square does the same thing without saying so. Leaving the second alone produced
+ * an emulation at odds with itself — `orientationLabel` reading "Landscape" over a
+ * 59px *top* gutter, which is a state no device can be in.
+ *
+ * Three things it must not do, each of which it did at some point: acquire gutters
+ * for a device that had them switched off (the first return); hand a device
+ * *another class's* gutters (hence [`insetPairFor`] recovering the class by value
+ * rather than reaching for a default); and rewrite a set no class in the table
+ * produces, which belongs to whoever edited it (the second return).
  */
+function reorientSafeArea(from: PaneEmulation, to: PaneEmulation): PaneEmulation {
+  if (from.safeArea === null) return to;
+  const pair = insetPairFor(from);
+  if (pair === null) return to;
+  return { ...to, safeArea: pair[orientationOf(to)] };
+}
+
+/** Swap width and height. The preset id is kept: it is still that device, held
+ *  the other way round, and [`isLandscape`] tells the label which way. The
+ *  gutters move with it — see [`reorientSafeArea`]. */
 export function rotateEmulation(e: PaneEmulation): PaneEmulation {
-  const rotated = { ...e, width: e.height, height: e.width };
-  if (e.safeArea === null) return rotated;
-  const pair = insetPairFor(e);
-  if (pair === null) return rotated;
-  return { ...rotated, safeArea: pair[orientationOf(rotated)] };
+  return reorientSafeArea(e, { ...e, width: e.height, height: e.width });
 }
 
 /** `59 / 34` — the gutters, top-and-bottom first, in the order a reader scans a
