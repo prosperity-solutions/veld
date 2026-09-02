@@ -6,7 +6,9 @@ import {
   availableFonts,
   firstFamily,
   fontAvailable,
+  fontHasLigatures,
   matchFont,
+  showsLigatureRow,
 } from "./terminalFonts";
 
 describe("font lists", () => {
@@ -78,5 +80,69 @@ describe("matchFont", () => {
 
   it("returns null for a custom value", () => {
     expect(matchFont("Comic Mono, monospace", opts)).toBeNull();
+  });
+});
+
+describe("fontHasLigatures", () => {
+  it("answers from the flag for a font we offer", () => {
+    // Both bundled fonts, and exactly one system font, are the ligature-capable
+    // ones. Asserted through the resolver rather than by reading the flag, so the
+    // stack-matching is covered too.
+    for (const f of BUNDLED_FONTS) {
+      expect(fontHasLigatures(f.stack, BUNDLED_FONTS)).toBe(true);
+    }
+    expect(fontHasLigatures("Menlo, ui-monospace, monospace", SYSTEM_FONTS)).toBe(
+      false,
+    );
+    expect(
+      fontHasLigatures('"Cascadia Code", ui-monospace, monospace', SYSTEM_FONTS),
+    ).toBe(true);
+  });
+
+  it("answers null — never false — for a family it cannot classify", () => {
+    // The load-bearing case. Nothing in a browser can read a font's OpenType
+    // tables, and these ligatures are width-preserving so measuring cannot
+    // substitute. `null` is what keeps the dialog showing the control for
+    // Iosevka, Monaspace, a Nerd-Font patch — all of which do have ligatures.
+    expect(fontHasLigatures("Iosevka, monospace", SYSTEM_FONTS)).toBeNull();
+    expect(fontHasLigatures("", SYSTEM_FONTS)).toBeNull();
+  });
+
+  it("matches the first family, so an added fallback still counts", () => {
+    // A user who appends a fallback to a listed font has still chosen that font;
+    // `matchFont` would call the stack custom, which would lose the answer.
+    expect(matchFont('"Fira Code Variable", Menlo', BUNDLED_FONTS)).toBeNull();
+    expect(fontHasLigatures('"Fira Code Variable", Menlo', BUNDLED_FONTS)).toBe(
+      true,
+    );
+  });
+
+  it("ignores quoting and case in the family name", () => {
+    expect(fontHasLigatures("menlo", SYSTEM_FONTS)).toBe(false);
+    expect(fontHasLigatures("'Cascadia Code'", SYSTEM_FONTS)).toBe(true);
+  });
+});
+
+describe("showsLigatureRow", () => {
+  it("hides the row only for a font we classify as incapable", () => {
+    expect(showsLigatureRow("Menlo, ui-monospace, monospace", SYSTEM_FONTS)).toBe(
+      false,
+    );
+    expect(showsLigatureRow(BUNDLED_FONTS[0].stack, BUNDLED_FONTS)).toBe(true);
+  });
+
+  it("shows the row for a family it cannot classify", () => {
+    // The assertion that makes `!== false` load-bearing. Tightening the gate to
+    // `=== true` passes every test above and fails these two: a ligature font we
+    // do not list would lose its control, along with any stored preference.
+    expect(showsLigatureRow("Iosevka, monospace", SYSTEM_FONTS)).toBe(true);
+    expect(showsLigatureRow('"Victor Mono", monospace', SYSTEM_FONTS)).toBe(true);
+  });
+
+  it("shows the row before the settings document has arrived", () => {
+    // The dialog passes `""` while `/api/settings` is still in flight. That is an
+    // unknown font, not an incapable one, so it takes the showing side — the same
+    // direction as every other unknown here.
+    expect(showsLigatureRow("", SYSTEM_FONTS)).toBe(true);
   });
 });

@@ -30,7 +30,14 @@
 //!   **unvalidated**, since `Unknown` accepts anything within its size bounds.
 //!
 //! The dialog then renders it and `veld settings` lists, gets, sets and describes
-//! it, with no further change anywhere. A shape the bundle has never heard of
+//! it, with no further change anywhere — for a setting whose row is a control over
+//! a value. A row whose *visibility* turns on something no catalog can state is
+//! the standing exception, and it is a bundle-side edit: a battery-only row is
+//! filtered in the dialog's `HARDWARE_GATES`, and one that depends on a property of
+//! a chosen value — whether the selected font can draw ligatures, which the daemon
+//! cannot know, since it stores a font-family string and never sees a font file —
+//! in its capability gates. Both are keyed by the strings this module owns, which
+//! is what `every_setting_the_dialog_names_by_hand_exists` below is guarding. A shape the bundle has never heard of
 //! renders as a visible "unsupported control" row rather than vanishing — the one
 //! failure mode worth engineering against here is a setting that exists in Rust
 //! and is *invisible* in the UI.
@@ -865,6 +872,32 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            // Sits under the font rather than beside the cursor: it configures what
+            // the *font* does, and the client hides it for a font it knows cannot.
+            // See `SettingKey::ALL`.
+            //
+            // `!=` and `===` rather than the obvious `->`: the UI font combines the
+            // dash-arrow family itself, so a literal `->` reaches the reader as `→`
+            // — one example already combined, in the help for a switch that is off.
+            // Both bundled terminal fonts combine these two and the UI font leaves
+            // them alone, so the sentence shows what it says.
+            //
+            // "symbol", not "glyph": in both bundled faces `calt` reaches only
+            // `SingleSubst` lookups, so `!=` becomes two alternate glyphs — a left
+            // half and a right half — rather than one merged glyph. That is exactly
+            // why the advance widths hold and the grid stays still. So these are
+            // strictly contextual alternates and not ligatures at all; the title
+            // keeps the word anyway, because that is what the font vendors and
+            // every editor call them and it is the word somebody hunting for this
+            // setting knows. Phrased as JetBrains' IDEs phrase it, which is where
+            // most people will have met the option — the "Enable" is redundant
+            // beside a switch, and is the price of matching what they searched for.
+            Self::TerminalLigatures => toggle_in(
+                "Enable font ligatures",
+                "Whether sequences like != and === are drawn as one combined symbol.",
+                Terminal,
+                APPEARANCE,
+            ),
             Self::TerminalCursorStyle => Spec {
                 title: "Cursor",
                 help: "The shape of a terminal's cursor. A full-screen program that sets its own \
@@ -884,7 +917,6 @@ impl SettingKey {
                 Terminal,
                 APPEARANCE,
             ),
-
             // ── Terminal › Behaviour ─────────────────────────────────────────
             Self::TerminalShell => Spec {
                 title: "Shell",
@@ -1648,16 +1680,19 @@ mod bundle_tests {
     /// exists in the catalog.
     ///
     /// **The one drift this change did not remove, gated.** The dialog now takes
-    /// every title, help string, bound and allowed value off the wire — but four
+    /// every title, help string, bound and allowed value off the wire — but five
     /// of its maps are still keyed by Rust-owned *strings*: `OVERRIDES` and
-    /// `TRAILING_ROWS` by setting key, `HARDWARE_GATES` by setting key, and
-    /// `SECTION_BLURBS` by section heading **prose**. Nothing in TypeScript can
-    /// check them, and every failure is silent in the worst direction:
+    /// `TRAILING_ROWS` by setting key, `HARDWARE_GATES` and `CAPABILITY_GATES` by
+    /// setting key, and `SECTION_BLURBS` by section heading **prose**. Nothing in
+    /// TypeScript can check them, and every failure is silent in the worst
+    /// direction:
     ///
     /// - a renamed key drops a bespoke control back to the generic one, so
     ///   `terminal.shell` would render as a plain text box;
     /// - a renamed key drops a hardware gate, so a battery-only row appears on a
     ///   desktop;
+    /// - a renamed key drops a capability gate, so the ligature row appears on
+    ///   every font — Menlo included — offering a switch that cannot do anything;
     /// - a reworded heading drops its explanatory blurb, and the section still
     ///   renders, so nothing looks broken.
     ///
@@ -1676,6 +1711,7 @@ mod bundle_tests {
             ("OVERRIDES", &keys, "setting"),
             ("TRAILING_ROWS", &keys, "setting"),
             ("HARDWARE_GATES", &keys, "setting"),
+            ("CAPABILITY_GATES", &keys, "setting"),
             ("SECTION_BLURBS", &sections, "section heading"),
         ] {
             let body = dialog

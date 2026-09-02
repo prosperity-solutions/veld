@@ -27,6 +27,11 @@
  * - **Hardware facts.** Whether this machine has a battery is not a preference and
  *   no daemon catalog describes it as one, so the battery rows are filtered
  *   client-side in {@link HARDWARE_GATES}.
+ * - **Facts about a chosen value that only the client can know.** Whether the
+ *   selected font can draw ligatures is a property of a font file the daemon never
+ *   sees — it stores a CSS font-family string — so that row is filtered in
+ *   {@link CAPABILITY_GATES}. Same shape as the hardware gates and the same rule:
+ *   an unknown answer shows the row rather than hiding it.
  *
  * A shape this build has never heard of renders as a visible "cannot show this"
  * row rather than vanishing (`Unsupported` below). That is the one failure mode
@@ -106,6 +111,7 @@ import { Modal } from "./dialogs";
 import {
   availableFonts,
   matchFont,
+  showsLigatureRow,
   type TerminalFont,
 } from "../shared/terminalFonts";
 import {
@@ -1259,6 +1265,52 @@ const HARDWARE_GATES: Record<string, (m: Machine) => boolean> = {
 };
 
 /**
+ * Settings that only apply to what the *current* settings have selected.
+ *
+ * A third gate, beside the catalog's `requires` and {@link HARDWARE_GATES}, and it
+ * exists because neither of those can ask this question. `requires` compares
+ * another setting's stored value for equality — but "the chosen font can draw
+ * them" is not a value of any setting, it is a property of the font behind one.
+ * And the daemon cannot answer it: it stores a CSS font-family string and never
+ * sees a font file, so the knowledge has to sit next to the font list, which is
+ * here in the bundle.
+ *
+ * **Unmounts rather than disables**, which is the `worktree.storageDir` direction
+ * and not the `backup.enabled` one: a ligature switch under Menlo is not a
+ * disabled control, it is a question with nowhere to land — the same reading
+ * {@link HARDWARE_GATES} takes for a battery setting on a desktop. The daemon
+ * still stores and validates the key, so `veld settings set terminal.ligatures`
+ * works whatever font is selected; this hides a control, never a capability.
+ *
+ * A hidden row can therefore sit over a stored `true`. That is deliberate and
+ * harmless — the value is inert on a font that cannot draw them, and it comes back
+ * as it was when a font that has them is selected again, which is better than
+ * silently rewriting a preference the user set.
+ */
+type CapabilityGate = (
+  settings: SettingsDoc | null,
+  fonts: TerminalFont[],
+) => boolean;
+
+// The type is named rather than inlined so the declaration fits on one line, like
+// the four maps above it — and it has to. The Rust tripwire that checks these keys
+// (`every_setting_the_dialog_names_by_hand_exists`) finds a map by its declaration
+// and then skips exactly the *first* line to reach the entries. A multi-line
+// `Record<…>` type would leave a colon-bearing type line where an entry belongs,
+// and that tripwire fails loudly on a shape it cannot parse rather than skipping
+// it. For the same reason, do not write this map's name after the word `const`
+// anywhere above — including in a comment, which is how this note first broke it.
+const CAPABILITY_GATES: Record<string, CapabilityGate> = {
+  // The three-way rule and its `!== false` comparison live in `showsLigatureRow`,
+  // which is exported and tested; what belongs here is only the reach into the
+  // settings document. `?? ""` covers the document not having arrived yet, and an
+  // empty stack matches nothing — so a not-yet-loaded dialog reads as unknown and
+  // shows the row, the same side every other unknown lands on.
+  "terminal.ligatures": (settings, fonts) =>
+    showsLigatureRow(asString(settings?.["terminal.fontFamily"] ?? ""), fonts),
+};
+
+/**
  * The panel scrolls, the sidebar and the footnote do not — the same inner-scroll
  * shape `NewWorktreeDialog` uses, and for the same reason: with the modal body as
  * the scroller, choosing a group would scroll the sidebar out of reach of the next
@@ -1415,6 +1467,8 @@ export function SettingsDialog(props: {
       if (entry.group !== groupId) continue;
       const hardware = HARDWARE_GATES[entry.key];
       if (hardware && !hardware(machine)) continue;
+      const capable = CAPABILITY_GATES[entry.key];
+      if (capable && !capable(settings, fonts)) continue;
 
       // Two shapes of dependency, two behaviours — today's, decided from the
       // catalog rather than from a list of keys kept in step by hand. A boolean

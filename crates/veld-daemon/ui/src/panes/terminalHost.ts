@@ -257,6 +257,54 @@ export function applyTerminalTheme(theme: "dark" | "light"): void {
 }
 
 /**
+ * Ligatures, as a CSS font-feature rule on the host element.
+ *
+ * Not an xterm option (there isn't one) and not `@xterm/addon-ligatures`, which
+ * parses the font binary through `font-finder`/`font-ligatures` and so needs
+ * Node's `fs` — unavailable on the browser path, which is the same bundle the
+ * desktop shell loads by URL.
+ *
+ * Both halves are written explicitly, and the `off` half is the load-bearing one.
+ * xterm's DOM renderer always sets a `letter-spacing` on its row container to
+ * absorb DPR rounding (`DomRenderer._setDefaultSpacing`), and a non-zero
+ * letter-spacing makes Blink and WebKit drop ligatures on their own. So "on" has
+ * to override that suppression, and "off" cannot simply be `normal` — at a
+ * font/DPR combination where the residual lands on exactly 0, `normal` would let
+ * ligatures through with the switch off.
+ *
+ * `calt` is the whole switch; `liga` and `clig` are held at 0 in *both* halves.
+ * Programming fonts put these substitutions in `calt` — both bundled faces ship
+ * `calt` and neither has a `liga` table — and pixel-comparing the four
+ * combinations at the renderer's own metrics says so outright: `liga`+`clig`
+ * with `calt` off renders identically to everything off, and `calt` alone
+ * renders identically to all three on. Naming them bought nothing.
+ *
+ * Naming them also cost something. `liga` is where a text-derived monospace font
+ * keeps its `fi`/`fl`/`ff` ligatures, and *those* are not width-preserving: with
+ * the letter-spacing taken away, `office difficult fluffy affix` measures 963px
+ * in Menlo against 1117px unligated. The non-zero letter-spacing above is what
+ * suppresses them today — but it is a residual derived from font metrics, and
+ * the font/DPR combination that lands it on exactly 0 is the same edge the `off`
+ * half is written out for. There, tagging `liga` would trade a broken grid for
+ * glyphs no font we offer even has.
+ *
+ * Set on the host element rather than on `.xterm`, so it also inherits into the
+ * renderer's own hidden measuring container — measurement and painting must not
+ * disagree about which glyphs they are looking at. Enabling this changes no
+ * advance width in either bundled font, and a GSUB dump says why rather than
+ * leaving it to luck: `calt` reaches only `SingleSubst` lookups in both faces —
+ * neither contains a `LigatureSubst` at all — so `!=` stays two glyphs, a left
+ * half and a right half, instead of collapsing into one. The cell box and the
+ * grid are unaffected; only the painted shapes differ.
+ */
+const LIGATURES_ON = '"liga" 0, "clig" 0, "calt" 1';
+const LIGATURES_OFF = '"liga" 0, "clig" 0, "calt" 0';
+
+function applyLigatures(container: HTMLElement, on: boolean): void {
+  container.style.fontFeatureSettings = on ? LIGATURES_ON : LIGATURES_OFF;
+}
+
+/**
  * Re-style every live terminal and re-measure each one.
  *
  * **Every** session, not only the visible one. Hidden terminals stay in the
@@ -286,6 +334,7 @@ export function applyTerminalPrefs(next: TerminalPrefs): void {
     s.term.options.fontFamily = next.fontFamily;
     s.term.options.cursorStyle = next.cursorStyle;
     s.term.options.cursorBlink = next.cursorBlink;
+    applyLigatures(s.container, next.ligatures);
     // Lowering scrollback drops the oldest lines immediately, which is what the
     // settings copy promises.
     s.term.options.scrollback = next.scrollback;
@@ -718,6 +767,7 @@ function ensure(
 
   const container = document.createElement("div");
   container.className = "term-host";
+  applyLigatures(container, p.ligatures);
 
   const s: Session = {
     id,
