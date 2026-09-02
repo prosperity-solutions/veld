@@ -113,8 +113,10 @@ import {
   resizeEmulation,
   responsiveEmulation,
   rotateEmulation,
+  safeAreaLabel,
   withMediaFeature,
   withMobileUserAgent,
+  withSafeArea,
   zoomStep,
 } from "./devices";
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
@@ -1022,6 +1024,18 @@ export function BrowserPane(props: {
   // to do with emulating a phone.
   const mediaSuspended =
     !iframeBackend && media !== null && !state.mediaActive && state.loaded;
+
+  // The third rider on that session, and the one this pattern matters most for:
+  // touch not working shows up the moment you drag and a colour scheme not
+  // applying is visible at a glance, but gutters that quietly read `0px` look
+  // exactly like a page with no notch to clear. Gated on the emulation because
+  // the gutters are stored on it — unlike the media features, which are a
+  // question about the page and have nothing to do with emulating a phone.
+  const safeAreaSuspended =
+    !iframeBackend &&
+    emulation?.safeArea != null &&
+    !state.safeAreaActive &&
+    state.loaded;
 
   const applyEmulation = (next: PaneEmulation | null) => {
     setBrowserEmulation(id, next);
@@ -1994,6 +2008,34 @@ export function BrowserPane(props: {
                     >
                       Touch events
                     </Menu.Item>
+                    {/* Touch's sibling rather than the user agent's: both are a
+                    claim about the device that the page can *read*. A preset
+                    brings its class's real gutters (a phone's 59/34, a tablet's
+                    home indicator, nothing at all for a monitor), and this is
+                    what compares the layout with and without them. On a custom
+                    or responsive size, where there is no class to inherit from,
+                    "on" means the phone set — the same answer the mobile user
+                    agent gives to the same problem. */}
+                    <Menu.Item
+                      closeMenuOnClick={false}
+                      leftSection={
+                        emulation?.safeArea ? <IconCheck size={14} /> : undefined
+                      }
+                      disabled={!emulation || iframeBackend}
+                      onClick={() =>
+                        emulation &&
+                        applyEmulation(
+                          withSafeArea(emulation, emulation.safeArea === null),
+                        )
+                      }
+                      rightSection={
+                        <span className="menu-size faint">
+                          {emulation ? (safeAreaLabel(emulation.safeArea) ?? "Off") : ""}
+                        </span>
+                      }
+                    >
+                      Safe area insets
+                    </Menu.Item>
                     {/* Separate from the size, because "does my app serve the mobile
                     bundle at this width" and "does my layout survive this width" are
                     different questions — and a responsive or custom size has no
@@ -2039,6 +2081,16 @@ export function BrowserPane(props: {
                     {touchSuspended && (
                       <Menu.Label>
                         Touch is paused — Chromium's debugger is in use
+                        elsewhere
+                      </Menu.Label>
+                    )}
+                    {/* Same session, same honesty. Worth saying out loud here
+                    because the page cannot: `env(safe-area-inset-top)` falls back
+                    to `0px`, which is indistinguishable from a device that
+                    reserves nothing. */}
+                    {safeAreaSuspended && (
+                      <Menu.Label>
+                        Safe area is paused — Chromium's debugger is in use
                         elsewhere
                       </Menu.Label>
                     )}
@@ -2193,8 +2245,8 @@ export function BrowserPane(props: {
 
                     {iframeBackend && (
                       <Menu.Label>
-                        Sizes work in a browser tab; user agent, touch and zoom
-                        need the desktop app
+                        Sizes work in a browser tab; user agent, touch, safe
+                        area and zoom need the desktop app
                       </Menu.Label>
                     )}
                   </div>

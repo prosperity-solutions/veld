@@ -145,6 +145,7 @@ test("safeEmulation clamps every number and keeps only what Electron consumes", 
       touch: true,
       ua: "UA/1.0",
       fit: true,
+      safeArea: { top: 59, right: 0, bottom: 34, left: 0 },
     }),
     {
       width: 393,
@@ -153,6 +154,7 @@ test("safeEmulation clamps every number and keeps only what Electron consumes", 
       mobile: true,
       touch: true,
       userAgent: "UA/1.0",
+      safeArea: { top: 59, right: 0, bottom: 34, left: 0 },
       // No `fit`: it arrives on the wire and is dropped here, because fitting is a
       // question about the pane that `deviceLayout` answers in the renderer.
     },
@@ -201,8 +203,43 @@ test("safeEmulation forwards exactly the fields Electron applies", () => {
   // answers, sending on only the resulting scale (with the bounds).
   assert.deepEqual(
     Object.keys(safeEmulation({ width: 400, height: 800, ua: "UA/1.0" })).sort(),
-    ["deviceScaleFactor", "height", "mobile", "touch", "userAgent", "width"],
+    ["deviceScaleFactor", "height", "mobile", "safeArea", "touch", "userAgent", "width"],
   );
+
+  // `safeArea` is the one nested field, so its members cross this boundary without
+  // the key-set check above seeing them — and it is the field where that matters
+  // most: `Emulation.setSafeAreaInsetsOverride` replaces the whole set per call
+  // rather than merging, so a side this validator stops reading is sent as `0` and
+  // flattens that edge rather than keeping its previous number.
+  assert.deepEqual(
+    Object.keys(
+      safeEmulation({ width: 400, height: 800, safeArea: { top: 59, bottom: 34 } }).safeArea,
+    ).sort(),
+    ["bottom", "left", "right", "top"],
+  );
+});
+
+test("safeEmulation repairs safe-area insets per side and collapses an empty set", () => {
+  // These become `Emulation.setSafeAreaInsetsOverride`, which is strict in both
+  // directions: it refuses a fractional inset outright — which would reject the
+  // whole applier's CDP round, taking touch and the media overrides with it — and
+  // accepts an absurd one *literally*, laying the page out inside a 100000px
+  // gutter. Neither may reach it.
+  const insets = (safeArea) => safeEmulation({ width: 400, height: 800, safeArea }).safeArea;
+  assert.deepEqual(insets({ top: 59, bottom: 34 }), { top: 59, right: 0, bottom: 34, left: 0 });
+  assert.deepEqual(insets({ top: 100000, right: -5, bottom: 34.6, left: "x" }), {
+    top: 200,
+    right: 0,
+    bottom: 35,
+    left: 0,
+  });
+  // One representation of "no gutters" on this side of the wire too: the applier
+  // tests this to decide whether the shared debugger session is wanted at all, and
+  // a second spelling of off would hold it for an override that does nothing.
+  assert.equal(insets({ top: 0, right: 0, bottom: 0, left: 0 }), null);
+  assert.equal(insets(undefined), null);
+  assert.equal(insets("59"), null);
+  assert.equal(insets([]), null);
 });
 
 test("safeColor takes hex and nothing else", () => {

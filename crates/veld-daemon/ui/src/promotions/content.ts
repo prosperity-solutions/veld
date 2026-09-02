@@ -247,4 +247,36 @@ export const PROMOTIONS: Promotion[] = [
       "The deck or report your agent just wrote opens beside the terminal: run open deck.html, or pick it from the recent list. It reloads when the file changes.",
     glyph: "panes",
   },
+  {
+    // A judgment call, and the reasoning rather than just the verdict, because
+    // "no" is the expected answer here and this is a narrow audience: only
+    // somebody building a mobile layout against the safe area wants it. Promoted
+    // anyway on the two tests the doc sets — it is a capability that did not exist
+    // (the variables read `0px` at every preset before this), and it lives inside
+    // a menu, so the person who wants it would conclude Veld cannot do it rather
+    // than find it. `browser-find-in-page` is the precedent for a browser-pane
+    // capability earning a card.
+    //
+    // **"Safe area" throughout, never "notch" or "bezel"**, even though the notch
+    // is what the gutters are *for* and the docs use the word freely to explain
+    // the landscape asymmetry. Here it would mislead: those words describe drawn
+    // device chrome, which this deliberately does not add (see
+    // `browserViews.js` — a native view paints over any DOM inside its own rect,
+    // so a drawn notch would need the view's rect to shrink, changing the very
+    // viewport under test). A card promising a notch and delivering four CSS
+    // variables spends the reader's one-time attention on a misunderstanding.
+    // "Safe area" is also the name of the thing they will search for.
+    //
+    // The headline is otherwise the flattest true sentence that still starts from
+    // the reader. "Stop guessing where the safe area is" was the first draft and
+    // is the mini-narrative the doc names: a struggle and a relief, where the
+    // capability alone reads faster.
+    id: "browser-safe-area-insets",
+    since: "2026-09-02",
+    eyebrow: "New",
+    headline: "Test a safe-area layout without a phone",
+    body:
+      "Pick a phone in a browser pane and the page reads the safe-area insets a real one reports, so a header or bottom bar pinned to them can be checked in place.",
+    glyph: "device",
+  },
 ];

@@ -15,6 +15,7 @@ import {
   HANDLE_THICKNESS,
   MAX_DEVICE_PX,
   MAX_DEVICE_RADIUS,
+  MAX_SAFE_AREA_PX,
   MIN_DEVICE_PADDING,
   MIN_DEVICE_PX,
   QUICK_DEVICE,
@@ -28,6 +29,10 @@ import {
   edgePinned,
   emulationForPreset,
   emulationLabel,
+  insetsFor,
+  safeAreaLabel,
+  sanitizeSafeArea,
+  withSafeArea,
   emulationSize,
   formatPercent,
   formatZoom,
@@ -66,6 +71,18 @@ describe("the preset table", () => {
       // A shape, within what the shell will apply.
       expect(preset.radius).toBeGreaterThanOrEqual(0);
       expect(preset.radius).toBeLessThanOrEqual(MAX_DEVICE_RADIUS);
+      // Gutters the shell will apply unchanged, and CDP refuses a fractional
+      // inset outright — so a non-integer here would reject the whole applier's
+      // CDP round, taking touch and the media overrides down with it.
+      for (const orientation of ["portrait", "landscape"] as const) {
+        const insets = preset.insets?.[orientation];
+        if (!insets) continue;
+        for (const side of ["top", "right", "bottom", "left"] as const) {
+          expect(Number.isInteger(insets[side])).toBe(true);
+          expect(insets[side]).toBeGreaterThanOrEqual(0);
+          expect(insets[side]).toBeLessThanOrEqual(MAX_SAFE_AREA_PX);
+        }
+      }
       // A UA is a header value — the same rule the shell enforces.
       if (preset.ua !== null) {
         expect(safeUserAgentText(resolveUserAgent(preset.ua, "143.0.0.0"))).not.toBeNull();
@@ -164,6 +181,129 @@ describe("rotate and label", () => {
   });
 });
 
+describe("safe-area insets", () => {
+  it("gives every handheld class gutters and every screen none", () => {
+    // The claim the feature rests on: a phone reserves space and a monitor does
+    // not, so a screen preset stays a plain desktop viewport.
+    for (const preset of DEVICE_PRESETS.filter((p) => p.group === "Screens")) {
+      expect(preset.insets).toBeNull();
+    }
+    for (const preset of DEVICE_PRESETS.filter((p) => p.group !== "Screens")) {
+      expect(preset.insets).not.toBeNull();
+    }
+    // And a phone's are bigger than a tablet's, because a tablet has only a home
+    // indicator while a phone also has a sensor housing to clear.
+    const top = (id: string) => presetById(id)?.insets?.portrait.top ?? 0;
+    expect(top("phone")).toBeGreaterThan(top("tablet"));
+  });
+
+  it("arrives with a preset, for the orientation it is applied at", () => {
+    const portrait = emulationForPreset(presetById("phone")!);
+    expect(portrait.safeArea).toEqual({ top: 59, right: 0, bottom: 34, left: 0 });
+    // Not the portrait set with its axes turned: a real handset held sideways puts
+    // the sensor housing on *both* sides and shortens the home indicator.
+    const landscape = emulationForPreset(presetById("phone")!, { landscape: true });
+    expect(landscape.safeArea).toEqual({ top: 0, right: 59, bottom: 21, left: 59 });
+    // A monitor reserves nothing, so picking one is not a way to acquire gutters.
+    expect(emulationForPreset(presetById("desktop")!).safeArea).toBeNull();
+  });
+
+  it("moves the gutters to the sides when the device is rotated", () => {
+    const e = emulationForPreset(presetById("phone")!);
+    const sideways = rotateEmulation(e);
+    expect(sideways.safeArea).toEqual({ top: 0, right: 59, bottom: 21, left: 59 });
+    // A round trip, which is only true because the preset id survives a rotation
+    // and the table is therefore still readable on the way back.
+    expect(rotateEmulation(sideways)).toEqual(e);
+    // A tablet has nothing for a rotation to move — no sensor housing, and a home
+    // indicator that rotates with the device.
+    const tablet = emulationForPreset(presetById("tablet")!);
+    expect(rotateEmulation(tablet).safeArea).toEqual(tablet.safeArea);
+  });
+
+  it("does not hand gutters back to a device that had them switched off", () => {
+    // Rotating is not a control for this, and a rotation that quietly re-enabled
+    // an override the user turned off would be the pane changing its own mind.
+    const off = withSafeArea(emulationForPreset(presetById("phone")!), false);
+    expect(off.safeArea).toBeNull();
+    expect(rotateEmulation(off).safeArea).toBeNull();
+  });
+
+  it("toggles back to the preset's own numbers, and to the phone set without one", () => {
+    const phonePreset = emulationForPreset(presetById("phone")!);
+    const cycled = withSafeArea(withSafeArea(phonePreset, false), true);
+    expect(cycled.safeArea).toEqual(phonePreset.safeArea);
+    // A hand-entered size has no class to inherit from — the same problem the
+    // mobile-UA toggle has, and the same answer: name a default rather than leave
+    // the control dead at the one size a fixed list cannot cover.
+    const custom = customEmulation(500, 900);
+    expect(custom.safeArea).toBeNull();
+    expect(withSafeArea(custom, true).safeArea).toEqual(insetsFor(custom));
+    expect(withSafeArea(custom, true).safeArea).toEqual({
+      top: 59,
+      right: 0,
+      bottom: 34,
+      left: 0,
+    });
+    // Landscape-shaped, so the landscape set — the orientation is read off the
+    // numbers, not off a preset.
+    expect(withSafeArea(customEmulation(900, 500), true).safeArea).toEqual({
+      top: 0,
+      right: 59,
+      bottom: 21,
+      left: 59,
+    });
+  });
+
+  it("carries the gutters through a drag and a custom size", () => {
+    // A phone dragged narrower is still a phone, gutters included — the same rule
+    // its touch events and user agent already follow.
+    const e = emulationForPreset(presetById("phone")!);
+    expect(resizeEmulation(e, 380, 800).safeArea).toEqual(e.safeArea);
+    expect(customEmulation(380, 800, e).safeArea).toEqual(e.safeArea);
+    // The resizable viewport is deliberately a plain desktop viewport: turning it
+    // on must change how wide the page is and nothing about how it behaves.
+    expect(responsiveEmulation(600, 400).safeArea).toBeNull();
+  });
+
+  it("reads the gutters out for the menu, and says Off as nothing", () => {
+    expect(safeAreaLabel(null)).toBeNull();
+    expect(safeAreaLabel({ top: 59, right: 0, bottom: 34, left: 0 })).toBe("59 / 34");
+    // All four once the sides are in play, which is what landscape looks like.
+    expect(safeAreaLabel({ top: 0, right: 59, bottom: 21, left: 59 })).toBe("0 / 59 / 21 / 59");
+  });
+
+  it("clamps a stored inset set per side, and collapses an empty one", () => {
+    // Storage is hand-editable. CDP accepts an inset of 100000 *literally*, which
+    // lays the page out inside a 100000px gutter, and refuses a fractional one
+    // outright — so both are repaired here rather than passed on.
+    expect(sanitizeSafeArea({ top: 100000, right: -5, bottom: 34.6, left: "x" })).toEqual({
+      top: MAX_SAFE_AREA_PX,
+      right: 0,
+      bottom: 35,
+      left: 0,
+    });
+    // One bad side is no reason to lose the other three.
+    expect(sanitizeSafeArea({ top: 59, bottom: 34 })).toEqual({
+      top: 59,
+      right: 0,
+      bottom: 34,
+      left: 0,
+    });
+    // All-zero is the same state as absent, to the page *and* to the shell, so it
+    // collapses to the one representation the CDP session is released on.
+    expect(sanitizeSafeArea({ top: 0, right: 0, bottom: 0, left: 0 })).toBeNull();
+    expect(sanitizeSafeArea(null)).toBeNull();
+    expect(sanitizeSafeArea("59")).toBeNull();
+    // A restored emulation from before this existed simply has no gutters, which
+    // is what Chromium was reporting to those pages anyway.
+    expect(sanitizeEmulation({ width: 400, height: 800 })?.safeArea).toBeNull();
+    expect(
+      sanitizeEmulation({ width: 400, height: 800, safeArea: { top: 59, bottom: 34 } })?.safeArea,
+    ).toEqual({ top: 59, right: 0, bottom: 34, left: 0 });
+  });
+});
+
 describe("customEmulation", () => {
   it("keeps the device flags of whatever is set now", () => {
     // The useful reading of "custom size": this phone, but narrower — not a
@@ -215,6 +355,7 @@ describe("the resizable viewport", () => {
       ua: null,
       fit: true,
       radius: CUSTOM_RADIUS,
+      safeArea: null,
     });
     expect(emulationLabel(r)).toBe("Responsive");
     // Clamped like any other size, so a drag past the bounds cannot store one.
@@ -307,7 +448,7 @@ describe("the emulation's field set", () => {
     // this one catches a field appearing here, that one catches a field vanishing there.
     //
     // Bounded honestly: this reads the real constructor's output, so it sees every
-    // *required* field (all nine are, and `emulationForPreset` is the one construction
+    // *required* field (all ten are, and `emulationForPreset` is the one construction
     // site). An **optional** field populated only by `customEmulation` or
     // `responsiveEmulation` would slip both gates — closing that needs a type-level
     // trick worth more than it buys.
@@ -318,10 +459,23 @@ describe("the emulation's field set", () => {
       "height",
       "mobile",
       "radius",
+      "safeArea",
       "touch",
       "ua",
       "width",
     ]);
+  });
+
+  it("pins the inset side names too, which nesting hides from the gate above", () => {
+    // The list above only sees *top-level* keys, so `safeArea`'s four members cross
+    // the boundary ungated — and for this field that is worse than a dropped value.
+    // `Emulation.setSafeAreaInsetsOverride` replaces the whole set on every call
+    // rather than merging (measured), so a side the shell's `safeAreaInsets` fails
+    // to read is not a gutter that keeps its old number: it is sent as `0` and
+    // resets that edge. A renamed side would therefore silently flatten one
+    // direction of every emulated device, in the desktop app only.
+    const insets = emulationForPreset(presetById("phone")!).safeArea;
+    expect(Object.keys(insets!).sort()).toEqual(["bottom", "left", "right", "top"]);
   });
 });
 
@@ -575,6 +729,7 @@ describe("restore", () => {
       ua: "UA/1.0\r\nX-Injected: 1",
       fit: false,
       radius: 9999,
+      safeArea: { top: 9999, right: -1, bottom: "34", left: null },
     });
     expect(stored).toEqual({
       device: "phone",
@@ -589,6 +744,10 @@ describe("restore", () => {
       ua: null,
       fit: false,
       radius: MAX_DEVICE_RADIUS,
+      // Per side, and the same rule as the rest: repaired where it can be, zeroed
+      // where it cannot. A `"34"` is a number a hand edit plausibly meant, while a
+      // `null` is not a gutter at all.
+      safeArea: { top: MAX_SAFE_AREA_PX, right: 0, bottom: 34, left: 0 },
     });
   });
 
