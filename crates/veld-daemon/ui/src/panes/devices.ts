@@ -690,6 +690,16 @@ function sameInsets(a: SafeAreaInsets, b: SafeAreaInsets): boolean {
  * cannot silently restate what a stored layout emulates, which is what
  * this file's header rules out.
  *
+ * **One asymmetry follows from that, and is invisible from either function
+ * alone.** Revise a class's gutters — say a phone's top from 59 to 61 — and a
+ * stored layout that still resolves *by id* rotates into the new number, because
+ * [`insetPairFor`] takes the preset row first; a *dragged* one carrying the old
+ * numbers no longer matches any row, so it keeps them. The same table revision
+ * therefore restates one stored layout and not the other, decided by whether the
+ * user once dragged an edge. That is consistent with the deliberate rule that a
+ * rotation is a live user action and a restore is not — it is simply not
+ * symmetric, and it is worth knowing before reading a bug report about it.
+ *
  * Ambiguity is harmless by construction — the three tablet classes share one
  * inset pair, so matching any of them returns the same pair.
  */

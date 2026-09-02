@@ -339,7 +339,14 @@ describe("safe-area insets", () => {
     // failure is invisible: the wrong numbers are still plausible numbers.
     //
     // Classes sharing one pair outright are fine and intended (the three tablets
-    // do), because recovering any of them returns the same pair.
+    // do), because recovering any of them returns the same pair object.
+    //
+    // **If this fails because a new class legitimately reserves the same gutters as
+    // an existing one, reuse that class's constant — do not delete the
+    // assertion.** Pointing the new row at the same `PresetInsets` makes the two
+    // indistinguishable *and* interchangeable, which is the state the recovery
+    // needs; writing a second identical literal makes them indistinguishable and
+    // not interchangeable, which is the bug.
     const pairs = DEVICE_PRESETS.map((p) => p.insets).filter((i) => i !== null);
     const key = (i: { top: number; right: number; bottom: number; left: number }) =>
       `${i.top},${i.right},${i.bottom},${i.left}`;
