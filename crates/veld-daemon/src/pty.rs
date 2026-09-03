@@ -90,7 +90,7 @@ pub(super) mod shims;
 #[path = "pty/wire.rs"]
 mod wire;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -136,18 +136,23 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// makes this bound comfortable rather than tight.
 const MAX_SESSIONS: usize = 48;
 
-/// How long a session with nobody attached keeps running.
+/// How long a session no Veld window has a pane for keeps running.
 ///
-/// This is the reload window, and it is deliberately generous: a page reload
-/// reattaches in under a second, but a laptop that slept mid-build should still
-/// find its build when it wakes. (`Instant` not advancing across a macOS sleep
-/// only helps here — the session survives the nap either way.) Closing a
-/// terminal does not wait for this: that path deletes the session outright.
+/// **Not "how long since the socket dropped".** That was the rule until this
+/// clock learned to ask `ide::kept_sessions`, and it was wrong in the way that
+/// cost the most: a socket goes away when the laptop sleeps, when `veld update`
+/// restarts the daemon, and whenever the client's three reconnect attempts are
+/// spent — none of which is the user walking away, and all of which left a live
+/// build being hung up half an hour later under a pane still on screen. A
+/// session named by a connected client is never collected however long its
+/// socket has been down; the clock starts when the last window, tab or app that
+/// had that pane goes away. Closing a terminal does not wait for it either:
+/// that path deletes the session outright.
 ///
-/// It is also the bound on the one leak the model can't avoid. Closing the
-/// browser window drops the `sessionStorage` that held the session ids, so
-/// those shells can never be reattached — but they *are* detached, so this is
-/// what collects them.
+/// It is still deliberately generous, because what it now bounds is a shell
+/// nobody can reach: quit the app with a build running, and this is how long
+/// you have to come back to it. (`Instant` not advancing across a macOS sleep
+/// only helps — the session survives the nap either way.)
 ///
 /// **Now a default, not a constant.** The effective value is the
 /// `terminal.detachGraceMinutes` setting, read through [`configured_detach_grace`]
@@ -764,7 +769,7 @@ async fn session_busy(session: Arc<Session>) -> Option<bool> {
         .and_then(|r| r.ok())
 }
 
-/// Collect sessions that have had nobody attached for `grace`.
+/// Collect sessions that no window has had a pane for in `grace`.
 ///
 /// An exited shell gets the same grace as a live one on purpose. Its scrollback,
 /// its exit notice and its exit code are exactly the post-mortem the detach
@@ -776,13 +781,18 @@ async fn session_busy(session: Arc<Session>) -> Option<bool> {
 /// [`DETACH_GRACE`] and without touching the process-global registry.
 async fn reap_detached(grace: Duration) {
     let now = Instant::now();
+    // Read **before** the session lock and once per pass rather than once per
+    // session: two locks in one function is where a lock order gets invented,
+    // and the only order safe to invent is the one nothing else contradicts.
+    // Nothing in `ide` takes the session lock, so this direction is free.
+    let kept = super::ide::kept_sessions().await;
     let stale: Vec<String> = {
         let sessions = SESSIONS.lock().await;
         sessions
             .values()
             .filter(|s| {
                 let detached = *s.detached_since.lock().expect("detach clock poisoned");
-                is_reapable(detached, now, grace)
+                is_reapable(&s.id, detached, now, grace, &kept)
             })
             .map(|s| s.id.clone())
             .collect()
@@ -792,11 +802,30 @@ async fn reap_detached(grace: Duration) {
     }
 }
 
-/// Whether a session is past its grace and may be collected.
+/// Whether a session may be collected.
 ///
-/// `None` means a socket is attached, which is never reapable however long it
-/// has been open — somebody is looking at it.
-fn is_reapable(detached_since: Option<Instant>, now: Instant, grace: Duration) -> bool {
+/// Two independent exemptions, and the second is the one whose absence used to
+/// hurt:
+///
+/// - **A socket is attached** (`detached_since` is `None`) — never reapable
+///   however long it has been open, because somebody is looking at it.
+/// - **A connected client still has a pane for it** (`kept`, from
+///   `ide::kept_sessions`) — never reapable however long its socket has been
+///   *down*. A socket drops when the laptop sleeps, when `veld update` restarts
+///   the daemon, and when the client's few reconnect attempts are spent; none of
+///   those is the user closing the window, and treating them as one hung up live
+///   builds under panes that were still on screen. The grace measures the window
+///   being gone, which is what its setting says.
+fn is_reapable(
+    session_id: &str,
+    detached_since: Option<Instant>,
+    now: Instant,
+    grace: Duration,
+    kept: &HashSet<String>,
+) -> bool {
+    if kept.contains(session_id) {
+        return false;
+    }
     detached_since.is_some_and(|since| {
         // `checked_duration_since`: a stamp that appears to be in the future
         // (read across cores) must not panic here.
@@ -5278,30 +5307,53 @@ mod tests {
     fn only_detached_sessions_past_their_grace_are_reapable() {
         let now = Instant::now();
         let grace = Duration::from_secs(60);
+        let nobody = HashSet::new();
+        let reapable = |detached, at: Instant| is_reapable("s", detached, at, grace, &nobody);
 
         // Attached: never reapable, however long it has been open. Somebody is
         // looking at it — this is the guard that keeps the reaper from killing
         // a terminal a user is typing into.
-        assert!(!is_reapable(None, now, grace));
+        assert!(!reapable(None, now));
 
         // Detached, still inside the reload/sleep window.
-        assert!(!is_reapable(Some(now), now, grace));
-        assert!(!is_reapable(
-            Some(now - Duration::from_secs(59)),
-            now,
-            grace
-        ));
+        assert!(!reapable(Some(now), now));
+        assert!(!reapable(Some(now - Duration::from_secs(59)), now));
         // Exactly at the grace is not yet past it.
-        assert!(!is_reapable(Some(now - grace), now, grace));
+        assert!(!reapable(Some(now - grace), now));
 
-        assert!(is_reapable(Some(now - Duration::from_secs(61)), now, grace));
+        assert!(reapable(Some(now - Duration::from_secs(61)), now));
 
         // A stamp that reads as being in the future must not panic (and must not
         // be treated as infinitely old).
-        assert!(!is_reapable(Some(now + Duration::from_secs(5)), now, grace));
+        assert!(!reapable(Some(now + Duration::from_secs(5)), now));
 
         // A zero grace still exempts an attached session.
-        assert!(!is_reapable(None, now, Duration::ZERO));
+        assert!(!is_reapable("s", None, now, Duration::ZERO, &nobody));
+    }
+
+    /// The exemption that makes the grace measure the window rather than the
+    /// socket. A dropped connection is not somebody walking away: the laptop
+    /// slept, `veld update` restarted the daemon, or the client's few reconnect
+    /// attempts were spent — and a shell hung up under a pane still on screen is
+    /// the loss this guard exists to prevent.
+    #[test]
+    fn a_session_a_client_still_has_a_pane_for_is_never_reapable() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(60);
+        let kept: HashSet<String> = ["mine".to_owned()].into_iter().collect();
+
+        // Detached for a week. Still nobody's business but the client's, and it
+        // says the pane exists.
+        let ancient = Some(now - Duration::from_secs(7 * 24 * 3600));
+        assert!(!is_reapable("mine", ancient, now, grace, &kept));
+
+        // The same clock, on a session no client names: collected as before. The
+        // two assertions differ only in the id, which is the whole rule.
+        assert!(is_reapable("theirs", ancient, now, grace, &kept));
+
+        // A zero grace does not defeat it either — the setting is clamped well
+        // above zero, but "kept" is a statement about the user, not a duration.
+        assert!(!is_reapable("mine", ancient, now, Duration::ZERO, &kept));
     }
 
     #[test]

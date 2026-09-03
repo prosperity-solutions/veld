@@ -1323,6 +1323,54 @@ function maybeAutoReconnect(s: Session): void {
 }
 
 /**
+ * Don't sweep more often than this. A sweep is one attempt per stalled
+ * terminal, and the events that trigger it can arrive in bursts — tabbing
+ * back and forth, or a daemon that comes up and goes down again.
+ */
+const RETRY_SWEEP_MS = 3000;
+let lastSweep = 0;
+
+/**
+ * Try the stalled terminals again, because something changed that makes this
+ * attempt worth more than the last one.
+ *
+ * [`maybeAutoReconnect`]'s budget is spent in about eleven seconds, and the two
+ * events that most often break a terminal's socket outlast that by a long way:
+ * a laptop that slept, and a daemon restarted by `veld update`. So the budget
+ * ran out while the cause was still present, and the pane settled into `error`
+ * with a **live shell behind it** — the daemon keeps it, which is the whole
+ * point of the holder process — waiting for a click nobody knew to make. The
+ * scrollback of a running build sat there looking dead.
+ *
+ * Called when the page becomes visible again (the laptop woke, the window came
+ * forward) and when the control socket reconnects (the daemon is back). Both are
+ * evidence, not a timer: a retry with the same conditions as the last failure is
+ * how a page ends up hammering a daemon that is not there.
+ *
+ * Only `error`, and only with no cycle in flight: `ended` is a shell that exited
+ * and has an exit code on screen, and reconnecting to one would replay its
+ * ending as if it had just happened.
+ */
+export function retryStalledTerminals(): void {
+  const now = Date.now();
+  if (now - lastSweep < RETRY_SWEEP_MS) return;
+  lastSweep = now;
+  for (const s of [...sessions.values()]) {
+    if (s.state !== "error" || s.reconnectTimer !== null) continue;
+    reconnectTerminal(s.id);
+  }
+}
+
+// Guarded because this module is imported by unit tests that have no DOM. The
+// listener is the page's for its whole life — there is no unmount for a registry
+// that outlives React by design.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") retryStalledTerminals();
+  });
+}
+
+/**
  * Reattach to the *same* shell after the socket dropped.
  *
  * The non-destructive counterpart to [`restartTerminal`], and the one that

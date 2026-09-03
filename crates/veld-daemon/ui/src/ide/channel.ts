@@ -159,6 +159,10 @@ class Channel {
   /** What this client holds, resent after every reconnect — the daemon's copy
    *  went with the old socket. */
   private held: number[] = [];
+  /** The sessions this client keeps alive, resent for the same reason — and with
+   *  more at stake: until it is back, the daemon believes nobody has these panes
+   *  and its reaper is free to hang the shells up. See [`keep`]. */
+  private kept: string[] = [];
   private kind: ClientKind = "browser";
   private label = "";
   private started = false;
@@ -243,6 +247,14 @@ class Channel {
       // would attach to shells this page is still driving.
       if (this.held.length > 0) {
         ws.send(JSON.stringify({ type: "holds", worktree_ids: this.held }));
+      }
+      // And re-declare the shells. The daemon dropped this client's set with the
+      // old socket, so between the drop and this frame its reaper counts these
+      // panes as belonging to nobody — a daemon restart is precisely when they
+      // are all detached at once, which is the worst moment to be silent about
+      // them.
+      if (this.kept.length > 0) {
+        ws.send(JSON.stringify({ type: "keep", session_ids: this.kept }));
       }
     };
 
@@ -438,6 +450,25 @@ class Channel {
   holds(worktreeIds: number[]): void {
     this.held = worktreeIds;
     this.send({ type: "holds", worktree_ids: worktreeIds });
+  }
+
+  /**
+   * The terminal sessions this page's layouts still name.
+   *
+   * What keeps the daemon's detach reaper off them. A terminal is *detached* the
+   * instant its socket drops — a slept laptop, a `veld update`, a spent
+   * reconnect budget — and the grace used to run from there, so a shell could be
+   * hung up half an hour later with its pane sitting on screen. Telling the
+   * daemon which panes exist is the only way it can tell a dropped socket from a
+   * closed window.
+   *
+   * The same list `pruneTerminals` collects against, deliberately: the rule is
+   * "a session no layout names is nobody's", and having two answers to that
+   * would mean one of them ends a shell the other is protecting.
+   */
+  keep(sessionIds: string[]): void {
+    this.kept = sessionIds;
+    this.send({ type: "keep", session_ids: sessionIds });
   }
 
   /**

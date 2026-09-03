@@ -236,6 +236,7 @@ import {
   pruneTerminals,
   noteExpectedResumes,
   releaseTerminal,
+  retryStalledTerminals,
 } from "./panes/terminalHost";
 import {
   onBrowserAccelerator,
@@ -1323,6 +1324,12 @@ function AppInner(props: {
        */
       onReady: (sameEpoch) => {
         noteChannelUp();
+        // The daemon is answering again, which is the evidence a terminal whose
+        // retry budget is spent has been waiting for. `veld update` restarts the
+        // daemon while pages stay open and takes longer than the eleven seconds
+        // that budget covers, so without this the panes come back as dead
+        // rectangles over live shells and every one of them needs a click.
+        retryStalledTerminals();
         // What to ask for. The worktree this client holds, first. Otherwise the
         // selection — but only when asking again cannot take a worktree off
         // somebody: either this client was never granted anything (the boot
@@ -4582,6 +4589,13 @@ function AppInner(props: {
   useEffect(() => {
     const terminals = Object.values(layouts).flatMap(terminalIds);
     pruneTerminals(terminals);
+    // The other half of the same sentence, said to the daemon: these panes
+    // exist, so their shells are not nobody's. Without it the detach grace runs
+    // from the moment a *socket* drops — a slept laptop, a restarted daemon, a
+    // spent reconnect budget — and hangs up a running build under a pane that is
+    // still on screen. Same list as the prune above, deliberately: two answers to
+    // "which sessions should exist" is one of them ending what the other keeps.
+    channel.keep(terminals);
     // Same contract for browser panes: a `WebContentsView` left behind is a
     // renderer process with nothing to paint into.
     pruneBrowsers(Object.values(layouts).flatMap(browserIds));
