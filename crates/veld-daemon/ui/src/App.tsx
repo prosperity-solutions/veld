@@ -1289,6 +1289,13 @@ function AppInner(props: {
     // `onReady` re-acquiring one is exactly how it would be. Every handler here
     // is inert, so the only frames it ever sends are `hello` and `keep`.
     if (chromeless) {
+      // `relayInboxEvents: false` restores exactly what a detached window did
+      // before it had a socket at all. The daemon relays an agent hook to every
+      // connected client and this window renders no rail and shows no worktree,
+      // so filing them would put a second native banner on screen — from a window
+      // whose whole content is one pane it was handed — for an event somewhere
+      // else. Its own panes still speak for themselves through `terminalHost`,
+      // which is the channel it has always used.
       channel.start(clientKind(), clientLabel(), {
         onClaims: () => {},
         // Never asked: a yield goes to a client the daemon recorded as holding
@@ -1302,7 +1309,7 @@ function AppInner(props: {
         // usually *the* window with a long-running thing in it.
         onReady: () => retryStalledTerminals(),
         onClosed: () => {},
-      });
+      }, { relayInboxEvents: false });
       return;
     }
     // Before anything else touches a layout: whichever client still holds the

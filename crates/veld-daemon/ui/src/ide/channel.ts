@@ -119,6 +119,17 @@ const MAX_RETRY_MS = 5000;
  */
 const CONNECT_WAIT_MS = 4000;
 
+/** Anything about a client that is not a handler. */
+export interface StartOptions {
+  /**
+   * Whether relayed agent-hook events reach this page's inbox. **Defaults on.**
+   *
+   * Off for a detached window, which has a socket only so it can declare the
+   * panes it keeps alive — see the `chromeless` branch in `App.tsx`.
+   */
+  relayInboxEvents?: boolean;
+}
+
 interface Handlers {
   /** The full claims table. State, not a delta — a client that missed one is
    *  not wrong afterwards. */
@@ -169,6 +180,8 @@ class Channel {
   private closed = false;
   /** The identity in use, once the daemon has told us. */
   private id: string | null = null;
+  /** See [`StartOptions.relayInboxEvents`]. */
+  private relayInboxEvents = true;
   /** Whether the handshake has completed on the current socket. */
   private ready = false;
   /** Callers parked until it has. */
@@ -186,10 +199,11 @@ class Channel {
     return this.id;
   }
 
-  start(kind: ClientKind, label: string, handlers: Handlers): void {
+  start(kind: ClientKind, label: string, handlers: Handlers, opts?: StartOptions): void {
     this.kind = kind;
     this.label = label;
     this.handlers = handlers;
+    this.relayInboxEvents = opts?.relayInboxEvents ?? true;
     if (this.started) return;
     this.started = true;
     void this.connect();
@@ -345,6 +359,16 @@ class Channel {
         return;
       }
       case "agent_state": {
+        // **Not every client that has a socket wants these.** The daemon relays an
+        // agent hook to every connected client, which was fine while the only
+        // clients were main windows — each one files it, and the notification
+        // effect picks a toast or a banner by where the user is. A detached window
+        // opens a socket now too (it declares the panes it keeps), and it renders
+        // no rail and shows no worktree: letting it file these would fire a second
+        // native banner, from a window whose whole content is one pane it was
+        // given, for an event in a worktree it is not showing. One event, two
+        // banners, and `notify.ts` has no dedupe across renderers.
+        if (!this.relayInboxEvents) return;
         // Filed straight into the inbox rather than routed through `Handlers`, for the
         // same reason `panes/terminalHost.ts` files its own signals there: the inbox is
         // a store, not a policy the app has to arbitrate. The policy — read-on-focus,

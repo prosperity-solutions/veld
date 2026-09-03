@@ -1021,6 +1021,16 @@ async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
         // fresh with the full budget rather than continuing a spent one.
         s.reconnectLeft = null;
         s.reconnectFiredFirst = false;
+        // **A shell that exists is one we expect to find again.** `EXPECTED_RESUMES`
+        // is otherwise fed only by layouts *arriving* — from storage, the seed, or
+        // the daemon — so a terminal the user opened during this page's life was
+        // never in it, and a later reconnect that found its shell gone replaced it
+        // with an empty prompt and said nothing. That was survivable while only a
+        // deliberate click could get there; `retryStalledTerminals` reaches it on a
+        // wake-up, unattended, which is the wrong place to be silent. Added here
+        // rather than at creation because the first connect is the one attach that
+        // legitimately finds nothing.
+        noteExpectedResumes([s.id]);
       }
       handleControl(s, ev.data);
       return;

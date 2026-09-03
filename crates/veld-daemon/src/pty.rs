@@ -895,8 +895,8 @@ async fn reap_detached(grace: Duration) {
 /// pane for them has just let go.
 ///
 /// **The precise half of the keep exemption**, called by `ide` the moment a
-/// client's set shrinks — it disconnects, or it sends a smaller `ide::ClientMsg::Keep`
-/// (`ide::ClientMsg::Keep`). Being kept is not a pause on the grace, it is the
+/// client's set shrinks — it disconnects, or it sends a smaller
+/// `ide::ClientMsg::Keep`. Being kept is not a pause on the grace, it is the
 /// grace not having started, so the clock has to begin *here* rather than where
 /// the socket happened to drop, which may be a night's sleep earlier.
 ///
