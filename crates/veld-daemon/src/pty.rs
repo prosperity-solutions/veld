@@ -867,10 +867,21 @@ async fn reap_detached(grace: Duration) {
         );
     }
     // **Re-judged under a fresh lock, not ended on the first read.** Three things
-    // can have happened while this pass was asking `ide`: a socket attached, the
-    // session was closed outright, or `start_detach_clock` restarted its clock
-    // because a client let go a moment ago — and that last one is a session whose
-    // grace has only just begun. Ending on the stale read would collect it.
+    // this catches, having happened while the pass was asking `ide`: a socket
+    // attached, the session was closed outright, or `start_detach_clock` restarted
+    // its clock because a client let go a moment ago — and that last one is a
+    // session whose grace has only just begun. Ending on the stale read would
+    // collect it.
+    //
+    // **The fourth is not caught, and is accepted.** A client can *start* keeping
+    // a candidate in that same window — a window opening on a worktree at the
+    // instant this pass runs — and nothing stamps a clock on the way *in*, so the
+    // re-judge still finds it reapable and hangs up a shell somebody declared
+    // microseconds earlier. Closing it means holding both locks at once, which is
+    // the one thing the ordering here exists to avoid, for a race no wider than
+    // two uncontended lock acquisitions and against a session that has already
+    // been abandoned for the whole grace. It is the same race, and the same width,
+    // as before any of this existed.
     let stale: Vec<String> = {
         let later = Instant::now();
         let sessions = SESSIONS.lock().await;

@@ -983,9 +983,10 @@ static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().
 /// of clients — the same asymmetry [`MAX_STATE_WORKTREES`] exists for. Collecting
 /// every client's ids into one owned set would allocate `clients × MAX_KEPT`
 /// strings under this lock once a minute, blocking every claim and hello for the
-/// duration. The reaper only ever asks about sessions that exist, which
-/// `pty::MAX_SESSIONS` caps at 48, so this way the work under the lock is bounded
-/// by something real.
+/// duration. **What this shape removes is the allocation**, not the factor of
+/// clients: the work here is still a probe per client per candidate, but the
+/// reaper only asks about sessions that exist, which `pty::MAX_SESSIONS` caps at
+/// 48. Hash probes over a bounded list, rather than a growing pile of `String`s.
 ///
 /// The decision lives on [`Registry::kept_among`] so it can be tested over a
 /// local registry, the way every other decision in this module is.
