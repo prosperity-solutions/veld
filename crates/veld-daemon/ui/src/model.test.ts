@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { EnvironmentList, Lane, RunInfo, RunStatus, Worktree } from "./api";
 import {
   activeRun,
+  attentionStatus,
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
@@ -25,6 +26,7 @@ import {
   runSignatureFor,
   runStatus,
   runsForWorktree,
+  sectionAttention,
   selectorRuns,
   siblingRuns,
   sortRunsForDisplay,
@@ -431,6 +433,89 @@ describe("worstStatus", () => {
     for (const s of ["running", "starting", "stopping", "failed", "recovering"] as const) {
       expect(worstStatus([run("a", s)])).toBe(runStatus(run("a", s)));
     }
+  });
+});
+
+describe("attentionStatus", () => {
+  it("says nothing about a worktree that is fine", () => {
+    expect(attentionStatus([])).toBeNull();
+    expect(attentionStatus([run("a", "running")])).toBeNull();
+    expect(attentionStatus([run("a", "starting")])).toBeNull();
+  });
+
+  it("reports the picked run when that is the thing to look at", () => {
+    expect(attentionStatus([run("a", "failed", true)])).toBe("failed");
+    expect(attentionStatus([run("a", "recovering")])).toBe("recovering");
+  });
+
+  /**
+   * The case the row asked two questions to catch, and the reason this reduction
+   * is shared rather than copied: `worktreeStatus` reports the *picked* run, and
+   * the picker prefers a healthy one — so a second environment that failed in the
+   * same directory had no representation at all while the first stayed green.
+   */
+  it("reports a live sibling that failed while the picked run is green", () => {
+    expect(attentionStatus([run("api", "running"), run("web", "failed", true)])).toBe(
+      "failed",
+    );
+  });
+
+  /** History is not attention. A failed run that is no longer live is the record
+   *  of something that already ended; the row it sits on has nothing to open. */
+  it("ignores a failed run that is only history", () => {
+    expect(attentionStatus([run("api", "running"), run("web", "failed")])).toBeNull();
+  });
+});
+
+describe("sectionAttention", () => {
+  const envsFor = (byPath: Record<string, RunInfo[]>): EnvironmentList => ({
+    projects: Object.entries(byPath).map(([project_root, runs]) => ({
+      name: project_root,
+      project_root,
+      runs,
+    })),
+  });
+  const at = (path: string, over: Partial<Worktree> = {}): Worktree => ({
+    ...wt(path),
+    ...over,
+  });
+
+  it("says nothing about an empty section, or one where nothing is wrong", () => {
+    expect(sectionAttention(null, [])).toBeNull();
+    expect(
+      sectionAttention(envsFor({ "/a": [run("x", "running")] }), [at("/a")]),
+    ).toBeNull();
+  });
+
+  /**
+   * Worst wins, by the same severity order a single row uses between its own
+   * runs. A header that reported the first row it found, or the commonest state,
+   * would let a failure hide behind a section that is merely busy — which is the
+   * one thing a folded section must not do.
+   */
+  it("reports the most attention-worthy worktree in the section", () => {
+    const envs = envsFor({
+      "/a": [run("x", "running")],
+      "/b": [run("y", "recovering")],
+      "/c": [run("z", "failed", true)],
+    });
+    expect(sectionAttention(envs, [at("/a"), at("/b"), at("/c")])).toBe("failed");
+    expect(sectionAttention(envs, [at("/a"), at("/b")])).toBe("recovering");
+  });
+
+  /** Trashed rows are silent, the same exclusion the row and the project badge
+   *  make: that directory is on its way off the disk, so an alert about it
+   *  offers nothing to do. A folded trash therefore reports a count and nothing
+   *  else. */
+  it("ignores trashed worktrees", () => {
+    const envs = envsFor({ "/a": [run("x", "failed", true)] });
+    expect(
+      sectionAttention(envs, [at("/a", { trashed_at: "2026-01-02T00:00:00Z" })]),
+    ).toBeNull();
+  });
+
+  it("says nothing when there is no environment data yet", () => {
+    expect(sectionAttention(null, [at("/a")])).toBeNull();
   });
 });
 

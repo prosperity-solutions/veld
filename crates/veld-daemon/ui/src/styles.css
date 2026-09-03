@@ -840,6 +840,58 @@ button.lane-empty {
   color: var(--accent);
 }
 
+/* --- Dropping a worktree on the trash ---------------------------------------
+ *
+ * The trash is the one section in the rail where a drop takes a worktree OUT of
+ * the list, so it says so in words rather than by tinting like the others. Every
+ * other section answers "which position?" and draws a caret; this one answers
+ * "in or out?", and a caret between two binned worktrees would promise an order
+ * the drop does not keep (`dropZone` hands a trash drop to `onTrashDrop` and
+ * throws the index away).
+ *
+ * Laid over the section rather than swapped in for its rows, which is what lets
+ * one rule serve all three states the trash can be in — folded (the default),
+ * empty, or holding rows — without any of them changing height mid-drag. The
+ * dock is pinned to the bottom of the rail, so a section that resized under the
+ * pointer would move the whole list above it as well.
+ *
+ * `.rail-group` is the positioning context (it already is one, for the lane
+ * bars). `pointer-events: none` because the section underneath is the actual
+ * drop target and the drag events must reach it. */
+.trash-drop {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed var(--danger);
+  border-radius: 8px;
+  /* Opaque, not a wash: it stands in for the section's contents while the drag
+     is in flight, and rows showing through would read as a list you were about
+     to drop *into* at some position. */
+  background: color-mix(in oklab, var(--danger) 12%, var(--panel2));
+  color: var(--danger);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  user-select: none;
+  pointer-events: none;
+}
+/* The pointer is inside: the offer becomes a confirmation. Dashed to solid is the
+   same move `.lane-empty` makes under `.rail-group.drop-in`, so the rail's two
+   drop targets are one language in two colours. */
+.trash-drop.over {
+  border-style: solid;
+  background: color-mix(in oklab, var(--danger) 22%, var(--panel2));
+}
+/* While a removal is in flight the Deleting lane sits above the trash in the
+   dock, and a second `.rail-group` carries the divider's 9px of padding. `inset`
+   is measured from the padding box, so without this the overlay would climb over
+   that gap and sit on the hairline between the two sections. */
+.rail-group + .rail-group .trash-drop {
+  top: 9px;
+}
+
 .lane-head {
   display: flex;
   align-items: center;
@@ -850,19 +902,29 @@ button.lane-empty {
   font-weight: 700;
   letter-spacing: 0.03em;
   user-select: none;
+  /* The whole bar is the fold toggle — see its `onClick`. Unconditional because
+     every rendered header has a disclosure in it: `hasHeader` gates both. */
+  cursor: pointer;
 }
-/* The whole header is the drag handle for reordering lanes, so it says so on
-   hover. Only on a real lane in the expanded rail — the class carries that
-   decision, the cursor only reports it. */
-.lane-head.grab {
-  cursor: grab;
-}
-.lane-head.grab:active {
+/* The whole header is the drag handle for reordering lanes — but the hand waits
+   until you have actually taken hold of it. An open hand on *hover* advertises
+   the secondary gesture at the expense of the primary one: what you do to a
+   section is fold it and click the rows inside, while dragging a lane into a new
+   order is the rare, deliberate act. Pressing is the moment the two stop
+   competing, so that is where the hand belongs — and it is the last moment a
+   page can draw one at all, because a native drag hands the cursor to the OS the
+   instant it starts.
+
+   Only on a real lane in the expanded rail — the class carries that decision (it
+   is the same expression that sets `draggable`), the cursor only reports it. */
+.lane-head.draggable:active {
   cursor: grabbing;
 }
 /* The header's own buttons are clicks, not drags, even though a drag started on
-   one still carries the lane. */
-.lane-head.grab .lane-edit {
+   one still carries the lane. `:active` on an ancestor holds while a descendant
+   is pressed, and `cursor` inherits — but a cursor declared *on* the button wins
+   over one inherited from the header, so this one rule covers both states. */
+.lane-head.draggable .lane-edit {
   cursor: pointer;
 }
 
@@ -870,13 +932,95 @@ button.lane-empty {
  *
  * `margin-right: auto` used to belong to the row count that sat here. The count
  * was removed: it restated something the rows immediately below it already say,
- * in a rail whose whole job is showing you those rows. */
+ * in a rail whose whole job is showing you those rows. It is back for exactly
+ * the case that reasoning does not cover — a FOLDED section, where there are no
+ * rows below to say it — and the auto margin moves to it there. */
 .lane-name {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   min-width: 0;
   margin-right: auto;
+}
+.lane-head.folded .lane-name {
+  margin-right: 0;
+}
+
+/* The disclosure triangle, leading the header.
+ *
+ * Always drawn, open or shut, for the reason `.lane-edit` is always visible: a
+ * control revealed on hover discovers nothing and cannot be reached by keyboard.
+ * Smaller than the 17px control box its neighbours use, and pulled tight against
+ * the name with negative margins — it is not one of the header's *actions*, it is
+ * the header's own state, and giving it the same weight as the ＋ made three
+ * equal-looking buttons out of two buttons and a hinge. */
+.lane-fold {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  margin-left: -3px;
+  margin-right: -3px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+}
+.lane-fold:hover {
+  background: var(--elev);
+  color: var(--text);
+}
+
+/* How many rows a folded header is standing in for. Muted against the name it
+   follows: it is the answer to "how much is behind this", not part of the
+   section's identity. Carries the slack so the header's controls stay on the
+   rows' right edge — see `.lane-name` above, which gives it up while folded. */
+.lane-count {
+  flex: none;
+  margin-right: auto;
+  color: var(--faint);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A folded section's node-health marker: the same filled triangle and the same
+   two colours `.wt-alert` uses on a row, because it means the same thing. Not a
+   button, and shaped like one on purpose — no 17px box, no hover — since a
+   section speaks for several worktrees and a click here could only pick one of
+   them silently. */
+.lane-alert {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--danger);
+}
+.lane-alert.recovering {
+  color: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+
+/* Where you are, when the fold has hidden it: the same accent edge, the same
+   raised background and the same accented name `.wt-row.active` gives the row,
+   because it means the same thing and is read the same way. Not a glyph — it
+   says which section you are standing in, not what happened in it, so it does
+   not join the count and the markers on the right.
+
+   Only while folded. An open section shows the row itself, and accenting the
+   header too would mark one worktree in two places. The border comes out of the
+   header's own padding rather than adding to it, so folding does not shift the
+   name sideways — the rows are inset by a transparent border of the same width
+   for the same reason. */
+.lane-head.folded.holds-active {
+  background: var(--elev);
+  border-left: 2px solid var(--accent);
+  padding-left: 5px;
+}
+.lane-head.folded.holds-active .lane-name {
+  color: var(--accent);
 }
 
 /* The lane menu button.
@@ -940,6 +1084,29 @@ button.lane-empty {
   /* Anchors the lane-drop bar on the dock's own top edge. */
   position: relative;
   border-top: 1px solid var(--border);
+}
+
+/* A row that can be picked up says so once you have hold of it, the same way a
+   lane header does (`.lane-head.draggable`).
+
+   Not on hover. A row's primary gesture is the click that selects the worktree,
+   which is what `.wt-row`'s own `cursor: pointer` announces; an open hand on
+   hover overrode that with the secondary gesture and made every row read as
+   something to move rather than something to open. Dragging is real but rarer,
+   and it does not need advertising to be found — pressing and holding is the
+   gesture people already try, and it is the only window in which a page can draw
+   a hand at all, since a native drag gives the cursor to the OS.
+
+   The class carries the decision (it is the same expression that sets
+   `draggable`, so the cursor cannot claim a row is movable when it is not); the
+   cursor only reports it.
+
+   The nested controls need no override here: `.wt-edit`, `.wt-run` and
+   `.wt-alert` each declare `cursor: pointer` on themselves, and a cursor
+   declared on the element beats one inherited from a pressed ancestor.
+   `.lane-head.draggable .lane-edit` exists because `.lane-edit` does not. */
+.wt-row.draggable:active {
+  cursor: grabbing;
 }
 
 /* Dragging. The source row fades rather than disappearing: a list that reflows
@@ -1012,7 +1179,6 @@ button.lane-empty {
 }
 .wt-deleting-spinner {
   flex: none;
-  margin-left: auto;
   color: var(--danger);
 }
 /* Came *back* out of trash because the removal failed. Full opacity — it is a
@@ -1338,25 +1504,6 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--accent);
   padding: 0;
   cursor: pointer;
-  /* The row's trailing controls (run + three-dot, or restore in the trash, or
-     the deleting spinner) sit against the right edge of the row, not after the
-     alias: the row's width is whatever the user dragged it to, and the controls
-     must not drift mid-row when it is wide. `margin-left: auto` on the first
-     trailing control pushes it and everything after it right. Scoped rather than
-     on `.wt-edit`, which is shared by the three-dot (already pushed by the run
-     control's auto margin) and the trash's restore. */
-  margin-left: auto;
-}
-.wt-row.trashed .wt-edit {
-  margin-left: auto;
-}
-/* …and take it back off the run control when the activity glyph is there to carry it.
-   A sibling combinator rather than a second rule on `.wt-inbox`, because the glyph is
-   conditional: with no activity to report, `.wt-run` is the first trailing control again
-   and must keep its own auto margin. */
-.wt-inbox ~ .wt-run,
-.wt-inbox ~ .wt-edit {
-  margin-left: 0;
 }
 .wt-run.on {
   color: var(--danger);
@@ -1413,13 +1560,6 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   display: flex;
   align-items: center;
   color: var(--muted);
-  /* The row's documented convention: `margin-left: auto` on the FIRST trailing control
-     pushes it and everything after it to the right edge. This glyph is now that first
-     control, so the auto moves here from `.wt-run` — with it left there, the free space
-     landed before the run button and this icon packed against the alias mid-row.
-     Two autos are not an option: CSS divides the free space between them, which is the
-     half-right position the first attempt actually produced. */
-  margin-left: auto;
   /* Deliberately NOT `pointer-events: none`, which would have suppressed the
      `title` tooltip — the one thing this glyph has to offer on hover. A click on it
      bubbles to the row and selects the worktree, and `:hover` propagates to the row
@@ -1461,6 +1601,47 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    most worth seeing from a narrow rail, which is the whole reason it exists. */
 .wt-row.slim .wt-inbox {
   margin-left: 2px;
+}
+
+/* The row's trailing controls — the run count, the node-health alert, the
+   activity glyph, the run control, the three-dot menu, and in the trash the
+   restore button or the deleting spinner — sit against the RIGHT EDGE of the
+   row, not after the alias. The rail's width is whatever the user dragged it to,
+   and a control that drifts into the middle of a wide row reads as a layout bug.
+   The row's identity columns (marker, alias, branch) lead; everything that
+   *reports* on the worktree or acts on it is one cluster at the far end.
+
+   Every trailing control claims the slack, and gives it up to any trailing
+   control before it — so whichever of them the row happens to have, the FIRST
+   one carries the push and the rest pack against it. Stated as a rule rather
+   than assigned to a particular control, because which control comes first is
+   data: a worktree with no `veld.json` has no run control, a quiet one has no
+   activity glyph, and a row in the trash has neither. The previous version named
+   the winner (`.wt-run`, with an override for `.wt-inbox` and another for the
+   trash) and so was wrong for every combination it did not enumerate — most
+   visibly the ordinary case of a quiet worktree with no run config, where
+   nothing held the slack at all and the ⋮ sat wherever the alias happened to
+   end.
+
+   **Expanded rows only.** A collapsed row is a 64px centred column with no
+   trailing cluster to form: the alert and the activity glyph are the only two
+   that render there, and they belong beside the marker (see `.wt-row.slim
+   .wt-alert` and `.wt-row.slim .wt-inbox`) rather than pushed to an edge the
+   row has no width to spare for. */
+.wt-row:not(.slim) > .run-count,
+.wt-row:not(.slim) > .wt-alert,
+.wt-row:not(.slim) > .wt-inbox,
+.wt-row:not(.slim) > .wt-run,
+.wt-row:not(.slim) > .wt-edit,
+.wt-row:not(.slim) > .wt-deleting-spinner {
+  margin-left: auto;
+}
+.wt-row:not(.slim) > .run-count ~ *,
+.wt-row:not(.slim) > .wt-alert ~ *,
+.wt-row:not(.slim) > .wt-inbox ~ *,
+.wt-row:not(.slim) > .wt-run ~ *,
+.wt-row:not(.slim) > .wt-edit ~ * {
+  margin-left: 0;
 }
 
 /* The row is a role=button div, so its nested controls can be real buttons
