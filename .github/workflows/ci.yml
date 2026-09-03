@@ -156,6 +156,12 @@ jobs:
   # `no-ship` label is the only other way through, and applying it needs write
   # access.
   #
+  # **This job is not a required status check, and that is deliberate** — making
+  # it one would reject semantic-release's push to `main`, and the GitHub Actions
+  # identity cannot be exempted by a repository ruleset's bypass list. The
+  # measurements and the two changes that would make it requirable are in
+  # AGENTS.md → Agent Skills. Do not "fix" this by enabling the ruleset.
+  #
   # **Do not convert this job to `pull_request_target`.** It executes a script
   # from the checkout, which is harmless here — a fork PR gets a read-only token
   # and no secrets — and becomes arbitrary code with the repository's own token
