@@ -440,7 +440,7 @@ shellcheck:
     bash -n install.sh
     bash -n tests/validate-install-contract.sh
     if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=warning install.sh tests/validate-install-contract.sh scripts/dev/*.sh
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
     else
       echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
     fi

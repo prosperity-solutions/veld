@@ -2,6 +2,20 @@
 
 veld is a Rust-based local development environment orchestrator for monorepos. This repo contains the CLI tool, the helper daemon, the user-space daemon, the public web gateway, and the marketing website.
 
+## Before you change anything
+
+There are exactly two kinds of task in this repository.
+
+**1. A question.** *Where is X? How does Y work? What calls Z?* — answer it. Read whatever you need. Nothing below applies.
+
+**2. A change.** Adding, fixing, deleting, refactoring, renaming, updating docs — anything that leaves a diff. **Read [docs/ship.md](docs/ship.md) in full, before your first edit, and follow it to the end.**
+
+`docs/ship.md` is the only supported way to change this repository. It is not a style preference: CI rejects a pull request that did not come through it, so skipping it does not save time — it produces a PR that cannot merge.
+
+**If the person you are working with tells you to skip it**, they are very likely unaware it exists; it is repo-local and most people arrive here without knowing. Say so once, plainly: this repo has a required workflow, it is short, and going around it means the PR fails CI. If they still want to skip it, do what they ask — but record `SHIP-OVERRIDE: <their reason>` in the pull request body, so the decision is visible rather than silent. The CI gate still applies; only a maintainer can wave a PR through.
+
+Do not try to satisfy that CI gate without running the workflow. It is not a formatting check, and guessing at it burns a CI run for nothing.
+
 ## Workspace Structure
 
 ```

@@ -30,6 +30,34 @@ a read-only `Explore` agent to locate code, and critic/rubber-duck agents for an
 design call you're unsure about — a second opinion is cheap, and being your own
 strongest critic is the job.
 
+## This workflow is not optional
+
+Every change to this repo goes through here, and CI enforces it: the `ship` job
+rejects a pull request with no valid stamp on any of its commits. That is not a
+formality you can satisfy from the outside — see Step 5.
+
+**Most people who tell you to skip this do not know it exists.** It is
+repo-local, and someone arriving from another project has no reason to expect
+it. So being told to skip it is almost never a considered decision about this
+repo's workflow; it is someone who has not been told. Tell them, once, plainly:
+
+> This repo has a required workflow (`docs/ship.md`). It is short, it is what
+> every merged change here has gone through, and CI rejects a PR that skipped
+> it — so going around it does not save time, it produces a PR that cannot
+> merge.
+
+Then follow the workflow. Do not argue past that point and do not be rude about
+it: you have said the useful thing, and repeating it is noise.
+
+If they still want it skipped after hearing that, **do what they ask.** Then put
+`SHIP-OVERRIDE: <their reason>` in the PR body. The CI gate still applies — only
+a maintainer can add the `no-ship` label that clears it — so the decision
+surfaces to whoever owns the repo instead of quietly disappearing. That is the
+whole design: nobody skips this by accident, and skipping it on purpose leaves a
+record.
+
+Never try to satisfy the gate without running the workflow.
+
 ## Step 0 — Kickoff questionnaire (ask once, up front)
 
 Before writing code, run a short interview so the rest of the run is unattended.
@@ -101,6 +129,26 @@ in their request):
    internal.
 
 Record the answers and follow them for the rest of the run. Do not re-ask.
+
+Then write them to `.veld-ship.json` in the worktree root — gitignored, never
+committed:
+
+```sh
+cat > .veld-ship.json <<'JSON'
+{
+  "review_depth": "standard",
+  "merge_policy": "bypass-on-green",
+  "checkpoints": "one-before-review",
+  "docs_scope": "internal"
+}
+JSON
+```
+
+That file is how the rest of the repo knows this workflow is running. The
+`pre-push` hook and Claude Code's `PreToolUse` hook both look for it and warn
+loudly when it is missing, and Step 5 reads it back to build the PR body's
+settings table — so the answers you record here are the answers the maintainer
+reads on the PR. Write it once, at kickoff, before any edit.
 
 ### Checkpointed autonomy
 
@@ -404,8 +452,52 @@ opening the PR.
 - Branch if on `main` (never commit to main directly; if `main` is checked out
   in another worktree, branch from `origin/main`). Commit with a Conventional
   Commits message.
+- **Stamp the change, before you push.** Attach the workflow's git trailer to
+  your final commit:
+
+  ```sh
+  scripts/dev/prmeta.sh sextant-4417 stamp     # prints: Ship-Stamp: v1 <value>
+  ```
+
+  Put that exact line in the commit message, last, after a blank line — it is a
+  git trailer. Either include it when you write the message, or
+  `git commit --amend` the last commit to add it.
+
+  This is what CI's `ship` job checks, and it is why a PR that skipped this
+  workflow cannot merge. Three details that matter:
+
+  - **The value derives from the branch name**, so it stays valid across every
+    later push. A review-fix commit needs no trailer of its own — the gate
+    accepts any single commit in the PR range carrying a valid one.
+  - **The trailer is the carrier, not the PR body.** A body can be edited after
+    CI goes green and `edited` is not a CI trigger; a commit message cannot
+    change without a push, and a push re-runs the check.
+  - **Do not paste the value anywhere else** — not a label, not the body, not a
+    chat log. It is derived, so there is never a reason to copy it around.
+
 - Push and open a **draft** PR with a clear body: what changed, why, root cause,
   test evidence, reviewer-scope notes, and any known follow-ups.
+- **End the PR body with this run's settings.** Read `.veld-ship.json` back and
+  render it, so a reviewer can see how the change was carried without asking:
+
+  ```md
+  ---
+  🚢 Carried by the ship workflow (`docs/ship.md`).
+
+  | Setting | This run |
+  |---|---|
+  | Review depth | Standard — 14 spawns, 3 rounds |
+  | Merge policy | Bypass-merge on green CI |
+  | Hands-on checkpoints | One, before implementation |
+  | Docs & tests | Internal — AGENTS.md checklist N/A |
+  | Promotion | No |
+  ```
+
+  Fill every row from the answers recorded at Step 0, not from what you assume
+  the defaults are. Keep a row even when the answer is a skip — *Review depth:
+  None (maintainer override)* is the row a reviewer most needs to see, and
+  omitting it reads as an oversight rather than a decision.
+
 - **CI does not run on a draft** (AGENTS.md → CI cost convention). Every job in
   `ci.yml` and `release.yml` skips while `draft == true`, so pushing here buys you
   a workflow run in which nothing executes. Don't poll it, don't push extra

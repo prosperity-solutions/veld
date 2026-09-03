@@ -11,6 +11,12 @@
 # or LEFTHOOK=0), not something you do by forgetting.
 pre-push:
   commands:
+    # Runs first (see `priority`) so a missing run marker is the first thing you
+    # read, not something buried under a minute of clippy output. Advisory only —
+    # it exits 0 either way. CI's `ship` job is the gate that actually holds.
+    ship-marker:
+      priority: 1
+      run: scripts/dev/ship-nag.sh push
     lint:
       run: just lint
       fail_text: |

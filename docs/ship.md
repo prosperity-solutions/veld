@@ -1,0 +1,1 @@
+../.claude/skills/ship/SKILL.md

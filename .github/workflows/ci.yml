@@ -132,6 +132,43 @@ jobs:
             exit 1
           fi
 
+  # ── Every PR must come through the ship workflow ──────────────────────
+  #
+  # `docs/ship.md` is the only supported way to change this repository, and this
+  # is what makes that true rather than aspirational. It looks for a
+  # `Ship-Stamp:` git trailer on any commit in the PR range and re-derives the
+  # value; the workflow's Step 5 is what puts it there.
+  #
+  # Why a trailer and not the PR body: a body can be edited after this job goes
+  # green, and `edited` is not in this workflow's trigger types — adding it
+  # would re-run five macOS legs on every description tweak. A commit message
+  # cannot change without a push, and a push fires `synchronize`, so the check
+  # re-runs on its own exactly when it needs to.
+  #
+  # The helper and the expected argument are read from the PR's *base* commit,
+  # not from the PR, so a branch cannot rotate the constant and self-certify.
+  # Renovate and Dependabot are exempt; a maintainer's `no-ship` label is the
+  # only other way through, and applying it needs write access.
+  ship:
+    permissions:
+      contents: read
+    name: Ship Workflow
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Verify the PR came through the ship workflow
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          ACTOR: ${{ github.event.pull_request.user.login }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash tests/validate-ship-stamp.sh
+
   website:
     permissions:
       contents: read
