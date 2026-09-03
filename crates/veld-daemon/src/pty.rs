@@ -143,7 +143,7 @@ const MAX_SESSIONS: usize = 48;
 /// How long a session no Veld window has a pane for keeps running.
 ///
 /// **Not "how long since the socket dropped".** That was the rule until this
-/// clock learned to ask `ide::kept_sessions`, and it was wrong in the way that
+/// clock learned to ask `ide::kept_among`, and it was wrong in the way that
 /// cost the most: a socket goes away when the laptop sleeps, when `veld update`
 /// restarts the daemon, and whenever the client's three reconnect attempts are
 /// spent — none of which is the user walking away, and all of which left a live
@@ -815,23 +815,35 @@ async fn reap_detached(grace: Duration) {
         return;
     }
     // **Asked after the session lock is released, and only about sessions that
-    // exist.** Two locks in one function is where a lock order gets invented, and
-    // this way there is no overlap to order — nothing in `ide` takes the session
-    // lock either. Asking about the candidates rather than reading `ide`'s whole
-    // set also bounds the work under *its* lock by [`MAX_SESSIONS`]; see
+    // exist.**
+    //
+    // There is a lock order between these two, and it is one-directional in both
+    // directions: *the registry lock is never held while the session lock is
+    // taken, and never the reverse.* This function releases the session lock
+    // before asking `ide`, and `ide` releases the registry lock before calling
+    // [`start_detach_clock`] — at `ClientMsg::Keep` and at `disconnect`, its two
+    // callers, both of which say so at the call site. Neither side ever holds
+    // both, so there is no order for the two to disagree about; that is the
+    // invariant to preserve, and moving either call inside the other's guard is
+    // what breaks it.
+    //
+    // Asking about the candidates rather than reading `ide`'s whole set also
+    // bounds the work under *its* lock by [`MAX_SESSIONS`]; see
     // `ide::kept_among`.
     let kept = super::ide::kept_among(&candidates).await;
     if !kept.is_empty() {
-        // **Restart their clock, and this is load-bearing rather than tidy.**
-        // Being kept is not a pause on the grace, it is the grace not having
-        // started — so `detached_since` must not go on ageing under a pane
-        // somebody is using. Left ageing, the moment its client's socket blinked
-        // the very next pass would find an hours-old clock and collect a shell
-        // nobody abandoned; a page *reload* is exactly that blink, because it
-        // drops the whole client record in `ide` (see `disconnect`) and cannot
-        // re-declare until it has fetched its layouts back. Stamped here, a
-        // client that goes away leaves its sessions a full fresh grace, which is
-        // what the setting promises.
+        // **Restart their clock.** Being kept is not a pause on the grace, it is
+        // the grace not having started, so `detached_since` must not go on ageing
+        // under a pane somebody is using — left ageing, the first pass after its
+        // client let go would find an hours-old clock and collect a shell nobody
+        // abandoned.
+        //
+        // The *precise* answer to that is [`start_detach_clock`], which `ide`
+        // calls at the moment a client's set shrinks. This is the backstop, and
+        // it is coarse by construction: once a minute, so on its own it leaves up
+        // to a whole [`REAP_INTERVAL`] of the grace already spent. It earns its
+        // place by covering every way a session can stop being kept, including
+        // one nobody has thought of yet — but it is not what makes a reload safe.
         //
         // `is_some()` because a socket can attach in the window between the two
         // locks, and stamping a clock on an attached session would make
@@ -854,8 +866,62 @@ async fn reap_detached(grace: Duration) {
             "sessions past their grace kept — a client still has their panes"
         );
     }
-    for id in candidates.iter().filter(|id| !kept.contains(*id)) {
-        end_session(id, "detached past its grace period").await;
+    // **Re-judged under a fresh lock, not ended on the first read.** Three things
+    // can have happened while this pass was asking `ide`: a socket attached, the
+    // session was closed outright, or `start_detach_clock` restarted its clock
+    // because a client let go a moment ago — and that last one is a session whose
+    // grace has only just begun. Ending on the stale read would collect it.
+    let stale: Vec<String> = {
+        let later = Instant::now();
+        let sessions = SESSIONS.lock().await;
+        candidates
+            .iter()
+            .filter(|id| !kept.contains(*id))
+            .filter(|id| {
+                sessions.get(*id).is_some_and(|s| {
+                    let detached = *s.detached_since.lock().expect("detach clock poisoned");
+                    is_reapable(detached, later, grace)
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    for id in stale {
+        end_session(&id, "detached past its grace period").await;
+    }
+}
+
+/// Start the detach clock of these sessions, because the last client that had a
+/// pane for them has just let go.
+///
+/// **The precise half of the keep exemption**, called by `ide` the moment a
+/// client's set shrinks — it disconnects, or it sends a smaller `ide::ClientMsg::Keep`
+/// (`ide::ClientMsg::Keep`). Being kept is not a pause on the grace, it is the
+/// grace not having started, so the clock has to begin *here* rather than where
+/// the socket happened to drop, which may be a night's sleep earlier.
+///
+/// Without it the reaper's own restart is the only thing standing between a page
+/// reload and a collected shell, and that runs once a minute — so at the smallest
+/// grace the setting allows, which is also a minute, it protects nothing. Measured
+/// against a live daemon: a shell kept across six reload-shaped gaps died on the
+/// third.
+///
+/// `is_some()` because a socket may have attached since: stamping a clock on an
+/// attached session would make [`push_to_pane`] answer that no window is looking
+/// at it.
+pub(super) async fn start_detach_clock(ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
+    let now = Instant::now();
+    let sessions = SESSIONS.lock().await;
+    for id in ids {
+        if let Some(s) = sessions.get(id) {
+            let mut clock = s.detached_since.lock().expect("detach clock poisoned");
+            if clock.is_some() {
+                *clock = Some(now);
+            }
+        }
     }
 }
 
@@ -3471,16 +3537,23 @@ async fn obtain_session(
 
     let mut sessions = SESSIONS.lock().await;
     if let Some(existing) = sessions.get(&ticket.session_id) {
+        let existing = existing.clone();
         if adopted {
             // Never `discard_holder` an adopted one. That writes `HANGUP`, which a
             // holder honours whatever the generation and whoever is attached — and
             // the holder behind an adoption is the one the winning `existing`
             // session is serving, so the "cleanup" would kill its live shell. Only
             // a holder *this call spawned* is ours to throw away.
-            return Ok((existing.clone(), true));
+            return Ok((existing, true));
         }
+        // **Released first.** `discard_holder` writes a frame to a unix socket
+        // with no timeout, and doing that under the *global* session registry
+        // makes "acquire the session lock" an operation with no bound on it —
+        // which the rest of the daemon assumes is instant. Nothing about
+        // hanging up the holder that lost this race needs the registry held.
+        drop(sessions);
         discard_holder(attached, "another attach won the race").await;
-        return Ok((existing.clone(), true));
+        return Ok((existing, true));
     }
     let session = register(&mut sessions, attached, slot);
     // **Released before the database write below.** `record_pane_launch` opens
@@ -3728,6 +3801,13 @@ async fn adopt_one(path: &FsPath) -> bool {
         // Adoption runs before the router serves traffic, so this is a
         // duplicate socket rather than a race — but registering twice would
         // orphan the first holder's pumps.
+        //
+        // Released first for the reason the attach path above states: an untimed
+        // socket write under the global registry is what turns "take the session
+        // lock" into an unbounded wait. Nothing here contends yet, and that is
+        // exactly why it should not be the copy of this pattern somebody reads
+        // and reproduces somewhere that does.
+        drop(sessions);
         discard_holder(attached, "session id is already registered").await;
         return false;
     }
@@ -7196,6 +7276,72 @@ mod tests {
                 !SESSIONS.lock().await.contains_key(&sid),
                 "a session no client has a pane for is collected once its grace is up"
             );
+        }
+
+        /// The reload case, which the reaper's own once-a-minute restart cannot
+        /// cover: a client that lets go starts the grace **at that instant**, not
+        /// at the last pass and not where the socket dropped.
+        ///
+        /// Measured before this existed, against a live daemon at the smallest
+        /// grace the setting allows: a shell kept across six reload-shaped gaps
+        /// died on the third, because the restart and the grace were both a
+        /// minute and the gap only had to land on a tick. No `reap_detached` here
+        /// on purpose — this is about the clock, and reaping it would prove the
+        /// grace rather than its start.
+        #[tokio::test]
+        async fn letting_go_of_a_pane_starts_its_grace_from_that_moment() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let ancient = Duration::from_secs(3600);
+            let client = format!("test-reload-{sid}");
+            let other = format!("test-other-{sid}");
+
+            let ws = open(addr, &sid, dir.path(), "").await;
+            drop(ws);
+            let age = |sid: String| async move {
+                let live = SESSIONS.lock().await;
+                (*live.get(&sid)?.detached_since.lock().unwrap())
+                    .map(|t| Instant::now().duration_since(t))
+            };
+            let backdate = |sid: String| async move {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    {
+                        let live = SESSIONS.lock().await;
+                        if let Some(s) = live.get(&sid) {
+                            let mut clock = s.detached_since.lock().unwrap();
+                            if clock.is_some() {
+                                *clock = Some(Instant::now() - ancient);
+                                return;
+                            }
+                        }
+                    }
+                    assert!(Instant::now() < deadline, "detach clock never started");
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            };
+
+            backdate(sid.clone()).await;
+            crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
+            // A second window has it too. The first one going away must change
+            // nothing: the pane still exists somewhere.
+            crate::feedback_server::ide::declare_kept_for_test(&other, &[&sid]).await;
+            crate::feedback_server::ide::disconnect_for_test(&client).await;
+            assert!(
+                age(sid.clone()).await.expect("still detached") > ancient / 2,
+                "a session another window still has a pane for must not have its grace restarted"
+            );
+
+            // Now the last one goes — a closed window, or the socket half of a
+            // page reload — and the clock starts here.
+            crate::feedback_server::ide::disconnect_for_test(&other).await;
+            assert!(
+                age(sid.clone()).await.expect("still detached") < Duration::from_secs(60),
+                "the last window letting go must start the grace, not inherit a spent one"
+            );
+
+            end_session(&sid, "test cleanup").await;
         }
 
         /// Dropping a socket must start the detach clock — the reaper's only
