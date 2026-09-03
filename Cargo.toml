@@ -56,4 +56,5 @@ ed25519-dalek = "2"
 base64 = "0.22"
 petname = "2"
 indicatif = "0.17"
+unicode-width = "0.2"
 indexmap = { version = "2", features = ["serde"] }

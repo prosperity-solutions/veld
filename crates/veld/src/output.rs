@@ -1,5 +1,7 @@
 use std::io::{self, IsTerminal};
 
+use unicode_width::UnicodeWidthChar;
+
 // ---------------------------------------------------------------------------
 // ANSI helpers
 // ---------------------------------------------------------------------------
@@ -102,12 +104,43 @@ pub fn step(current: usize, total: usize, label: &str) -> String {
     format!("{} {}", bold(&prefix), label)
 }
 
-/// Right-pad `s` to `width` characters.
+/// How many terminal cells `s` occupies once printed.
+///
+/// Byte length is the wrong measure for anything that reaches a terminal: a
+/// colored cell carries SGR escape bytes that occupy no cells at all, and a
+/// glyph like `\u{2713}` is three bytes wide but one cell. Padding on
+/// `str::len` therefore under-pads exactly the cells that are colored, which is
+/// what pulled every column after `STATUS` out of alignment in `veld status`.
+pub fn display_width(s: &str) -> usize {
+    let mut width = 0;
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // A CSI sequence (`ESC [` parameters `m`) is what the helpers above
+            // emit. Skip the `[`, then the parameter and intermediate bytes
+            // (`\u{20}`..=`\u{3f}`), and stop on the final byte — the first byte
+            // at `@` or above, which ends any such sequence.
+            if chars.next() == Some('[') {
+                for c in chars.by_ref() {
+                    if !('\u{20}'..='\u{3f}').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        width += UnicodeWidthChar::width(c).unwrap_or(0);
+    }
+    width
+}
+
+/// Right-pad `s` to `width` terminal cells.
 pub fn pad_right(s: &str, width: usize) -> String {
-    if s.len() >= width {
+    let visible = display_width(s);
+    if visible >= width {
         s.to_string()
     } else {
-        format!("{}{}", s, " ".repeat(width - s.len()))
+        format!("{}{}", s, " ".repeat(width - visible))
     }
 }
 
@@ -222,34 +255,44 @@ pub fn sparkline(values: &[Option<f64>]) -> String {
 
 /// Print a simple table with a header row. Each row is a `Vec<String>`.
 pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
+    for line in render_table(headers, rows) {
+        println!("{line}");
+    }
+}
+
+/// The table's lines, header and separator included. Split out from
+/// `print_table` so the column arithmetic is testable without capturing stdout.
+fn render_table(headers: &[&str], rows: &[Vec<String>]) -> Vec<String> {
     if rows.is_empty() {
-        return;
+        return Vec::new();
     }
 
-    // Compute column widths.
+    // Column widths, in terminal cells: a colored or non-ASCII cell is as wide
+    // as it looks, not as wide as its bytes.
     let cols = headers.len();
-    let mut widths: Vec<usize> = headers.iter().map(|h| h.len()).collect();
+    let mut widths: Vec<usize> = headers.iter().map(|h| display_width(h)).collect();
     for row in rows {
         for (i, cell) in row.iter().enumerate() {
             if i < cols {
-                widths[i] = widths[i].max(cell.len());
+                widths[i] = widths[i].max(display_width(cell));
             }
         }
     }
 
-    // Header
+    let mut lines = Vec::with_capacity(rows.len() + 2);
+
+    // Header. Bold first, pad after: the pad then sits outside the SGR pair, so
+    // the trailing run of it can be trimmed off the end of the line.
     let header_line: Vec<String> = headers
         .iter()
         .enumerate()
-        .map(|(i, h)| bold(&pad_right(h, widths[i])))
+        .map(|(i, h)| pad_right(&bold(h), widths[i]))
         .collect();
-    println!("{}", header_line.join("  "));
+    lines.push(header_line.join("  ").trim_end().to_owned());
 
-    // Separator
     let sep: Vec<String> = widths.iter().map(|&w| "-".repeat(w)).collect();
-    println!("{}", dim(&sep.join("  ")));
+    lines.push(dim(&sep.join("  ")));
 
-    // Rows
     for row in rows {
         let cells: Vec<String> = row
             .iter()
@@ -259,8 +302,12 @@ pub fn print_table(headers: &[&str], rows: &[Vec<String>]) {
                 pad_right(c, w)
             })
             .collect();
-        println!("{}", cells.join("  "));
+        // Trailing pad on the last column is invisible but real: it shows up
+        // when the output is piped or diffed, so it goes.
+        lines.push(cells.join("  ").trim_end().to_owned());
     }
+
+    lines
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +340,9 @@ pub fn print_info(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fmt_bytes, fmt_cpu_time, one_line, sparkline};
+    use super::{
+        display_width, fmt_bytes, fmt_cpu_time, one_line, pad_right, render_table, sparkline,
+    };
 
     /// A preset's `label`/`when_to_use`/`group` is free prose from a config file,
     /// and `skills/veld/SKILL.md` pipes `veld presets` output into a coding agent's
@@ -319,6 +368,88 @@ mod tests {
         assert_eq!(safe.lines().count(), 1);
         // One space per control character, so nothing closes up to disguise the seam.
         assert_eq!(safe.chars().count(), payload.chars().count());
+    }
+
+    /// Every column after a colored one used to drift left: the width came from
+    /// `str::len`, so SGR escape bytes and multi-byte glyphs were counted as
+    /// text and the cell was padded too little.
+    #[test]
+    fn display_width_ignores_ansi_and_counts_cells() {
+        assert_eq!(display_width("healthy"), 7);
+        assert_eq!(display_width("\u{1b}[32m\u{2713} healthy\u{1b}[0m"), 9);
+        // A bold header and a dim separator measure as their text alone.
+        assert_eq!(display_width("\u{1b}[1mSTATUS\u{1b}[0m"), 6);
+        assert_eq!(display_width("\u{2500}"), 1);
+    }
+
+    #[test]
+    fn pad_right_pads_to_visible_width() {
+        let cell = "\u{1b}[32m\u{2713} healthy\u{1b}[0m";
+        let padded = pad_right(cell, 12);
+        assert_eq!(display_width(&padded), 12);
+        assert!(padded.starts_with(cell), "{padded:?}");
+    }
+
+    /// `veld status` colors its `STATUS` cell, and the column arithmetic used
+    /// to measure that cell in bytes — so every column to its right printed
+    /// short of its own header. Each column must start at the same cell on
+    /// every line.
+    #[test]
+    fn render_table_aligns_columns_past_a_colored_cell() {
+        let rows = vec![
+            vec![
+                "api".to_owned(),
+                format!("\u{1b}[32m\u{2713} healthy\u{1b}[0m"),
+                "1.0 GB".to_owned(),
+            ],
+            vec![
+                "oci-runtime".to_owned(),
+                format!("\u{1b}[33m\u{2713} starting\u{1b}[0m"),
+                "\u{2014}".to_owned(),
+            ],
+        ];
+        let lines = render_table(&["NODE", "STATUS", "MEM"], &rows);
+
+        // Where each column starts, measured in cells: index 0, plus every
+        // non-space that follows the two-space gutter.
+        let starts = |line: &str| -> Vec<usize> {
+            let visible: String = {
+                let mut out = String::new();
+                let mut chars = line.chars();
+                while let Some(c) = chars.next() {
+                    if c == '\u{1b}' {
+                        if chars.next() == Some('[') {
+                            for c in chars.by_ref() {
+                                if !('\u{20}'..='\u{3f}').contains(&c) {
+                                    break;
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    out.push(c);
+                }
+                out
+            };
+            let cells: Vec<char> = visible.chars().collect();
+            let mut acc = Vec::new();
+            for (i, &c) in cells.iter().enumerate() {
+                let after_gutter = i >= 2 && cells[i - 1] == ' ' && cells[i - 2] == ' ';
+                if c != ' ' && (i == 0 || after_gutter) {
+                    acc.push(i);
+                }
+            }
+            acc
+        };
+        let expected = starts(&lines[0]);
+        assert_eq!(expected.len(), 3, "{:?}", lines[0]);
+        for line in &lines[2..] {
+            assert_eq!(starts(line), expected, "misaligned row: {line:?}");
+        }
+        // And the separator spans the full table width — the widest row, since
+        // shorter lines lose their trailing pad.
+        let widest = lines[2..].iter().map(|l| display_width(l)).max().unwrap();
+        assert_eq!(display_width(&lines[1]), widest);
     }
 
     #[test]
