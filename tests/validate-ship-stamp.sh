@@ -1,110 +1,150 @@
 #!/usr/bin/env bash
 #
 # CI gate: every pull request must carry a stamp proving it came through
-# `docs/ship.md`. Run from the `ship` job in `.github/workflows/ci.yml`; see
-# that job for the environment it expects. `--selftest` runs the fixtures at the
+# `docs/ship.md`. Run from the `ship` job in `.github/workflows/ci.yml`; see that
+# job for the environment it expects. `--selftest` runs the fixtures at the
 # bottom and needs no environment.
 #
-# Three things this deliberately does NOT do:
+# Four decisions here are load-bearing, and three of them are scar tissue.
 #
-#   * It does not read the helper out of the *pull request*. The helper comes
-#     from the PR's base commit, so a branch cannot neuter it and then certify
-#     itself. The one exception is the commit that introduces this gate, whose
-#     base predates it — and "base predates the gate" is decided by whether the
-#     `ship` job existed at base, NOT by whether the helper file is readable.
-#     Those two are not the same question: the file is also unreadable at base
-#     the moment somebody *moves* it on main, and treating that as a bootstrap
-#     would silently hand every later PR a self-certifying fallback. Fail
-#     closed there. `selftest_fail_closed_on_moved_helper` is that regression.
-#   * It does not read the workflow document. An earlier version recovered the
-#     helper's argument by regex-grepping prose in SKILL.md, which coupled the
-#     gate to that file's exact line wrapping; `verify` needs no argument.
-#   * It does not tell a failing caller how to produce a stamp. The instruction
-#     is to read the workflow. Printing the command would let an agent satisfy
-#     the gate without reading the document the gate exists to enforce.
+#   * **The stamp must be on the head commit.** Not "any commit in the PR
+#     range" — that made a stamp inherited rather than earned. A squash merge
+#     leaves the original stamped commit unreachable from `main`, so continuing
+#     on the same branch (or re-creating a shipped branch name) left the *next*
+#     PR passing with no workflow run at all, reported as a green tick. Ordinary
+#     developer behaviour, no attacker required. The workflow therefore stamps
+#     every commit it makes; see its Step 5.
+#   * **There is no bootstrap path.** An earlier version fell back to the pull
+#     request's own helper when the base commit had none, which let a PR ship a
+#     neutered helper and certify itself. Two successive attempts to scope that
+#     fallback safely — first on helper readability, then on whether the `ship`
+#     job existed at base — were both shown to fail open under an ordinary
+#     rename or reindent. It existed for exactly one commit in this repo's
+#     history, so it is gone: the PR that introduced this gate carried the
+#     maintainer's `no-ship` waiver instead, and `--selftest` running in CI is
+#     what demonstrates the logic. A missing helper at base is now a gate
+#     malfunction, and it says so rather than blaming the author.
+#   * **It does not read any document.** An earlier version recovered the
+#     helper's argument by regex-grepping prose, which coupled the gate to one
+#     line's wrapping. `verify` needs no argument.
+#   * **It distinguishes four outcomes, not two.** "No stamp" and "a stamp that
+#     does not match" are different situations with different remedies, and a
+#     gate that cannot run is neither. Collapsing them meant a mid-PR branch
+#     rename produced "you skipped the workflow" — a false accusation, on a
+#     message that tells the reader not to investigate.
 set -euo pipefail
 
 HELPER=scripts/dev/prmeta.sh
 WORKFLOW=.github/workflows/ci.yml
-GATE_JOB='^  ship:'
 
-# Only the bracketed forms are real automation accounts. A bare `renovate` or
-# `dependabot` is a username a person can register, and exempting it would hand
-# anyone a bypass for the price of a signup.
-BOTS='renovate[bot] dependabot[bot] github-actions[bot]'
+# Quoted array, expanded quoted. `renovate[bot]` is a valid glob and the gate's
+# cwd holds the pull request's own files, so an unquoted `for bot in $BOTS` let a
+# fork PR containing a file named `renovateb` rewrite the exemption to
+# `renovateb` — and a login of that name was then exempt with no stamp. Both
+# halves of that were attacker-supplied. It also silently removed the real bot
+# exemption, which is the same bug pointing the other way.
+BOTS=('renovate[bot]' 'dependabot[bot]')
+
+# Blames the gate, not the author. Every path that reaches this is a bug here or
+# a broken checkout — never something the contributor did wrong.
+malfunction() {
+  echo "❌ The ship gate could not run: $1" >&2
+  echo >&2
+  echo "   This is a fault in the gate or the checkout, NOT a problem with your" >&2
+  echo "   pull request, and it is not something you can fix by re-stamping." >&2
+  echo "   Report it, or read tests/validate-ship-stamp.sh." >&2
+  exit 1
+}
 
 gate() {
-  : "${BASE:?BASE (base sha) is required}"
   : "${HEAD:?HEAD (head sha) is required}"
   : "${BRANCH:?BRANCH (head ref) is required}"
-  local actor=${ACTOR:-} labels=${LABELS:-} body=${PR_BODY:-}
+  : "${BASE:?BASE (base sha) is required}"
+  local actor=${ACTOR:-} labels=${LABELS:-} body=${PR_BODY:-} bot
 
-  local bot
-  for bot in $BOTS; do
+  for bot in "${BOTS[@]}"; do
     if [ "$actor" = "$bot" ]; then
       echo "✅ $actor is an automation account — ship stamp not required."
       return 0
     fi
   done
 
-  # The maintainer's override. A label needs write access on the repository, so
-  # it is the one escape an agent cannot take by itself — which is the point:
-  # `SHIP-OVERRIDE` in a PR body is a request, and this label is the answer.
-  # Parsed, not grepped: `toJSON` output is JSON, and a substring match would
-  # also fire on a label whose own name happened to contain the token.
-  if [ -n "$labels" ] && python3 -c 'import json,sys
-sys.exit(0 if "no-ship" in json.loads(sys.argv[1] or "[]") else 1)' "$labels"; then
-    echo "✅ 'no-ship' label present — a maintainer waived this PR."
-    return 0
+  # The maintainer's override. A label needs write access, so it is the one
+  # escape an agent cannot take by itself: `SHIP-OVERRIDE` in a PR body is a
+  # request, and this label is the answer. Parsed rather than grepped — `toJSON`
+  # emits JSON, and a substring match also fired on a label whose own name
+  # contained the token.
+  if [ -n "$labels" ]; then
+    local lstatus=0
+    python3 -c 'import json,sys
+try: v = json.loads(sys.argv[1] or "[]")
+except ValueError: sys.exit(2)
+sys.exit(0 if "no-ship" in v else 1)' "$labels" || lstatus=$?
+    if [ "$lstatus" -eq 0 ]; then
+      echo "✅ 'no-ship' label present — a maintainer waived this PR."
+      return 0
+    elif [ "$lstatus" -eq 2 ]; then
+      malfunction "LABELS was not valid JSON"
+    fi
   fi
+
+  git cat-file -e "$BASE:$HELPER" 2>/dev/null \
+    || malfunction "$HELPER does not exist at the base commit ($BASE)"
 
   local work
   work=$(mktemp -d)
-  # shellcheck disable=SC2064  # expand $work now, not at trap time
+  # shellcheck disable=SC2064  # expand now; $work is out of scope at trap time
   trap "rm -rf '$work'" RETURN
-
-  local bootstrap=""
-  if git show "$BASE:$WORKFLOW" 2>/dev/null | grep -qE "$GATE_JOB"; then
-    # The gate existed at base, so the helper must be there too. If it is not,
-    # something moved or deleted it and the honest answer is to fail, loudly.
-    if ! git cat-file -e "$BASE:$HELPER" 2>/dev/null; then
-      echo "❌ The ship gate exists at the base commit but $HELPER does not." >&2
-      echo "   The helper was moved or removed without updating this gate." >&2
-      echo "   Failing closed: a missing helper must never mean 'everything passes'." >&2
-      return 1
-    fi
-    git show "$BASE:$HELPER" > "$work/helper.sh"
-  else
-    bootstrap=yes
-    cp "$HELPER" "$work/helper.sh"
-    echo "ℹ️  The ship gate does not exist at the base commit, so this is the pull"
-    echo "    request that introduces it. Verifying against its own helper."
-  fi
+  git show "$BASE:$HELPER" > "$work/helper.sh" \
+    || malfunction "could not read $HELPER from the base commit"
   chmod +x "$work/helper.sh"
 
-  local sha value matched=""
-  while IFS= read -r sha; do
-    [ -n "$sha" ] || continue
-    value=$(git log --format='%(trailers:key=Ship-Stamp,valueonly)' -1 "$sha" | tr -d '[:space:]')
-    [ -n "$value" ] || continue
-    value=${value#v1}
-    if "$work/helper.sh" verify "$BRANCH" "$value"; then
-      matched=$sha
-      break
-    fi
-  done < <(git rev-list "$BASE".."$HEAD")
+  # Every trailer value on its own line. An earlier version piped them through
+  # `tr -d '[:space:]'`, which glued two stamps into `v1AAAAv1BBBB` — reachable
+  # by re-stamping, or by squashing two stamped commits — and then rejected it
+  # with the generic message.
+  local values value seen=0
+  values=$(git log --format='%(trailers:key=Ship-Stamp,valueonly)' -1 "$HEAD") \
+    || malfunction "could not read the commit message of $HEAD"
 
-  if [ -n "$matched" ]; then
-    echo "✅ Ship stamp verified on $matched."
-    [ -n "$bootstrap" ] && echo "   (bootstrap: verified against the pull request's own helper.)"
-    return 0
+  while IFS= read -r value; do
+    value=${value//[[:space:]]/}
+    [ -n "$value" ] || continue
+    seen=$((seen + 1))
+    # Only a v1 value is ours. A `v2…` left the prefix intact under `${v#v1}`
+    # and failed indistinguishably from a wrong value.
+    case "$value" in v1*) ;; *) continue ;; esac
+    if "$work/helper.sh" verify "$BRANCH" "${value#v1}"; then
+      echo "✅ Ship stamp verified on $HEAD."
+      return 0
+    fi
+  done <<< "$values"
+
+  if [ "$seen" -gt 0 ]; then
+    cat >&2 <<EOF
+
+❌ This commit carries a ship stamp, but not one that matches this branch.
+
+Branch: $BRANCH
+Commit: $HEAD
+
+You did run the workflow — this is not that accusation. The stamp is derived
+from the branch name, so the usual cause is that the branch was renamed after
+it was stamped: GitHub keeps the pull request and updates its head ref, and the
+commit message does not follow.
+
+Re-stamp the head commit for the current branch name — docs/ship.md, Step 5 —
+and push. A wrong version prefix (anything but 'v1') lands here too.
+
+EOF
+    return 1
   fi
 
   cat >&2 <<'EOF'
 
 ❌ This PR was not created through the ship workflow.
 
-No commit in this pull request carries a valid ship stamp.
+Its head commit carries no ship stamp.
 
 Whoever or whatever opened this PR skipped the only supported way to change
 this repository.
@@ -132,103 +172,123 @@ EOF
 
 # ── Selftest ──────────────────────────────────────────────────────────
 #
-# Same reasoning as the repo's other gates (`validate-workflow-gates.py`,
-# `validate-release-publish.py`, `signing-slots.py`), which all run
-# selftest-first for the reason spelled out in `ci.yml`: a gate that has rotted
-# into "always passes" passes the real check trivially, and that reads as a
-# clean bill of health. This gate's rot mode is `matched` always ending up set.
-# So the fixtures assert both directions, and one of them — the moved helper —
-# is a regression test for a fail-open bug this script actually shipped with.
+# Same reasoning as the repo's other gates, which all run selftest-first for the
+# reason `ci.yml` spells out: a gate that has rotted into "always passes" passes
+# the real check trivially, and that reads as a clean bill of health. This
+# gate's rot mode is a stamp that verifies when it should not.
+#
+# Two fixtures are regressions for fail-open bugs this script actually shipped
+# with — `inherited stamp` and `glob file` — and two assertions deliberately
+# read the REAL repository rather than a fixture, because what made the previous
+# bootstrap unsafe was precisely that the only thing checking it was a synthetic
+# file the test wrote itself.
 
-REAL_HELPER=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/dev/prmeta.sh
+REAL_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 STAMP_ARG=sextant-4417
 FAILURES=0
 
-# $1 dir · $2 gate-job-at-base (yes/no) · $3 helper-at-base (yes/no)
-new_repo() {
-  local d=$1 gate_at_base=$2 helper_at_base=$3
-  mkdir -p "$d" && git -C "$d" init -q -b main
-  git -C "$d" config user.email t@example.com
-  git -C "$d" config user.name Test
-  mkdir -p "$d/.github/workflows" "$d/scripts/dev"
-  if [ "$gate_at_base" = yes ]; then
-    printf 'jobs:\n  ship:\n    runs-on: ubuntu-latest\n' > "$d/$WORKFLOW"
-  else
-    printf 'jobs:\n  other:\n    runs-on: ubuntu-latest\n' > "$d/$WORKFLOW"
-  fi
-  [ "$helper_at_base" = yes ] && cp "$REAL_HELPER" "$d/$HELPER"
-  git -C "$d" add -A && git -C "$d" commit -qm "base"
-}
-
-# $1 dir · $2 branch to stamp for ("" = no stamp)
-add_commit() {
-  local d=$1 stamp_branch=$2 msg
-  cp "$REAL_HELPER" "$d/$HELPER"
-  chmod +x "$d/$HELPER"
-  date > "$d/change.txt"
-  msg="feat: a change"
-  if [ -n "$stamp_branch" ]; then
-    msg="$msg
-
-$("$REAL_HELPER" "$STAMP_ARG" stamp "$stamp_branch")"
-  fi
-  git -C "$d" add -A && git -C "$d" commit -qm "$msg"
-}
-
-expect() {
-  local label=$1 want=$2 d=$3 branch=$4 got
-  shift 4
-  if (cd "$d" && BASE=$(git rev-parse HEAD~1) HEAD=$(git rev-parse HEAD) \
-        BRANCH=$branch ACTOR=${1:-someone} LABELS=${2:-[]} PR_BODY=${3:-} \
-        gate >/dev/null 2>&1); then
-    got=accept
-  else
-    got=reject
-  fi
+check() {
+  local label=$1 want=$2 got=$3
   if [ "$got" = "$want" ]; then
-    printf '  ok    %-46s %s\n' "$label" "$got"
+    printf '  ok    %-44s %s\n' "$label" "$got"
   else
-    printf '  FAIL  %-46s want %s, got %s\n' "$label" "$want" "$got"
+    printf '  FAIL  %-44s want %s, got %s\n' "$label" "$want" "$got"
     FAILURES=$((FAILURES + 1))
   fi
 }
 
+new_repo() {  # $1 dir · $2 helper-at-base (yes/no)
+  local d=$1
+  mkdir -p "$d/scripts/dev" && git -C "$d" init -q -b main
+  git -C "$d" config user.email t@example.com
+  git -C "$d" config user.name Test
+  [ "$2" = yes ] && cp "$REAL_ROOT/$HELPER" "$d/$HELPER"
+  echo base > "$d/f.txt"
+  git -C "$d" add -A && git -C "$d" commit -qm base
+  # Tagged, because the fixtures commit on `main` itself — resolving BASE as
+  # `main` would make it the head commit and quietly defeat the "helper absent
+  # at base" fixture, which is exactly what it did on the first run.
+  git -C "$d" tag base-ref
+}
+
+add_commit() {  # $1 dir · $2 trailer block ("" = none)
+  local d=$1 msg="feat: a change"
+  cp "$REAL_ROOT/$HELPER" "$d/$HELPER"; chmod +x "$d/$HELPER"
+  date +%s%N > "$d/f.txt"
+  [ -n "$2" ] && msg="$msg
+
+$2"
+  git -C "$d" add -A && git -C "$d" commit -qm "$msg"
+}
+
+stamp_for() { "$REAL_ROOT/$HELPER" "$STAMP_ARG" stamp "$1"; }
+
+run_gate() {  # $1 dir · $2 branch · $3 actor · $4 labels · $5 body
+  if (cd "$1" && BASE=$(git rev-parse base-ref) HEAD=$(git rev-parse HEAD) \
+        BRANCH=$2 ACTOR=${3:-someone} LABELS=${4:-[]} PR_BODY=${5:-} \
+        gate >/dev/null 2>&1); then echo accept; else echo reject; fi
+}
+
 selftest() {
-  local tmp
+  local tmp d
   tmp=$(mktemp -d)
-  # Expand $tmp now, not at trap time: it is `local`, so it is out of scope by
-  # the time an EXIT trap fires and `set -u` turns the cleanup into an error.
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" EXIT
   echo "ship-stamp selftest:"
 
-  new_repo "$tmp/good" yes yes;  add_commit "$tmp/good" feature-x
-  expect "valid stamp, gate and helper at base" accept "$tmp/good" feature-x
+  d=$tmp/ok;   new_repo "$d" yes; add_commit "$d" "$(stamp_for feature-x)"
+  check "valid stamp on the head commit"        accept "$(run_gate "$d" feature-x)"
+  check "same stamp, different branch"          reject "$(run_gate "$d" feature-y)"
 
-  new_repo "$tmp/wrong" yes yes; add_commit "$tmp/wrong" some-other-branch
-  expect "stamp derived from a different branch" reject "$tmp/wrong" feature-x
+  d=$tmp/none; new_repo "$d" yes; add_commit "$d" ""
+  check "no stamp at all"                       reject "$(run_gate "$d" feature-x)"
 
-  new_repo "$tmp/none" yes yes;  add_commit "$tmp/none" ""
-  expect "no stamp at all" reject "$tmp/none" feature-x
+  # REGRESSION: a stamp on an earlier commit must not carry the head commit.
+  # This is what let a stamp be inherited across a reused branch.
+  d=$tmp/inh;  new_repo "$d" yes
+  add_commit "$d" "$(stamp_for feature-x)"; add_commit "$d" ""
+  check "inherited stamp (not on head)"         reject "$(run_gate "$d" feature-x)"
 
-  # The commit that introduces the gate: no `ship` job at base, so the helper
-  # legitimately is not there either.
-  new_repo "$tmp/boot" no no;    add_commit "$tmp/boot" feature-x
-  expect "bootstrap — gate absent at base" accept "$tmp/boot" feature-x
+  # No bootstrap: a helper missing at base is a malfunction, never a pass.
+  d=$tmp/noh;  new_repo "$d" no;  add_commit "$d" "$(stamp_for feature-x)"
+  check "helper absent at base — no fallback"   reject "$(run_gate "$d" feature-x)"
 
-  # The regression. Gate present at base, helper missing at base: somebody moved
-  # it on main. Must NOT fall back to the PR's own copy.
-  new_repo "$tmp/moved" yes no;  add_commit "$tmp/moved" feature-x
-  expect "moved helper — must fail closed" reject "$tmp/moved" feature-x
+  # Two trailers must not be glued together; a valid one among them still wins.
+  d=$tmp/two;  new_repo "$d" yes
+  add_commit "$d" "$(printf 'Ship-Stamp: v1 %s\n%s' deadbeefdeadbeef "$(stamp_for feature-x)")"
+  check "two trailers, one valid"               accept "$(run_gate "$d" feature-x)"
 
-  # A stamp is irrelevant for an exempt actor, and a wrong one must not save a
-  # non-exempt one.
-  new_repo "$tmp/bot" yes yes;   add_commit "$tmp/bot" ""
-  expect "renovate[bot] exempt without a stamp" accept "$tmp/bot" feature-x 'renovate[bot]'
-  expect "bare 'renovate' is NOT exempt"        reject "$tmp/bot" feature-x 'renovate'
-  expect "no-ship label waives"                 accept "$tmp/bot" feature-x 'someone' '["no-ship"]'
-  expect "label containing the token does not"  reject "$tmp/bot" feature-x 'someone' '["not-no-ship-really"]'
-  expect "SHIP-OVERRIDE alone does not waive"   reject "$tmp/bot" feature-x 'someone' '[]' 'SHIP-OVERRIDE: no time'
+  d=$tmp/v2;   new_repo "$d" yes; add_commit "$d" "Ship-Stamp: v2 deadbeefdeadbeef"
+  check "unknown version prefix"                reject "$(run_gate "$d" feature-x)"
+
+  d=$tmp/bot;  new_repo "$d" yes; add_commit "$d" ""
+  check "renovate[bot] exempt, no stamp"        accept "$(run_gate "$d" feature-x 'renovate[bot]')"
+  check "bare 'renovate' not exempt"            reject "$(run_gate "$d" feature-x 'renovate')"
+  check "no-ship label waives"                  accept "$(run_gate "$d" feature-x someone '["no-ship"]')"
+  check "label merely containing the token"     reject "$(run_gate "$d" feature-x someone '["not-no-ship"]')"
+  check "malformed LABELS is a malfunction"     reject "$(run_gate "$d" feature-x someone 'not json')"
+  check "SHIP-OVERRIDE alone does not waive"    reject "$(run_gate "$d" feature-x someone '[]' 'SHIP-OVERRIDE: x')"
+
+  # REGRESSION: `renovate[bot]` is a glob and the gate's cwd holds the PR's own
+  # files. A file named `renovateb` used to rewrite the exemption to `renovateb`.
+  d=$tmp/glob; new_repo "$d" yes; add_commit "$d" ""
+  : > "$d/renovateb"
+  git -C "$d" add -A && git -C "$d" commit -qm "chore: a file named like a glob match"
+  check "glob file cannot forge an exemption"   reject "$(run_gate "$d" feature-x 'renovateb')"
+  check "glob file does not break real bot"     accept "$(run_gate "$d" feature-x 'renovate[bot]')"
+
+  # Non-fixture assertions against the real repository. The previous bootstrap
+  # was unsafe precisely because nothing checked the real files.
+  if [ -f "$REAL_ROOT/$HELPER" ]; then
+    check "real repo still has the helper"      present present
+  else
+    check "real repo still has the helper"      present missing
+  fi
+  if grep -q 'validate-ship-stamp.sh' "$REAL_ROOT/$WORKFLOW"; then
+    check "real ci.yml still invokes this gate" wired wired
+  else
+    check "real ci.yml still invokes this gate" wired unwired
+  fi
 
   if [ "$FAILURES" -ne 0 ]; then
     echo "ship-stamp selftest: $FAILURES failure(s)" >&2

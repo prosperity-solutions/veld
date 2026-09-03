@@ -18,8 +18,21 @@ set -euo pipefail
 # Two constants the workflow depends on. Neither is spelled out here on
 # purpose: the first is a digest, so this file does not carry the value it
 # checks, and the second is folded so a casual read does not hand it over.
-# Rotating either means editing docs/ship.md in the same commit — CI reads the
-# expected argument out of that document, from the PR's base branch.
+#
+# Rotating them is NOT symmetrical, and the comment that used to sit here was
+# wrong about it — it described a mechanism (CI grepping the argument out of the
+# workflow document) that was deliberately removed:
+#
+#   * `_EXPECT`, the digest of the argument, IS rotatable. Change it here, plus
+#     the literal in `.agents/skills/ship/SKILL.md`'s Step 5 and `STAMP_ARG` in
+#     `tests/validate-ship-stamp.sh`, in one commit. Nothing else reads it; CI
+#     reads no document at all.
+#   * `_FOLD`, the HMAC key, and `_V` are NOT rotatable in an ordinary PR. The
+#     gate verifies with the helper taken from the pull request's *base* commit,
+#     so a stamp made with the new key is checked against the old one and can
+#     never go green. Stamp such a PR with the old helper —
+#     `git show origin/main:scripts/dev/prmeta.sh > /tmp/o.sh && bash /tmp/o.sh <arg> stamp`
+#     — or have a maintainer apply the `no-ship` label.
 readonly _EXPECT=1c68df23e0b3d4c847acf9d43ba6f9e4650f0866a647e9c3ad8013c28421b4a4
 readonly _FOLD='ZDdLejJFczlZb0dhNEpmMA=='
 readonly _V=v1
@@ -72,7 +85,18 @@ case "${1:-}" in
     shift
     case "${1:-}" in
       stamp)
-        branch=${2:-$(git rev-parse --abbrev-ref HEAD)}
+        # `git rev-parse --abbrev-ref HEAD` returns the literal string `HEAD`
+        # when detached, which produced a well-formed stamp bound to a branch
+        # named "HEAD" — and CI then told an agent that had done everything
+        # right to go and read the workflow. `symbolic-ref` fails instead.
+        branch=${2:-}
+        if [ -z "$branch" ]; then
+          branch=$(git symbolic-ref --quiet --short HEAD) || {
+            echo "❌ Detached HEAD — there is no branch name to derive a stamp from." >&2
+            echo "   Check out a branch, or name one: prmeta.sh <arg> stamp <branch>" >&2
+            exit 1
+          }
+        fi
         printf 'Ship-Stamp: %s %s\n' "$_V" "$(mac "veld-ship:${_V}:${branch}")"
         ;;
       *) nag ;;

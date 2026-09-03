@@ -439,6 +439,7 @@ shellcheck:
     set -euo pipefail
     bash -n install.sh
     bash -n tests/validate-install-contract.sh
+    bash -n tests/validate-ship-stamp.sh
     if command -v shellcheck >/dev/null 2>&1; then
       shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
     else
@@ -475,6 +476,21 @@ topbar-height:
 # The `schema` job in ci.yml is the enforcing copy — and because that job is
 # itself draft-guarded, this local recipe is the ONLY thing that catches either
 # failure before CI has already spent a run on it.
+# Run the ship gate against the current branch, the way CI will. Every sibling
+# gate has a local runner; without one this gate's first ever execution is a CI
+# run after `gh pr ready`, which is the most expensive place to discover a
+# misplaced trailer. `base` defaults to origin/main.
+ship-stamp base="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash tests/validate-ship-stamp.sh --selftest
+    BASE=$(git rev-parse {{base}}) \
+    HEAD=$(git rev-parse HEAD) \
+    BRANCH=$(git symbolic-ref --quiet --short HEAD) \
+    ACTOR=local LABELS='[]' PR_BODY='' \
+      bash tests/validate-ship-stamp.sh
+
+
 workflow-gates:
     python3 tests/validate-workflow-gates.py --selftest
     python3 tests/validate-workflow-gates.py
