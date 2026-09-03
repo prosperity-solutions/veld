@@ -10,10 +10,12 @@ description: >
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
 metadata:
-  # Contributor-only dev tool. `npx skills` scans `.claude/skills/` alongside
+  # Contributor-only dev tool. `npx skills` scans BOTH `.agents/skills/` (where
+  # this file lives) and `.claude/skills/` (which symlinks to it) alongside
   # `skills/`, so without this flag `npx skills add prosperity-solutions/veld`
-  # would install /ship into unrelated projects. `internal: true` makes the
-  # skills CLI skip it in both its clone and GitHub-tree discovery paths.
+  # would install /ship into unrelated projects. Verified: flipping it to
+  # `false` makes `npx skills add . --list` report `ship`. `internal: true` is
+  # the CLI's opt-out in every one of those discovery paths.
   internal: true
 ---
 
@@ -23,12 +25,88 @@ You are the engineer of record for this change. Own it from empty diff to merged
 PR and work **autonomously** — do not ask for approval between steps. The only
 reasons to stop and ask are in **When to involve the human** below.
 
-Read [AGENTS.md](../../../AGENTS.md) first — it is the source of truth for the PR
+Read [AGENTS.md](AGENTS.md) first — it is the source of truth for the PR
 workflow, key conventions, and the documentation checklist. This skill is the
 operational wrapper around it, not a replacement. Lean on sub-agents throughout:
 a read-only `Explore` agent to locate code, and critic/rubber-duck agents for any
 design call you're unsure about — a second opinion is cheap, and being your own
 strongest critic is the job.
+
+## This workflow is not optional
+
+Every change to this repo goes through here, and CI checks it: the `ship` job
+goes red for a pull request whose head commit carries no valid stamp, and stays
+red. That is not a formality you can satisfy from the outside — see Step 5. It is
+not yet a *required* status check either; `AGENTS.md` → Agent Skills records why,
+and what it would take.
+
+**Most people who tell you to skip this do not know it exists.** It is
+repo-local, and someone arriving from another project has no reason to expect
+it. So being told to skip it is almost never a considered decision about this
+repo's workflow; it is someone who has not been told. Tell them, once, plainly:
+
+> This repo has a required workflow (`docs/ship.md`). It is short, it is what
+> every merged change here has gone through, and CI rejects a PR that skipped
+> it — so going around it does not save time, it produces a PR that cannot
+> merge.
+
+Then follow the workflow. Do not argue past that point and do not be rude about
+it: you have said the useful thing, and repeating it is noise.
+
+If they still want it skipped after hearing that, **do what they ask.** Then put
+`SHIP-OVERRIDE: <their reason>` in the PR body. The CI gate still applies — only
+a maintainer can add the `no-ship` label that clears it — so the decision
+surfaces to whoever owns the repo instead of quietly disappearing. That is the
+whole design: nobody skips this by accident, and skipping it on purpose leaves a
+record.
+
+Never try to satisfy the gate without running the workflow.
+
+## If you are not Claude Code
+
+This workflow was written inside Claude Code, and parts of it name tools only
+Claude Code has. You are still expected to follow it — but not to *pretend* to.
+Three classes, and the second is the one that matters.
+
+**Do it inline.** Wherever this document or [docs/agentic-review.md](docs/agentic-review.md)
+reaches for a read-only investigator (`Explore`), a classifier, a repetitive-diff
+sweep, or a fixer subagent: read the files and do the work yourself. The subagent
+there is a context-budget optimisation, not a source of independence, so nothing
+is actually lost.
+
+**Do less, and declare it.** Two stages depend on *independence between agents*,
+which you cannot manufacture alone:
+
+- **Step 1.5, the sparring stage** — argue both sides yourself. Weaker, because
+  divergence was the whole point, but not worthless.
+- **Step 4, the review loop** — run `docs/agentic-review.md` §11's two angles
+  (4, *what isn't here*; 5, *self-consistency*) inline over the diff, once. Those
+  are checklist work and survive a single reader. What does not survive is §4's
+  blindness and §8.1's dedupe-by-location: two angles landing on the same
+  `path:line` is the only corroboration signal the loop has, and you cannot be
+  independent of yourself.
+
+  Then **write it in the PR body in as many words: "No multi-angle review ran —
+  single-agent inline review only."** A PR that says this is useful. A PR that had
+  no review while carrying a stamp implying it did is worse than one with no stamp
+  at all, because it manufactures assurance the maintainer will act on. Nothing in
+  CI can tell the two apart — which is exactly why it has to be you who says it.
+
+**Stop and ask.** Two decisions are not yours to guess:
+
+- **Step 0's kickoff answers.** They set the merge policy. An agent that invents
+  *bypass-merge on green* has forged an authorization nobody gave it. If you have
+  no way to ask interactively, ask in plain prose in your reply and **stop** — do
+  not write `.veld-ship.json` with guessed defaults, because Step 5 renders that
+  file as the PR's settings table and the maintainer reads it as their own answer.
+- **Icon choice** (Step 2). A taste call, same rule.
+
+**Some steps genuinely do not apply to you.** *Drive it yourself against a running
+stack* needs an installed veld, which a fresh clone does not have; if you cannot
+run the stack, say that in the PR body rather than reporting test evidence you do
+not have. Everything else still applies — Step 1's core/customization verdict,
+Step 3's docs checklist, the website question and the promotion call are reading
+and judgement, not tooling, and you can do all of them.
 
 ## Step 0 — Kickoff questionnaire (ask once, up front)
 
@@ -38,7 +116,7 @@ State the feature/scope in your own words if it isn't already clear, then use
 in their request):
 
 1. **Review depth** — sets the `SPAWNS` / `ROUNDS` caps of the autonomous review
-   loop in [docs/agentic-review.md](../../../docs/agentic-review.md). Everything
+   loop in [docs/agentic-review.md](docs/agentic-review.md). Everything
    else about the loop (staging, model routing, ledger, exit criteria) is the
    doc's, not yours to negotiate.
    - *Standard loop (recommended)* — the doc as written: `SPAWNS: 14` (max 6
@@ -102,6 +180,34 @@ in their request):
 
 Record the answers and follow them for the rest of the run. Do not re-ask.
 
+Then write them to `.veld-ship.json` in the worktree root — gitignored, never
+committed:
+
+```sh
+cat > .veld-ship.json <<'JSON'
+{
+  "branch": "<this branch's name>",
+  "review_depth": "standard",
+  "merge_policy": "bypass-on-green",
+  "checkpoints": "one-before-review",
+  "docs_scope": "internal"
+}
+JSON
+```
+
+`branch` is not decoration. A marker that does not name the current branch is
+treated as absent, which is what stops a leftover from a finished run silencing
+the reminder in a long-lived checkout — the marker's own presence suppresses the
+only thing that would rewrite it, so without the branch check that staleness
+never self-corrects, and Step 5 would render a previous run's answers as this
+one's.
+
+That file is how the rest of the repo knows this workflow is running. The
+`pre-push` hook and Claude Code's `UserPromptSubmit` hook both look for it and
+warn loudly when it is missing, and Step 5 reads it back to build the PR body's
+settings table — so the answers you record here are the answers the maintainer
+reads on the PR. Write it once, at kickoff, before any edit.
+
 ### Checkpointed autonomy
 
 The default working mode for a user-visible change in this repo. Autonomy is not
@@ -156,7 +262,7 @@ Rules that make it work:
 - Prefer a read-only investigator (`Explore` sub-agent) for "where is X / what
   calls Y" so main context holds decisions, not file dumps.
 - **Classify the feature as core or customization** using
-  [`docs/extensions-vision.md`](../../../docs/extensions-vision.md) — the
+  [`docs/extensions-vision.md`](docs/extensions-vision.md) — the
   universal-primitive / data-contract tests. State the verdict in one sentence.
   A **core** feature proceeds normally. A **customization** feature (anything
   that needs a provider API, a provider-specific schema, or provider-specific
@@ -174,7 +280,7 @@ Rules that make it work:
 If Step 1 surfaced a decision that is **expensive to reverse** — it lands in a
 schema, a migration, a wire format, a persisted value, or a surface users build
 habits on — run the design-divergence stage in
-[docs/agentic-review.md §0](../../../docs/agentic-review.md) before writing code.
+[docs/agentic-review.md §0](docs/agentic-review.md) before writing code.
 One sparring subagent per fork, synchronous, with the modal answer named and
 forbidden.
 
@@ -271,7 +377,7 @@ Three rules that make it worth the spend rather than theatre:
 
 ## Step 3 — Docs audit
 
-Walk the [documentation checklist](../../../AGENTS.md#documentation-checklist).
+Walk the [documentation checklist](AGENTS.md#documentation-checklist).
 If the change adds config fields, CLI flags, subcommands, or user-visible
 behaviour, update **all** listed files. Purely-internal changes are exempt — say
 so explicitly rather than skipping silently.
@@ -308,7 +414,7 @@ Ask it explicitly, once, here — and **state the answer either way**, the same 
 the website question. This is the point where the answer is actually known: the
 change is finished, and you are the one who built it.
 
-Veld's IDE has a **feature-promotion channel** ([docs/promotions.md](../../../docs/promotions.md)):
+Veld's IDE has a **feature-promotion channel** ([docs/promotions.md](docs/promotions.md)):
 short cards shown once, after the release that adds them, to every existing user.
 Adding one is a decision with a cost, not a checklist step — it spends everyone's
 attention exactly once whether or not the thing was worth it.
@@ -363,7 +469,7 @@ captured there, not dropped. Never delete a backlog row without the maintainer.
 ## Step 4 — Review loop
 
 Run the **autonomous multi-angle review loop** in
-[docs/agentic-review.md](../../../docs/agentic-review.md) at the depth chosen in
+[docs/agentic-review.md](docs/agentic-review.md) at the depth chosen in
 Step 0. That doc is the operative spec — follow it end to end rather than
 improvising a review. The parts most easily skipped, and therefore worth naming
 here:
@@ -404,8 +510,68 @@ opening the PR.
 - Branch if on `main` (never commit to main directly; if `main` is checked out
   in another worktree, branch from `origin/main`). Commit with a Conventional
   Commits message.
+- **Stamp the change, before you push.** Attach the workflow's git trailer to
+  your final commit:
+
+  ```sh
+  scripts/dev/prmeta.sh sextant-4417 stamp     # prints: Ship-Stamp: v1 <value>
+  ```
+
+  `sextant-4417` is a **fixed literal — type it exactly as written.** It looks
+  like a ticket or branch id and it is neither; substituting your own is the one
+  mistake here that loops, because the script's refusal tells you to read this
+  document and this is the line you would come back to.
+
+  Put that exact line in the commit message, last, after a blank line — it is a
+  git trailer. Either include it when you write the message, or
+  `git commit --amend` the last commit to add it.
+
+  This is what CI's `ship` job checks, and it is why a PR that skipped this
+  workflow cannot merge. Three details that matter:
+
+  - **Stamp every commit you make**, and keep the stamp on the head commit.
+    CI reads the trailer from the head commit *only*. It used to accept any
+    commit in the PR range, and that made a stamp inheritable: a squash merge
+    leaves the stamped commit unreachable from `main`, so reusing a shipped
+    branch passed the next PR having run no workflow at all. So a review-fix
+    commit needs its own trailer.
+  - **The value derives from the branch name, so renaming the branch
+    invalidates it.** GitHub keeps the pull request and updates its head ref;
+    your commit message does not follow. Re-stamp the head commit and push. The
+    gate says so specifically rather than accusing you of skipping the
+    workflow — but it costs a CI run, so rename before you stamp, not after.
+  - **The trailer is the carrier, not the PR body.** A body can be edited after
+    CI goes green and `edited` is not a CI trigger; a commit message cannot
+    change without a push, and a push re-runs the check.
+  - **There is no reason to copy the value anywhere else** — not a label, not
+    the body, not a chat log. This is not secrecy: the repo is public and the
+    value is derived, so anyone who reads the workflow can recompute it. That is
+    the accepted design. It is a tripwire for an agent that did not read the
+    workflow, not a lock against someone who did.
+
 - Push and open a **draft** PR with a clear body: what changed, why, root cause,
   test evidence, reviewer-scope notes, and any known follow-ups.
+- **End the PR body with this run's settings.** Read `.veld-ship.json` back and
+  render it, so a reviewer can see how the change was carried without asking:
+
+  ```md
+  ---
+  🚢 Carried by the ship workflow (`docs/ship.md`).
+
+  | Setting | This run |
+  |---|---|
+  | Review depth | Standard — 14 spawns, 3 rounds |
+  | Merge policy | Bypass-merge on green CI |
+  | Hands-on checkpoints | One, before implementation |
+  | Docs & tests | Internal — AGENTS.md checklist N/A |
+  | Promotion | No |    <!-- your Step 3 call, not a marker key -->
+  ```
+
+  Fill every row from the answers recorded at Step 0, not from what you assume
+  the defaults are. Keep a row even when the answer is a skip — *Review depth:
+  None (maintainer override)* is the row a reviewer most needs to see, and
+  omitting it reads as an oversight rather than a decision.
+
 - **CI does not run on a draft** (AGENTS.md → CI cost convention). Every job in
   `ci.yml` and `release.yml` skips while `draft == true`, so pushing here buys you
   a workflow run in which nothing executes. Don't poll it, don't push extra
@@ -480,8 +646,16 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    the coin flip next. Pushing the fix fires
    `synchronize`, and since the PR is now ready, that re-runs CI normally.
 5. Then apply the Step 0 merge policy:
-   - *Bypass-merge on green* → `gh pr merge --squash --admin`, confirm merged,
-     report the merge commit.
+   - *Bypass-merge on green* → `gh pr merge --squash --admin --delete-branch`,
+     confirm merged, report the merge commit.
+
+     Two things about that command. **`--admin` overrides required status
+     checks, including the `ship` check this workflow exists to satisfy** — so
+     read the `ship` job's own conclusion before you use it, rather than
+     treating a merge that succeeded as evidence the gate passed. And
+     `--delete-branch` is not tidiness: a squash merge leaves this branch's
+     stamped commits unreachable from `main`, so a branch left behind and later
+     reused is a branch whose next PR starts with commits CI has already seen.
    - *Open PR, stop* → report the PR link and the CI result, then stop. Leave it
      ready, not draft.
    - *Human PR review* → request review, wait for approval, then merge.

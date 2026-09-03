@@ -132,6 +132,61 @@ jobs:
             exit 1
           fi
 
+  # ── Every PR must come through the ship workflow ──────────────────────
+  #
+  # `docs/ship.md` is the only supported way to change this repository, and this
+  # is what makes that true rather than aspirational. It requires a `Ship-Stamp:`
+  # git trailer on the pull request's **head commit** and re-derives the value;
+  # the workflow's Step 5 is what puts it there, on every commit it makes.
+  #
+  # Head commit, not "any commit in the range": a squash merge leaves the
+  # original stamped commit unreachable from `main`, so accepting any commit in
+  # the range let a reused branch inherit a stamp and pass the *next* PR with no
+  # workflow run at all — reported as a green tick.
+  #
+  # Why a trailer and not the PR body: a body can be edited after this job goes
+  # green, and `edited` is not in this workflow's trigger types — adding it would
+  # re-run five macOS legs on every description tweak. A commit message cannot
+  # change without a push, and a push fires `synchronize`, so the check re-runs
+  # on its own exactly when it needs to.
+  #
+  # The helper comes from the PR's *base* commit, so a branch cannot neuter it
+  # and self-certify. There is no fallback when it is missing — that is a gate
+  # malfunction and says so. Renovate and Dependabot are exempt; a maintainer's
+  # `no-ship` label is the only other way through, and applying it needs write
+  # access.
+  #
+  # **Do not convert this job to `pull_request_target`.** It executes a script
+  # from the checkout, which is harmless here — a fork PR gets a read-only token
+  # and no secrets — and becomes arbitrary code with the repository's own token
+  # the moment the trigger changes. If a future need for write scope appears,
+  # split the privileged step into its own workflow rather than promoting this
+  # one.
+  ship:
+    permissions:
+      contents: read
+    name: Ship Workflow
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' && github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      # Selftest first, same as `check`'s other gates: a gate that has rotted
+      # into "everything matches" passes the real check trivially, and that
+      # reads as a clean bill of health.
+      - name: Selftest the gate
+        run: bash tests/validate-ship-stamp.sh --selftest
+      - name: Verify the PR came through the ship workflow
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
+          ACTOR: ${{ github.event.pull_request.user.login }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: bash tests/validate-ship-stamp.sh
+
   website:
     permissions:
       contents: read
@@ -980,7 +1035,8 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           bash -n install.sh
           bash -n tests/validate-install-contract.sh
-          shellcheck --severity=warning install.sh tests/validate-install-contract.sh scripts/dev/*.sh
+          bash -n tests/validate-ship-stamp.sh
+          shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
       # The drift neither of the above can see: a `VELD_*` variable renamed on
       # one side of the CLI/install.sh boundary. Both files stay individually
       # valid while every app update silently reinstalls the CLI and restarts

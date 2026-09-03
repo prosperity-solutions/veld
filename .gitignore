@@ -47,3 +47,7 @@ desktop/dist-deb/
 
 # Review scaffolding (context pack, ledger) — never committed.
 .review/
+
+# Ship-workflow run marker (docs/ship.md Step 0). Holds the kickoff answers for
+# this worktree's run; the local nag hooks and Step 5's PR footer read it.
+.veld-ship.json

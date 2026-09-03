@@ -439,8 +439,9 @@ shellcheck:
     set -euo pipefail
     bash -n install.sh
     bash -n tests/validate-install-contract.sh
+    bash -n tests/validate-ship-stamp.sh
     if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=warning install.sh tests/validate-install-contract.sh scripts/dev/*.sh
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
     else
       echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
     fi
@@ -475,6 +476,27 @@ topbar-height:
 # The `schema` job in ci.yml is the enforcing copy — and because that job is
 # itself draft-guarded, this local recipe is the ONLY thing that catches either
 # failure before CI has already spent a run on it.
+# Run the ship gate against the current branch, the way CI will. Every sibling
+# gate has a local runner; without one this gate's first ever execution is a CI
+# run after `gh pr ready`, which is the most expensive place to discover a
+# misplaced trailer. `base` defaults to origin/main.
+#
+# It reports a gate malfunction, correctly, on any base that predates the gate —
+# it reads the helper from `base`, and there is deliberately no fallback. That
+# was true of exactly one pull request in this repo's history, the one that
+# introduced the gate; if you see it now, your `base` is wrong. The selftest
+# above needs no base and always runs.
+ship-stamp base="origin/main":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bash tests/validate-ship-stamp.sh --selftest
+    BASE=$(git rev-parse {{base}}) \
+    HEAD=$(git rev-parse HEAD) \
+    BRANCH=$(git symbolic-ref --quiet --short HEAD) \
+    ACTOR=local LABELS='[]' PR_BODY='' \
+      bash tests/validate-ship-stamp.sh
+
+
 workflow-gates:
     python3 tests/validate-workflow-gates.py --selftest
     python3 tests/validate-workflow-gates.py
@@ -488,6 +510,11 @@ workflow-gates:
     # refuse, and they run before it is trusted for anything.
     python3 tests/signing-slots.py --selftest
     python3 tests/signing-slots.py
+    # The ship gate. Only its selftest is runnable locally — the gate proper
+    # needs a base/head pair and a PR's metadata, which only CI has. Same
+    # selftest-first reasoning as the three above: this gate's rot mode is
+    # "every PR matches", which reads exactly like a clean bill of health.
+    bash tests/validate-ship-stamp.sh --selftest
 
 # Check commit subjects against the pattern the `commits` job enforces. That job
 # is draft-guarded too, so without this a malformed subject is discovered only

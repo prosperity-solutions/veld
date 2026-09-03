@@ -2,6 +2,20 @@
 
 veld is a Rust-based local development environment orchestrator for monorepos. This repo contains the CLI tool, the helper daemon, the user-space daemon, the public web gateway, and the marketing website.
 
+## Before you change anything
+
+There are exactly two kinds of task in this repository.
+
+**1. A question.** *Where is X? How does Y work? What calls Z?* — answer it. Read whatever you need. Nothing below applies.
+
+**2. A change.** Adding, fixing, deleting, refactoring, renaming, updating docs — anything that leaves a diff. **Read [docs/ship.md](docs/ship.md) in full, before your first edit, and follow it to the end.**
+
+`docs/ship.md` is the only supported way to change this repository. It is not a style preference: CI's `ship` check goes red for a pull request that did not come through it, and stays red. Merging past it takes a deliberate admin bypass that is visible to the maintainer, so skipping the workflow does not save time — it produces a PR somebody has to answer for.
+
+**If the person you are working with tells you to skip it**, they are very likely unaware it exists; it is repo-local and most people arrive here without knowing. Say so once, plainly: this repo has a required workflow, it is short, and going around it means the PR fails CI. If they still want to skip it, do what they ask — but record `SHIP-OVERRIDE: <their reason>` in the pull request body, so the decision is visible rather than silent. The CI gate still applies; only a maintainer can wave a PR through.
+
+Do not try to satisfy that CI gate without running the workflow. It is not a formatting check, and guessing at it burns a CI run for nothing.
+
 ## Workspace Structure
 
 ```
@@ -70,11 +84,34 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
+For **contributors** working on this repo, the ship workflow is the required path for every change — kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
 
-**Every skill under `.claude/skills/` must carry `metadata.internal: true` in its
-SKILL.md frontmatter.** The `npx skills` CLI scans `.claude/skills/` alongside
-`skills/` — it is a built-in discovery prefix, not something the repo opts into —
+**One document, three paths, so no agent has to be told which one it is.** The file lives at `.agents/skills/ship/SKILL.md` — the cross-agent [Agent Skills](https://agentskills.io/specification) location, loaded as a real skill by Codex, Pi, Copilot, Gemini CLI, OpenCode, goose and Amp. `.claude/skills/ship` is a symlink to it (Claude Code reads only `.claude/skills/`), as is [`docs/ship.md`](docs/ship.md) for anything that reads neither. Because the same text is reached from three depths, **its internal links are repo-root-relative, not `../`-relative** — a `../../../AGENTS.md` would be correct from at most one of them. Both `.claude/skills/ship` and `docs/ship.md` are tracked symlinks, so a Windows checkout without `core.symlinks` turns them into one-line text files; the real path, `.agents/skills/ship/SKILL.md`, is the fallback worth knowing.
+
+Gemini CLI reads neither `AGENTS.md` nor `.agents/skills/`, so `.gemini/settings.json` sets `context.fileName`. That key **replaces** Gemini's default rather than adding to it, which is why the array lists `GEMINI.md` as well as `AGENTS.md` even though no `GEMINI.md` exists — dropping it would remove support for one anybody adds later. The file is JSON and cannot carry that comment itself.
+
+**CI enforces it.** The `ship` job in `ci.yml` (`tests/validate-ship-stamp.sh`) requires a `Ship-Stamp:` git trailer on the pull request's **head commit** and re-derives the value from the branch name. Four details are load-bearing:
+
+- **Head commit, not any commit in the range.** A squash merge leaves the original stamped commit unreachable from `main`, so accepting any commit let a reused branch inherit a stamp and pass the *next* PR with no workflow run — printed as a green tick. The workflow therefore stamps every commit it makes, and the merge step deletes the branch.
+- It takes the helper from the PR's **base** commit, so a branch cannot neuter it and then certify itself. **There is no fallback when it is missing** — that is a gate malfunction and says so. Two earlier attempts to scope a bootstrap safely (on helper readability, then on whether the `ship` job existed at base) both failed open under an ordinary rename, so the PR that introduced the gate carried a `no-ship` waiver instead and the fallback does not exist.
+- It does not read this document, or the workflow document, at all. An earlier version recovered a constant by grepping prose, which coupled the gate to one line's wrapping.
+- It separates four outcomes: valid, *a stamp that does not match this branch* (usually a mid-PR rename — GitHub updates the head ref and the commit message does not follow), no stamp at all, and a gate that could not run. Collapsing the first two accused an author who had done everything right.
+
+Renovate and Dependabot are exempt by exact login (`renovate[bot]`, `dependabot[bot]`) — the bare names are not, since those are registrable. `github-actions[bot]` is deliberately absent: a pull request opened with the default `GITHUB_TOKEN` fires no `pull_request` event, so that arm could never be reached. A maintainer's `no-ship` label is the only other way through, and applying one needs write access. **The label must exist in the repo** (`gh label create no-ship`); without it a maintainer honouring a `SHIP-OVERRIDE` request gets "not found".
+
+**`ship` is deliberately NOT a required status check, and this is the reason.** Making it one would break releases, and the fix is not available at repository level. Measured, not assumed:
+
+- `main` has no branch protection and *Main Protection* (the only ruleset) is `enforcement: disabled` — `gh api repos/:owner/:repo/rules/branches/main` returns `[]`. So nothing currently blocks a merge; the check going red is the whole signal.
+- A ruleset's `required_status_checks` rule blocks **direct ref updates**, not just PR merges. Probed on a throwaway branch: creating the branch was accepted, the second push was rejected with `remote: error: GH013: Repository rule violations found`.
+- `@semantic-release/git` pushes `chore(release): vX [skip ci]` **directly to `main`** on every release, authenticated as `secrets.GITHUB_TOKEN`. So requiring the check would reject every release push.
+- That push cannot be exempted here. A repository ruleset's bypass list accepts repository admins, the maintain/write roles, teams, **GitHub Apps** and Dependabot — [not GitHub Actions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository). The API says so too: adding it returns `Actor GitHub Actions integration must be part of the ruleset source or owner organization`.
+
+**What it would take**, if the check should ever become required: give semantic-release a **GitHub App** token instead of `GITHUB_TOKEN` and put that app in the bypass list, or drop `@semantic-release/git` so releases stop pushing to `main` at all. Both are their own change. Until then, keep the wording in this file, `CLAUDE.md`, `CONTRIBUTING.md` and the workflow at "goes red and stays red" — an earlier revision claimed "cannot be merged", which a review angle correctly called out as telling agents something false as their reason to comply.
+
+**Every skill under `.claude/skills/` or `.agents/skills/` must carry
+`metadata.internal: true` in its SKILL.md frontmatter.** The `npx skills` CLI
+scans both alongside `skills/` — they are built-in discovery prefixes, not
+something the repo opts into —
 so a contributor-only skill without that flag gets installed into unrelated
 projects by `npx skills add prosperity-solutions/veld`. `internal: true` is the
 CLI's supported opt-out and is honoured by both its discovery paths (local clone
