@@ -84,7 +84,9 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
+For **contributors** working on this repo, [`docs/ship.md`](docs/ship.md) is the required workflow for every change — kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. Claude Code loads that same document as the `/ship` skill from `.claude/skills/ship/`, and `docs/ship.md` is a symlink to it, so agents with no skill mechanism — Codex, Cursor, Gemini CLI, Pi — read identical text. It's a dev tool, not a published consumer skill.
+
+**CI enforces it.** The `ship` job in `ci.yml` (`tests/validate-ship-stamp.sh`) looks for a `Ship-Stamp:` git trailer on any commit in the PR range and re-derives the value from the branch name. It reads the helper and the helper's expected argument from the PR's *base* commit, not from the PR, so a branch cannot rotate the constant and certify itself. Renovate and Dependabot are exempt; a maintainer's `no-ship` label is the only other way through, and applying one needs write access. A PR opened without the workflow fails that job and cannot merge — see the workflow's own Step 5 for how the trailer gets there.
 
 **Every skill under `.claude/skills/` must carry `metadata.internal: true` in its
 SKILL.md frontmatter.** The `npx skills` CLI scans `.claude/skills/` alongside

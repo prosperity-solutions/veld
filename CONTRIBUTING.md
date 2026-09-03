@@ -11,7 +11,7 @@ Why? Because that's how this project was built, and it's how we believe modern s
 ## How to contribute
 
 1. **Fork the repo** and create a branch from `main`.
-2. **Use an AI coding agent** to implement your changes.
+2. **Use an AI coding agent** to implement your changes — and let it follow [`docs/ship.md`](docs/ship.md), this repo's required workflow for any change. Most agents pick it up unprompted, because it is announced in the first lines of `AGENTS.md`, `CLAUDE.md` and `GEMINI.md`; say it out loud if yours does not. **CI rejects a pull request that did not come through it**, so this is not a style preference — skipping it produces a PR that cannot merge.
 3. **Follow conventional commits** — we use [Conventional Commits](https://www.conventionalcommits.org/) for semantic versioning. Prefix your commit messages with `feat:`, `fix:`, `docs:`, `chore:`, etc.
 4. **Run the checks locally first** — `just lint` and `just test` (`cargo fmt`, `cargo clippy`, `cargo test`) must all be green *before* you ask CI for an opinion. This is not a formality: **CI does not run while a PR is a draft.**
 5. **Open a PR** with a clear description of what changed and why. Open it as a draft while you're still iterating — pushes to a draft are free — and mark it ready for review once your agent has finished reviewing the change and your local checks are green. That's the step that starts CI.
