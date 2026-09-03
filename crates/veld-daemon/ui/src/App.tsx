@@ -236,6 +236,7 @@ import {
   pruneTerminals,
   noteExpectedResumes,
   releaseTerminal,
+  retryStalledTerminals,
 } from "./panes/terminalHost";
 import {
   onBrowserAccelerator,
@@ -1269,12 +1270,48 @@ function AppInner(props: {
    * closed by the page going away, which is exactly the event a claim should not
    * survive.
    *
-   * A detached window has no part in this: its tabs were transferred out of a
-   * worktree its origin owns, so it is a satellite of that claim rather than a
-   * claimant.
+   * A detached window has no part in the **arbitration**: its tabs were
+   * transferred out of a worktree its origin owns, so it is a satellite of that
+   * claim rather than a claimant. It does open a socket, though, and the
+   * distinction matters — see the branch below.
    */
   useEffect(() => {
-    if (chromeless) return;
+    // **A detached window connects, and claims nothing.** It used to return here
+    // instead, and that quietly excluded the one thing this socket now does for
+    // every client: `channel.keep` is what stops the daemon collecting a shell
+    // whose socket dropped (a slept laptop, a `veld update`) while its window is
+    // still open. A detached window's tabs are named by no other client's layout
+    // — they left the origin's in the same step the window was seeded — so
+    // staying silent here meant the fix reached every window *except* the one
+    // holding a pane somebody deliberately pulled out to watch.
+    //
+    // Handlers, not a second `start`: it must never be granted a worktree, and
+    // `onReady` re-acquiring one is exactly how it would be. Every handler here
+    // is inert, so the only frames it ever sends are `hello` and `keep`.
+    if (chromeless) {
+      // `relayInboxEvents: false` restores exactly what a detached window did
+      // before it had a socket at all. The daemon relays an agent hook to every
+      // connected client and this window renders no rail and shows no worktree,
+      // so filing them would put a second native banner on screen — from a window
+      // whose whole content is one pane it was handed — for an event somewhere
+      // else. Its own panes still speak for themselves through `terminalHost`,
+      // which is the channel it has always used.
+      channel.start(clientKind(), clientLabel(), {
+        onClaims: () => {},
+        // Never asked: a yield goes to a client the daemon recorded as holding
+        // the worktree, and this one neither claims nor reports `holds`.
+        onYield: (_worktreeId, ack) => ack(),
+        onFocus: () => {},
+        onLayoutChanged: () => {},
+        // The one handler with work to do, and the same work it does in a main
+        // window: the daemon answering again is the evidence a terminal whose
+        // retry budget is spent has been waiting for. A detached window is
+        // usually *the* window with a long-running thing in it.
+        onReady: () => retryStalledTerminals(),
+        onClosed: () => {},
+      }, { relayInboxEvents: false });
+      return;
+    }
     // Before anything else touches a layout: whichever client still holds the
     // old browser store is the only one that can move it, and the first client
     // to open a worktree creates its row.
@@ -1323,6 +1360,12 @@ function AppInner(props: {
        */
       onReady: (sameEpoch) => {
         noteChannelUp();
+        // The daemon is answering again, which is the evidence a terminal whose
+        // retry budget is spent has been waiting for. `veld update` restarts the
+        // daemon while pages stay open and takes longer than the eleven seconds
+        // that budget covers, so without this the panes come back as dead
+        // rectangles over live shells and every one of them needs a click.
+        retryStalledTerminals();
         // What to ask for. The worktree this client holds, first. Otherwise the
         // selection — but only when asking again cannot take a worktree off
         // somebody: either this client was never granted anything (the boot
@@ -4582,6 +4625,13 @@ function AppInner(props: {
   useEffect(() => {
     const terminals = Object.values(layouts).flatMap(terminalIds);
     pruneTerminals(terminals);
+    // The other half of the same sentence, said to the daemon: these panes
+    // exist, so their shells are not nobody's. Without it the detach grace runs
+    // from the moment a *socket* drops — a slept laptop, a restarted daemon, a
+    // spent reconnect budget — and hangs up a running build under a pane that is
+    // still on screen. Same list as the prune above, deliberately: two answers to
+    // "which sessions should exist" is one of them ending what the other keeps.
+    channel.keep(terminals);
     // Same contract for browser panes: a `WebContentsView` left behind is a
     // renderer process with nothing to paint into.
     pruneBrowsers(Object.values(layouts).flatMap(browserIds));

@@ -232,6 +232,44 @@ describe("reconnecting", () => {
     expect(second.frames()).toContainEqual({ type: "holds", worktree_ids: [7, 9] });
   });
 
+  /**
+   * And re-declares the shells, which has more riding on it than the holds do:
+   * while the daemon has no set from this client, its reaper counts these panes
+   * as belonging to nobody. A daemon restart is exactly when every terminal is
+   * detached at once, so it is the worst moment to stay quiet about them.
+   */
+  it("re-declares the sessions it keeps alive", async () => {
+    const channel = await freshChannel();
+    const first = await connect(channel);
+    first.open();
+    channel.keep(["a", "b"]);
+    expect(first.frames()).toContainEqual({ type: "keep", session_ids: ["a", "b"] });
+    first.drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.instances.at(-1) as FakeSocket;
+    expect(second).not.toBe(first);
+    second.open();
+    expect(second.frames()).toContainEqual({ type: "keep", session_ids: ["a", "b"] });
+  });
+
+  /**
+   * An empty set is a real answer — the last pane closed — but it is also the
+   * state a page is in before it has read any layout. Sending it on every
+   * reconnect would be a client with no terminals telling the daemon so, which
+   * is true and costs nothing; not sending it is what keeps the re-declaration
+   * to the frames that carry information.
+   */
+  it("says nothing about sessions it has none of", async () => {
+    const channel = await freshChannel();
+    const first = await connect(channel);
+    first.open();
+    first.drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.instances.at(-1) as FakeSocket;
+    second.open();
+    expect(second.frames().some((f) => f.type === "keep")).toBe(false);
+  });
+
   it("reports a daemon restart as a changed epoch, and a first connect as unchanged", async () => {
     const seen: boolean[] = [];
     vi.resetModules();

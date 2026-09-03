@@ -977,10 +977,13 @@ impl SettingKey {
                 requires: None,
             },
             Self::TerminalDetachGrace => Spec {
-                title: "Keep detached shells for",
-                help: "Minutes a terminal with nobody attached keeps running before it is \
-                       collected. Takes effect for new shells and for the next collection pass; \
-                       shells already running keep the value they started with.",
+                title: "Keep shells after the last window closes",
+                help: "Minutes a terminal keeps running once no Veld window or tab has its pane \
+                       — after you quit the app, or close the window it was in. A dropped \
+                       connection does not start this clock: while Veld is open the shell is \
+                       kept however long the terminal has been disconnected. Takes effect for \
+                       new shells and for the next collection pass; shells already running keep \
+                       the value they started with.",
                 group: Terminal,
                 section: BEHAVIOUR,
                 shape: ValueShape::Int,

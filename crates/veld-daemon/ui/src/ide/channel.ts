@@ -119,6 +119,17 @@ const MAX_RETRY_MS = 5000;
  */
 const CONNECT_WAIT_MS = 4000;
 
+/** Anything about a client that is not a handler. */
+export interface StartOptions {
+  /**
+   * Whether relayed agent-hook events reach this page's inbox. **Defaults on.**
+   *
+   * Off for a detached window, which has a socket only so it can declare the
+   * panes it keeps alive — see the `chromeless` branch in `App.tsx`.
+   */
+  relayInboxEvents?: boolean;
+}
+
 interface Handlers {
   /** The full claims table. State, not a delta — a client that missed one is
    *  not wrong afterwards. */
@@ -159,12 +170,18 @@ class Channel {
   /** What this client holds, resent after every reconnect — the daemon's copy
    *  went with the old socket. */
   private held: number[] = [];
+  /** The sessions this client keeps alive, resent for the same reason — and with
+   *  more at stake: until it is back, the daemon believes nobody has these panes
+   *  and its reaper is free to hang the shells up. See [`keep`]. */
+  private kept: string[] = [];
   private kind: ClientKind = "browser";
   private label = "";
   private started = false;
   private closed = false;
   /** The identity in use, once the daemon has told us. */
   private id: string | null = null;
+  /** See [`StartOptions.relayInboxEvents`]. */
+  private relayInboxEvents = true;
   /** Whether the handshake has completed on the current socket. */
   private ready = false;
   /** Callers parked until it has. */
@@ -182,10 +199,11 @@ class Channel {
     return this.id;
   }
 
-  start(kind: ClientKind, label: string, handlers: Handlers): void {
+  start(kind: ClientKind, label: string, handlers: Handlers, opts?: StartOptions): void {
     this.kind = kind;
     this.label = label;
     this.handlers = handlers;
+    this.relayInboxEvents = opts?.relayInboxEvents ?? true;
     if (this.started) return;
     this.started = true;
     void this.connect();
@@ -243,6 +261,14 @@ class Channel {
       // would attach to shells this page is still driving.
       if (this.held.length > 0) {
         ws.send(JSON.stringify({ type: "holds", worktree_ids: this.held }));
+      }
+      // And re-declare the shells. The daemon dropped this client's set with the
+      // old socket, so between the drop and this frame its reaper counts these
+      // panes as belonging to nobody — a daemon restart is precisely when they
+      // are all detached at once, which is the worst moment to be silent about
+      // them.
+      if (this.kept.length > 0) {
+        ws.send(JSON.stringify({ type: "keep", session_ids: this.kept }));
       }
     };
 
@@ -333,6 +359,16 @@ class Channel {
         return;
       }
       case "agent_state": {
+        // **Not every client that has a socket wants these.** The daemon relays an
+        // agent hook to every connected client, which was fine while the only
+        // clients were main windows — each one files it, and the notification
+        // effect picks a toast or a banner by where the user is. A detached window
+        // opens a socket now too (it declares the panes it keeps), and it renders
+        // no rail and shows no worktree: letting it file these would fire a second
+        // native banner, from a window whose whole content is one pane it was
+        // given, for an event in a worktree it is not showing. One event, two
+        // banners, and `notify.ts` has no dedupe across renderers.
+        if (!this.relayInboxEvents) return;
         // Filed straight into the inbox rather than routed through `Handlers`, for the
         // same reason `panes/terminalHost.ts` files its own signals there: the inbox is
         // a store, not a policy the app has to arbitrate. The policy — read-on-focus,
@@ -438,6 +474,25 @@ class Channel {
   holds(worktreeIds: number[]): void {
     this.held = worktreeIds;
     this.send({ type: "holds", worktree_ids: worktreeIds });
+  }
+
+  /**
+   * The terminal sessions this page's layouts still name.
+   *
+   * What keeps the daemon's detach reaper off them. A terminal is *detached* the
+   * instant its socket drops — a slept laptop, a `veld update`, a spent
+   * reconnect budget — and the grace used to run from there, so a shell could be
+   * hung up half an hour later with its pane sitting on screen. Telling the
+   * daemon which panes exist is the only way it can tell a dropped socket from a
+   * closed window.
+   *
+   * The same list `pruneTerminals` collects against, deliberately: the rule is
+   * "a session no layout names is nobody's", and having two answers to that
+   * would mean one of them ends a shell the other is protecting.
+   */
+  keep(sessionIds: string[]): void {
+    this.kept = sessionIds;
+    this.send({ type: "keep", session_ids: sessionIds });
   }
 
   /**

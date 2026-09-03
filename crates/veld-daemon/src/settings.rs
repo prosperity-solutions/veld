@@ -658,6 +658,14 @@ mod catalog_tests {
     /// is worse than the path itself.
     #[tokio::test]
     async fn the_catalog_is_served_without_a_csrf_header() {
+        // **A reader of `VELD_DB_PATH` needs the lock as much as a writer does.**
+        // `machine.backupDir` is derived from it, and this test computes the
+        // expectation *after* the request that produced the answer — so a sibling
+        // test setting or clearing the variable in between makes the two sides
+        // disagree and fails here with no hint that the environment moved. Seen
+        // once in a full `just test` run, green on its own immediately after.
+        // Exactly one acquire per test — the mutex is not reentrant.
+        let _env = crate::feedback_server::lock_db_env();
         let res = routes()
             .oneshot(
                 Request::builder()

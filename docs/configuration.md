@@ -2619,7 +2619,7 @@ already gone. Concretely:
 | App restarted / rebooted, shell gone | `auto_resume: true` resumes; otherwise the pane waits with a **Resume** button. |
 | The daemon restarted, or you ran `veld update` | Nothing — the shell survived, and the pane simply reattaches. |
 | The tool exited while you were looking at it | Buttons, always. `auto_resume` is not consulted; an exit you saw is one you get to answer. |
-| The session was reaped after the detach grace | Buttons, next time you look at it. |
+| The session was reaped after the detach grace — no window had the pane for the whole of it | Buttons, next time you look at it. |
 | You dragged the pane to another window | Nothing — the shell is alive and moves with the pane. |
 
 #### Restarting a pane on purpose

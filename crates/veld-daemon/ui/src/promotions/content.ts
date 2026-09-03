@@ -279,4 +279,27 @@ export const PROMOTIONS: Promotion[] = [
       "A header or bottom bar pinned to the safe area can be checked without a handset — emulate a phone and the page reads the same insets a real one reports.",
     glyph: "device",
   },
+  {
+    // **A fix, and promoted anyway** — which the header above says not to do, so
+    // it owes an argument. What changed is not that a bug stopped happening; it
+    // is that a default people plan around moved. "Keep detached shells for 30
+    // minutes" measured the *socket*, and a socket drops when the lid closes, so
+    // the honest advice until now was "do not walk away from a build" — and the
+    // workaround people reached for was winding that setting up to a week, which
+    // then really does leave shells running long after they quit. That is a
+    // habit, and a habit somebody has to be told to drop is what this channel is
+    // for.
+    //
+    // The headline names the lid because that is the case people have lost work
+    // to. "Your terminals now outlive a dropped connection" was the first draft
+    // and opens on the product with the mechanism in it, which is the failure the
+    // header describes twice.
+    id: "shells-outlive-a-dropped-socket",
+    since: "2026-09-03",
+    eyebrow: "Changed",
+    headline: "Sleep the laptop without losing a shell",
+    body:
+      "A closed lid, an update, a connection that dropped — the terminal is still there when you get back. Shells last while Veld is open, not 30 minutes past a drop.",
+    glyph: "terminal",
+  },
 ];

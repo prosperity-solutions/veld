@@ -33,6 +33,7 @@ import {
   storedTerminalIds,
   terminalIds,
 } from "./model";
+import { RETRY_STAGGER_MS, isStalled, planSweep } from "./retrySweep";
 import { handleKeyEvent } from "./terminalKeys";
 import {
   clipboardImageIndex,
@@ -1020,6 +1021,16 @@ async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
         // fresh with the full budget rather than continuing a spent one.
         s.reconnectLeft = null;
         s.reconnectFiredFirst = false;
+        // **A shell that exists is one we expect to find again.** `EXPECTED_RESUMES`
+        // is otherwise fed only by layouts *arriving* — from storage, the seed, or
+        // the daemon — so a terminal the user opened during this page's life was
+        // never in it, and a later reconnect that found its shell gone replaced it
+        // with an empty prompt and said nothing. That was survivable while only a
+        // deliberate click could get there; `retryStalledTerminals` reaches it on a
+        // wake-up, unattended, which is the wrong place to be silent. Added here
+        // rather than at creation because the first connect is the one attach that
+        // legitimately finds nothing.
+        noteExpectedResumes([s.id]);
       }
       handleControl(s, ev.data);
       return;
@@ -1322,6 +1333,63 @@ function maybeAutoReconnect(s: Session): void {
   }, delayMs);
 }
 
+let lastSweep = 0;
+/** A sweep suppressed by the throttle, waiting out the rest of the window. */
+let trailingSweep: number | null = null;
+
+/**
+ * Try the stalled terminals again, because something changed that makes this
+ * attempt worth more than the last one.
+ *
+ * Called when the page becomes visible again (the laptop woke, the window came
+ * forward) and when the control socket reconnects (the daemon is back). Both are
+ * evidence, not a timer: a retry under the same conditions as the last failure is
+ * how a page ends up hammering a daemon that is not there.
+ *
+ * The two decisions — which terminals, and now-or-later — are `isStalled` and
+ * `planSweep` in `retrySweep.ts`, where they can be tested; this file cannot be
+ * imported by the test runner at all (it reaches xterm and the DOM). What is
+ * here is the loop and the timers.
+ */
+export function retryStalledTerminals(): void {
+  const now = Date.now();
+  const plan = planSweep(now, lastSweep);
+  if (!plan.run) {
+    if (trailingSweep === null && plan.deferMs !== null) {
+      trailingSweep = window.setTimeout(() => {
+        trailingSweep = null;
+        retryStalledTerminals();
+      }, plan.deferMs);
+    }
+    return;
+  }
+  lastSweep = now;
+  let nth = 0;
+  for (const s of [...sessions.values()]) {
+    if (!isStalled(s.state, s.reconnectTimer !== null)) continue;
+    const id = s.id;
+    // Re-read the state when the turn comes round: a stagger is real time, and in
+    // it the user can have clicked Reconnect, restarted the pane or closed it —
+    // all of which leave `reconnectTerminal` reconnecting a terminal nobody asked
+    // it to.
+    window.setTimeout(() => {
+      const still = sessions.get(id);
+      if (!still || !isStalled(still.state, still.reconnectTimer !== null)) return;
+      reconnectTerminal(id);
+    }, nth * RETRY_STAGGER_MS);
+    nth += 1;
+  }
+}
+
+// Guarded because this module is imported by unit tests that have no DOM. The
+// listener is the page's for its whole life — there is no unmount for a registry
+// that outlives React by design.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") retryStalledTerminals();
+  });
+}
+
 /**
  * Reattach to the *same* shell after the socket dropped.
  *
@@ -1365,6 +1433,9 @@ export function restartTerminal(id: string): void {
   // process and none of it carries over — in particular the "this pane's exit is already
   // filed" marker, which otherwise silenced every later exit in the pane.
   inbox.restarted(id);
+  // See `startTerminal`: a shell the user just asked to replace is not one whose
+  // absence needs reporting.
+  EXPECTED_RESUMES.delete(id);
   // A config-declared pane has no login shell to fall back to, and "restart"
   // for one means the same thing "start fresh" does: run its launch command
   // again under a new identity.
@@ -1460,6 +1531,10 @@ export function startTerminal(
   // Same reason as `restartTerminal`: the pane id is reused, so everything the inbox knows
   // about this session belongs to the process that just ended.
   inbox.restarted(id);
+  // And the shell's absence is not news when the user is the one who asked for a
+  // new one — without this, "start fresh" answers with "the previous shell is
+  // gone", which is both redundant and reads as a fault.
+  EXPECTED_RESUMES.delete(id);
   cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();

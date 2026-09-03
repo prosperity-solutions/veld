@@ -34,6 +34,17 @@
 //! A competing claim during the grace still wins immediately — a reloading
 //! client has nothing attached, so there is nothing to protect it from.
 //!
+//! # And it is what keeps shells alive
+//!
+//! Because this registry is the only place that knows whether a Veld window
+//! still exists, it is also where `pty`'s detach reaper asks. A client reports
+//! the sessions its layouts name ([`ClientMsg::Keep`]), and [`kept_among`]
+//! is the answer the reaper skips. That moves the meaning of the
+//! `terminal.detachGraceMinutes` setting from "this socket has been down for
+//! N minutes" — which a sleeping laptop or a daemon restart satisfies while the
+//! user is still sitting in front of the pane — to "no window has had this pane
+//! for N minutes", which is what its name says and what people expect.
+//!
 //! # Focus
 //!
 //! Clicking a worktree that another client is showing does not open a second
@@ -107,6 +118,16 @@ const _: () = assert!(
 /// clicks. This stops a buggy or hostile page growing the registry without
 /// limit.
 const MAX_HELD: usize = 256;
+
+/// Cap on the PTY sessions one client may report keeping alive.
+///
+/// Comfortably above `pty::MAX_SESSIONS` (48), which is the real bound on how
+/// many shells can exist: a client naming more than that is naming sessions the
+/// daemon does not have, and the extras cost a `HashSet` entry each until its
+/// socket closes. Present for the same reason [`MAX_HELD`] is — a buggy or
+/// hostile page must not be able to grow the registry without limit — rather
+/// than because a legitimate client comes close.
+const MAX_KEPT: usize = 512;
 
 /// Cap on a single control frame. Every message in this protocol is a handful of
 /// numbers and a short string.
@@ -309,6 +330,10 @@ struct ClientState {
     /// and having more of these than `claims` is normal — a client keeps the panes
     /// of worktrees it has visited mounted so switching back is instant.
     holds: Vec<i64>,
+    /// How many PTY sessions this client is keeping alive — the panes its
+    /// layouts name. See [`ClientMsg::Keep`]. The ids are not interesting to a
+    /// diagnostic; "is anything keeping shells off the reaper" is.
+    keeps: usize,
     /// Yields asked of this client that it has not acknowledged.
     ///
     /// **The field to read when a claim is stuck.** A holder that does not answer
@@ -473,6 +498,7 @@ fn snapshot(reg: &Registry, now: Instant) -> (Vec<ClientState>, Vec<OrphanState>
                     label: c.info.label.clone(),
                     claims,
                     holds,
+                    keeps: c.keeps.len(),
                     unacked_yields: c.pending.len(),
                 },
             )
@@ -712,6 +738,31 @@ enum ClientMsg {
     /// inside a page, and "who would I have to ask to let go" is a question
     /// only the pages can answer.
     Holds { worktree_ids: Vec<i64> },
+    /// The PTY sessions this client's layouts still name — "these panes exist
+    /// somewhere I am showing, do not collect their shells."
+    ///
+    /// **The detach grace is about the client being gone, not the socket.** A
+    /// terminal's socket drops for reasons that have nothing to do with the user
+    /// walking away: the laptop slept, `veld update` restarted the daemon, a
+    /// proxy timed out. `pty`'s reaper cannot tell those from a closed window,
+    /// so before this frame existed a transient drop plus a spent reconnect
+    /// budget hung up a live build thirty minutes later with the pane still on
+    /// screen. This is the missing half of that question, and it is the one the
+    /// pages can answer: the same list they already compute for
+    /// `pruneTerminals`.
+    ///
+    /// Sent by every client — a detached window included, which is the one place
+    /// it differs from [`Self::Holds`] — and re-sent after a reconnect, because
+    /// the daemon's copy dies with the socket, which is exactly what makes this a
+    /// lease rather than a promise. See [`kept_among`].
+    ///
+    /// **A page from an older build never sends it**, and `veld update` replaces
+    /// the daemon while pages stay open. So for windows open across an update the
+    /// grace still measures the socket until they are reloaded — the desktop app
+    /// relaunches and heals itself, a browser tab does not. Nothing breaks: an
+    /// unknown frame is discarded at `debug!` in the read loop, so a *newer*
+    /// client against an older daemon degrades the same way.
+    Keep { session_ids: Vec<String> },
     /// A yield has been carried out — sent *after* the release is on screen,
     /// not when the message arrived.
     Yielded { yield_id: u64 },
@@ -853,6 +904,10 @@ struct Client {
     tx: mpsc::UnboundedSender<ServerMsg>,
     /// Worktrees whose panes this client has mounted.
     holds: HashSet<i64>,
+    /// PTY sessions this client's layouts name. Read by [`kept_among`], which
+    /// is what keeps `pty`'s detach reaper off a shell whose window is still
+    /// open — see [`ClientMsg::Keep`].
+    keeps: HashSet<String>,
     /// Yields this client has been asked for and has not answered.
     pending: HashMap<u64, oneshot::Sender<()>>,
 }
@@ -908,6 +963,82 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// `veld update` replaces the binary while pages stay open, so this is a normal
 /// event, not a fault.
 static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().to_string());
+
+/// Which of `candidates` some connected client still has a pane for.
+///
+/// The answer to "is any Veld window or tab still showing this terminal", which
+/// is the question `pty`'s detach reaper needs and could not ask: a session is
+/// *detached* the moment its socket goes away, and a socket goes away for
+/// reasons — a sleeping laptop, `veld update`, a spent reconnect budget — that
+/// have nothing to do with the window being closed. Reaping on the socket alone
+/// hung up live builds under a pane the user was looking at.
+///
+/// **The socket is still the lease** (see the module docs): a client's ids go
+/// with its record in [`disconnect`], so quitting the app, closing the window or
+/// closing the tab empties this within one frame. Nothing here is persisted and
+/// nothing expires on a timer.
+///
+/// **Asked about a list rather than answered with the union**, and the shape is
+/// the point: [`MAX_KEPT`] bounds one client's set and nothing bounds the number
+/// of clients — the same asymmetry [`MAX_STATE_WORKTREES`] exists for. Collecting
+/// every client's ids into one owned set would allocate `clients × MAX_KEPT`
+/// strings under this lock once a minute, blocking every claim and hello for the
+/// duration. **What this shape removes is the allocation**, not the factor of
+/// clients: the work here is still a probe per client per candidate, but the
+/// reaper only asks about sessions that exist, which `pty::MAX_SESSIONS` caps at
+/// 48. Hash probes over a bounded list, rather than a growing pile of `String`s.
+///
+/// The decision lives on [`Registry::kept_among`] so it can be tested over a
+/// local registry, the way every other decision in this module is.
+pub async fn kept_among(candidates: &[String]) -> HashSet<String> {
+    REGISTRY.lock().await.kept_among(candidates)
+}
+
+/// Declare a client's kept sessions from a test in a sibling module.
+///
+/// `pty`'s reaper test needs a registry with a client in it, and the registry is
+/// a private static. Test-only, and deliberately not a general setter: it takes
+/// the whole set, the way the [`ClientMsg::Keep`] handler does.
+#[cfg(test)]
+pub(super) async fn declare_kept_for_test(client_id: &str, session_ids: &[&str]) {
+    let mut reg = REGISTRY.lock().await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let entry = reg.clients.entry(client_id.to_owned()).or_insert(Client {
+        conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+        info: ClientInfo {
+            kind: ClientKind::Browser,
+            label: client_id.to_owned(),
+        },
+        tx,
+        holds: HashSet::new(),
+        keeps: HashSet::new(),
+        pending: HashMap::new(),
+    });
+    entry.keeps = session_ids.iter().map(|s| (*s).to_owned()).collect();
+}
+
+/// Remove a test client, so one test's declaration cannot reach another's.
+///
+/// The blunt version: the record goes and nothing else happens. Use
+/// [`disconnect_for_test`] to exercise what a closing socket actually does.
+#[cfg(test)]
+pub(super) async fn forget_client_for_test(client_id: &str) {
+    REGISTRY.lock().await.clients.remove(client_id);
+}
+
+/// Close a test client's socket, through the real [`disconnect`] path.
+///
+/// The distinction from [`forget_client_for_test`] is the whole point of the test
+/// that uses it: `disconnect` is where a departing client's panes have their
+/// grace started, and a test that removed the record by hand would assert
+/// nothing about it.
+#[cfg(test)]
+pub(super) async fn disconnect_for_test(client_id: &str) {
+    let conn = REGISTRY.lock().await.clients.get(client_id).map(|c| c.conn);
+    if let Some(conn) = conn {
+        disconnect(client_id, conn).await;
+    }
+}
 
 impl Registry {
     /// Drop orphaned claims whose owner is not coming back. Returns whether
@@ -984,6 +1115,50 @@ impl Registry {
                     client: info,
                 })
             })
+            .collect()
+    }
+
+    /// Of `letting_go`, the sessions no client keeps any more.
+    ///
+    /// Called after the shrinking client's record has already been updated (or
+    /// removed), so "no client" includes it: the answer is which panes have just
+    /// become nobody's, and therefore whose detach clock `pty` must start now.
+    ///
+    /// **This is what makes the exemption exact.** The reaper restarts the clock
+    /// of the sessions it spares, but it only runs once a minute, so on its own
+    /// it leaves up to a full interval of a session's grace already spent when
+    /// its client goes — which at the smallest grace the setting allows, also a
+    /// minute, is the whole of it. A page reload is precisely that: the record
+    /// here is dropped and cannot be rebuilt until the new page has fetched its
+    /// layouts back.
+    fn released_by(&self, letting_go: &HashSet<String>) -> Vec<String> {
+        letting_go
+            .iter()
+            .filter(|id| !self.clients.values().any(|c| c.keeps.contains(*id)))
+            .cloned()
+            .collect()
+    }
+
+    /// Which of `candidates` some *connected* client still has a pane for.
+    ///
+    /// One window is enough — which window it is has never mattered to the
+    /// reaper, so this is an `any` across clients rather than a per-client
+    /// answer. What `pty::reap_detached` skips.
+    ///
+    /// **Orphans are deliberately absent**, and a shell needs no equivalent of
+    /// [`RECONNECT_GRACE`] because what moves is the clock rather than the
+    /// membership: [`Registry::released_by`] hands `pty::start_detach_clock` the
+    /// sessions a departing client was the last to name, so their grace begins at
+    /// the disconnect rather than wherever the socket dropped. A page reload —
+    /// which drops the whole record here and cannot re-declare until the new page
+    /// has fetched its layouts back — therefore costs a reload's worth of the
+    /// grace, not the whole of it. A grace protects the shell; `RECONNECT_GRACE`
+    /// protects a *claim* from a competitor, which is a different question.
+    fn kept_among(&self, candidates: &[String]) -> HashSet<String> {
+        candidates
+            .iter()
+            .filter(|id| self.clients.values().any(|c| c.keeps.contains(*id)))
+            .cloned()
             .collect()
     }
 
@@ -1328,6 +1503,7 @@ async fn serve_channel(socket: WebSocket, minted: String) {
                 info: info.clone(),
                 tx,
                 holds: HashSet::new(),
+                keeps: HashSet::new(),
                 pending: HashMap::new(),
             },
         );
@@ -1369,9 +1545,17 @@ async fn serve_channel(socket: WebSocket, minted: String) {
             // frames being read for the duration — including the `yielded` that
             // some third client's claim is waiting on. The symptom is the one
             // warning this module has for the takeover race firing about a
-            // client that answered promptly. Everything else is a map update
-            // that finishes immediately, and `claim` re-checks `claim_seq` under
+            // client that answered promptly. `claim` re-checks `claim_seq` under
             // the lock, so being overtaken is already its normal case.
+            //
+            // **Everything else must finish immediately, and one arm is only
+            // *nearly* a map update**: `Keep` also takes `pty`'s session lock, to
+            // start the grace of the panes this client has just let go. That is
+            // fine for the same reason it is fine here — the session lock is
+            // held for a map write and nothing else, which is why `obtain_session`
+            // and `adopt_one` were changed to release it before writing to a
+            // holder socket. Anything that makes taking that lock unbounded makes
+            // this loop unbounded, and the takeover race above is what pays.
             Ok(ClientMsg::Claim {
                 worktree_id,
                 request_id,
@@ -1413,6 +1597,26 @@ async fn handle(client_id: &str, msg: ClientMsg) {
             if let Some(client) = reg.clients.get_mut(client_id) {
                 client.holds = worktree_ids.into_iter().take(MAX_HELD).collect();
             }
+        }
+        ClientMsg::Keep { session_ids } => {
+            let released = {
+                let mut reg = REGISTRY.lock().await;
+                let Some(client) = reg.clients.get_mut(client_id) else {
+                    return;
+                };
+                let next: HashSet<String> = session_ids.into_iter().take(MAX_KEPT).collect();
+                // What this client is giving up — a pane closed, or a worktree
+                // yielded to another window. Computed before the swap, filtered
+                // after it, so a session another client also names is not
+                // counted as released.
+                let letting_go: HashSet<String> = client.keeps.difference(&next).cloned().collect();
+                client.keeps = next;
+                reg.released_by(&letting_go)
+            };
+            // Outside the lock, and it must be: `pty` takes the session lock, and
+            // holding both at once here would be the one place in the daemon that
+            // orders them the opposite way to the reaper.
+            super::pty::start_detach_clock(&released).await;
         }
         ClientMsg::Yielded { yield_id } => {
             let mut reg = REGISTRY.lock().await;
@@ -1572,6 +1776,13 @@ async fn claim(
 /// them back — see [`RECONNECT_GRACE`]. Its holds go immediately: nothing is
 /// mounted behind a closed socket, so waiting for it to yield would be waiting
 /// for a page that no longer exists.
+///
+/// **So do its keeps**, with the same record and for the same reason — and that
+/// is the event `terminal.detachGraceMinutes` is supposed to measure from. A
+/// reload gets them back the moment its new socket re-sends them, which is
+/// inside the reaper's own minute; nothing needs [`RECONNECT_GRACE`] here,
+/// because the shortest grace this could race is a minute and the shortest one
+/// the setting allows is a minute more.
 async fn disconnect(client_id: &str, conn: u64) {
     let mut reg = REGISTRY.lock().await;
     // **Only the socket that is still registered may tear anything down.** A
@@ -1582,7 +1793,16 @@ async fn disconnect(client_id: &str, conn: u64) {
     if reg.clients.get(client_id).is_none_or(|c| c.conn != conn) {
         return;
     }
-    let info = reg.clients.remove(client_id).map(|c| c.info);
+    let gone = reg.clients.remove(client_id);
+    // Its panes are nobody's now — unless another window also has them. `pty`
+    // starts their grace from this instant rather than from wherever the socket
+    // happened to drop, which for a shell left overnight is a night earlier and
+    // therefore already spent. Applied below, once this lock is released.
+    let released = gone
+        .as_ref()
+        .map(|c| reg.released_by(&c.keeps))
+        .unwrap_or_default();
+    let info = gone.map(|c| c.info);
     reg.claim_seq.remove(client_id);
     let now = Instant::now();
     // Its holds went with the record: nothing is mounted behind a closed
@@ -1609,6 +1829,11 @@ async fn disconnect(client_id: &str, conn: u64) {
     let _ = reg.expire_orphans(now);
     reg.broadcast();
     drop(reg);
+
+    // Outside the lock, and it must be: `pty` takes the session lock, and holding
+    // both at once here would be the one place in the daemon that orders them the
+    // opposite way to the reaper.
+    super::pty::start_detach_clock(&released).await;
 
     // **Arm the expiry.** Nothing else in this module runs at the moment the
     // grace ends, so without this a closed tab left every other client's rail
@@ -1649,6 +1874,7 @@ mod tests {
                 },
                 tx,
                 holds: HashSet::new(),
+                keeps: HashSet::new(),
                 pending: HashMap::new(),
             },
         );
@@ -2249,6 +2475,68 @@ mod tests {
         );
     }
 
+    /// What `pty`'s reaper asks this module: of the sessions that exist, which
+    /// ones some connected client still has a pane for.
+    ///
+    /// The disconnect half is the load-bearing one. `Client.keeps` lives on the
+    /// record [`disconnect`] removes wholesale, which is what makes the socket
+    /// the lease here as much as it is for a claim — if keeps ever outlived the
+    /// record, quitting the app would stop collecting shells at all and the
+    /// setting would silently mean "never".
+    #[test]
+    fn kept_among_answers_for_every_connected_client_and_no_gone_one() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        let _b = connect(&mut reg, "b", ClientKind::Browser);
+        let asked: Vec<String> = ["one", "two", "shared", "nobodys"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let set = |names: [&str; 2]| names.into_iter().map(str::to_owned).collect();
+
+        assert!(
+            reg.kept_among(&asked).is_empty(),
+            "a client that has said nothing keeps nothing"
+        );
+
+        reg.clients.get_mut("a").unwrap().keeps = set(["one", "shared"]);
+        reg.clients.get_mut("b").unwrap().keeps = set(["two", "shared"]);
+
+        assert_eq!(
+            reg.kept_among(&asked),
+            ["one", "two", "shared"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<HashSet<_>>(),
+            "one window is enough to keep a shell, and two naming it is not two shells"
+        );
+
+        // Only ever the sessions asked about — the answer is scoped to what the
+        // reaper found, never to what a client claimed.
+        assert_eq!(
+            reg.kept_among(&["one".to_owned()]),
+            ["one".to_owned()].into_iter().collect::<HashSet<_>>()
+        );
+        reg.clients.get_mut("a").unwrap().keeps = set(["absent", "gone"]);
+        assert!(
+            reg.kept_among(&["one".to_owned()]).is_empty(),
+            "an id no client names any more is not kept by having been named before"
+        );
+
+        // The window closed. `disconnect` removes the whole record, so its panes
+        // stop counting — and `shared` survives on the client still open, which
+        // is the case a per-client "last one out" rule would get wrong.
+        reg.clients.get_mut("a").unwrap().keeps = set(["one", "shared"]);
+        reg.clients.remove(&a.id);
+        assert_eq!(
+            reg.kept_among(&asked),
+            ["two", "shared"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<HashSet<_>>()
+        );
+    }
+
     /// A claim waits for every holder at once. Sequentially, `holds` being
     /// client-declared meant one page could name itself a holder of everything
     /// and put `holders × YIELD_ACK` in front of every real claim.
@@ -2318,6 +2606,10 @@ mod tests {
         match parse(r#"{"type":"holds","worktree_ids":[7,9]}"#) {
             ClientMsg::Holds { worktree_ids } => assert_eq!(worktree_ids, vec![7, 9]),
             other => panic!("expected holds, got {other:?}"),
+        }
+        match parse(r#"{"type":"keep","session_ids":["a","b"]}"#) {
+            ClientMsg::Keep { session_ids } => assert_eq!(session_ids, vec!["a", "b"]),
+            other => panic!("expected keep, got {other:?}"),
         }
         match parse(r#"{"type":"yielded","yield_id":42}"#) {
             ClientMsg::Yielded { yield_id } => assert_eq!(yield_id, 42),
