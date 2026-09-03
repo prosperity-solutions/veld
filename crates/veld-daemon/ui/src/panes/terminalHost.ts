@@ -1433,6 +1433,9 @@ export function restartTerminal(id: string): void {
   // process and none of it carries over — in particular the "this pane's exit is already
   // filed" marker, which otherwise silenced every later exit in the pane.
   inbox.restarted(id);
+  // See `startTerminal`: a shell the user just asked to replace is not one whose
+  // absence needs reporting.
+  EXPECTED_RESUMES.delete(id);
   // A config-declared pane has no login shell to fall back to, and "restart"
   // for one means the same thing "start fresh" does: run its launch command
   // again under a new identity.
@@ -1528,6 +1531,10 @@ export function startTerminal(
   // Same reason as `restartTerminal`: the pane id is reused, so everything the inbox knows
   // about this session belongs to the process that just ended.
   inbox.restarted(id);
+  // And the shell's absence is not news when the user is the one who asked for a
+  // new one — without this, "start fresh" answers with "the previous shell is
+  // gone", which is both redundant and reads as a fault.
+  EXPECTED_RESUMES.delete(id);
   cancelAutoReconnect(s);
   s.generation += 1;
   s.ws?.close();
