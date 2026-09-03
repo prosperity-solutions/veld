@@ -45,7 +45,7 @@ This repo has a required workflow for changes. If this turn is a question about
 the repository, ignore this. If it changes anything — add, fix, delete,
 refactor, docs — invoke the `ship` skill before your first edit (or read
 docs/ship.md in full if skills are unavailable). A pull request whose head
-commit has no valid stamp fails CI's required `ship` check and cannot be merged.
+commit has no valid stamp turns CI's `ship` check red, and it stays red.
 EOF
 
 case "$mode" in

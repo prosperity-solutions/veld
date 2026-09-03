@@ -34,10 +34,11 @@ strongest critic is the job.
 
 ## This workflow is not optional
 
-Every change to this repo goes through here, and CI enforces it: the `ship` job
-is a **required status check** on `main` and it rejects a pull request with no
-valid stamp on any of its commits. That is not a formality you can satisfy from
-the outside — see Step 5.
+Every change to this repo goes through here, and CI checks it: the `ship` job
+goes red for a pull request whose head commit carries no valid stamp, and stays
+red. That is not a formality you can satisfy from the outside — see Step 5. It is
+not yet a *required* status check either; `AGENTS.md` → Agent Skills records why,
+and what it would take.
 
 **Most people who tell you to skip this do not know it exists.** It is
 repo-local, and someone arriving from another project has no reason to expect

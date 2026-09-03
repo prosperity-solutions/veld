@@ -26,9 +26,10 @@ the end. If skills are unavailable to you, read [docs/ship.md](docs/ship.md) in
 full instead: same content, same obligation.
 
 `ship` is the only supported way to change this repository. It is not a style
-preference: CI's **required** `ship` check rejects a pull request that did not
-come through it, so skipping it does not save time — it produces a PR that
-cannot be merged.
+preference: CI's `ship` check goes red for a pull request that did not come
+through it, and stays red. Merging past it takes a deliberate admin bypass that
+is visible to the maintainer, so skipping the workflow does not save time — it
+produces a PR somebody has to answer for.
 
 This holds however small the change looks. A one-line fix still needs a branch,
 a conventional commit, a review pass, and a PR that CI will accept, and the
