@@ -4,6 +4,15 @@ Claude Code reads this file and **not** `AGENTS.md`, so the one rule that matter
 most is repeated here. Everything else lives in [AGENTS.md](AGENTS.md) — read it
 before changing code, not before answering a question about it.
 
+Two deliberate choices, recorded because both look like mistakes worth
+"fixing". This file is short and duplicates `AGENTS.md`'s §0 rather than
+`@AGENTS.md`-importing it, because that import would pull 74KB into every
+session — including the "just asking a question" half, which is exactly the
+half that should not pay for it. And the wording differs on purpose: `AGENTS.md`
+says *read `docs/ship.md`* because most agents have no skill mechanism, while
+this file says *invoke the `ship` skill* because Claude Code does. Deduplicating
+the two by symlink would silently delete the skill instruction.
+
 ## There are exactly two kinds of task here
 
 **1. A question.** *Where is X? How does Y work? What calls Z?* — answer it.

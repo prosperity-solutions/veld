@@ -480,6 +480,12 @@ topbar-height:
 # gate has a local runner; without one this gate's first ever execution is a CI
 # run after `gh pr ready`, which is the most expensive place to discover a
 # misplaced trailer. `base` defaults to origin/main.
+#
+# It reports a gate malfunction, correctly, on any base that predates the gate —
+# it reads the helper from `base`, and there is deliberately no fallback. That
+# was true of exactly one pull request in this repo's history, the one that
+# introduced the gate; if you see it now, your `base` is wrong. The selftest
+# above needs no base and always runs.
 ship-stamp base="origin/main":
     #!/usr/bin/env bash
     set -euo pipefail

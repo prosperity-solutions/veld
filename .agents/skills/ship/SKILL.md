@@ -10,10 +10,12 @@ description: >
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
 metadata:
-  # Contributor-only dev tool. `npx skills` scans `.claude/skills/` alongside
+  # Contributor-only dev tool. `npx skills` scans BOTH `.agents/skills/` (where
+  # this file lives) and `.claude/skills/` (which symlinks to it) alongside
   # `skills/`, so without this flag `npx skills add prosperity-solutions/veld`
-  # would install /ship into unrelated projects. `internal: true` makes the
-  # skills CLI skip it in both its clone and GitHub-tree discovery paths.
+  # would install /ship into unrelated projects. Verified: flipping it to
+  # `false` makes `npx skills add . --list` report `ship`. `internal: true` is
+  # the CLI's opt-out in every one of those discovery paths.
   internal: true
 ---
 
@@ -58,6 +60,52 @@ whole design: nobody skips this by accident, and skipping it on purpose leaves a
 record.
 
 Never try to satisfy the gate without running the workflow.
+
+## If you are not Claude Code
+
+This workflow was written inside Claude Code, and parts of it name tools only
+Claude Code has. You are still expected to follow it — but not to *pretend* to.
+Three classes, and the second is the one that matters.
+
+**Do it inline.** Wherever this document or [docs/agentic-review.md](docs/agentic-review.md)
+reaches for a read-only investigator (`Explore`), a classifier, a repetitive-diff
+sweep, or a fixer subagent: read the files and do the work yourself. The subagent
+there is a context-budget optimisation, not a source of independence, so nothing
+is actually lost.
+
+**Do less, and declare it.** Two stages depend on *independence between agents*,
+which you cannot manufacture alone:
+
+- **Step 1.5, the sparring stage** — argue both sides yourself. Weaker, because
+  divergence was the whole point, but not worthless.
+- **Step 4, the review loop** — run `docs/agentic-review.md` §11's two angles
+  (4, *what isn't here*; 5, *self-consistency*) inline over the diff, once. Those
+  are checklist work and survive a single reader. What does not survive is §4's
+  blindness and §8.1's dedupe-by-location: two angles landing on the same
+  `path:line` is the only corroboration signal the loop has, and you cannot be
+  independent of yourself.
+
+  Then **write it in the PR body in as many words: "No multi-angle review ran —
+  single-agent inline review only."** A PR that says this is useful. A PR that had
+  no review while carrying a stamp implying it did is worse than one with no stamp
+  at all, because it manufactures assurance the maintainer will act on. Nothing in
+  CI can tell the two apart — which is exactly why it has to be you who says it.
+
+**Stop and ask.** Two decisions are not yours to guess:
+
+- **Step 0's kickoff answers.** They set the merge policy. An agent that invents
+  *bypass-merge on green* has forged an authorization nobody gave it. If you have
+  no way to ask interactively, ask in plain prose in your reply and **stop** — do
+  not write `.veld-ship.json` with guessed defaults, because Step 5 renders that
+  file as the PR's settings table and the maintainer reads it as their own answer.
+- **Icon choice** (Step 2). A taste call, same rule.
+
+**Some steps genuinely do not apply to you.** *Drive it yourself against a running
+stack* needs an installed veld, which a fresh clone does not have; if you cannot
+run the stack, say that in the PR body rather than reporting test evidence you do
+not have. Everything else still applies — Step 1's core/customization verdict,
+Step 3's docs checklist, the website question and the promotion call are reading
+and judgement, not tooling, and you can do all of them.
 
 ## Step 0 — Kickoff questionnaire (ask once, up front)
 
@@ -154,8 +202,8 @@ never self-corrects, and Step 5 would render a previous run's answers as this
 one's.
 
 That file is how the rest of the repo knows this workflow is running. The
-`pre-push` hook and Claude Code's `PreToolUse` hook both look for it and warn
-loudly when it is missing, and Step 5 reads it back to build the PR body's
+`pre-push` hook and Claude Code's `UserPromptSubmit` hook both look for it and
+warn loudly when it is missing, and Step 5 reads it back to build the PR body's
 settings table — so the answers you record here are the answers the maintainer
 reads on the PR. Write it once, at kickoff, before any edit.
 
@@ -480,9 +528,17 @@ opening the PR.
   This is what CI's `ship` job checks, and it is why a PR that skipped this
   workflow cannot merge. Three details that matter:
 
-  - **The value derives from the branch name**, so it stays valid across every
-    later push. A review-fix commit needs no trailer of its own — the gate
-    accepts any single commit in the PR range carrying a valid one.
+  - **Stamp every commit you make**, and keep the stamp on the head commit.
+    CI reads the trailer from the head commit *only*. It used to accept any
+    commit in the PR range, and that made a stamp inheritable: a squash merge
+    leaves the stamped commit unreachable from `main`, so reusing a shipped
+    branch passed the next PR having run no workflow at all. So a review-fix
+    commit needs its own trailer.
+  - **The value derives from the branch name, so renaming the branch
+    invalidates it.** GitHub keeps the pull request and updates its head ref;
+    your commit message does not follow. Re-stamp the head commit and push. The
+    gate says so specifically rather than accusing you of skipping the
+    workflow — but it costs a CI run, so rename before you stamp, not after.
   - **The trailer is the carrier, not the PR body.** A body can be edited after
     CI goes green and `edited` is not a CI trigger; a commit message cannot
     change without a push, and a push re-runs the check.
@@ -507,7 +563,7 @@ opening the PR.
   | Merge policy | Bypass-merge on green CI |
   | Hands-on checkpoints | One, before implementation |
   | Docs & tests | Internal — AGENTS.md checklist N/A |
-  | Promotion | No |
+  | Promotion | No |    <!-- your Step 3 call, not a marker key -->
   ```
 
   Fill every row from the answers recorded at Step 0, not from what you assume
@@ -589,8 +645,16 @@ PR is ready, so waiting on a draft's checks is an infinite wait, not patience.
    the coin flip next. Pushing the fix fires
    `synchronize`, and since the PR is now ready, that re-runs CI normally.
 5. Then apply the Step 0 merge policy:
-   - *Bypass-merge on green* → `gh pr merge --squash --admin`, confirm merged,
-     report the merge commit.
+   - *Bypass-merge on green* → `gh pr merge --squash --admin --delete-branch`,
+     confirm merged, report the merge commit.
+
+     Two things about that command. **`--admin` overrides required status
+     checks, including the `ship` check this workflow exists to satisfy** — so
+     read the `ship` job's own conclusion before you use it, rather than
+     treating a merge that succeeded as evidence the gate passed. And
+     `--delete-branch` is not tidiness: a squash merge leaves this branch's
+     stamped commits unreachable from `main`, so a branch left behind and later
+     reused is a branch whose next PR starts with commits CI has already seen.
    - *Open PR, stop* → report the PR link and the CI result, then stop. Leave it
      ready, not draft.
    - *Human PR review* → request review, wait for approval, then merge.
