@@ -33,6 +33,7 @@ import {
   storedTerminalIds,
   terminalIds,
 } from "./model";
+import { RETRY_STAGGER_MS, isStalled, planSweep } from "./retrySweep";
 import { handleKeyEvent } from "./terminalKeys";
 import {
   clipboardImageIndex,
@@ -1322,42 +1323,51 @@ function maybeAutoReconnect(s: Session): void {
   }, delayMs);
 }
 
-/**
- * Don't sweep more often than this. A sweep is one attempt per stalled
- * terminal, and the events that trigger it can arrive in bursts — tabbing
- * back and forth, or a daemon that comes up and goes down again.
- */
-const RETRY_SWEEP_MS = 3000;
 let lastSweep = 0;
+/** A sweep suppressed by the throttle, waiting out the rest of the window. */
+let trailingSweep: number | null = null;
 
 /**
  * Try the stalled terminals again, because something changed that makes this
  * attempt worth more than the last one.
  *
- * [`maybeAutoReconnect`]'s budget is spent in about eleven seconds, and the two
- * events that most often break a terminal's socket outlast that by a long way:
- * a laptop that slept, and a daemon restarted by `veld update`. So the budget
- * ran out while the cause was still present, and the pane settled into `error`
- * with a **live shell behind it** — the daemon keeps it, which is the whole
- * point of the holder process — waiting for a click nobody knew to make. The
- * scrollback of a running build sat there looking dead.
- *
  * Called when the page becomes visible again (the laptop woke, the window came
  * forward) and when the control socket reconnects (the daemon is back). Both are
- * evidence, not a timer: a retry with the same conditions as the last failure is
+ * evidence, not a timer: a retry under the same conditions as the last failure is
  * how a page ends up hammering a daemon that is not there.
  *
- * Only `error`, and only with no cycle in flight: `ended` is a shell that exited
- * and has an exit code on screen, and reconnecting to one would replay its
- * ending as if it had just happened.
+ * The two decisions — which terminals, and now-or-later — are `isStalled` and
+ * `planSweep` in `retrySweep.ts`, where they can be tested; this file cannot be
+ * imported by the test runner at all (it reaches xterm and the DOM). What is
+ * here is the loop and the timers.
  */
 export function retryStalledTerminals(): void {
   const now = Date.now();
-  if (now - lastSweep < RETRY_SWEEP_MS) return;
+  const plan = planSweep(now, lastSweep);
+  if (!plan.run) {
+    if (trailingSweep === null && plan.deferMs !== null) {
+      trailingSweep = window.setTimeout(() => {
+        trailingSweep = null;
+        retryStalledTerminals();
+      }, plan.deferMs);
+    }
+    return;
+  }
   lastSweep = now;
+  let nth = 0;
   for (const s of [...sessions.values()]) {
-    if (s.state !== "error" || s.reconnectTimer !== null) continue;
-    reconnectTerminal(s.id);
+    if (!isStalled(s.state, s.reconnectTimer !== null)) continue;
+    const id = s.id;
+    // Re-read the state when the turn comes round: a stagger is real time, and in
+    // it the user can have clicked Reconnect, restarted the pane or closed it —
+    // all of which leave `reconnectTerminal` reconnecting a terminal nobody asked
+    // it to.
+    window.setTimeout(() => {
+      const still = sessions.get(id);
+      if (!still || !isStalled(still.state, still.reconnectTimer !== null)) return;
+      reconnectTerminal(id);
+    }, nth * RETRY_STAGGER_MS);
+    nth += 1;
   }
 }
 

@@ -1270,12 +1270,41 @@ function AppInner(props: {
    * closed by the page going away, which is exactly the event a claim should not
    * survive.
    *
-   * A detached window has no part in this: its tabs were transferred out of a
-   * worktree its origin owns, so it is a satellite of that claim rather than a
-   * claimant.
+   * A detached window has no part in the **arbitration**: its tabs were
+   * transferred out of a worktree its origin owns, so it is a satellite of that
+   * claim rather than a claimant. It does open a socket, though, and the
+   * distinction matters — see the branch below.
    */
   useEffect(() => {
-    if (chromeless) return;
+    // **A detached window connects, and claims nothing.** It used to return here
+    // instead, and that quietly excluded the one thing this socket now does for
+    // every client: `channel.keep` is what stops the daemon collecting a shell
+    // whose socket dropped (a slept laptop, a `veld update`) while its window is
+    // still open. A detached window's tabs are named by no other client's layout
+    // — they left the origin's in the same step the window was seeded — so
+    // staying silent here meant the fix reached every window *except* the one
+    // holding a pane somebody deliberately pulled out to watch.
+    //
+    // Handlers, not a second `start`: it must never be granted a worktree, and
+    // `onReady` re-acquiring one is exactly how it would be. Every handler here
+    // is inert, so the only frames it ever sends are `hello` and `keep`.
+    if (chromeless) {
+      channel.start(clientKind(), clientLabel(), {
+        onClaims: () => {},
+        // Never asked: a yield goes to a client the daemon recorded as holding
+        // the worktree, and this one neither claims nor reports `holds`.
+        onYield: (_worktreeId, ack) => ack(),
+        onFocus: () => {},
+        onLayoutChanged: () => {},
+        // The one handler with work to do, and the same work it does in a main
+        // window: the daemon answering again is the evidence a terminal whose
+        // retry budget is spent has been waiting for. A detached window is
+        // usually *the* window with a long-running thing in it.
+        onReady: () => retryStalledTerminals(),
+        onClosed: () => {},
+      });
+      return;
+    }
     // Before anything else touches a layout: whichever client still holds the
     // old browser store is the only one that can move it, and the first client
     // to open a worktree creates its row.

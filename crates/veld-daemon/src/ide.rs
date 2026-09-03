@@ -751,10 +751,17 @@ enum ClientMsg {
     /// pages can answer: the same list they already compute for
     /// `pruneTerminals`.
     ///
-    /// Sent by every client, on the same edge as [`Self::Holds`] and re-sent
-    /// after a reconnect, because the daemon's copy dies with the socket — which
-    /// is exactly what makes this a lease rather than a promise. See
-    /// [`kept_sessions`].
+    /// Sent by every client — a detached window included, which is the one place
+    /// it differs from [`Self::Holds`] — and re-sent after a reconnect, because
+    /// the daemon's copy dies with the socket, which is exactly what makes this a
+    /// lease rather than a promise. See [`kept_among`].
+    ///
+    /// **A page from an older build never sends it**, and `veld update` replaces
+    /// the daemon while pages stay open. So for windows open across an update the
+    /// grace still measures the socket until they are reloaded — the desktop app
+    /// relaunches and heals itself, a browser tab does not. Nothing breaks: an
+    /// unknown frame is discarded at `debug!` in the read loop, so a *newer*
+    /// client against an older daemon degrades the same way.
     Keep { session_ids: Vec<String> },
     /// A yield has been carried out — sent *after* the release is on screen,
     /// not when the message arrived.
@@ -957,7 +964,7 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// event, not a fault.
 static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().to_string());
 
-/// Every PTY session some connected client still has a pane for.
+/// Which of `candidates` some connected client still has a pane for.
 ///
 /// The answer to "is any Veld window or tab still showing this terminal", which
 /// is the question `pty`'s detach reaper needs and could not ask: a session is
@@ -968,17 +975,51 @@ static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().
 ///
 /// **The socket is still the lease** (see the module docs): a client's ids go
 /// with its record in [`disconnect`], so quitting the app, closing the window or
-/// closing the tab empties this within one frame — and the grace then runs from
-/// there, which is what it always meant to measure. Nothing here is persisted
-/// and nothing expires on a timer.
+/// closing the tab empties this within one frame. Nothing here is persisted and
+/// nothing expires on a timer.
 ///
-/// Returned as an owned set rather than a predicate so the reaper takes this
-/// lock once per pass instead of once per session, and never while holding its
-/// own.
-/// The union lives on [`Registry::kept`] so it can be tested over a local
-/// registry, the way every other decision in this module is.
-pub async fn kept_sessions() -> HashSet<String> {
-    REGISTRY.lock().await.kept()
+/// **Asked about a list rather than answered with the union**, and the shape is
+/// the point: [`MAX_KEPT`] bounds one client's set and nothing bounds the number
+/// of clients — the same asymmetry [`MAX_STATE_WORKTREES`] exists for. Collecting
+/// every client's ids into one owned set would allocate `clients × MAX_KEPT`
+/// strings under this lock once a minute, blocking every claim and hello for the
+/// duration. The reaper only ever asks about sessions that exist, which
+/// `pty::MAX_SESSIONS` caps at 48, so this way the work under the lock is bounded
+/// by something real.
+///
+/// The decision lives on [`Registry::kept_among`] so it can be tested over a
+/// local registry, the way every other decision in this module is.
+pub async fn kept_among(candidates: &[String]) -> HashSet<String> {
+    REGISTRY.lock().await.kept_among(candidates)
+}
+
+/// Declare a client's kept sessions from a test in a sibling module.
+///
+/// `pty`'s reaper test needs a registry with a client in it, and the registry is
+/// a private static. Test-only, and deliberately not a general setter: it takes
+/// the whole set, the way the [`ClientMsg::Keep`] handler does.
+#[cfg(test)]
+pub(super) async fn declare_kept_for_test(client_id: &str, session_ids: &[&str]) {
+    let mut reg = REGISTRY.lock().await;
+    let (tx, _rx) = mpsc::unbounded_channel();
+    let entry = reg.clients.entry(client_id.to_owned()).or_insert(Client {
+        conn: NEXT_CONN.fetch_add(1, Ordering::Relaxed),
+        info: ClientInfo {
+            kind: ClientKind::Browser,
+            label: client_id.to_owned(),
+        },
+        tx,
+        holds: HashSet::new(),
+        keeps: HashSet::new(),
+        pending: HashMap::new(),
+    });
+    entry.keeps = session_ids.iter().map(|s| (*s).to_owned()).collect();
+}
+
+/// Remove a test client, so one test's declaration cannot reach another's.
+#[cfg(test)]
+pub(super) async fn forget_client_for_test(client_id: &str) {
+    REGISTRY.lock().await.clients.remove(client_id);
 }
 
 impl Registry {
@@ -1059,18 +1100,27 @@ impl Registry {
             .collect()
     }
 
-    /// Every session some *connected* client still has a pane for.
+    /// Which of `candidates` some *connected* client still has a pane for.
     ///
-    /// A union, not a per-client answer: one window is enough to keep a shell,
-    /// and which window it is has never mattered to the reaper. Orphans are
-    /// deliberately absent — [`RECONNECT_GRACE`] exists so a reloading page does
-    /// not lose its *claim* to a competitor, and a shell needs no such
-    /// protection: the shortest grace the setting allows is a minute, and a
-    /// reload re-sends its set in well under one.
-    fn kept(&self) -> HashSet<String> {
-        self.clients
-            .values()
-            .flat_map(|c| c.keeps.iter().cloned())
+    /// One window is enough — which window it is has never mattered to the
+    /// reaper, so this is an `any` across clients rather than a per-client
+    /// answer.
+    ///
+    /// **Orphans are deliberately absent**, and that is safe only because of what
+    /// `pty::reap_detached` does with the answer: it restarts the detach clock of
+    /// every session it finds kept. So a client that disappears leaves its
+    /// sessions with a clock at most one reaper pass old — a fresh grace — rather
+    /// than with the hours-old clock they would otherwise carry. Without that,
+    /// this omission would be a real hole: a page *reload* drops the whole client
+    /// record here and cannot re-declare until it has fetched its layouts back,
+    /// and any pass landing in that window would collect shells that were never
+    /// abandoned. [`RECONNECT_GRACE`] protects a claim from a competitor; the
+    /// clock restart is what protects a shell from a reload.
+    fn kept_among(&self, candidates: &[String]) -> HashSet<String> {
+        candidates
+            .iter()
+            .filter(|id| self.clients.values().any(|c| c.keeps.contains(*id)))
+            .cloned()
             .collect()
     }
 
@@ -2351,9 +2401,8 @@ mod tests {
         );
     }
 
-    /// What `pty`'s reaper asks this module, end to end over the registry: the
-    /// union of every connected client's panes, and nothing from a client that
-    /// has gone.
+    /// What `pty`'s reaper asks this module: of the sessions that exist, which
+    /// ones some connected client still has a pane for.
     ///
     /// The disconnect half is the load-bearing one. `Client.keeps` lives on the
     /// record [`disconnect`] removes wholesale, which is what makes the socket
@@ -2361,26 +2410,26 @@ mod tests {
     /// record, quitting the app would stop collecting shells at all and the
     /// setting would silently mean "never".
     #[test]
-    fn kept_sessions_are_the_union_of_what_connected_clients_have_panes_for() {
+    fn kept_among_answers_for_every_connected_client_and_no_gone_one() {
         let mut reg = Registry::default();
         let a = connect(&mut reg, "a", ClientKind::Electron);
         let _b = connect(&mut reg, "b", ClientKind::Browser);
+        let asked: Vec<String> = ["one", "two", "shared", "nobodys"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let set = |names: [&str; 2]| names.into_iter().map(str::to_owned).collect();
 
         assert!(
-            reg.kept().is_empty(),
+            reg.kept_among(&asked).is_empty(),
             "a client that has said nothing keeps nothing"
         );
 
-        reg.clients.get_mut("a").unwrap().keeps = ["one".to_owned(), "shared".to_owned()]
-            .into_iter()
-            .collect();
-        reg.clients.get_mut("b").unwrap().keeps = ["two".to_owned(), "shared".to_owned()]
-            .into_iter()
-            .collect();
+        reg.clients.get_mut("a").unwrap().keeps = set(["one", "shared"]);
+        reg.clients.get_mut("b").unwrap().keeps = set(["two", "shared"]);
 
-        let kept = reg.kept();
         assert_eq!(
-            kept,
+            reg.kept_among(&asked),
             ["one", "two", "shared"]
                 .into_iter()
                 .map(str::to_owned)
@@ -2388,12 +2437,25 @@ mod tests {
             "one window is enough to keep a shell, and two naming it is not two shells"
         );
 
+        // Only ever the sessions asked about — the answer is scoped to what the
+        // reaper found, never to what a client claimed.
+        assert_eq!(
+            reg.kept_among(&["one".to_owned()]),
+            ["one".to_owned()].into_iter().collect::<HashSet<_>>()
+        );
+        reg.clients.get_mut("a").unwrap().keeps = set(["absent", "gone"]);
+        assert!(
+            reg.kept_among(&["one".to_owned()]).is_empty(),
+            "an id no client names any more is not kept by having been named before"
+        );
+
         // The window closed. `disconnect` removes the whole record, so its panes
         // stop counting — and `shared` survives on the client still open, which
         // is the case a per-client "last one out" rule would get wrong.
+        reg.clients.get_mut("a").unwrap().keeps = set(["one", "shared"]);
         reg.clients.remove(&a.id);
         assert_eq!(
-            reg.kept(),
+            reg.kept_among(&asked),
             ["two", "shared"]
                 .into_iter()
                 .map(str::to_owned)
