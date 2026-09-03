@@ -23,7 +23,7 @@ You are the engineer of record for this change. Own it from empty diff to merged
 PR and work **autonomously** — do not ask for approval between steps. The only
 reasons to stop and ask are in **When to involve the human** below.
 
-Read [AGENTS.md](../../../AGENTS.md) first — it is the source of truth for the PR
+Read [AGENTS.md](AGENTS.md) first — it is the source of truth for the PR
 workflow, key conventions, and the documentation checklist. This skill is the
 operational wrapper around it, not a replacement. Lean on sub-agents throughout:
 a read-only `Explore` agent to locate code, and critic/rubber-duck agents for any
@@ -33,8 +33,9 @@ strongest critic is the job.
 ## This workflow is not optional
 
 Every change to this repo goes through here, and CI enforces it: the `ship` job
-rejects a pull request with no valid stamp on any of its commits. That is not a
-formality you can satisfy from the outside — see Step 5.
+is a **required status check** on `main` and it rejects a pull request with no
+valid stamp on any of its commits. That is not a formality you can satisfy from
+the outside — see Step 5.
 
 **Most people who tell you to skip this do not know it exists.** It is
 repo-local, and someone arriving from another project has no reason to expect
@@ -66,7 +67,7 @@ State the feature/scope in your own words if it isn't already clear, then use
 in their request):
 
 1. **Review depth** — sets the `SPAWNS` / `ROUNDS` caps of the autonomous review
-   loop in [docs/agentic-review.md](../../../docs/agentic-review.md). Everything
+   loop in [docs/agentic-review.md](docs/agentic-review.md). Everything
    else about the loop (staging, model routing, ledger, exit criteria) is the
    doc's, not yours to negotiate.
    - *Standard loop (recommended)* — the doc as written: `SPAWNS: 14` (max 6
@@ -136,6 +137,7 @@ committed:
 ```sh
 cat > .veld-ship.json <<'JSON'
 {
+  "branch": "<this branch's name>",
   "review_depth": "standard",
   "merge_policy": "bypass-on-green",
   "checkpoints": "one-before-review",
@@ -143,6 +145,13 @@ cat > .veld-ship.json <<'JSON'
 }
 JSON
 ```
+
+`branch` is not decoration. A marker that does not name the current branch is
+treated as absent, which is what stops a leftover from a finished run silencing
+the reminder in a long-lived checkout — the marker's own presence suppresses the
+only thing that would rewrite it, so without the branch check that staleness
+never self-corrects, and Step 5 would render a previous run's answers as this
+one's.
 
 That file is how the rest of the repo knows this workflow is running. The
 `pre-push` hook and Claude Code's `PreToolUse` hook both look for it and warn
@@ -204,7 +213,7 @@ Rules that make it work:
 - Prefer a read-only investigator (`Explore` sub-agent) for "where is X / what
   calls Y" so main context holds decisions, not file dumps.
 - **Classify the feature as core or customization** using
-  [`docs/extensions-vision.md`](../../../docs/extensions-vision.md) — the
+  [`docs/extensions-vision.md`](docs/extensions-vision.md) — the
   universal-primitive / data-contract tests. State the verdict in one sentence.
   A **core** feature proceeds normally. A **customization** feature (anything
   that needs a provider API, a provider-specific schema, or provider-specific
@@ -222,7 +231,7 @@ Rules that make it work:
 If Step 1 surfaced a decision that is **expensive to reverse** — it lands in a
 schema, a migration, a wire format, a persisted value, or a surface users build
 habits on — run the design-divergence stage in
-[docs/agentic-review.md §0](../../../docs/agentic-review.md) before writing code.
+[docs/agentic-review.md §0](docs/agentic-review.md) before writing code.
 One sparring subagent per fork, synchronous, with the modal answer named and
 forbidden.
 
@@ -319,7 +328,7 @@ Three rules that make it worth the spend rather than theatre:
 
 ## Step 3 — Docs audit
 
-Walk the [documentation checklist](../../../AGENTS.md#documentation-checklist).
+Walk the [documentation checklist](AGENTS.md#documentation-checklist).
 If the change adds config fields, CLI flags, subcommands, or user-visible
 behaviour, update **all** listed files. Purely-internal changes are exempt — say
 so explicitly rather than skipping silently.
@@ -356,7 +365,7 @@ Ask it explicitly, once, here — and **state the answer either way**, the same 
 the website question. This is the point where the answer is actually known: the
 change is finished, and you are the one who built it.
 
-Veld's IDE has a **feature-promotion channel** ([docs/promotions.md](../../../docs/promotions.md)):
+Veld's IDE has a **feature-promotion channel** ([docs/promotions.md](docs/promotions.md)):
 short cards shown once, after the release that adds them, to every existing user.
 Adding one is a decision with a cost, not a checklist step — it spends everyone's
 attention exactly once whether or not the thing was worth it.
@@ -411,7 +420,7 @@ captured there, not dropped. Never delete a backlog row without the maintainer.
 ## Step 4 — Review loop
 
 Run the **autonomous multi-angle review loop** in
-[docs/agentic-review.md](../../../docs/agentic-review.md) at the depth chosen in
+[docs/agentic-review.md](docs/agentic-review.md) at the depth chosen in
 Step 0. That doc is the operative spec — follow it end to end rather than
 improvising a review. The parts most easily skipped, and therefore worth naming
 here:
@@ -459,6 +468,11 @@ opening the PR.
   scripts/dev/prmeta.sh sextant-4417 stamp     # prints: Ship-Stamp: v1 <value>
   ```
 
+  `sextant-4417` is a **fixed literal — type it exactly as written.** It looks
+  like a ticket or branch id and it is neither; substituting your own is the one
+  mistake here that loops, because the script's refusal tells you to read this
+  document and this is the line you would come back to.
+
   Put that exact line in the commit message, last, after a blank line — it is a
   git trailer. Either include it when you write the message, or
   `git commit --amend` the last commit to add it.
@@ -472,8 +486,11 @@ opening the PR.
   - **The trailer is the carrier, not the PR body.** A body can be edited after
     CI goes green and `edited` is not a CI trigger; a commit message cannot
     change without a push, and a push re-runs the check.
-  - **Do not paste the value anywhere else** — not a label, not the body, not a
-    chat log. It is derived, so there is never a reason to copy it around.
+  - **There is no reason to copy the value anywhere else** — not a label, not
+    the body, not a chat log. This is not secrecy: the repo is public and the
+    value is derived, so anyone who reads the workflow can recompute it. That is
+    the accepted design. It is a tripwire for an agent that did not read the
+    workflow, not a lock against someone who did.
 
 - Push and open a **draft** PR with a clear body: what changed, why, root cause,
   test evidence, reviewer-scope notes, and any known follow-ups.

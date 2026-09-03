@@ -9,7 +9,7 @@
 #
 # Usage (from docs/ship.md):
 #   scripts/dev/prmeta.sh <arg> stamp [branch]
-#   scripts/dev/prmeta.sh <arg> verify <branch> <value>
+#   scripts/dev/prmeta.sh verify <branch> <value>      (ungated; see below)
 #
 # `branch` defaults to the current one. `stamp` prints a git trailer line.
 # `verify` is silent and exits non-zero on a mismatch.
@@ -57,17 +57,25 @@ print(hmac.new(key, sys.argv[2].encode(), hashlib.sha256).hexdigest()[:16])
 PY
 }
 
-[ "$(digest "${1:-}")" = "$_EXPECT" ] || nag
-shift
-
 case "${1:-}" in
-  stamp)
-    branch=${2:-$(git rev-parse --abbrev-ref HEAD)}
-    printf 'Ship-Stamp: %s %s\n' "$_V" "$(mac "veld-ship:${_V}:${branch}")"
-    ;;
   verify)
+    # Deliberately ungated. `verify` is a confirm-only oracle: it cannot produce
+    # a value, only agree with one, so demanding the argument here protected
+    # nothing — and it coupled the CI gate to the exact prose formatting of one
+    # line in the workflow document, where a reflow would have reddened every
+    # open pull request. The gate belongs on the *producer* below.
     [ $# -eq 3 ] || nag
     [ "$(mac "veld-ship:${_V}:${2}")" = "$3" ]
     ;;
-  *) nag ;;
+  *)
+    [ "$(digest "${1:-}")" = "$_EXPECT" ] || nag
+    shift
+    case "${1:-}" in
+      stamp)
+        branch=${2:-$(git rev-parse --abbrev-ref HEAD)}
+        printf 'Ship-Stamp: %s %s\n' "$_V" "$(mac "veld-ship:${_V}:${branch}")"
+        ;;
+      *) nag ;;
+    esac
+    ;;
 esac

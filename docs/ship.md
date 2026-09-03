@@ -1,1 +1,1 @@
-../.claude/skills/ship/SKILL.md
+../.agents/skills/ship/SKILL.md

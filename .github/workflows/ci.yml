@@ -159,6 +159,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
+      # Selftest first, same as `check`'s other gates: a gate that has rotted
+      # into "everything matches" passes the real check trivially, and that
+      # reads as a clean bill of health.
+      - name: Selftest the gate
+        run: bash tests/validate-ship-stamp.sh --selftest
       - name: Verify the PR came through the ship workflow
         env:
           BASE: ${{ github.event.pull_request.base.sha }}

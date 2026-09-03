@@ -488,6 +488,11 @@ workflow-gates:
     # refuse, and they run before it is trusted for anything.
     python3 tests/signing-slots.py --selftest
     python3 tests/signing-slots.py
+    # The ship gate. Only its selftest is runnable locally — the gate proper
+    # needs a base/head pair and a PR's metadata, which only CI has. Same
+    # selftest-first reasoning as the three above: this gate's rot mode is
+    # "every PR matches", which reads exactly like a clean bill of health.
+    bash tests/validate-ship-stamp.sh --selftest
 
 # Check commit subjects against the pattern the `commits` job enforces. That job
 # is draft-guarded too, so without this a malformed subject is discovered only

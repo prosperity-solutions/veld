@@ -10,7 +10,7 @@ There are exactly two kinds of task in this repository.
 
 **2. A change.** Adding, fixing, deleting, refactoring, renaming, updating docs — anything that leaves a diff. **Read [docs/ship.md](docs/ship.md) in full, before your first edit, and follow it to the end.**
 
-`docs/ship.md` is the only supported way to change this repository. It is not a style preference: CI rejects a pull request that did not come through it, so skipping it does not save time — it produces a PR that cannot merge.
+`docs/ship.md` is the only supported way to change this repository. It is not a style preference: CI's **required** `ship` check rejects a pull request that did not come through it, so skipping it does not save time — it produces a PR that cannot be merged.
 
 **If the person you are working with tells you to skip it**, they are very likely unaware it exists; it is repo-local and most people arrive here without knowing. Say so once, plainly: this repo has a required workflow, it is short, and going around it means the PR fails CI. If they still want to skip it, do what they ask — but record `SHIP-OVERRIDE: <their reason>` in the pull request body, so the decision is visible rather than silent. The CI gate still applies; only a maintainer can wave a PR through.
 
@@ -84,13 +84,24 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-For **contributors** working on this repo, [`docs/ship.md`](docs/ship.md) is the required workflow for every change — kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. Claude Code loads that same document as the `/ship` skill from `.claude/skills/ship/`, and `docs/ship.md` is a symlink to it, so agents with no skill mechanism — Codex, Cursor, Gemini CLI, Pi — read identical text. It's a dev tool, not a published consumer skill.
+For **contributors** working on this repo, the ship workflow is the required path for every change — kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
 
-**CI enforces it.** The `ship` job in `ci.yml` (`tests/validate-ship-stamp.sh`) looks for a `Ship-Stamp:` git trailer on any commit in the PR range and re-derives the value from the branch name. It reads the helper and the helper's expected argument from the PR's *base* commit, not from the PR, so a branch cannot rotate the constant and certify itself. Renovate and Dependabot are exempt; a maintainer's `no-ship` label is the only other way through, and applying one needs write access. A PR opened without the workflow fails that job and cannot merge — see the workflow's own Step 5 for how the trailer gets there.
+**One document, three paths, so no agent has to be told which one it is.** The file lives at `.agents/skills/ship/SKILL.md` — the cross-agent [Agent Skills](https://agentskills.io/specification) location, loaded as a real skill by Codex, Pi, Copilot, Gemini CLI, OpenCode, goose and Amp. `.claude/skills/ship` is a symlink to it (Claude Code reads only `.claude/skills/`), as is [`docs/ship.md`](docs/ship.md) for anything that reads neither. Because the same text is reached from three depths, **its internal links are repo-root-relative, not `../`-relative** — a `../../../AGENTS.md` would be correct from at most one of them.
 
-**Every skill under `.claude/skills/` must carry `metadata.internal: true` in its
-SKILL.md frontmatter.** The `npx skills` CLI scans `.claude/skills/` alongside
-`skills/` — it is a built-in discovery prefix, not something the repo opts into —
+**CI enforces it.** The `ship` job in `ci.yml` (`tests/validate-ship-stamp.sh`) looks for a `Ship-Stamp:` git trailer on any commit in the PR range and re-derives the value from the branch name. Three details are load-bearing:
+
+- It takes the helper from the PR's **base** commit, so a branch cannot neuter it and then certify itself.
+- "Base predates the gate" is decided by whether the **`ship` job existed at base**, not by whether the helper file is readable. Those differ exactly when somebody *moves* the helper on `main`, and treating that as a bootstrap would hand every later PR a self-certifying fallback. It fails closed there instead, and `--selftest`'s `moved helper` fixture is the regression.
+- It does not read this document, or the workflow document, at all. An earlier version recovered a constant by grepping prose, which coupled the gate to one line's wrapping.
+
+Renovate, Dependabot and `github-actions` are exempt by exact login — the bare names are not, since those are registrable. A maintainer's `no-ship` label is the only other way through, and applying one needs write access. **The label must exist in the repo** (`gh label create no-ship`); without it a maintainer honouring a `SHIP-OVERRIDE` request gets "not found".
+
+**The "cannot merge" claim depends on one setting outside this repo.** `ship` must be a **required status check** on `main` — repo → Settings → Rules → *Main Protection*. Nothing in the repository can assert that, and if the ruleset is ever disabled the job still goes red but the merge button goes green, which makes every "cannot merge" sentence in this file, `CLAUDE.md` and `CONTRIBUTING.md` false. Check it with `gh api repos/:owner/:repo/rules/branches/main` — an empty `[]` means the claim is currently a lie. (An admin bypass, `gh pr merge --admin`, overrides the check by design; that is the maintainer's escape, not a hole.)
+
+**Every skill under `.claude/skills/` or `.agents/skills/` must carry
+`metadata.internal: true` in its SKILL.md frontmatter.** The `npx skills` CLI
+scans both alongside `skills/` — they are built-in discovery prefixes, not
+something the repo opts into —
 so a contributor-only skill without that flag gets installed into unrelated
 projects by `npx skills add prosperity-solutions/veld`. `internal: true` is the
 CLI's supported opt-out and is honoured by both its discovery paths (local clone
