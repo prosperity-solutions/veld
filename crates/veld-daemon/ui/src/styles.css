@@ -1054,7 +1054,9 @@ button.lane-empty {
 }
 /* The Detached lane's question mark is informational, not a button — it opens a
    tooltip but takes no action, so it reads as a hint rather than a control and
-   must not invite a click that does nothing. */
+   must not invite a click that does nothing. The header's fold guard names this
+   class for that reason — the bar folds under a click anywhere else along it,
+   and a cursor promising nothing must not be the one place it lies. */
 .lane-help {
   cursor: help;
 }

@@ -527,6 +527,18 @@ export interface RailGroup {
  * literally called "Trash" must not merge with it. A leading NUL cannot occur in a
  * lane name — `valid_lane_name` rejects control characters — so the two key spaces
  * cannot collide.
+ *
+ * **Also a stored value, not only a runtime constant.** This string, along with
+ * [`DELETING_LANE`] and [`DETACHED_LANE`] below, is what `ide/foldedSections.ts`
+ * persists in `localStorage` for a folded virtual section, so renaming one
+ * silently orphans every existing user's fold for it — no error, no migration,
+ * the section just quietly comes back open. Change one only with a read-time
+ * migration beside it.
+ *
+ * [`MAIN_LANE`] is the sibling this does *not* cover, and only by accident of a
+ * decision made elsewhere: it is the one section drawn without a header
+ * (`label: null`, below), folding is a header gesture, and so no fold is ever
+ * keyed to it. Give that section a header and it joins this list.
  */
 export const TRASH_LANE = "\u0000trash";
 

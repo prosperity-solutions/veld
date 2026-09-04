@@ -647,8 +647,19 @@ function useSelectedRun(
  * re-reads. `e.key === null` is `localStorage.clear()`, so it is not filtered out.
  * This is the first listener of its kind in the UI — the other persisted values
  * are per window slot by design, and folds deliberately are not.
+ *
+ * **One instance per document**, and there is one (`AppInner`), passed down. That
+ * same asymmetry is why: a `storage` event is the only thing that re-reads, and it
+ * does not fire in the document that wrote, so a second hook in this window would
+ * hold a copy nothing ever catches up — folding in one place and stale everywhere
+ * else, with no error and nothing in the types to notice. A second surface that
+ * needs folds takes them as a prop; if one ever needs to *write* from far away,
+ * this has to broadcast within the document too, not grow a second instance.
  */
-function useFoldedSections(repoRoot: string): {
+function useFoldedSections(
+  repoRoot: string,
+  onRemoteChange: () => void,
+): {
   folded: ReadonlySet<string>;
   toggle: (sectionKey: string) => void;
   renameSection: (from: string, to: string) => void;
@@ -671,10 +682,22 @@ function useFoldedSections(repoRoot: string): {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== null && e.key !== foldedSectionsKey(repoRoot)) return;
       reread();
+      // The two halves of a lane rename do not travel together. The fold set is
+      // shared storage and arrives here at once; the lane's new *name* is daemon
+      // state and does not arrive until this window's next poll, up to `POLL_MS`
+      // later. In between, the set names a lane this window has never heard of
+      // and no longer names the one it is drawing, so a section the user folded
+      // shut springs open and stays open for up to five seconds before snapping
+      // back — measured at ~1s in a two-window run, and the docs promise that two
+      // windows agree. A lane deleted elsewhere does the same thing on its way
+      // out. Pulling the poll forward is the whole fix: the fold set is only ever
+      // written by a *user* folding something, so this costs one refresh per
+      // fold in another window, and only while a second window is open.
+      onRemoteChange();
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [repoRoot, read]);
+  }, [repoRoot, read, onRemoteChange]);
   const commit = useCallback(
     (next: Set<string>) => setHeld({ root: repoRoot, folded: next }),
     [repoRoot],
@@ -4835,7 +4858,7 @@ function AppInner(props: {
   // toggle above — see `useFoldedSections`. Held here rather than inside `Rail`
   // because a lane rename or delete has to move the fold with it, and both of
   // those happen out here.
-  const foldedSections = useFoldedSections(repo?.root ?? "");
+  const foldedSections = useFoldedSections(repo?.root ?? "", refresh);
 
   /**
    * Move a worktree in the rail: assign its lane, then rewrite the order.
@@ -8502,6 +8525,20 @@ function Rail(props: {
     const hiddenAlert = folded
       ? sectionAttention(props.envs, group.worktrees)
       : null;
+    // The one thing a row says in red, and the only one it says with no glyph of
+    // its own: a permanent delete that failed leaves the row behind with git's
+    // reason printed across it. `sectionAttention` cannot see it — that reduction
+    // is about runs, and it skips trashed rows on purpose — so folded, the row
+    // that most needs answering would have been the one thing a fold silenced
+    // completely. The trash now starts folded, which is exactly where those rows
+    // pile up. Not only the trash, either: a failed delete *untrashes* the
+    // worktree so it rejoins its own lane, so any folded section can hold one.
+    //
+    // It borrows the header's triangle, which already means "something in here is
+    // wrong", because a header has no red row to turn. One triangle, never two —
+    // when a run has failed in here as well, the single tooltip names both.
+    const hiddenRemoveError =
+      folded && group.worktrees.some((w) => w.trash_error !== "");
     // Where you are, when the fold has hidden it. The rail answers two questions —
     // where am I, and where else could I be — and a section folded over the
     // selected worktree answered neither: no row carried `.active`, so the rail
@@ -8539,8 +8576,23 @@ function Rail(props: {
         hiddenAlert === "recovering" ? "a node is being restarted" : "a run failed",
       );
     }
+    if (hiddenRemoveError) hiddenNotes.push("a worktree could not be deleted");
     const inboxNote = hiddenInbox === null ? undefined : inboxDescription(hiddenInbox);
     if (inboxNote !== undefined) hiddenNotes.push(inboxNote);
+    // What the one triangle is for, spelled out in the tooltip rather than left
+    // to the colour. Two reasons can hold at once and both are actionable, so
+    // both are said.
+    const alertReasons: string[] = [];
+    if (hiddenAlert === "recovering") {
+      alertReasons.push(
+        "veld is restarting a node in a hidden worktree that keeps failing its liveness probe",
+      );
+    } else if (hiddenAlert !== null) {
+      alertReasons.push("a run in a hidden worktree failed");
+    }
+    if (hiddenRemoveError) {
+      alertReasons.push("a hidden worktree could not be deleted");
+    }
     // Whether a dragged worktree would land in this section right now. Named
     // because two things are drawn from it and they must agree: the section's
     // own wash, and — in the trash — whether its drop overlay is an offer or a
@@ -8635,6 +8687,24 @@ function Rail(props: {
                    than on `e.target` itself, because the click usually lands on
                    the SVG *inside* the button.
 
+                   `.lane-help` is named here although it is not a control at
+                   all: the Detached lane's question mark is a hint wearing
+                   `cursor: help`, a `<span role="img">` that opens a tooltip and
+                   does nothing else, and a bar that folds under a cursor saying
+                   "this takes no click" contradicts itself. It has no element
+                   type to match on, so it is matched by class — the exception,
+                   not a second convention.
+
+                   **This selector is the contract for anything added to this
+                   header.** It is an allowlist, not a behavioural test: a new
+                   control that is none of these fires its own handler *and*
+                   folds the section, and nothing catches that — there is no
+                   component test in this package and it type-checks fine. The
+                   form elements are listed although the header has none today
+                   precisely because they are what gets reached for next (a
+                   Mantine `Checkbox` is an `<input>`); a control that is a
+                   styled `<div>` has to be added here by hand.
+
                    Deliberately NOT `role="button"` + `tabIndex` on this div.
                    The header already contains the real control — a focusable
                    button carrying `aria-expanded` and the fold's accessible
@@ -8649,7 +8719,11 @@ function Rail(props: {
                    drops a lane in its new place is not a second gesture here.
                    Measured, not assumed. */
                 onClick={(e) => {
-                  if ((e.target as Element).closest("button, a") === null) {
+                  if (
+                    (e.target as Element).closest(
+                      'button, a, input, select, textarea, [role="button"], [role="menuitem"], .lane-help',
+                    ) === null
+                  ) {
                     props.onFold(group.key);
                   }
                 }}
@@ -8659,31 +8733,29 @@ function Rail(props: {
                     changes what the section *shows* rather than what it contains,
                     which is why it sits ahead of the ＋ and the ⋮ rather than
                     among them. */}
-                {hasHeader && (
-                  <Tooltip label={foldLabel}>
-                    <button
-                      type="button"
-                      className="lane-fold"
-                      aria-label={foldLabel}
-                      aria-expanded={!folded}
-                      aria-description={
-                        hiddenNotes.length > 0 ? hiddenNotes.join(", ") : undefined
-                      }
-                      /* The header is also the lane's drag handle and its
-                         right-click target, so a click here has to be only this. */
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        props.onFold(group.key);
-                      }}
-                    >
-                      {folded ? (
-                        <IconChevronRight size={12} />
-                      ) : (
-                        <IconChevronDown size={12} />
-                      )}
-                    </button>
-                  </Tooltip>
-                )}
+                <Tooltip label={foldLabel}>
+                  <button
+                    type="button"
+                    className="lane-fold"
+                    aria-label={foldLabel}
+                    aria-expanded={!folded}
+                    aria-description={
+                      hiddenNotes.length > 0 ? hiddenNotes.join(", ") : undefined
+                    }
+                    /* The header is also the lane's drag handle and its
+                       right-click target, so a click here has to be only this. */
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onFold(group.key);
+                    }}
+                  >
+                    {folded ? (
+                      <IconChevronRight size={12} />
+                    ) : (
+                      <IconChevronDown size={12} />
+                    )}
+                  </button>
+                </Tooltip>
                 <span className="lane-name">{group.label}</span>
                 {/* How many rows are behind the header, and only while there are
                     rows behind it. A count on an open section restated what the
@@ -8703,17 +8775,16 @@ function Rail(props: {
                     worktrees, so a click here would have to pick one of them
                     silently; the row's own alert can be clicked precisely because
                     it speaks for exactly one. The disclosure is the action. */}
-                {hiddenAlert !== null && (
+                {alertReasons.length > 0 && (
                   <Tooltip
-                    label={
-                      hiddenAlert === "recovering"
-                        ? `${group.label} — veld is restarting a node in a hidden worktree that keeps failing its liveness probe. Unfold to see which.`
-                        : `${group.label} — a run in a hidden worktree failed. Unfold to see which.`
-                    }
+                    label={`${group.label} — ${alertReasons.join("; ")}. Unfold to see which.`}
                     multiline
                     w={260}
                   >
-                    <span className={`lane-alert ${hiddenAlert}`} aria-hidden="true">
+                    <span
+                      className={`lane-alert ${hiddenAlert ?? "failed"}`}
+                      aria-hidden="true"
+                    >
                       <IconAlertTriangleFilled size={11} />
                     </span>
                   </Tooltip>
