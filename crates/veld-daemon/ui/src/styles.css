@@ -726,6 +726,13 @@ body[data-fullscreen="true"] .topbar.electron {
   gap: 2px;
   /* The anchor for the lane-reorder bars below. */
   position: relative;
+  /* Equal air above and below the rows — and it belongs *here*, not on the
+     divider rule below, because `.drop-in` washes this box. Separation that
+     lives on one edge only is a wash that floats above the header and hugs the
+     last row, which is what it did: 10px over, 0 under. The gutter between two
+     sections is now these two halves meeting around the hairline instead of one
+     section carrying all of it, and it measures the same 21px it always did. */
+  padding: 9px 0;
 }
 
 /* --- Dragging a whole lane -------------------------------------------------
@@ -785,9 +792,23 @@ body[data-fullscreen="true"] .topbar.electron {
  * MAIN checkout from the branches in the collapsed rail, where no header exists to
  * do it. */
 .rail-group + .rail-group {
+  border-top: 1px solid var(--border);
+}
+
+/* The dock opts out of the symmetric padding and keeps the one-sided separation
+   the scroller above just gave up. Nothing pinned here takes the `.drop-in` wash
+   — the trash draws `.trash-drop` over its whole self, and the Deleting lane
+   refuses drops outright — so there is no lopsided wash to balance, and padding
+   on a dock that is usually a single group would only make the pinned bottom of
+   the rail taller for nothing. The gutter between Deleting and Trash still has to
+   exist while a removal is in flight, which is what the second rule restores —
+   and `.rail-group + .rail-group .trash-drop` below insets from that same 9px. */
+.rail-dock .rail-group {
+  padding: 0;
+}
+.rail-dock .rail-group + .rail-group {
   margin-top: 9px;
   padding-top: 9px;
-  border-top: 1px solid var(--border);
 }
 
 /* Lit while a drag is over the section. The one affordance an empty lane has, and
@@ -796,6 +817,13 @@ body[data-fullscreen="true"] .topbar.electron {
   background: color-mix(in oklab, var(--accent) 9%, transparent);
   border-radius: 8px;
   box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent);
+  /* The divider above is the previous section's boundary, not this one's lid. Left
+     visible it draws a grey chord across the top of a rounded green block — so
+     while the section IS the target, the block owns its own edge. Transparent
+     rather than removed: the border still occupies its 1px, so nothing shifts.
+     This rule must stay *after* `.rail-group + .rail-group`; the two selectors
+     weigh the same and order is what decides. */
+  border-top-color: transparent;
 }
 
 /* The empty-lane target. Sized so it is actually hittable: a freshly created lane
