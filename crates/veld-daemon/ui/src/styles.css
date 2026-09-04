@@ -837,6 +837,7 @@ body[data-fullscreen="true"] .topbar.electron {
   margin: 1px 3px 2px;
   padding: 0;
   border: 1px dashed var(--border2);
+  border-radius: 6px;
   background: none;
   color: var(--faint);
   font: inherit;
@@ -1205,7 +1206,9 @@ button.lane-empty {
 .wt-row.deleting {
   opacity: 1;
   cursor: default;
-  border-left-color: var(--danger);
+}
+.wt-row.deleting::before {
+  background: var(--danger);
 }
 .wt-deleting-spinner {
   flex: none;
@@ -1213,8 +1216,8 @@ button.lane-empty {
 }
 /* Came *back* out of trash because the removal failed. Full opacity — it is a
    live worktree again — with the branch column carrying the reason. */
-.wt-row.failed-remove {
-  border-left-color: var(--danger);
+.wt-row.failed-remove::before {
+  background: var(--danger);
 }
 .wt-row.failed-remove .wt-branch {
   color: var(--danger);
@@ -1254,9 +1257,17 @@ button.lane-empty {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 5px 7px;
+  /* 9px on the left rather than 7: it absorbs the 2px the state bar used to
+     occupy as a border, so the alias sits exactly where it always did. */
+  padding: 5px 7px 5px 9px;
   border: none;
-  border-left: 2px solid transparent;
+  /* A step tighter than the 8px `.rail-group.drop-in` and `.trash-drop` use.
+     Those are the boxes a row sits *inside*, and a nested corner cut to the same
+     radius as its container's reads as a mistake rather than as a set. It is
+     visible at all because `.rail-list` insets the rows 8px from the rail's
+     edges and both `:hover` and `.active` paint a background behind them — a
+     full-bleed row could carry this and never show it. */
+  border-radius: 6px;
   background: transparent;
   text-align: left;
   min-width: 0;
@@ -1268,16 +1279,44 @@ button.lane-empty {
      emoji. Must clear the tallest expanded child plus vertical padding. */
   min-height: 28px;
   box-sizing: border-box;
-  /* Positioning context for the drop caret's pseudo-element. */
+  /* Positioning context for the state bar below. (It used to say "for the drop
+     caret", from a version where the caret was a pseudo-element on the row; the
+     caret has been a `.rail-caret` sibling since, and left nothing behind it.) */
   position: relative;
 }
 .wt-row:hover {
   background: var(--panel);
 }
+
+/* The state bar: active, being deleted, or came back from a failed delete.
+ *
+ * A pseudo-element rather than the `border-left` this used to be, because a
+ * border follows the corner radius. On a 28px row cut to 6px, a 2px left border
+ * has 16px of straight run and 12px curling away into a crescent at either end
+ * — it stops reading as a marker and starts reading as a smudge. Inset from the
+ * ends instead, which puts 20px of straight bar clear of both curves, and gives
+ * a *longer* mark than the border managed. (Inset, not full-height: the row's
+ * `overflow: hidden` clips to the same radius, so a bar spanning the full height
+ * would be cut into exactly the crescent this exists to avoid.)
+ *
+ * Flush to the left edge, where the border was, and drawn unconditionally so the
+ * three states below set one property. */
+.wt-row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 0 2px 2px 0;
+  background: transparent;
+}
 .wt-row.active {
   background: var(--elev);
-  border-left-color: var(--accent);
   box-shadow: inset 0 0 0 1px var(--border2);
+}
+.wt-row.active::before {
+  background: var(--accent);
 }
 .wt-row.active .wt-alias {
   color: var(--accent);
