@@ -59,6 +59,7 @@ import { useSettings } from "./shared/useSettings";
 import { TopBarControls } from "./components/TopBarControls";
 import {
   activeRun,
+  attentionStatus,
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
@@ -78,6 +79,7 @@ import {
   runSignatureFor,
   runStatus,
   runsForWorktree,
+  sectionAttention,
   selectorRuns,
   siblingRuns,
   sortRunsForDisplay,
@@ -198,6 +200,13 @@ import {
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
+import {
+  foldedSectionsKey,
+  forgetFoldedSection,
+  readFoldedSections,
+  renameFoldedSection,
+  toggleFoldedSection,
+} from "./ide/foldedSections";
 import {
   lastWorktreeName,
   recallLastWorktree,
@@ -617,6 +626,100 @@ function useSelectedRun(
     [scoped, global],
   );
   return [value, set];
+}
+
+/**
+ * Which rail sections this project has folded shut, agreed across windows.
+ *
+ * The storage shape and the hygiene rules live in `ide/foldedSections.ts`; what
+ * is here is the two things that need React.
+ *
+ * **The held copy carries the project it was read for**, the same self-invalidating
+ * pair `useSelectedRun` uses and for the same class of reason: the obvious shape
+ * (`useState` plus an effect that re-reads on a key change) commits one frame in
+ * which *this* project's rail is folded according to the *previous* project's
+ * record — sections visibly snapping shut and open again on every project switch.
+ * Staleness has to be impossible in the rendered value, not repaired after it.
+ *
+ * **A `storage` event is what makes two windows agree.** It fires in every other
+ * document of the origin but not in the one that wrote, which is exactly the
+ * shape needed: the writer already has the answer in state, and everyone else
+ * re-reads. `e.key === null` is `localStorage.clear()`, so it is not filtered out.
+ * This is the first listener of its kind in the UI — the other persisted values
+ * are per window slot by design, and folds deliberately are not.
+ *
+ * **One instance per document**, and there is one (`AppInner`), passed down. That
+ * same asymmetry is why: a `storage` event is the only thing that re-reads, and it
+ * does not fire in the document that wrote, so a second hook in this window would
+ * hold a copy nothing ever catches up — folding in one place and stale everywhere
+ * else, with no error and nothing in the types to notice. A second surface that
+ * needs folds takes them as a prop; if one ever needs to *write* from far away,
+ * this has to broadcast within the document too, not grow a second instance.
+ */
+function useFoldedSections(
+  repoRoot: string,
+  onRemoteChange: () => void,
+): {
+  folded: ReadonlySet<string>;
+  toggle: (sectionKey: string) => void;
+  renameSection: (from: string, to: string) => void;
+  forgetSection: (sectionKey: string) => void;
+} {
+  const read = useCallback(
+    () => readFoldedSections(window.localStorage, repoRoot),
+    [repoRoot],
+  );
+  const [held, setHeld] = useState<{ root: string; folded: Set<string> }>(() => ({
+    root: repoRoot,
+    folded: read(),
+  }));
+  const folded = held.root === repoRoot ? held.folded : read();
+  useEffect(() => {
+    const reread = () => setHeld({ root: repoRoot, folded: read() });
+    // Catches the held copy up after a project switch. The render above already
+    // showed the right answer — this only stops it re-reading every frame.
+    reread();
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== foldedSectionsKey(repoRoot)) return;
+      reread();
+      // The two halves of a lane rename do not travel together. The fold set is
+      // shared storage and arrives here at once; the lane's new *name* is daemon
+      // state and does not arrive until this window's next poll, up to `POLL_MS`
+      // later. In between, the set names a lane this window has never heard of
+      // and no longer names the one it is drawing, so a section the user folded
+      // shut springs open and stays open for up to five seconds before snapping
+      // back — measured at ~1s in a two-window run, and the docs promise that two
+      // windows agree. A lane deleted elsewhere does the same thing on its way
+      // out. Pulling the poll forward is the whole fix: the fold set is only ever
+      // written by a *user* folding something, so this costs one refresh per
+      // fold in another window, and only while a second window is open.
+      onRemoteChange();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [repoRoot, read, onRemoteChange]);
+  const commit = useCallback(
+    (next: Set<string>) => setHeld({ root: repoRoot, folded: next }),
+    [repoRoot],
+  );
+  return {
+    folded,
+    toggle: useCallback(
+      (sectionKey: string) =>
+        commit(toggleFoldedSection(window.localStorage, repoRoot, sectionKey)),
+      [commit, repoRoot],
+    ),
+    renameSection: useCallback(
+      (from: string, to: string) =>
+        commit(renameFoldedSection(window.localStorage, repoRoot, from, to)),
+      [commit, repoRoot],
+    ),
+    forgetSection: useCallback(
+      (sectionKey: string) =>
+        commit(forgetFoldedSection(window.localStorage, repoRoot, sectionKey)),
+      [commit, repoRoot],
+    ),
+  };
 }
 
 /**
@@ -3022,6 +3125,10 @@ function AppInner(props: {
     if (!repo) return;
     try {
       await api.deleteLane(repo.root, lane);
+      // A lane is identified by (repo root, name) and has nothing else, so a
+      // fold left behind here would be inherited by the next lane somebody
+      // creates with this name — a brand-new group that arrives shut.
+      foldedSections.forgetSection(lane);
     } catch (e) {
       notifyError(`Could not delete the group "${lane}"`, e);
     }
@@ -4746,6 +4853,12 @@ function AppInner(props: {
     setRailWideRaw(fn(railWide) ? "1" : "0");
   const [railWidthRaw, setRailWidthRaw] = usePersistedPerWindow("veld.railWidth");
   const railW = railWidth(railWidthRaw);
+  // The rail's *other* collapse: which individual sections are folded shut. Per
+  // project and shared by every window, unlike the width and the wide/narrow
+  // toggle above — see `useFoldedSections`. Held here rather than inside `Rail`
+  // because a lane rename or delete has to move the fold with it, and both of
+  // those happen out here.
+  const foldedSections = useFoldedSections(repo?.root ?? "", refresh);
 
   /**
    * Move a worktree in the rail: assign its lane, then rewrite the order.
@@ -6440,6 +6553,8 @@ function AppInner(props: {
             onTrashAllDetached={trashAllDetached}
             onTrashDrop={trashWorktree}
             deleting={deletingIds}
+            folded={foldedSections.folded}
+            onFold={foldedSections.toggle}
           />
           {/* **Beside the rail, never instead of it.** This used to replace the
               whole workspace, which took away the one control that resolves the
@@ -6785,6 +6900,10 @@ function AppInner(props: {
           onSubmit={async (name) => {
             if (!repo || dialog.kind !== "rename-lane") return;
             await api.renameLane(repo.root, dialog.lane, name);
+            // Same reason as the delete above, from the other side: the fold is
+            // keyed by the lane's name, so without this a folded group springs
+            // open the moment it is renamed.
+            foldedSections.renameSection(dialog.lane, name);
             await refresh();
             closeDialog();
           }}
@@ -8080,6 +8199,12 @@ function Rail(props: {
    *  (see `deletingIds`). Folds into the rendering exactly like the daemon's own
    *  `worktree.deleting` flag, so the two sources can't disagree visually. */
   deleting: ReadonlySet<number>;
+  /** Section keys ([`RailGroup.key`]) whose rows are folded away behind their
+   *  header. Owned by `useFoldedSections` up in `App`, because a lane rename or
+   *  delete has to move the fold with it. */
+  folded: ReadonlySet<string>;
+  /** Fold this section shut, or open it again. */
+  onFold: (sectionKey: string) => void;
 }) {
   // The daemon's `deleting` flag starts only once `git worktree remove` is
   // running; a row this window confirmed moments ago is folded in here so it
@@ -8207,6 +8332,34 @@ function Rail(props: {
     setLaneDropAt(null);
     setOnDock(false);
   };
+  // A target's highlight follows the pointer *out* of it, not only into the next
+  // one. Nothing else retracted it: `dropAt` is written by whichever zone the
+  // pointer was last over and lasted until some other zone overwrote it, so
+  // dragging off a section and stopping anywhere that takes no drop — a pinned
+  // lane, the gap under the sections, the panes, outside the window — left it
+  // lit, still promising a landing it would no longer accept.
+  //
+  // `defaultPrevented` is what a claim looks like here. Accepting a drag *is*
+  // calling `preventDefault` — the browser gives no other way to say yes — so an
+  // event that reaches this listener unclaimed is proof that nothing under the
+  // pointer would take the drop. It is the same test `laneDrop` and the stray
+  // file-drop guard already read, rather than a second convention beside them.
+  // (Most row and section zones stop propagation as well and never arrive here
+  // at all, which is the same answer reached one step earlier.)
+  //
+  // On the window, because "over no target" has to include "not over the rail";
+  // mounted only while a drag of ours is in flight, so nothing listens at rest.
+  useEffect(() => {
+    if (dragPath === null && dragLane === null) return;
+    const clear = (e: DragEvent) => {
+      if (e.defaultPrevented) return;
+      setDropAt(null);
+      setLaneDropAt(null);
+      setOnDock(false);
+    };
+    window.addEventListener("dragover", clear);
+    return () => window.removeEventListener("dragover", clear);
+  }, [dragPath, dragLane]);
   // Dropping is disabled while the rail is collapsed. A 64px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
   // whose result you cannot see is a reorder you did not mean.
@@ -8355,6 +8508,97 @@ function Rail(props: {
     const menuLabel = group.editable
       ? `Menu for group ${group.label}`
       : `Menu for ${group.label}`;
+    // The rail's *other* collapse. Folding is a header gesture, so it exists only
+    // where a header does: never on the main checkout's headerless section, and
+    // never in the collapsed rail, which draws no headers at all. The stored fold
+    // outlives both — widen the rail again and the section is still shut.
+    const hasHeader = group.label !== null && props.wide;
+    const folded = hasHeader && props.folded.has(group.key);
+    // Everything below is computed only for a section that is actually hiding
+    // rows. Each walks every worktree in the section — its runs, then its
+    // sessions — and an open section already says all of it on the rows.
+    //
+    // The same reductions the rows use, not parallel ones: `sectionAttention`
+    // shares `attentionStatus` with the row's own alert, and `groupState` is what
+    // the project squares already aggregate with. A header that stands in for
+    // rows must not be able to disagree with them.
+    const hiddenAlert = folded
+      ? sectionAttention(props.envs, group.worktrees)
+      : null;
+    // The one thing a row says in red, and the only one it says with no glyph of
+    // its own: a permanent delete that failed leaves the row behind with git's
+    // reason printed across it. `sectionAttention` cannot see it — that reduction
+    // is about runs, and it skips trashed rows on purpose — so folded, the row
+    // that most needs answering would have been the one thing a fold silenced
+    // completely. The trash now starts folded, which is exactly where those rows
+    // pile up. Not only the trash, either: a failed delete *untrashes* the
+    // worktree so it rejoins its own lane, so any folded section can hold one.
+    //
+    // It borrows the header's triangle, which already means "something in here is
+    // wrong", because a header has no red row to turn. One triangle, never two —
+    // when a run has failed in here as well, the single tooltip names both.
+    const hiddenRemoveError =
+      folded && group.worktrees.some((w) => w.trash_error !== "");
+    // Where you are, when the fold has hidden it. The rail answers two questions —
+    // where am I, and where else could I be — and a section folded over the
+    // selected worktree answered neither: no row carried `.active`, so the rail
+    // showed nothing selected at all. It is not an exotic state. Folding the
+    // section you are working in reaches it, and so does landing in an
+    // already-folded one from ⌘K, a notification, or the worktree the URL
+    // restores on load. Same rule as the alert and the activity glyph — the
+    // header carries what the hidden row would have said, in that row's own
+    // language — which is why it is the row's accent rather than a fourth glyph:
+    // "you are here" is not news to be listed beside the others.
+    const holdsActive = folded && group.worktrees.some((w) => w.id === props.active?.id);
+    const hiddenInbox = folded
+      ? inbox.groupState(
+          // Trashed rows are silent here for the reason they are silent on a row
+          // and on a project square: those directories are on their way off the
+          // disk, so news about one offers nothing to do. In the trash section
+          // that is every row, which is the intent — a folded trash reports a
+          // count and nothing else.
+          new Set(group.worktrees.filter((w) => !w.trashed_at).map((w) => w.id)),
+          props.showWorking,
+        )
+      : null;
+    // Same collision rule the ⋮ and the ＋ follow: `UNGROUPED_LABEL` is itself a
+    // legal lane name, so only a real lane may be called a "group" in an
+    // accessible name.
+    const foldTarget = group.editable ? `group ${group.label}` : group.label;
+    const foldLabel = folded ? `Unfold ${foldTarget}` : `Fold ${foldTarget}`;
+    // Both header glyphs are decorative — `aria-hidden`, like the row's — so the
+    // header's one focusable control carries what they mean. Without it, folding a
+    // section would make its news inaudible rather than merely smaller.
+    const hiddenNotes: string[] = [];
+    if (holdsActive) hiddenNotes.push("the selected worktree is in here");
+    if (hiddenAlert !== null) {
+      hiddenNotes.push(
+        hiddenAlert === "recovering" ? "a node is being restarted" : "a run failed",
+      );
+    }
+    if (hiddenRemoveError) hiddenNotes.push("a worktree could not be deleted");
+    const inboxNote = hiddenInbox === null ? undefined : inboxDescription(hiddenInbox);
+    if (inboxNote !== undefined) hiddenNotes.push(inboxNote);
+    // What the one triangle is for, spelled out in the tooltip rather than left
+    // to the colour. Two reasons can hold at once and both are actionable, so
+    // both are said.
+    const alertReasons: string[] = [];
+    if (hiddenAlert === "recovering") {
+      alertReasons.push(
+        "veld is restarting a node in a hidden worktree that keeps failing its liveness probe",
+      );
+    } else if (hiddenAlert !== null) {
+      alertReasons.push("a run in a hidden worktree failed");
+    }
+    if (hiddenRemoveError) {
+      alertReasons.push("a hidden worktree could not be deleted");
+    }
+    // Whether a dragged worktree would land in this section right now. Named
+    // because two things are drawn from it and they must agree: the section's
+    // own wash, and — in the trash — whether its drop overlay is an offer or a
+    // confirmation.
+    const dropInto =
+      dragPath !== null && canDropOn(group) && dropAt?.key === group.key;
     // Where the dragged lane would land, drawn in the gutter beside the hovered
     // section. Which side is the travel direction: carrying a lane *up* onto this
     // one puts it above, carrying it *down* puts it below. Exactly one section
@@ -8376,9 +8620,11 @@ function Rail(props: {
               // Lit while a drag is over this section, so the target reads as a
               // whole area and not only as a caret between two rows. This is the
               // only feedback an EMPTY lane can give.
-              dragPath && canDropOn(group) && dropAt?.key === group.key
-                ? " drop-in"
-                : ""
+              //
+              // Never the trash: it draws its own target over the whole section
+              // (`.trash-drop` below), and a wash underneath would be a second
+              // outline saying the same thing in the same colour.
+              dropInto && group.key !== TRASH_LANE ? " drop-in" : ""
             }${group.editable && dragLane === group.lane ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
             // The section itself is the fallback target, and it resolves to its
             // FIRST position rather than its last. What actually reaches this
@@ -8394,9 +8640,9 @@ function Rail(props: {
                pointer over them resolves to the nearest lane instead. */
             data-lane-index={laneAt}
           >
-            {group.label !== null && props.wide && (
+            {hasHeader && (
               <div
-                className={`lane-head${group.editable && canDrag ? " grab" : ""}`}
+                className={`lane-head${group.editable && canDrag ? " draggable" : ""}${folded ? " folded" : ""}${holdsActive ? " holds-active" : ""}`}
                 /* The header IS the handle — the whole bar, not a grip icon
                    beside the name. A lane's header is already the thing that
                    stands for the lane (it is where the menu and the ＋ live), and
@@ -8427,8 +8673,125 @@ function Rail(props: {
                 onContextMenu={
                   hasMenu ? (e) => props.onLaneMenu(e, group.lane) : undefined
                 }
+                /* The whole bar folds, not only the chevron on it. A section
+                   header is the biggest thing in the rail and the disclosure
+                   beside it is 12px, so aiming at the triangle was work the bar
+                   could absorb — and the bar is already the section's stand-in
+                   everywhere else (it carries the menu, the ＋, and the drag).
+
+                   Anything that is its own control keeps its own meaning.
+                   `.lane-fold` stops propagation and never arrives here; the ＋
+                   and the ⋮ do not, and this guard is what keeps creating a
+                   worktree or opening the lane menu from also folding the
+                   section out from under the click. Matched on `closest` rather
+                   than on `e.target` itself, because the click usually lands on
+                   the SVG *inside* the button.
+
+                   `.lane-help` is named here although it is not a control at
+                   all: the Detached lane's question mark is a hint wearing
+                   `cursor: help`, a `<span role="img">` that opens a tooltip and
+                   does nothing else, and a bar that folds under a cursor saying
+                   "this takes no click" contradicts itself. It has no element
+                   type to match on, so it is matched by class — the exception,
+                   not a second convention.
+
+                   **This selector is the contract for anything added to this
+                   header.** It is an allowlist, not a behavioural test: a new
+                   control that is none of these fires its own handler *and*
+                   folds the section, and nothing catches that — there is no
+                   component test in this package and it type-checks fine. The
+                   form elements are listed although the header has none today
+                   precisely because they are what gets reached for next (a
+                   Mantine `Checkbox` is an `<input>`); a control that is a
+                   styled `<div>` has to be added here by hand.
+
+                   Deliberately NOT `role="button"` + `tabIndex` on this div.
+                   The header already contains the real control — a focusable
+                   button carrying `aria-expanded` and the fold's accessible
+                   name — and wrapping it in a second one would put the same
+                   action in the tab order twice and announce a button inside a
+                   button. This is a mouse convenience laid over a control that
+                   already exists, which is the one shape where a click target
+                   that cannot be focused is honest rather than a hole.
+
+                   A drag of this same bar does not also fold it: Chromium
+                   emits no `click` after a completed drag, so the release that
+                   drops a lane in its new place is not a second gesture here.
+                   Measured, not assumed. */
+                onClick={(e) => {
+                  if (
+                    (e.target as Element).closest(
+                      'button, a, input, select, textarea, [role="button"], [role="menuitem"], .lane-help',
+                    ) === null
+                  ) {
+                    props.onFold(group.key);
+                  }
+                }}
               >
+                {/* The disclosure, leading the header and always drawn — open or
+                    shut, never revealed on hover. It is the one control here that
+                    changes what the section *shows* rather than what it contains,
+                    which is why it sits ahead of the ＋ and the ⋮ rather than
+                    among them. */}
+                <Tooltip label={foldLabel}>
+                  <button
+                    type="button"
+                    className="lane-fold"
+                    aria-label={foldLabel}
+                    aria-expanded={!folded}
+                    aria-description={
+                      hiddenNotes.length > 0 ? hiddenNotes.join(", ") : undefined
+                    }
+                    /* The header is also the lane's drag handle and its
+                       right-click target, so a click here has to be only this. */
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      props.onFold(group.key);
+                    }}
+                  >
+                    {folded ? (
+                      <IconChevronRight size={12} />
+                    ) : (
+                      <IconChevronDown size={12} />
+                    )}
+                  </button>
+                </Tooltip>
                 <span className="lane-name">{group.label}</span>
+                {/* How many rows are behind the header, and only while there are
+                    rows behind it. A count on an open section restated what the
+                    rows immediately below it already say — which is why the header
+                    carried none before this, and why `.lane-name` had the auto
+                    margin the count used to hold. Zero is rendered too: an empty
+                    folded section still has to say that it is empty. */}
+                {folded && (
+                  <span className="lane-count">({group.worktrees.length})</span>
+                )}
+                {/* What the hidden rows would have said, in the vocabulary they
+                    would have said it in — the same filled triangle and the same
+                    activity glyph, so a folded section is read with the language
+                    already learned from the rows.
+
+                    Indicators, never buttons. A section stands for several
+                    worktrees, so a click here would have to pick one of them
+                    silently; the row's own alert can be clicked precisely because
+                    it speaks for exactly one. The disclosure is the action. */}
+                {alertReasons.length > 0 && (
+                  <Tooltip
+                    label={`${group.label} — ${alertReasons.join("; ")}. Unfold to see which.`}
+                    multiline
+                    w={260}
+                  >
+                    <span
+                      className={`lane-alert ${hiddenAlert ?? "failed"}`}
+                      aria-hidden="true"
+                    >
+                      <IconAlertTriangleFilled size={11} />
+                    </span>
+                  </Tooltip>
+                )}
+                {hiddenInbox !== null && (
+                  <InboxIcon summary={hiddenInbox} label={group.label ?? ""} />
+                )}
                 {/* Creating happens *into a lane*, and this is the whole of the
                     rail's create affordance: the single "+" that used to sit in
                     the toolbar could only ever mean "ungrouped", so filing a new
@@ -8548,7 +8911,11 @@ function Rail(props: {
                 drop target too — dropping a worktree on it bins it — so an empty
                 trash needs the same affordance, saying plainly that worktrees can
                 be dropped here. */}
-            {props.wide && canDropOn(group) && group.worktrees.length === 0 && (
+            {/* Not while folded: a folded section is a header and nothing else,
+                and a "drop here" placeholder under one would be a second, taller
+                thing on screen than the section it belongs to. The drop still
+                lands — the section itself is the target. */}
+            {props.wide && !folded && canDropOn(group) && group.worktrees.length === 0 && (
               group.addable ? (
                 /* The addable empty lane is the lane's own "＋": clicking the
                    whole placeholder files into the same lane a header "＋" would,
@@ -8580,14 +8947,23 @@ function Rail(props: {
                 </div>
               )
             )}
-            {group.worktrees.map((w, index) => {
+            {!folded && group.worktrees.map((w, index) => {
+              // The trash draws no insertion caret. Everywhere else a drop is a
+              // *position* and the caret says which one; a drop on the trash is a
+              // destination — `dropZone` hands it to `onTrashDrop` and throws the
+              // index away — so a bar promising a slot between two rows would be
+              // offering an order the drop does not keep. Nothing in the trash is
+              // sorted, and the section's own wash already says the drop lands.
+              const ordered = group.key !== TRASH_LANE;
               const caretHere =
+                ordered &&
                 dropAt !== null &&
                 dropAt.key === group.key &&
                 dropAt.index === index;
               // The append caret rides on the last row, because a caret after the
               // final element has no following sibling to attach to.
               const caretAfter =
+                ordered &&
                 dropAt !== null &&
                 dropAt.key === group.key &&
                 index === group.worktrees.length - 1 &&
@@ -8610,10 +8986,12 @@ function Rail(props: {
               // affordance here at all while the picked run stayed green.
               const liveAll = liveRuns(runs);
               const worst = worstStatus(liveAll);
-              const attention = needsAttention(status) || needsAttention(worst);
-              // Which status the alert affordance describes: the thing that
-              // actually needs looking at, which may not be the picked run.
-              const alertStatus = needsAttention(status) ? status : worst;
+              // Which status the alert affordance describes — the thing that
+              // actually needs looking at, which may not be the picked run — or
+              // `null` for a row with nothing to flag. Shared with the folded
+              // section header, which stands in for rows like this one and must
+              // reduce the same two questions the same way.
+              const alertStatus = attentionStatus(runs);
               // The run's own status, verbatim rather than through a table, so
               // this cannot drift from what the daemon reports. `activeRun` never
               // returns a stopped run, so a worktree with nothing up says nothing
@@ -8650,6 +9028,22 @@ function Rail(props: {
               // icon: the summary is needed twice (the glyph and the row's
               // `aria-description`), and a rail holds every worktree of a monorepo.
               const inboxSummary = inbox.rowState(w.id, props.showWorking);
+              /* Whether this row can be picked up. Named rather than written
+                 inline on `draggable`, because the grabbing cursor is drawn
+                 from the same answer and the two must not disagree: a row that
+                 says it can be moved and then refuses is worse than one that
+                 never offered.
+
+                 Pending removals are not draggable: they are leaving, so a
+                 position for them means nothing. The main checkout is never
+                 dragged either, even when the user has put it in a lane (which
+                 un-pins its section) — `WT_ORDER` sorts `is_main DESC` ahead of
+                 `sort_position`, so a position given to main is ignored and the
+                 row visibly snaps back to the top of its group, a drag that
+                 appears to do nothing. It leads its lane instead, which is the
+                 same rule it follows ungrouped. */
+              const rowDraggable =
+                canDrag && !trashed && !group.pinned && !w.is_main;
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
                    they were clipped by its `overflow: hidden` and rounded by its
@@ -8677,7 +9071,7 @@ function Rail(props: {
                      inside it would be announced ahead of the alias it describes —
                      the same reason the away icon is `aria-hidden`. */
                   aria-description={inboxDescription(inboxSummary)}
-                  className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}`}
+                  className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
                     deletingRow
                       ? `${worktreeLabel(w)} — being deleted, cannot be restored`
@@ -8689,15 +9083,7 @@ function Rail(props: {
                             ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
                             : `${worktreeLabel(w)} — ${w.branch}${stateNote}`
                   }
-                  /* Pending removals are not draggable: they are leaving, so a
-                     position for them means nothing. */
-                  /* The main checkout is never dragged, even when the user has put
-                     it in a lane (which un-pins its section). `WT_ORDER` sorts
-                     `is_main DESC` ahead of `sort_position`, so a position given to
-                     main is ignored and the row visibly snaps back to the top of its
-                     group — a drag that appears to do nothing. It leads its lane
-                     instead, which is the same rule it follows ungrouped. */
-                  draggable={canDrag && !trashed && !group.pinned && !w.is_main}
+                  draggable={rowDraggable}
                   onDragStart={(e) => {
                     setDragPath(w.path);
                     // Exclusive with the lane drag — see the lane header's own
@@ -8796,7 +9182,7 @@ function Rail(props: {
                       {liveAll.length}
                     </span>
                   )}
-                  {!trashed && attention && (
+                  {!trashed && alertStatus !== null && (
                     <button
                       type="button"
                       className={`wt-alert ${alertStatus}`}
@@ -8920,6 +9306,46 @@ function Rail(props: {
                 </Fragment>
               );
             })}
+            {/* The trash's drop target, drawn OVER whatever the section is
+                showing rather than in place of it.
+
+                The trash is the one section where a drop is a destination and
+                not a position, so it gets a destination's affordance instead of
+                a caret and a tint: the empty-lane placeholder's shape and words,
+                addressed to the whole section. It appears the moment a worktree
+                is picked up — the same point at which an empty lane starts
+                saying "Drop here" — because binning by drag is the one rail
+                gesture nothing else on screen advertises. It firms up (`over`)
+                once the pointer is actually inside, which is the same
+                dashed-to-solid move `.lane-empty` makes under `.rail-group
+                .drop-in`.
+
+                **An overlay, not a replacement.** Swapping the rows out for a
+                placeholder would resize the dock mid-drag and move the target
+                out from under the pointer aiming at it — and the dock is pinned
+                to the bottom, so the list above would jump as well. Positioned
+                absolutely, it also covers the case that has nothing to replace:
+                a FOLDED trash, which is now the default (see
+                `defaultFoldedSections`) and is a header and nothing else. There
+                the overlay is a header-height bar, which is the right size for
+                what the section is.
+
+                Says "trash", not "delete": the drop is revertible — it moves the
+                worktree to the trash, where Restore sits on the row and deleting
+                it for real is a separate, explicit step. A label promising
+                deletion would make people avoid a gesture that is safe.
+
+                `aria-hidden`, and `pointer-events: none` in the CSS: it is a
+                picture of a drop, and the section underneath is the real target —
+                the drag events have to reach it. */}
+            {group.key === TRASH_LANE && dragPath !== null && (
+              <div
+                className={`trash-drop${dropInto ? " over" : ""}`}
+                aria-hidden="true"
+              >
+                Drop here to trash
+              </div>
+            )}
           </div>
     );
   };

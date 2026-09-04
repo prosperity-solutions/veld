@@ -401,6 +401,58 @@ export function needsAttention(status: WorktreeStatus): boolean {
 }
 
 /**
+ * The status a worktree's attention affordance describes, or `null` when it has
+ * nothing to flag.
+ *
+ * Two questions folded into one answer, because the rail row asked them
+ * separately (`needsAttention(status) || needsAttention(worst)`, then
+ * `needsAttention(status) ? status : worst`) and the folded section header has to
+ * ask exactly the same pair. Two copies of that reduction would be two chances
+ * for a header to disagree with the row it is standing in for — the one thing a
+ * summary must never do.
+ *
+ * The picked run comes first, then the worst of every *live* run: a directory can
+ * hold several environments at once, and [`worktreeStatus`] reports the healthiest
+ * of them, so a sibling that failed had no representation at all while the picked
+ * run stayed green.
+ */
+export function attentionStatus(runs: RunInfo[]): WorktreeStatus | null {
+  const status = worktreeStatus(runs);
+  if (needsAttention(status)) return status;
+  const worst = worstStatus(liveRuns(runs));
+  return needsAttention(worst) ? worst : null;
+}
+
+/**
+ * The same answer for a whole rail section: the most attention-worthy status
+ * among its worktrees, or `null` when none of them is asking for anything.
+ *
+ * What a folded section header shows in place of the rows it is hiding. Worst
+ * wins, by the same [`STATUS_SEVERITY`] order a single row uses to choose between
+ * its own runs — a header that averaged, or reported the first row it found,
+ * would let a failure hide behind a section that is merely busy.
+ *
+ * **Trashed worktrees are silent**, the same exclusion `projects.ts` makes for a
+ * project badge and the row makes for its own glyph: those directories are on
+ * their way off the disk, and an alert about one offers nothing to do.
+ */
+export function sectionAttention(
+  envs: EnvironmentList | null,
+  worktrees: readonly Worktree[],
+): WorktreeStatus | null {
+  let worst: WorktreeStatus | null = null;
+  for (const w of worktrees) {
+    if (w.trashed_at !== "") continue;
+    const status = attentionStatus(runsForWorktree(envs, w));
+    if (status === null) continue;
+    if (worst === null || STATUS_SEVERITY[status] < STATUS_SEVERITY[worst]) {
+      worst = status;
+    }
+  }
+  return worst;
+}
+
+/**
  * One rendered section of the rail.
  *
  * `lane` is `""` for the ungrouped section and the sentinel [`TRASH_LANE`] /
@@ -475,6 +527,18 @@ export interface RailGroup {
  * literally called "Trash" must not merge with it. A leading NUL cannot occur in a
  * lane name — `valid_lane_name` rejects control characters — so the two key spaces
  * cannot collide.
+ *
+ * **Also a stored value, not only a runtime constant.** This string, along with
+ * [`DELETING_LANE`] and [`DETACHED_LANE`] below, is what `ide/foldedSections.ts`
+ * persists in `localStorage` for a folded virtual section, so renaming one
+ * silently orphans every existing user's fold for it — no error, no migration,
+ * the section just quietly comes back open. Change one only with a read-time
+ * migration beside it.
+ *
+ * [`MAIN_LANE`] is the sibling this does *not* cover, and only by accident of a
+ * decision made elsewhere: it is the one section drawn without a header
+ * (`label: null`, below), folding is a header gesture, and so no fold is ever
+ * keyed to it. Give that section a header and it joins this list.
  */
 export const TRASH_LANE = "\u0000trash";
 
