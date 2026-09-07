@@ -9472,7 +9472,11 @@ function Rail(props: {
                 <Tooltip label={trashMoreLabel}>
                   <button
                     type="button"
-                    className="trash-more"
+                    /* `holds-active` only where there is no header to carry it:
+                       the collapsed rail draws none, and it caps the trash just
+                       the same, so the pill is the only thing left standing for
+                       the rows it hides. */
+                    className={`trash-more${holdsActive && !hasHeader ? " holds-active" : ""}`}
                     aria-label={trashMoreLabel}
                     /* No `aria-expanded`: a disclosure's controlled region has to
                        follow its trigger, and the rows this reveals are rendered

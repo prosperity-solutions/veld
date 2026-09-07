@@ -904,6 +904,15 @@ button.lane-empty {
   border-color: var(--border2);
   color: var(--text);
 }
+/* The selected worktree is one of the rows behind this count. Normally the
+   section header says so (`.lane-head.holds-active`), but the collapsed rail
+   draws no headers and still caps the trash, so without this the rail would show
+   no selection anywhere — the state that accent exists to prevent. Only ever set
+   when there is no header to carry it, so the two cannot both speak. */
+.trash-more.holds-active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 /* --- Dropping a worktree on the trash ---------------------------------------
  *
@@ -1081,17 +1090,20 @@ button.lane-empty {
    says which section you are standing in, not what happened in it, so it does
    not join the count and the markers on the right.
 
-   Only while folded. An open section shows the row itself, and accenting the
-   header too would mark one worktree in two places. The border comes out of the
-   header's own padding rather than adding to it, so folding does not shift the
-   name sideways — the rows are inset by a transparent border of the same width
-   for the same reason. */
-.lane-head.folded.holds-active {
+   Not keyed on `folded` — on whether the row was *drawn*, which the class
+   already answers (`holdsActive` in `App.tsx`). A fold is one way a section
+   hides the selected row and the trash's `+N` preview is the other, and an open
+   section that draws the row never carries the class, so this cannot mark one
+   worktree in two places. The border comes out of the header's own padding
+   rather than adding to it, so folding does not shift the name sideways — the
+   rows are inset by a transparent border of the same width for the same
+   reason. */
+.lane-head.holds-active {
   background: var(--elev);
   border-left: 2px solid var(--accent);
   padding-left: 5px;
 }
-.lane-head.folded.holds-active .lane-name {
+.lane-head.holds-active .lane-name {
   color: var(--accent);
 }
 
@@ -1197,7 +1209,14 @@ button.lane-empty {
  * working. Deleting scrolls inside itself instead (`min-height: 0` is what lets a
  * flex item shrink below its content at all), and the trash keeps its size. */
 .rail-dock-scroll .rail-group.deleting {
-  min-height: 0;
+  /* Floored at a header plus one row (17px + the 2px gap + `.wt-row`'s 28px).
+     `min-height: 0` alone let it yield *everything*: the trash does not shrink,
+     so an expanded trash taller than the cap took the whole dock and Deleting
+     went to 0px — no header, no rows, and no height to scroll inside. Deleting a
+     stale worktree is the main reason to open the trash in the first place, so
+     that erased the section exactly when it had something to say. Past the floor
+     the dock's own scrollbar takes over. */
+  min-height: 47px;
   overflow-y: auto;
 }
 .rail-dock-scroll .rail-group.trash {
