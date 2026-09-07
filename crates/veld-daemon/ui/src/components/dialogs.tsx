@@ -1,6 +1,7 @@
 import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
   Alert,
+  Autocomplete,
   Badge,
   Button,
   Checkbox,
@@ -877,38 +878,31 @@ export function NewWorktreeDialog(props: {
               Could not read this repo's branches: {branchesError}
             </Text>
           )}
-          {/* **The escape hatch, and it is not a nicety.** Before this dialog had
-              a source picker, an existing branch was checked out by typing its
-              name into a plain text box — no daemon call, nothing to fail. A
-              `Select` fed by `GET /api/repos/branches` turns any `for-each-ref`
-              failure into "you cannot check out an existing branch at all",
-              which is a capability this change would have removed rather than
-              improved. So a failed fetch falls back to exactly the old
-              control. */}
-          {mode === "local_branch" && branchesError !== null && (
-            <TextInput
+          {mode === "local_branch" && (
+            /* **An `Autocomplete`, not a `Select`, and that is the whole
+               finding.** Before this dialog had a source picker, an existing
+               branch was checked out by typing its name into a plain text box —
+               which needed no daemon call and accepted any commit-ish
+               `validate_branch` allows, so a tag or a SHA produced a
+               detached-HEAD checkout. A `Select` fed from `refs/heads` took
+               both of those away: the tag became unreachable, and a branch-list
+               fetch that failed *or never settled* (there is no request
+               timeout) left the only control disabled on "Loading…" — turning
+               an improvement into "you cannot check out an existing branch at
+               all". An `Autocomplete` is the old text box with the list
+               offered on top of it: everything that worked still works, and
+               the suggestions are a help rather than a gate. */
+            <Autocomplete
               label="Local branch"
               placeholder="feat/checkout-v2"
-              description="The branch list could not be read, so type the name exactly as git has it. Whether it is already checked out somewhere cannot be known here — git will refuse if it is."
-              value={localBranch}
-              onChange={(e) => {
-                setLocalBranch(e.currentTarget.value);
-                if (name.trim() === "") setName(e.currentTarget.value);
-              }}
-              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-            />
-          )}
-          {mode === "local_branch" && branchesError === null && (
-            <Select
-              label="Local branch"
-              placeholder={branches ? "Pick a branch" : "Loading…"}
-              searchable
-              nothingFoundMessage="No branch of that name"
-              disabled={!branches}
-              // A repo can have thousands of branches and Mantine's Combobox
-              // does not virtualise, so cap what is *rendered*. Filtering runs
-              // over the whole list first, so search still reaches every
-              // branch — this bounds the DOM, not the choice.
+              description={
+                branchesError !== null
+                  ? "The branch list could not be read, so type the name exactly as git has it."
+                  : "Pick one, or type any ref git has — a tag or a commit gives a detached checkout."
+              }
+              // Rendered-count cap: a repo can have thousands of branches and
+              // Mantine's Combobox does not virtualise. Filtering runs over the
+              // whole list first, so typing still reaches every branch.
               limit={200}
               data={(branches?.local ?? []).map((b) => ({
                 value: b.name,
@@ -918,17 +912,14 @@ export function NewWorktreeDialog(props: {
                   b.checked_out_in === null
                     ? b.name
                     : `${b.name} — checked out in ${labelForPath(b.checked_out_in)}`,
-                // Selectable on purpose, so the reason is readable in the
-                // field rather than only in a list you have closed. Create is
-                // what refuses (`localTaken`).
               }))}
-              value={localBranch === "" ? null : localBranch}
+              value={localBranch}
               onChange={(v) => {
-                setLocalBranch(v ?? "");
+                setLocalBranch(v);
                 // One-time fill, not a follow-forever rule: an empty Name is
                 // the common case here and typing the branch again is pure
                 // ceremony, but a name already typed is the user's.
-                if (v && name.trim() === "") setName(v);
+                if (v !== "" && name.trim() === "") setName(v);
               }}
               styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
               error={
@@ -938,11 +929,13 @@ export function NewWorktreeDialog(props: {
               }
             />
           )}
-          {/* No text-box fallback for the remote picker, deliberately: a
-              remote ref has no pre-existing typed-entry behaviour to preserve,
-              and `new_branch` already covers "cut a branch" when the list is
-              unreadable. The error line above says why the picker is empty. */}
-          {mode === "remote_branch" && branchesError === null && (
+          {/* A `Select` here, unlike the local picker above, and deliberately:
+              a remote-tracking ref has no pre-existing typed-entry behaviour to
+              preserve, and the daemon refuses a ref this repo does not have —
+              so free text could only ever produce a 400. When the list is
+              unreadable `new_branch` already covers "cut a branch", and the
+              error line above says why this picker is empty. */}
+          {mode === "remote_branch" && (
             <Select
               label="Remote branch"
               placeholder={branches ? "Pick a branch" : "Loading…"}

@@ -6702,17 +6702,23 @@ function AppInner(props: {
             // plain success. Silence there is the one outcome that loses
             // somebody's work without telling them.
             const carried = created.carry_over;
+            // `null` means the count could not be read, which is not zero —
+            // see `CarryOverReport.files`. Every message below therefore has a
+            // countless form, and the "nothing arrived" case is `0` alone.
+            const n = carried?.files ?? null;
+            const files = n === null ? null : `${n} file${n === 1 ? "" : "s"}`;
             if (carried?.error) {
-              // `files > 0` alongside an error is a **partial** apply: the
+              // A non-zero count alongside an error is a **partial** apply: the
               // working-tree pass landed and the staged pass did not, or the
-              // first failed midway. The daemon reports both numbers precisely
-              // so this message can too — a flat "did not come across" would
-              // deny work that is sitting in the new checkout, and send the
-              // user to re-do it.
+              // first failed midway. The daemon reports the two separately so
+              // this message can too — a flat "did not come across" would deny
+              // work sitting in the new checkout and send the user to re-do it.
               notifyError(
-                carried.files > 0
-                  ? `${worktreeLabel(created)} was created, but only ${carried.files} file${carried.files === 1 ? "" : "s"} of its changes came across`
-                  : `${worktreeLabel(created)} was created, but its changes did not come across`,
+                n === 0
+                  ? `${worktreeLabel(created)} was created, but its changes did not come across`
+                  : files === null
+                    ? `${worktreeLabel(created)} was created, but its changes may not have come across`
+                    : `${worktreeLabel(created)} was created, but only ${files} of its changes came across`,
                 carried.error,
               );
             } else if (carried?.drifted) {
@@ -6721,11 +6727,13 @@ function AppInner(props: {
               // of two moments and the user is the only one who can tell
               // whether that matters.
               notifyRedirect(
-                `Carried ${carried.files} file${carried.files === 1 ? "" : "s"} across, but the source changed while it was being read — check ${worktreeLabel(created)}`,
+                `${files === null ? "Carried the changes" : `Carried ${files}`} across, but the source changed while it was being read — check ${worktreeLabel(created)}`,
               );
-            } else if (carried && carried.files > 0) {
+            } else if (carried && n !== 0) {
+              // `n === null` lands here too, and must: a carry-over that
+              // succeeded is worth confirming even without a number.
               notifyDone(
-                `Carried ${carried.files} file${carried.files === 1 ? "" : "s"} across to ${worktreeLabel(created)}`,
+                `Carried ${files ?? "the changes"} across to ${worktreeLabel(created)}`,
               );
             }
             // Newest first, in the section it was created into. Unplaced rows sort

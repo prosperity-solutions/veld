@@ -1371,22 +1371,27 @@ struct CreatedWorktreeView {
 ///
 /// `-uall` answers both: it expands directories and overrides the config
 /// (verified against git 2.50).
-async fn carried_file_count(dir: &FsPath) -> usize {
+///
+/// **`None` when the status cannot be read at all**, which is a different fact
+/// from `Some(0)` and has to stay one. A count of zero says "nothing arrived";
+/// no count says "something may well have arrived and I cannot tell you how
+/// much". Collapsing them into `0` made a carry-over that *succeeded* — apply
+/// fine, status read failed — reach the client as `files: 0` with no `error`,
+/// which fell through every branch of the UI's report and showed the user
+/// nothing whatsoever.
+async fn carried_file_count(dir: &FsPath) -> Option<usize> {
     // Via `git_raw` for the same reason `git_status` uses it: an unstaged
     // change's porcelain code begins with a space, and the trimming helper
     // would destroy it.
     git_raw(dir, &["status", "--porcelain=v1", "-z", "-uall"])
         .await
+        .ok()
         .map(|out| {
             String::from_utf8_lossy(&out)
                 .split('\0')
                 .filter(|r| !r.is_empty())
                 .count()
         })
-        // A status that cannot be read leaves the count at 0 beside whatever
-        // `error` says, which is honest — it is not a claim that nothing
-        // arrived.
-        .unwrap_or(0)
 }
 
 /// What a spin-off's carry-over actually did, reported alongside the created
@@ -1398,10 +1403,11 @@ async fn carried_file_count(dir: &FsPath) -> usize {
 /// "spun off, changes left behind".
 #[derive(Debug, Serialize)]
 struct CarryOverReport {
-    /// How many paths the new checkout has uncommitted afterwards — what
-    /// `git status` reports in it. A count, because "your changes came across"
-    /// is only worth saying with a number next to it.
-    files: usize,
+    /// How many paths the new checkout has uncommitted afterwards. A count,
+    /// because "your changes came across" is worth more with a number next to
+    /// it — and **`null` when it could not be counted**, which a client must
+    /// not render as zero: see [`carried_file_count`].
+    files: Option<usize>,
     /// See [`CapturedWork::drifted`].
     drifted: bool,
     /// Why the carry-over did not happen. The worktree exists either way.

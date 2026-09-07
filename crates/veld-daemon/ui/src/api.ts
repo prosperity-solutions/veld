@@ -208,8 +208,18 @@ export interface RepoBranches {
  * caller can say so rather than denying work that did arrive.
  */
 export interface CarryOverReport {
-  /** How many paths the new checkout has uncommitted afterwards. */
-  files: number;
+  /**
+   * How many paths the new checkout has uncommitted afterwards, or **`null`
+   * when it could not be counted**.
+   *
+   * `null` is not zero and must not be rendered as it: zero says nothing
+   * arrived, `null` says something may well have and the daemon cannot tell
+   * you how much. Collapsing the two made a carry-over that *succeeded* — the
+   * apply fine, the status read after it not — arrive as `files: 0` with no
+   * `error`, which fell through every branch of the report and told the user
+   * nothing at all.
+   */
+  files: number | null;
   /**
    * The source's `git status` changed while it was being read, so what arrived
    * mixes two moments — an agent or a build writing the source mid-request.
