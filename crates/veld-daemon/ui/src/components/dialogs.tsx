@@ -598,10 +598,19 @@ export function NewWorktreeDialog(props: {
   const [localBranch, setLocalBranch] = useState("");
   /** The chosen remote-tracking ref (`remote_branch`), e.g. `origin/feat/x`. */
   const [remoteRef, setRemoteRef] = useState("");
-  /** The chosen spin-off source's worktree id, as a string for `Select`. */
-  const [fromId, setFromId] = useState(
-    props.spinOffFrom ? String(props.spinOffFrom.id) : "",
-  );
+  /**
+   * The chosen spin-off source's **path**, which is also what goes on the wire.
+   *
+   * Not its id, and that is the whole point: `worktrees.id` is a SQLite rowid
+   * with no `AUTOINCREMENT`, so a permanent delete frees it and the next
+   * worktree created takes it. This dialog can sit open for minutes while the
+   * 5s poll refreshes `props.sources` underneath it — so an id-keyed selection
+   * silently re-resolved to whatever row inherited the number, and the path
+   * *that* row carries is what would have been sent. Keying on the path makes
+   * the client trust the same identity the daemon does (`worktrees.path` is
+   * `UNIQUE`), so the two cannot disagree.
+   */
+  const [fromPath, setFromPath] = useState(props.spinOffFrom?.path ?? "");
   /**
    * Whether a spin-off reproduces the source's uncommitted work.
    *
@@ -670,7 +679,7 @@ export function NewWorktreeDialog(props: {
   const taken = takenExcluding(props.takenAliases, pendingAlias);
   const collides = aliasCollides(alias, taken);
   /** The spin-off source currently selected, resolved to its row. */
-  const from = props.sources.find((w) => String(w.id) === fromId) ?? null;
+  const from = props.sources.find((w) => w.path === fromPath) ?? null;
   /**
    * A checkout path as the rail names it.
    *
@@ -968,17 +977,17 @@ export function NewWorktreeDialog(props: {
               searchable
               nothingFoundMessage="No worktree of that name"
               data={props.sources.map((w) => ({
-                value: String(w.id),
+                value: w.path,
                 label: `${worktreeLabel(w)} — ${w.branch}`,
               }))}
-              value={fromId === "" ? null : fromId}
-              onChange={(v) => setFromId(v ?? "")}
+              value={fromPath === "" ? null : fromPath}
+              onChange={(v) => setFromPath(v ?? "")}
               // The picked source can disappear underneath an open dialog —
               // binned, or a permanent delete — and `data` is rebuilt from the
               // live list every render, so the field would otherwise go blank
               // with Create greyed out and nothing saying why.
               error={
-                fromId !== "" && from === null
+                fromPath !== "" && from === null
                   ? "That worktree is no longer available — pick another"
                   : null
               }

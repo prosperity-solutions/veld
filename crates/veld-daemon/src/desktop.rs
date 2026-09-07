@@ -1372,6 +1372,14 @@ struct CreatedWorktreeView {
 /// `-uall` answers both: it expands directories and overrides the config
 /// (verified against git 2.50).
 ///
+/// **The counting itself is [`parse_git_status`]'s, not a `split('\0').count()`.**
+/// A rename is *two* NUL-delimited fields — `R  new.txt\0old.txt\0` — so a raw
+/// field count reports one moved file as two, and the first version of this
+/// function did exactly that: it added `-uall` to fix the undercount and
+/// reimplemented the parsing a few hundred lines away from the parser that
+/// already documents this trap. Reusing it fixes both directions at once and
+/// keeps one owner for "what does a porcelain record mean".
+///
 /// **`None` when the status cannot be read at all**, which is a different fact
 /// from `Some(0)` and has to stay one. A count of zero says "nothing arrived";
 /// no count says "something may well have arrived and I cannot tell you how
@@ -1383,15 +1391,10 @@ async fn carried_file_count(dir: &FsPath) -> Option<usize> {
     // Via `git_raw` for the same reason `git_status` uses it: an unstaged
     // change's porcelain code begins with a space, and the trimming helper
     // would destroy it.
-    git_raw(dir, &["status", "--porcelain=v1", "-z", "-uall"])
+    let out = git_raw(dir, &["status", "--porcelain=v1", "-z", "-uall"])
         .await
-        .ok()
-        .map(|out| {
-            String::from_utf8_lossy(&out)
-                .split('\0')
-                .filter(|r| !r.is_empty())
-                .count()
-        })
+        .ok()?;
+    Some(parse_git_status(&String::from_utf8_lossy(&out)).len())
 }
 
 /// What a spin-off's carry-over actually did, reported alongside the created
@@ -5421,6 +5424,56 @@ mod tests {
         assert!(
             e.contains("sparse"),
             "the refusal must name the reason: {e}"
+        );
+    }
+
+    /// The reported count is **paths, not porcelain fields**, and a rename is
+    /// two fields for one path. Driven through real git rather than a fixture,
+    /// because the bug was a hand-rolled count that a fixture written by the
+    /// same hand would have agreed with.
+    #[tokio::test]
+    async fn the_carried_count_is_paths_not_status_fields() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        run_git(root, &["init", "-q", "-b", "main"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // One rename (two fields) plus one untracked file (one field): three
+        // NUL-delimited fields, two changed paths.
+        run_git(root, &["mv", "a.txt", "b.txt"]).await;
+        std::fs::write(root.join("c.txt"), "c").unwrap();
+        let raw = git_raw(root, &["status", "--porcelain=v1", "-z", "-uall"])
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&raw)
+                .split('\0')
+                .filter(|f| !f.is_empty())
+                .count(),
+            3,
+            "the premise: git emits a rename as two fields, so a raw field \
+             count is not a path count"
+        );
+        assert_eq!(
+            carried_file_count(root).await,
+            Some(2),
+            "a renamed file is one carried path, not two"
+        );
+
+        // And the untracked-directory expansion the flag exists for, in the
+        // same breath — one record from plain porcelain, three paths here.
+        std::fs::create_dir(root.join("newdir")).unwrap();
+        for f in ["x", "y", "z"] {
+            std::fs::write(root.join("newdir").join(f), f).unwrap();
+        }
+        assert_eq!(
+            carried_file_count(root).await,
+            Some(5),
+            "an untracked directory counts as its files, not as one entry"
         );
     }
 
