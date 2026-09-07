@@ -689,7 +689,26 @@ async fn git_raw_with_index(
 ) -> Result<Vec<u8>, String> {
     let path_env = cached_user_path().await;
     let mut cmd = tokio::process::Command::new("git");
-    cmd.arg("-C").arg(dir).args(args).env("PATH", path_env);
+    cmd.arg("-C")
+        .arg(dir)
+        .args(args)
+        .env("PATH", path_env)
+        // **`GIT_DIR` beats `-C`.** These four are inherited, and the daemon is
+        // auto-started by any `veld` CLI call — including one made from inside a
+        // hook, a `git rebase --exec` or a `git bisect run`, where they point at
+        // whatever repository git was operating on. An inherited pair would aim
+        // every git call here at a checkout nobody named, and the worst of them
+        // is `apply_captured`'s `read-tree -u --reset`, which writes: the
+        // destination would get nothing while a `git status` through this same
+        // wrapper reported a plausible count from the hijacked checkout.
+        // `veld_core::project_id` strips the same four for the same reason. The
+        // directory is the only input this should have — plus `GIT_INDEX_FILE`
+        // where a caller asks for it *below*, which is why the removal comes
+        // first.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE");
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
@@ -1008,13 +1027,23 @@ struct BranchesView {
 /// Parse `git for-each-ref refs/heads` in the format
 /// `<short>\t<upstream:short>\t<worktreepath>`.
 ///
-/// **The worktree path is last on purpose.** A refname cannot contain a tab
-/// (`git check-ref-format` rejects every ASCII control character), but a
-/// *filesystem path* can — so the split is `splitn(3, …)` and the trailing
-/// field keeps whatever it holds, rather than a fourth field appearing out of
-/// a directory somebody named with a tab.
+/// **Records are NUL-terminated and fields are tab-separated, and both halves
+/// are about the worktree path.** A refname cannot contain a tab or a newline
+/// (`git check-ref-format` rejects every ASCII control character) but a
+/// *filesystem path* can hold either — so the record separator is `%00` rather
+/// than the newline `for-each-ref` would otherwise end each record with, and
+/// the path is the last field so `splitn(3, …)` leaves whatever it holds
+/// intact. Splitting records on lines was the first version, and a worktree at
+/// a path containing a newline produced a phantom branch row named after the
+/// path's second half, plus a real branch reported as checked out at the
+/// first half.
 fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
-    out.lines()
+    out.split('\0')
+        // `for-each-ref` still ends each record with its own newline *after*
+        // the `%00`, so every record but the first arrives with a leading one.
+        // Trimmed from the start only — a refname cannot begin with a newline,
+        // and trimming the end would eat a path that does.
+        .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
             let mut fields = line.splitn(3, '\t');
@@ -1034,7 +1063,8 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
 }
 
 /// Parse `git for-each-ref refs/remotes` in the format
-/// `<short>\t<symref>`, given the local branch names for the `has_local` flag.
+/// `<short>\t<symref>`, NUL-terminated per record (see
+/// [`parse_local_branches`] for why).
 ///
 /// **Symbolic refs are skipped.** `refs/remotes/origin/HEAD` is a symref to the
 /// remote's default branch and shortens to the bare remote name (`origin`),
@@ -1042,7 +1072,8 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
 /// called "origin" in the picker that duplicates whatever `origin/main` already
 /// is.
 fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBranchView> {
-    out.lines()
+    out.split('\0')
+        .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
             let (name, symref) = line.split_once('\t').unwrap_or((line, ""));
@@ -1087,7 +1118,7 @@ async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>,
         &repo_root,
         &[
             "for-each-ref",
-            "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)",
+            "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
             "refs/heads",
         ],
     )
@@ -1098,7 +1129,7 @@ async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>,
         &repo_root,
         &[
             "for-each-ref",
-            "--format=%(refname:short)\t%(symref)",
+            "--format=%(refname:short)\t%(symref)%00",
             "refs/remotes",
         ],
     )
@@ -1323,6 +1354,39 @@ struct CreatedWorktreeView {
     /// Present only for a spin-off that was asked to carry work across.
     #[serde(skip_serializing_if = "Option::is_none")]
     carry_over: Option<CarryOverReport>,
+}
+
+/// How many paths the new checkout has uncommitted — the number reported as
+/// [`CarryOverReport::files`].
+///
+/// **Not [`git_status`], and the difference is a wrong number.** That helper
+/// answers "what would block `git worktree remove`", which is a question about
+/// *paths in the way*, so it lets git collapse a whole untracked directory into
+/// one `?? newdir/` record — and it honours `status.showUntrackedFiles=no`,
+/// a repo-config knob shared by every worktree of that repo, under which
+/// untracked paths vanish from the answer entirely. Reusing it undercounted
+/// every spin-off that carried a new directory (the common case when an agent
+/// has been working) and reported `0` — no toast at all — for a carry-over of
+/// untracked-only work in a repo with that config set.
+///
+/// `-uall` answers both: it expands directories and overrides the config
+/// (verified against git 2.50).
+async fn carried_file_count(dir: &FsPath) -> usize {
+    // Via `git_raw` for the same reason `git_status` uses it: an unstaged
+    // change's porcelain code begins with a space, and the trimming helper
+    // would destroy it.
+    git_raw(dir, &["status", "--porcelain=v1", "-z", "-uall"])
+        .await
+        .map(|out| {
+            String::from_utf8_lossy(&out)
+                .split('\0')
+                .filter(|r| !r.is_empty())
+                .count()
+        })
+        // A status that cannot be read leaves the count at 0 beside whatever
+        // `error` says, which is honest — it is not a claim that nothing
+        // arrived.
+        .unwrap_or(0)
 }
 
 /// What a spin-off's carry-over actually did, reported alongside the created
@@ -1637,6 +1701,11 @@ struct RepoGitStatus {
 
 #[derive(Serialize)]
 struct WorktreeView {
+    // **Never name a field here `carry_over`.** `CreatedWorktreeView` flattens
+    // this struct beside its own `carry_over`, and serde emits a duplicate key
+    // for that collision with no compile-time complaint —
+    // `the_create_response_flattens_the_worktree_and_omits_an_absent_carry_over`
+    // is the only thing that would notice.
     #[serde(flatten)]
     worktree: WorktreeRecord,
     /// Whether this checkout's removal is past the point of no return — the
@@ -3066,8 +3135,17 @@ enum CreateFrom {
     /// checkout's `HEAD`. `carry_over` is the rest: its staged, unstaged and
     /// untracked work, reproduced in the new checkout (see
     /// [`capture_uncommitted`]).
+    ///
+    /// **The source is named by `from_path`, never by `worktrees.id`.** That
+    /// column is a rowid with no `AUTOINCREMENT`, so SQLite reuses it — the
+    /// bug #201 shipped, and the reason `POST /api/worktree-order` is keyed on
+    /// paths too. An id would be resolved when the *request* lands, and this
+    /// dialog can sit open for minutes: delete the highest-id checkout, create
+    /// another, and the reused id sails past both guards below to cut a branch
+    /// from a checkout the user never chose — and copy its uncommitted work
+    /// out. `worktrees.path` is `UNIQUE` and names one checkout for good.
     Worktree {
-        from_worktree: i64,
+        from_path: String,
         #[serde(default)]
         carry_over: bool,
     },
@@ -3120,18 +3198,32 @@ struct CreateWorktreeBody {
     marker_color: Option<String>,
 }
 
+impl CreateWorktreeBody {
+    /// Where the checkout comes from: `source` when the client sent one, else
+    /// the `create_branch` boolean that every client written before `source`
+    /// existed still sends. One resolution point, so nothing downstream reads
+    /// `create_branch` and nothing has to remember which wins.
+    ///
+    /// **A named method rather than an inline `match`**, because the
+    /// maintainer's explicit requirement — the pre-existing default survives —
+    /// needs something a test can *call*. It was an inline match with a test
+    /// that re-implemented the same three arms in a closure, which passes
+    /// whatever the real code happens to do; a review angle correctly called
+    /// that a decoy.
+    fn create_from(&self) -> &CreateFrom {
+        match &self.source {
+            Some(s) => s,
+            None if self.create_branch => &CreateFrom::NewBranch,
+            None => &CreateFrom::LocalBranch,
+        }
+    }
+}
+
 async fn create_worktree(
     Json(body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
     validate_branch(&body.branch)?;
-    // One resolution point for the two spellings of the same question, so
-    // nothing below reads `create_branch` and nothing has to remember which
-    // takes precedence.
-    let source = match &body.source {
-        Some(s) => s,
-        None if body.create_branch => &CreateFrom::NewBranch,
-        None => &CreateFrom::LocalBranch,
-    };
+    let source = body.create_from();
     // A remote ref is passed to git as a start point, so it gets the same
     // shape check the branch does.
     if let CreateFrom::RemoteBranch { remote_ref } = source {
@@ -3443,13 +3535,18 @@ async fn create_worktree(
             ]
         }
         CreateFrom::Worktree {
-            from_worktree,
+            from_path,
             carry_over,
         } => {
             let src = db
-                .get_worktree(*from_worktree)
+                .get_worktree_by_path(from_path)
                 .map_err(db_err)?
-                .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree to branch off"))?;
+                .ok_or_else(|| {
+                    err(
+                        StatusCode::NOT_FOUND,
+                        "no such worktree to branch off — veld knows no checkout at that path",
+                    )
+                })?;
             // Same repo only. Cutting a branch from another repository's HEAD
             // would produce a checkout whose history has nothing to do with the
             // repo the rail files it under.
@@ -3514,13 +3611,9 @@ async fn create_worktree(
         Some(work) => {
             let error = apply_captured(&checkout_path, &work).await.err();
             // Counted from the new checkout rather than from the capture, so
-            // the number describes what actually arrived. A status that cannot
-            // be read leaves the count at 0 next to whatever `error` says,
-            // which is honest — it is not a claim that nothing came across.
-            let files = git_status(&checkout_path)
-                .await
-                .map(|f| f.len())
-                .unwrap_or(0);
+            // the number describes what actually arrived. See
+            // `carried_file_count` for why it is not `git_status`.
+            let files = carried_file_count(&checkout_path).await;
             Some(CarryOverReport {
                 files,
                 drifted: work.drifted,
@@ -4922,10 +5015,15 @@ mod tests {
     fn local_branches_report_which_checkout_holds_them() {
         // Tab-separated `<short>\t<upstream>\t<worktreepath>`, and the path is
         // last so a directory with a tab in its name cannot shift the fields.
-        let out = "main\torigin/main\t/repo\n\
-                   feat/x\torigin/feat/x\t\n\
-                   local-only\t\t\n\
-                   odd\t\t/repo/we\tird\n";
+        // The real shape: `%00`-terminated records, each followed by
+        // `for-each-ref`'s own newline. `odd` holds both a tab *and* a newline
+        // in its path — the two characters a refname cannot contain and a path
+        // can, and the reason for both the field order and the record
+        // separator.
+        let out = "main\torigin/main\t/repo\0\n\
+                   feat/x\torigin/feat/x\t\0\n\
+                   local-only\t\t\0\n\
+                   odd\t\t/repo/we\tir\nd\0\n";
         let got = parse_local_branches(out);
         assert_eq!(
             got,
@@ -4947,7 +5045,7 @@ mod tests {
                 },
                 LocalBranchView {
                     name: "odd".into(),
-                    checked_out_in: Some("/repo/we\tird".into()),
+                    checked_out_in: Some("/repo/we\tir\nd".into()),
                     upstream: None,
                 },
             ]
@@ -4958,10 +5056,10 @@ mod tests {
     fn remote_branches_skip_the_symref_and_keep_slashes_in_the_local_name() {
         // `refs/remotes/origin/HEAD` shortens to the bare remote name and
         // carries a symref — it is not a branch and must not become a row.
-        let out = "origin\trefs/remotes/origin/main\n\
-                   origin/main\t\n\
-                   origin/feat/x\t\n\
-                   upstream/main\t\n";
+        let out = "origin\trefs/remotes/origin/main\0\n\
+                   origin/main\t\0\n\
+                   origin/feat/x\t\0\n\
+                   upstream/main\t\0\n";
         let local = vec![LocalBranchView {
             name: "main".into(),
             checked_out_in: None,
@@ -5317,6 +5415,156 @@ mod tests {
         assert!(
             e.contains("sparse"),
             "the refusal must name the reason: {e}"
+        );
+    }
+
+    /// `--track` on the remote-branch argv is not decoration, and nothing
+    /// exercised it: a contributor reading `git worktree add -b x … origin/x`
+    /// would reasonably conclude git infers the upstream anyway. It does — but
+    /// only while `branch.autoSetupMerge` is at its default, which is a user
+    /// setting. Pinned against real git with that setting turned off, which is
+    /// the configuration where dropping the flag actually loses the upstream.
+    #[tokio::test]
+    async fn a_remote_branch_checkout_tracks_its_remote_even_with_autosetupmerge_off() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let origin = dir.path().join("origin.git");
+        let main = dir.path().join("main");
+        let spin = dir.path().join("spun");
+        run_git(
+            FsPath::new(dir.path()),
+            &["init", "-q", "--bare", origin.to_str().unwrap()],
+        )
+        .await;
+        std::fs::create_dir(&main).unwrap();
+        let main = FsPath::new(&main);
+        run_git(main, &["init", "-q", "-b", "main"]).await;
+        run_git(main, &["config", "user.email", "t@t"]).await;
+        run_git(main, &["config", "user.name", "t"]).await;
+        // The setting that makes the flag load-bearing.
+        run_git(main, &["config", "branch.autoSetupMerge", "false"]).await;
+        std::fs::write(main.join("a.txt"), "a").unwrap();
+        run_git(main, &["add", "-A"]).await;
+        run_git(main, &["commit", "-qm", "init"]).await;
+        run_git(main, &["remote", "add", "origin", origin.to_str().unwrap()]).await;
+        run_git(main, &["push", "-q", "origin", "main:feat/remote-only"]).await;
+        run_git(main, &["fetch", "-q", "origin"]).await;
+
+        // The existence check the handler performs before it fetches — the
+        // guard that stops `git fetch <name>` being handed something git would
+        // treat as a URL. Both directions, since only the negative one is
+        // load-bearing and only the positive one keeps the feature working.
+        assert!(
+            git(
+                main,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/origin/feat/remote-only"
+                ]
+            )
+            .await
+            .is_ok(),
+            "the fetched ref must be verifiable, or the handler would refuse a valid create"
+        );
+        assert!(
+            git(
+                main,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    "refs/remotes/nosuch/branch"
+                ]
+            )
+            .await
+            .is_err(),
+            "an unknown ref must fail the check rather than reaching `git fetch`"
+        );
+
+        // The handler's argv for this source, verbatim.
+        run_git(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--track",
+                "-b",
+                "feat/remote-only",
+                "--",
+                spin.to_str().unwrap(),
+                "origin/feat/remote-only",
+            ],
+        )
+        .await;
+        let upstream = git(FsPath::new(&spin), &["rev-parse", "--abbrev-ref", "@{u}"])
+            .await
+            .expect("the new branch must have an upstream");
+        assert_eq!(
+            upstream, "origin/feat/remote-only",
+            "the checkout must track the remote branch it came from"
+        );
+    }
+
+    /// A worktree path can contain a newline, and `for-each-ref` records used
+    /// to be split on lines — which produced a phantom branch row named after
+    /// the path's second half. Driven through **real git output** rather than a
+    /// fixture, because the fixture is exactly the thing that was wrong.
+    #[tokio::test]
+    async fn a_worktree_path_containing_a_newline_does_not_invent_a_branch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let main = dir.path().join("main");
+        std::fs::create_dir(&main).unwrap();
+        let main = FsPath::new(&main);
+        run_git(main, &["init", "-q", "-b", "main"]).await;
+        run_git(main, &["config", "user.email", "t@t"]).await;
+        run_git(main, &["config", "user.name", "t"]).await;
+        std::fs::write(main.join("a.txt"), "a").unwrap();
+        run_git(main, &["add", "-A"]).await;
+        run_git(main, &["commit", "-qm", "init"]).await;
+
+        let odd = dir.path().join("we\nird");
+        run_git(
+            main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feat/odd",
+                "--",
+                odd.to_str().unwrap(),
+            ],
+        )
+        .await;
+
+        let raw = git(
+            main,
+            &[
+                "for-each-ref",
+                "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
+                "refs/heads",
+            ],
+        )
+        .await
+        .unwrap();
+        let got = parse_local_branches(&raw);
+        let names: Vec<&str> = got.iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["feat/odd", "main"],
+            "exactly the two real branches — a newline in a checkout path must \
+             not split one record into two"
+        );
+        let odd_row = got.iter().find(|b| b.name == "feat/odd").unwrap();
+        assert!(
+            odd_row
+                .checked_out_in
+                .as_deref()
+                .is_some_and(|p| p.contains('\n')),
+            "and the path must arrive whole, newline included: {:?}",
+            odd_row.checked_out_in
         );
     }
 
@@ -5678,19 +5926,49 @@ mod tests {
         /// repo and the thing worth pinning is the fallback, not the plumbing.
         #[test]
         fn a_request_with_no_source_still_means_what_create_branch_said() {
-            use super::super::CreateFrom;
-            let resolve = |create_branch: bool| match (None::<CreateFrom>, create_branch) {
-                (Some(s), _) => s,
-                (None, true) => CreateFrom::NewBranch,
-                (None, false) => CreateFrom::LocalBranch,
+            use super::super::{CreateFrom, CreateWorktreeBody};
+            // Deserialized from the literal wire text rather than built
+            // field-by-field, so this covers serde's `default`s too — and it is
+            // the *real* `create_from`, not a copy of it.
+            let body = |json: &str| {
+                serde_json::from_str::<CreateWorktreeBody>(json)
+                    .expect("the request body must deserialize")
             };
             assert!(
-                matches!(resolve(true), CreateFrom::NewBranch),
+                matches!(
+                    body(r#"{"repo_root":"/r","branch":"b","create_branch":true}"#).create_from(),
+                    CreateFrom::NewBranch
+                ),
                 "create_branch: true with no source must still cut a new branch"
             );
             assert!(
-                matches!(resolve(false), CreateFrom::LocalBranch),
+                matches!(
+                    body(r#"{"repo_root":"/r","branch":"b","create_branch":false}"#).create_from(),
+                    CreateFrom::LocalBranch
+                ),
                 "create_branch: false with no source must still check one out"
+            );
+            // Omitted entirely — `create_branch` is `#[serde(default)]`, so
+            // this is the `false` arm and must not silently become the default
+            // create.
+            assert!(
+                matches!(
+                    body(r#"{"repo_root":"/r","branch":"b"}"#).create_from(),
+                    CreateFrom::LocalBranch
+                ),
+                "an absent create_branch must not read as true"
+            );
+            // Precedence, which the decoy could not pin either: `source` wins.
+            assert!(
+                matches!(
+                    body(
+                        r#"{"repo_root":"/r","branch":"b","create_branch":true,
+                            "source":{"kind":"local_branch"}}"#
+                    )
+                    .create_from(),
+                    CreateFrom::LocalBranch
+                ),
+                "an explicit source must win over create_branch"
             );
         }
 

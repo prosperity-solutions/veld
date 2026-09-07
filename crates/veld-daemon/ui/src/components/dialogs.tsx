@@ -398,6 +398,25 @@ export function RemoveRepoDialog(props: {
 export type SourceMode = CreateWorktreeSource["kind"];
 
 /**
+ * The `default` arm of every switch over [`SourceMode`], and it exists to make
+ * that arm **unreachable**.
+ *
+ * `never` is what forces it: add a fifth variant to `CreateWorktreeSource` and
+ * every switch that has not grown a case for it stops compiling here, because
+ * the un-handled mode is no longer assignable. A plain
+ * `default: return { kind: "new_branch" }` compiled fine and shipped the wrong
+ * thing — the dialog would show "Tag" selected and cut a branch from
+ * `origin/<default>` instead, with tests green. The daemon holds itself to a
+ * `422` on an unknown `kind`; this is the frontend's half of the same bar.
+ *
+ * It throws rather than returning a fallback, so a variant that somehow reaches
+ * it at runtime is loud instead of quietly wrong.
+ */
+function unhandledMode(mode: never): never {
+  throw new Error(`unhandled worktree source mode: ${String(mode)}`);
+}
+
+/**
  * The branch a create will use — the one derivation in this dialog that is
  * genuinely mode-dependent, and therefore the one worth a test.
  *
@@ -419,29 +438,35 @@ export function branchForMode(input: {
   localBranch: string;
   remoteLocalName: string | null;
 }): string {
-  if (input.mode === "local_branch") return input.localBranch;
-  if (input.mode === "remote_branch") {
-    return input.branchEdit ?? input.remoteLocalName ?? "";
+  switch (input.mode) {
+    case "local_branch":
+      return input.localBranch;
+    case "remote_branch":
+      return input.branchEdit ?? input.remoteLocalName ?? "";
+    case "new_branch":
+    case "worktree":
+      return input.branchEdit ?? input.derivedBranch;
+    default:
+      return unhandledMode(input.mode);
   }
-  return input.branchEdit ?? input.derivedBranch;
 }
 
 /**
  * The `source` value sent on the wire, built from the mode in **one** place so
  * the union's shape is decided once.
  *
- * `fromWorktreeId` is `null` when nothing is picked yet; the union still needs
- * a number, and `0` is the sentinel the daemon 404s on — which is right,
- * because `ready` already blocks the submit in that state and a request that
- * somehow escapes it must fail rather than target worktree 1.
+ * The spin-off source travels as a **path**, not as `Worktree.id`: that id is a
+ * SQLite rowid and gets reused, and this dialog can sit open for minutes.
  */
 export function sourceForMode(input: {
   mode: SourceMode;
   remoteRef: string;
-  fromWorktreeId: number | null;
+  fromPath: string | null;
   carryOver: boolean;
 }): CreateWorktreeSource {
   switch (input.mode) {
+    case "new_branch":
+      return { kind: "new_branch" };
     case "local_branch":
       return { kind: "local_branch" };
     case "remote_branch":
@@ -449,11 +474,14 @@ export function sourceForMode(input: {
     case "worktree":
       return {
         kind: "worktree",
-        from_worktree: input.fromWorktreeId ?? 0,
+        // `""` when nothing is picked. `ready` already blocks the submit in
+        // that state, and a request that somehow escaped it must 404 rather
+        // than resolve to some other checkout.
+        from_path: input.fromPath ?? "",
         carry_over: input.carryOver,
       };
     default:
-      return { kind: "new_branch" };
+      return unhandledMode(input.mode);
   }
 }
 
@@ -477,7 +505,7 @@ export function createBlockers(input: {
   aliasCollides: boolean;
   localBranch: string;
   remoteRef: string;
-  fromWorktreeId: number | null;
+  fromPath: string | null;
   branches: RepoBranches | null;
 }): {
   /** The checkout already holding the picked local branch, or `null`. */
@@ -503,7 +531,7 @@ export function createBlockers(input: {
     !branchExistsLocally &&
     (input.mode !== "local_branch" || input.localBranch !== "") &&
     (input.mode !== "remote_branch" || input.remoteRef !== "") &&
-    (input.mode !== "worktree" || input.fromWorktreeId !== null);
+    (input.mode !== "worktree" || input.fromPath !== null);
   return { localTaken, branchExistsLocally, ready };
 }
 
@@ -662,14 +690,14 @@ export function NewWorktreeDialog(props: {
     aliasCollides: collides,
     localBranch,
     remoteRef,
-    fromWorktreeId: from?.id ?? null,
+    fromPath: from?.path ?? null,
     branches,
   });
   /** See [`sourceForMode`]. */
   const source = sourceForMode({
     mode,
     remoteRef,
-    fromWorktreeId: from?.id ?? null,
+    fromPath: from?.path ?? null,
     carryOver,
   });
 
@@ -952,6 +980,15 @@ export function NewWorktreeDialog(props: {
               }))}
               value={fromId === "" ? null : fromId}
               onChange={(v) => setFromId(v ?? "")}
+              // The picked source can disappear underneath an open dialog —
+              // binned, or a permanent delete — and `data` is rebuilt from the
+              // live list every render, so the field would otherwise go blank
+              // with Create greyed out and nothing saying why.
+              error={
+                fromId !== "" && from === null
+                  ? "That worktree is no longer available — pick another"
+                  : null
+              }
             />
           )}
           {mode === "worktree" && (

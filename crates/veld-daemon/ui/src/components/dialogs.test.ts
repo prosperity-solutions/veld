@@ -94,7 +94,11 @@ describe("branchForMode", () => {
 });
 
 describe("sourceForMode", () => {
-  const args = { remoteRef: "origin/feat/new", fromWorktreeId: 42, carryOver: true };
+  const args = {
+    remoteRef: "origin/feat/new",
+    fromPath: "/repo/../wt/source",
+    carryOver: true,
+  };
 
   it("builds each variant with only its own fields", () => {
     expect(sourceForMode({ ...args, mode: "new_branch" })).toEqual({
@@ -109,7 +113,7 @@ describe("sourceForMode", () => {
     });
     expect(sourceForMode({ ...args, mode: "worktree" })).toEqual({
       kind: "worktree",
-      from_worktree: 42,
+      from_path: "/repo/../wt/source",
       carry_over: true,
     });
   });
@@ -120,15 +124,26 @@ describe("sourceForMode", () => {
     // explicit `false` and not as an absent key.
     expect(sourceForMode({ ...args, mode: "worktree", carryOver: false })).toEqual({
       kind: "worktree",
-      from_worktree: 42,
+      from_path: "/repo/../wt/source",
       carry_over: false,
     });
   });
 
-  it("falls back to the daemon's 404 sentinel rather than targeting worktree 1", () => {
-    expect(
-      sourceForMode({ ...args, mode: "worktree", fromWorktreeId: null }),
-    ).toEqual({ kind: "worktree", from_worktree: 0, carry_over: true });
+  it("sends an empty path rather than resolving to some other checkout", () => {
+    // The daemon 404s on `""`. `ready` blocks the submit before this can
+    // happen, so this pins the behaviour of a request that escaped it anyway.
+    expect(sourceForMode({ ...args, mode: "worktree", fromPath: null })).toEqual({
+      kind: "worktree",
+      from_path: "",
+      carry_over: true,
+    });
+  });
+
+  it("names the spin-off source by path, because the id is a reusable rowid", () => {
+    // The #201 hazard: this dialog can sit open for minutes, and a rowid freed
+    // by a permanent delete lands on the next worktree created.
+    const got = sourceForMode({ ...args, mode: "worktree" });
+    expect(JSON.stringify(got)).not.toMatch(/from_worktree/);
   });
 });
 
@@ -139,7 +154,7 @@ describe("createBlockers", () => {
     aliasCollides: false,
     localBranch: "",
     remoteRef: "",
-    fromWorktreeId: null as number | null,
+    fromPath: null as string | null,
     branches: BRANCHES,
   };
 
@@ -179,7 +194,7 @@ describe("createBlockers", () => {
         mode,
         branch: "feat/free",
         remoteRef: "origin/feat/new",
-        fromWorktreeId: 42,
+        fromPath: "/repo/../wt/source",
       });
       expect(got.branchExistsLocally, mode).toBe(true);
       expect(got.ready, mode).toBe(false);
@@ -219,10 +234,11 @@ describe("createBlockers", () => {
       createBlockers({ ...args, mode: "remote_branch", remoteRef: "" }).ready,
     ).toBe(false);
     expect(
-      createBlockers({ ...args, mode: "worktree", fromWorktreeId: null }).ready,
+      createBlockers({ ...args, mode: "worktree", fromPath: null }).ready,
     ).toBe(false);
     expect(
-      createBlockers({ ...args, mode: "worktree", fromWorktreeId: 42 }).ready,
+      createBlockers({ ...args, mode: "worktree", fromPath: "/repo/../wt/s" })
+        .ready,
     ).toBe(true);
   });
 

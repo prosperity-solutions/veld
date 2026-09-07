@@ -245,8 +245,12 @@ export type CreateWorktreeSource =
    * **`carry_over` omitted means `false` on the wire**, which is the opposite
    * of the create dialog's own default — the dialog ticks it and sends it
    * explicitly. A caller that wants the work carried has to say so.
+   *
+   * The source is named by `from_path`, never by `Worktree.id`: that id is a
+   * SQLite rowid and gets reused, so a dialog left open across a delete and a
+   * create could point at a checkout nobody picked.
    */
-  | { kind: "worktree"; from_worktree: number; carry_over?: boolean };
+  | { kind: "worktree"; from_path: string; carry_over?: boolean };
 
 export interface Worktree {
   id: number;

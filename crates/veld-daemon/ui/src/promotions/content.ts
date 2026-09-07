@@ -316,6 +316,10 @@ export const PROMOTIONS: Promotion[] = [
     // the mechanism; "Stop stashing before you try something else" was the
     // second and is the struggle-then-relief shape the doc names.
     //
+    // The **body** opened on the menu item, which is the same failure one level
+    // down — the doc's order is what changes about your day first, where to look
+    // second. It now states the outcome and names the menu item last.
+    //
     // `panes` is the closest fit in a deliberately closed four-glyph set — none
     // of them means "checkout", and adding a fifth is a new icon choice rather
     // than a copy decision.
@@ -324,7 +328,7 @@ export const PROMOTIONS: Promotion[] = [
     eyebrow: "New",
     headline: "Take your uncommitted work to a new branch",
     body:
-      "Spin off… in a worktree's ⋯ menu gives you a second checkout starting exactly where that one is — staged, unstaged and untracked files and all.",
+      "A second checkout starts exactly where one you are working in is — staged, unstaged and untracked files and all. Spin off…, in a worktree's ⋯ menu.",
     glyph: "panes",
   },
 ];
