@@ -7,7 +7,15 @@
   "ide": {
     "quicklinks": [
       { "label": "Staging", "url": "https://staging.example.com" },
-      { "label": "Grafana", "url": "https://grafana.internal" }
+      { "label": "Grafana", "url": "https://grafana.internal" },
+      // Resolved per checkout, against the worktree scope. `branch_raw` and not
+      // `branch`, which is slugified — a `feat/foo` checkout would otherwise
+      // address a branch named `feat-foo`. The `/tree/` path is GitHub's spelling
+      // and lives here rather than in veld, which never learns your code host.
+      {
+        "label": "This branch on GitHub",
+        "url": "https://github.com/o/r/tree/${veld.branch_raw}"
+      }
     ],
     // URLs a terminal produces open in a Veld browser pane. These do not: a
     // pane has its own cookie jar, so an SSO flow started in one begins from

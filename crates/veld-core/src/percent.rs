@@ -7,14 +7,25 @@
 //! dependency shared between the CLI, the daemon, the privileged helper and the
 //! gateway is not free.
 //!
-//! **One function, however many callers, deliberately.** `veld settings` encodes a
-//! setting key into a `DELETE` path and its database path into `X-Veld-Db`; the
-//! daemon encodes *its own* database path to compare against that header, and
-//! encodes each segment of a relative path into a file-serving URL
-//! (`veld-daemon/src/files.rs`). Two encoders that agree today are two encoders that
+//! **One function per rule, however many callers, deliberately.** `veld settings`
+//! encodes a setting key into a `DELETE` path and its database path into
+//! `X-Veld-Db`; the daemon encodes *its own* database path to compare against that
+//! header, and encodes each segment of a relative path into a file-serving URL
+//! (`veld-daemon/src/files.rs`). All four are the same rule and all four call
+//! [`encode_component`]. Two encoders that agree today are two encoders that
 //! disagree after somebody "fixes" one, and the failure would be a settings guard
 //! that silently stops guarding — which is the bug this module was extracted during.
-//! Adding a caller is fine; adding a second encoder is the thing to refuse.
+//! Adding a caller is fine; adding a second spelling of a rule that already lives
+//! here is the thing to refuse.
+//!
+//! [`encode_in_url`] is a genuinely different rule, not a second spelling of that
+//! one: it preserves `/` because its inputs are multi-segment (a `feat/foo` branch
+//! interpolated into `…/tree/feat/foo`), which is the exact property
+//! [`encode_component`] exists to deny. Keeping them apart is what stops a caller
+//! reaching for the one whose escaping is wrong for its destination — and it is
+//! also why neither delegates to the other: a shared inner function parameterised
+//! by an allow-list would make the difference a call-site argument rather than a
+//! choice of name, and a wrong argument there is silent.
 
 /// Percent-encode a string so it is safe as a URL path segment **and** as an HTTP
 /// header value.
@@ -33,6 +44,39 @@ pub fn encode_component(s: &str) -> String {
     for byte in s.as_bytes() {
         match byte {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Percent-encode a string for interpolation into a **URL a config author wrote**,
+/// preserving `/`.
+///
+/// The same allow-list as [`encode_component`] plus `/`, and that one difference is
+/// the whole reason this is a second function rather than a caller of it. The values
+/// this encodes are multi-segment by nature — a branch name (`feat/foo`) whose
+/// slashes are *path* in `…/tree/feat/foo`, a worktree path — so the segment
+/// encoder's `a%2Fb` would produce a URL that resolves to nothing on every code
+/// host. Preserving `/` is safe against traversal because `git check-ref-format`
+/// refuses the two-character sequence `..` anywhere in a refname, refuses a leading
+/// or trailing `/` and refuses `//`; and `/` is legal unencoded in a query string as
+/// well as in a path, so one rule serves both places a template can put a value.
+///
+/// Everything else outside RFC 3986's unreserved set still goes out as `%XX` —
+/// which is what closes the interesting hole: git *does* allow `#` in a branch
+/// name, and a raw one would truncate the URL at a fragment and quietly open the
+/// repo's front page instead of the branch.
+///
+/// Not a general URL encoder, for the same reason [`encode_component`] is not: it
+/// does not know `+` for spaces in a query string, and must not be used for one.
+pub fn encode_in_url(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for byte in s.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'/' => {
                 out.push(*byte as char)
             }
             other => out.push_str(&format!("%{other:02X}")),
@@ -103,6 +147,50 @@ mod tests {
         assert_eq!(encode_component("a?b#c"), "a%3Fb%23c");
         assert_eq!(encode_component("a b"), "a%20b");
         assert_eq!(encode_component("100%"), "100%25");
+    }
+
+    /// The URL encoder's one difference, and the reason it is a second function.
+    ///
+    /// A branch name's slashes are *path*: `…/tree/feat/foo` is the address on every
+    /// code host and `…/tree/feat%2Ffoo` is a 404 on all of them. Everything else
+    /// outside the unreserved set still goes out escaped — `#` being the one that
+    /// matters, because git permits it in a refname and a raw one truncates the URL
+    /// at a fragment, silently opening the repo's front page instead of the branch.
+    #[test]
+    fn a_url_keeps_its_path_separators_and_escapes_everything_else() {
+        assert_eq!(encode_in_url("feat/foo"), "feat/foo");
+        assert_eq!(encode_in_url("git-status-visual"), "git-status-visual");
+        assert_eq!(encode_in_url("feat#2"), "feat%232");
+        assert_eq!(encode_in_url("100%"), "100%25");
+        assert_eq!(encode_in_url("a b"), "a%20b");
+        assert_eq!(encode_in_url("feat/ümlaut"), "feat/%C3%BCmlaut");
+        // The two encoders must disagree here, and only here. If a change ever
+        // makes them agree, one of them has stopped doing its job.
+        assert_ne!(encode_in_url("a/b"), encode_component("a/b"));
+    }
+
+    /// **This encoder does not stop path traversal, and is not what makes it safe.**
+    /// Pinned as an assertion rather than left as a comment, because the tempting
+    /// "fix" is to start escaping `.` — which would break every `feat/foo` branch
+    /// link this function exists to produce.
+    ///
+    /// Two things carry the safety instead. First, `git check-ref-format` refuses
+    /// the two-character sequence `..` anywhere in a refname, refuses `//`, and
+    /// refuses `?` and space (verified against git 2.50.1; it *accepts* `#` and `/`,
+    /// which is why `#` is escaped above and `/` is not) — so the one value here an
+    /// outsider chooses, a branch name on somebody else's pull request, cannot
+    /// contain a traversal to begin with. Second, traversal cannot cross an origin:
+    /// `https://host/o/r/tree/../../x` normalises to `https://host/x`, the same
+    /// host, and the scheme and host of the template are not interpolated. So the
+    /// worst a hostile value could reach is another path on a host the repo's own
+    /// config already named.
+    #[test]
+    fn dot_segments_pass_through_and_git_is_what_refuses_them() {
+        assert_eq!(encode_in_url("../../evil"), "../../evil");
+        assert_eq!(encode_in_url("a/../b"), "a/../b");
+        // The characters git *does* allow in a branch name and a URL reads as
+        // structure — the actual job.
+        assert_eq!(encode_in_url("feat#2"), "feat%232");
     }
 
     /// The header half, and the bug this module exists for.

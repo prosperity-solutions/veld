@@ -155,7 +155,7 @@
               "url": {
                 "type": "string",
                 "pattern": "^https?://",
-                "description": "An http:// or https:// URL. Other schemes are refused: a quicklink is a repo-controlled string that a click hands to the OS, and `vscode://` or `file://` would make a config file a launcher for whatever the machine has registered. Literal only — `${...}` is not interpolated here, because the start page is rendered with no run to resolve against."
+                "description": "An http:// or https:// URL. Other schemes are refused: a quicklink is a repo-controlled string that a click hands to the OS, and `vscode://` or `file://` would make a config file a launcher for whatever the machine has registered. Interpolates the worktree scope — ${veld.root}, ${veld.branch}, ${veld.branch_raw}, ${veld.worktree}, ${veld.project}, ${veld.username} — so a link can open this checkout's branch: `https://github.com/o/r/tree/${veld.branch_raw}`. Use branch_raw, not branch, which is slugified. A run's own values (${output.*}, ${nodes.*}) are refused, because the bookmark list renders whether or not anything is running. Values are percent-encoded with `/` preserved, and the provider-specific path (`/tree/` on GitHub, `/-/tree/` on GitLab) is yours to write — veld does not know your code host."
               }
             }
           },

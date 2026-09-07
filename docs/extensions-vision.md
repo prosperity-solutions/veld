@@ -930,6 +930,84 @@ one day since it shipped — a small, technically-engaged group who reads
 `docs/configuration.md` and `Settings → General`, not the audience a
 once-ever interrupt exists to reach.
 
+### 2026-09-07 — "Already merged" on a rail row: core states `[gone]`, and only a forge says *merged*
+
+The request was for a per-worktree glyph answering "is this checkout used" —
+uncommitted changes, unpushed commits, and **"is the branch already merged (via a
+PR)"**. The first two are unambiguously core. The third is the interesting one,
+because it sits exactly on this document's line and the obvious readings fall on
+opposite sides of it.
+
+**Chosen:** core computes and renders `upstream_gone` — git's own
+`%(upstream:track)` reporting `[gone]`, i.e. *this branch has an upstream
+configured whose remote-tracking ref no longer exists*. That is a proposition git
+answers exactly, through a primitive identical on every host, and it is what a
+squash-merge-and-delete leaves behind — which is `/ship`'s own merge step, and the
+default on GitHub, GitLab and Gitea alike. The glyph is a merge glyph (the
+maintainer's pick) and the tooltip says *"the remote branch was deleted, which
+usually means its pull request was merged"*. The word **merged** never appears as
+an assertion, and `merged: bool` is deliberately **not** a field.
+
+Its one wrong answer is a pull request **closed without merging** and then
+deleted, which is byte-identical to a merge from git's side. That is affordable
+here for a reason worth recording: `git worktree remove` is the only removal veld
+performs, so **the branch ref survives trashing a worktree** — a misread costs a
+`git worktree add`, not work. Had veld deleted branches, this entry would have
+gone the other way.
+
+**Rejected — `merge-base --is-ancestor`, the modal answer.** Returns false after a
+squash merge *and* after a rebase merge, so it is silent for the two policies most
+projects (including this one) actually use. It would have shipped a glyph that
+never appears and a maintainer wondering why.
+
+**Rejected — patch-identity search** (`git cherry`, or `git diff <merge-base>..HEAD
+| git patch-id --stable` scanned against upstream commits). This is the trap, and
+it was independently named as such. It reads as the winner: pure git, no object
+writes, covers squash, and it can hand the UI a *linkable SHA* instead of a
+boolean. On contact it fails three ways. Its cost is unbounded on exactly the
+worktrees that matter — an old branch against a fast-moving trunk means scanning
+thousands of commits, per worktree, invalidated whenever `origin/main` moves — so
+it is confidently `unknown` for the worst offenders and confident for the ones
+nobody needed help with. Patch-id equality breaks on any conflict resolution,
+amend or formatter run during the merge, i.e. on the merges most likely to come
+from a long-lived branch. And "which ref is the mainline" is a config knob one
+inch from provider-specificity that would grow a provider-shaped default. An
+oracle right 70% of the time and confidently silent for the rest destroys trust
+faster than an observation that is always right about something narrower.
+
+**Rejected — the community `commit-tree` + `git cherry` squash trick.** Writes a
+loose object into the store on what is otherwise a read path, and only works when
+the branch's entire diff became exactly one upstream commit.
+
+**Rejected — building the `rail` slot and answering this with the existing PR
+badge.** The *right* long-term answer, and it remains the backlog rows below: only
+a forge separates merged from closed-unmerged, and `PR #283 · merged` with a URL
+beats every git inference. It is not this change because the rail slot is the
+larger half of the work (daemon-owned evaluation for every worktree at once, not
+just the visible one — see [How a badge is evaluated](#how-a-badge-is-evaluated))
+and because it would leave the rail blank for every project that has not written a
+script, which is every project but this one. Declining to render `[gone]` on those
+grounds would be purity rather than discipline: it costs one extra column on a
+`for-each-ref` this daemon now runs anyway.
+
+**One behaviour change fell out of it.** `maybe_fetch` now runs
+`git fetch --prune origin`. Without pruning, a merged-and-deleted branch keeps its
+`origin/<branch>` ref locally and `%(upstream:track)` reports it as merely in
+sync, so the glyph could never appear. Pruning deletes only remote-tracking refs
+the remote no longer has — no local branch, no working tree, no worktree — which
+keeps it on the safe side of the same line the deliberately-non-fast-forward fetch
+is on.
+
+**And a note for whoever builds the `rail` slot.** The per-worktree evaluation
+this change needed is *not* the push model that section defers; it is the cheap
+half. The push/gone data is one `for-each-ref` per **repo** (21ms measured,
+independent of worktree count, never enters a working tree) so it rides the
+existing poll, and only the `git status` half — per checkout — is rate-limited
+behind it. A badge command is per-worktree and unbounded in cost, so it still
+needs the daemon-owned push model. The transport is the thing that is still
+unbuilt; the "evaluate every row, not just the visible one" cadence now has a
+worked precedent in `spawn_dirty_sweep`.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of
@@ -940,7 +1018,7 @@ idea.
 
 | Feature | Data contract it needs | UI surface | Status |
 |---|---|---|---|
-| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1** |
+| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog — asked for again 2026-09-07 and answered in core only as far as git can state it, see the decision log |
 | Open a worktree in an external IDE (WebStorm, VS Code, …) | a local binary per editor | top bar | **Tier 1 round 1** (`type: "action"`) |
 | CI check status for a worktree's branch | provider API | top bar, worktree detail | backlog — expressible as a second `type: "status"` today |
 | Per-worktree staleness ("branch is N behind origin") | **already exposed as core data** — see note | rail row, worktree detail | core data shipped; badge = extension |
@@ -969,6 +1047,13 @@ idea.
 > computes "main checkout is N commits behind `origin/<default>`" and carries it
 > on the repo view, because worktree freshness is core (universal-primitive
 > test). Rendering it per-worktree as a coloured badge is extension.
+>
+> As of 2026-09-07 the *per-worktree* half of that data is core too and already on
+> the wire: `WorktreeView.git` carries `ahead`, `behind`, `upstream`,
+> `upstream_gone` and `dirty` for every checkout. `behind` in particular is
+> carried and **deliberately unrendered** — the top bar's pill already answers it
+> for the main checkout — so a project wanting a per-worktree staleness badge
+> needs no new daemon work, only the `rail` slot.
 
 ## Rules for agents
 

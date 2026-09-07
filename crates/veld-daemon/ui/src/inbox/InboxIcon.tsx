@@ -1,4 +1,3 @@
-import { Tooltip } from "@mantine/core";
 import {
   IconAlertTriangle,
   IconCircleCheck,
@@ -6,6 +5,7 @@ import {
   IconMessageQuestion,
 } from "@tabler/icons-react";
 
+import { RailGlyphTooltip } from "../shared/RailGlyphTooltip";
 import type { RowState, RowSummary } from "./inbox";
 
 /**
@@ -53,35 +53,6 @@ export const HEADLINE: Record<RowState, string> = {
   finished: "finished",
   working: "working",
 };
-
-/**
- * A tooltip for an activity glyph.
- *
- * Mantine's, not the native `title`: it is what the run control beside it uses, it
- * honours the theme's 400ms `openDelay` instead of the browser's second-and-a-bit, and
- * it can be styled. `pre-line` because the body is one line per pane — the whole point
- * of the tooltip is that a single glyph cannot say *which* pane, so enumerating them is
- * the job.
- */
-function ActivityTooltip(props: {
-  label: string;
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <Tooltip
-      label={props.label}
-      multiline
-      w={260}
-      withArrow
-      // The row is draggable and scrolls; a tooltip that followed the pointer would
-      // fight both. Anchored, like the run control's.
-      position="left"
-      style={{ whiteSpace: "pre-line" }}
-    >
-      {props.children}
-    </Tooltip>
-  );
-}
 
 /**
  * The whole tooltip for a worktree's glyph.
@@ -138,7 +109,7 @@ export function InboxIcon(props: {
   if (state === null) return null;
   const Icon = ICONS[state];
   return (
-    <ActivityTooltip label={tooltipFor(props.summary, props.label)}>
+    <RailGlyphTooltip label={tooltipFor(props.summary, props.label)}>
       <span
         className={`wt-inbox ${state}`}
         // Decorative for the screen reader: the row is a `role=button` whose accessible
@@ -149,7 +120,7 @@ export function InboxIcon(props: {
       >
         <Icon size={12} />
       </span>
-    </ActivityTooltip>
+    </RailGlyphTooltip>
   );
 }
 
@@ -168,13 +139,13 @@ export function PaneActivityIcon(props: {
 }): React.JSX.Element {
   const Icon = ICONS[props.state];
   return (
-    <ActivityTooltip
+    <RailGlyphTooltip
       label={props.detail ?? HEADLINE[props.state]}
     >
       <span className={`pane-tab-activity ${props.state}`} aria-hidden="true">
         <Icon size={11} />
       </span>
-    </ActivityTooltip>
+    </RailGlyphTooltip>
   );
 }
 

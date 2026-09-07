@@ -1893,6 +1893,46 @@ fn check_command_variables(
     Some(())
 }
 
+/// Refuse a quicklink URL that references a variable a worktree will not have.
+///
+/// The same closed set an extension command gets ([`EXTENSION_BUILTINS`]), for the
+/// same reason: a quicklink is resolved against a *worktree*, so `${veld.pane.id}`
+/// would resolve to nothing, and an unresolvable reference here does not fail
+/// loudly — the link is simply absent from that worktree's bookmark list, which is
+/// the hardest kind of bug to read backwards from.
+///
+/// **Not** [`check_command_variables`], despite the overlap. That one also decides
+/// `argv`-versus-`shell`, and a URL is neither: `SHELL_REFUSED_BUILTINS`' reason
+/// (git allows a branch named `foo$(id)`, and no amount of quoting saves a shell
+/// string built from it) does not apply to a value that is percent-encoded into a
+/// URL and handed to a browser. So `${veld.branch_raw}` is *permitted* here — it is
+/// the whole point, since `${veld.branch}` is slugified and `feat/foo` would
+/// address a branch called `feat-foo` that does not exist.
+fn check_url_variables(url: &str, location: &str, out: &mut IdeSection) -> Option<()> {
+    for reference in all_references(url) {
+        let name = reference.strip_prefix("veld.").filter(|name| {
+            // `${veld.url.host}` and friends are a node's, resolved against a run.
+            // A dotted name is not in the worktree set and never will be, so it is
+            // reported by the same sentence as a typo rather than a special case.
+            EXTENSION_BUILTINS.contains(name)
+        });
+        if name.is_none() {
+            out.problems.push(IdeProblem {
+                location: location.to_owned(),
+                message: format!(
+                    "`${{{reference}}}` is not available in a quicklink URL. A quicklink may \
+                     use: {}. A run's own values (`${{output.*}}`, `${{nodes.*}}`) are not \
+                     among them — the bookmark list is rendered whether or not anything is \
+                     running",
+                    variable_list(EXTENSION_BUILTINS)
+                ),
+            });
+            return None;
+        }
+    }
+    Some(())
+}
+
 fn variable_list(allowed: &[&str]) -> String {
     allowed
         .iter()
@@ -2368,6 +2408,9 @@ fn parse_quicklinks(value: &serde_json::Value, out: &mut IdeSection) {
                 location: format!("{at}.url"),
                 message: format!("must be an http:// or https:// URL (got {url:?})"),
             });
+            continue;
+        }
+        if check_url_variables(url, &format!("{at}.url"), out).is_none() {
             continue;
         }
         out.quicklinks.push(Quicklink {
@@ -3237,6 +3280,60 @@ mod tests {
                 "ide.quicklinks[3]",
                 "ide.quicklinks[4]",
             ]
+        );
+    }
+
+    /// A quicklink URL may template the **worktree** scope and nothing else.
+    ///
+    /// The closed set is the same one an extension command gets, because the
+    /// resolution scope is the same — a worktree — and `AGENTS.md`'s "one
+    /// vocabulary, everywhere" is worth more here than a bespoke shorter list.
+    /// `${veld.branch_raw}` is deliberately *in*: it is the whole point, since
+    /// `${veld.branch}` is slugified and `feat/foo` would address a branch called
+    /// `feat-foo` that does not exist. It is refused in a `shell` command for a
+    /// reason that has no URL analogue (a branch named `foo$(id)` is command
+    /// execution in a shell string; percent-encoded into a URL it is a path).
+    #[test]
+    fn a_quicklink_may_template_the_worktree_scope_and_nothing_else() {
+        let parsed = section(json!({
+            "quicklinks": [
+                { "label": "Branch", "url": "https://github.com/o/r/tree/${veld.branch_raw}" },
+                { "label": "Slug", "url": "https://x/${veld.branch}/${veld.project}" },
+                // A run's own values: there is no run when a bookmark list renders,
+                // which is the reason the schema said "literal only" before this.
+                { "label": "Run", "url": "https://x/${output.url}" },
+                // A pane's, which an extension cannot use either.
+                { "label": "Pane", "url": "https://x/${veld.pane.id}" },
+                { "label": "Typo", "url": "https://x/${veld.brunch}" },
+            ]
+        }));
+        assert_eq!(
+            parsed
+                .quicklinks
+                .iter()
+                .map(|q| q.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Branch", "Slug"],
+            "a reference outside the worktree scope must drop the link, not ship it"
+        );
+        assert_eq!(
+            parsed
+                .problems
+                .iter()
+                .map(|p| p.location.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "ide.quicklinks[2].url",
+                "ide.quicklinks[3].url",
+                "ide.quicklinks[4].url",
+            ]
+        );
+        // The message has to name what *is* available, since the author is reading
+        // it in `veld lint` with no other reference to hand.
+        assert!(
+            parsed.problems[2].message.contains("${veld.branch_raw}"),
+            "the finding must list the names a quicklink may use: {}",
+            parsed.problems[2].message
         );
     }
 

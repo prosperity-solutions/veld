@@ -892,6 +892,369 @@ async fn git_status(dir: &FsPath) -> Result<Vec<DirtyFile>, String> {
     Ok(parse_git_status(&String::from_utf8_lossy(&out)))
 }
 
+// ---------------------------------------------------------------------------
+// Per-worktree git signals ("is this checkout used?")
+// ---------------------------------------------------------------------------
+
+/// What git says about one checkout, for the rail's at-a-glance glyph.
+///
+/// **Independent facts, never a glyph.** The daemon does not send a
+/// `state: "dirty" | "unpushed" | "clean"` because the fourth and fifth states
+/// (conflicted, mid-rebase, detached, behind) will arrive, and an enum users have
+/// built habits on is the expensive thing to change. Folding these into one glyph
+/// is the client's job — see `railGitState` in the UI.
+///
+/// Every field is optional and `None` means *not known*, which is deliberately a
+/// different fact from a zero or a `false`: a checkout whose volume is unmounted, a
+/// repo with no remote, and a worktree the dirty sweep has not reached yet all
+/// render as no glyph rather than as "clean". `carried_file_count` above made the
+/// same distinction for the same reason, and collapsing it was the bug there too.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+struct WorktreeGitSignals {
+    /// `git status --porcelain` is non-empty — staged, unstaged or untracked work
+    /// that exists in this checkout and nowhere else.
+    ///
+    /// Measured by the sweep, not on the request path, and dropped once it is older
+    /// than [`DIRTY_MAX_AGE`] so a wedged sweep shows nothing rather than an answer
+    /// from five minutes ago.
+    dirty: Option<bool>,
+    /// The branch's upstream as git spells it (`origin/feat-x`), or `None` when the
+    /// branch has none — never pushed, or a detached HEAD.
+    upstream: Option<String>,
+    /// Commits this branch has that its upstream does not: the "not pushed yet"
+    /// half of the question. `None` when there is no upstream to compare against.
+    ///
+    /// Note what this counts for a branch whose upstream is `origin/main` rather
+    /// than `origin/<itself>` — a worktree created from the default branch and
+    /// never pushed. Then `ahead` is the branch's own commits, which is the same
+    /// answer by a different route, and the one the reader wants either way.
+    ahead: Option<i64>,
+    /// The mirror image, carried because it costs nothing — it comes out of the
+    /// same `for-each-ref` field as `ahead`. No glyph renders it today: the repo's
+    /// staleness pill in the top bar already answers "behind" for the main
+    /// checkout, and a second amber signal per row was not asked for. It is on the
+    /// wire so that adding one later is a UI change and not a protocol change.
+    behind: Option<i64>,
+    /// The branch has an upstream configured whose remote-tracking ref is **gone** —
+    /// git's own `[gone]`, which appears once `fetch --prune` has seen the remote
+    /// branch disappear.
+    ///
+    /// **This is as close to "merged" as core gets, and it is not the same claim.**
+    /// A squash-merge-and-delete leaves exactly this behind, and so does a pull
+    /// request closed without merging and then deleted. Only a forge can separate
+    /// those, which is what `ide.extensions` is for and what this repo's own
+    /// top-bar PR badge already does with `gh`. So the field is named after what was
+    /// measured, the UI's tooltip glosses it, and neither says "merged" outright.
+    upstream_gone: bool,
+}
+
+impl WorktreeGitSignals {
+    /// Whether there is anything here worth sending.
+    ///
+    /// An all-`None` value is what a worktree looks like before the sweep has run
+    /// and after every probe failed, and the two are the same to a client: no
+    /// glyph. Sending `null` instead of a struct of nulls keeps that unambiguous
+    /// on the wire.
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// How old a swept `dirty` answer may be before it is served as `None`.
+///
+/// The sweep is kicked by the UI's own poll, so in normal use an entry is at most
+/// [`DIRTY_REFRESH_AGE`] plus one sweep old. This is the backstop for the abnormal
+/// case — a checkout on a network filesystem that takes a minute to answer, a
+/// spawn that never returns — where the failure mode worth avoiding is a confident
+/// glyph nobody is refreshing. Six times the refresh age, so an ordinary slow
+/// sweep does not make rows blink.
+const DIRTY_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// How old an entry must be before the sweep recomputes it.
+///
+/// Not a poll interval: the UI polls every 5s and this is what stops that becoming
+/// a `git status` in every checkout every 5s, which is the cost
+/// [`worktree_status`] was written to avoid putting on the listing. Measured on
+/// this repo, `git --no-optional-locks status --porcelain=v1 -z` is 16ms in a warm
+/// worktree and 155ms in a cold one with a large ignored `target/`, so 15s over 18
+/// worktrees is a few percent of one core rather than a busy loop.
+const DIRTY_REFRESH_AGE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// How many `git status` children the sweep runs at once.
+///
+/// The same reasoning — and the same number — as the delete dialog's bounded
+/// worker: each one runs git in a checkout on a machine already running this
+/// project's dev servers, so the sweep is deliberately not `join_all` over 18
+/// worktrees.
+const DIRTY_CONCURRENCY: usize = 4;
+
+/// `ahead`/`behind`/`gone` per worktree, keyed by worktree id.
+///
+/// Refreshed **synchronously** on each [`refresh_repos`] poll, because it costs one
+/// `for-each-ref` per *repo* — 21ms measured, whatever the worktree count — and a
+/// glyph that appears a poll late for no reason is worse than one that costs 21ms.
+static UPSTREAMS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<i64, WorktreeGitSignals>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// `dirty` per worktree, keyed by worktree id, with the instant it was measured.
+///
+/// Refreshed **asynchronously** by [`spawn_dirty_sweep`], because it costs a
+/// `git status` per *worktree* and the poll must not wait for eighteen of them.
+static DIRTY: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<i64, (bool, std::time::Instant)>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// One `for-each-ref` per repo: every local branch's upstream and how it tracks.
+///
+/// **One process for the whole repo, and it never enters a working tree.** It reads
+/// refs and walks the object graph, so it does not care whether a worktree's volume
+/// is mounted, does not touch an index, and does not contend with the developer's
+/// own git — which is what makes the push half of the glyph affordable on a 5s poll
+/// when the dirty half is not.
+///
+/// Keyed by **worktree path**, from `%(worktreepath)`, so the caller does not have
+/// to match branch names itself. A branch checked out nowhere reports an empty
+/// path and is skipped: it has no row in the rail.
+///
+/// Tab-delimited with a NUL record separator, the same shape [`list_branches`] uses.
+/// Safe because `git check-ref-format` refuses control characters in a refname, so
+/// neither a branch name nor an upstream name can contain either separator;
+/// `%(upstream:track,nobracket)` is the one field with punctuation in it
+/// (`ahead 1, behind 2`) and it contains neither.
+///
+/// This is a second `for-each-ref` rather than a column added to
+/// [`list_branches`]'s. That one answers "what may I check out" for the branch
+/// picker, on demand and for branches with no worktree at all; this one answers
+/// "how does each checked-out branch stand" on every poll. Merging them would make
+/// the picker pay for tracking information it does not render, and this pay for
+/// rows it discards.
+async fn repo_upstreams(
+    repo_root: &FsPath,
+) -> std::collections::HashMap<String, WorktreeGitSignals> {
+    let mut out = std::collections::HashMap::new();
+    let Ok(raw) = git(
+        repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(worktreepath)%09%(upstream:short)%09%(upstream:track,nobracket)%00",
+            "refs/heads",
+        ],
+    )
+    .await
+    else {
+        return out;
+    };
+    for record in raw.split('\0') {
+        let record = record.trim_start_matches('\n');
+        if record.trim().is_empty() {
+            continue;
+        }
+        let mut fields = record.split('\t');
+        let (Some(path), Some(upstream), Some(track)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        out.insert(path.to_owned(), parse_upstream_track(upstream, track));
+    }
+    out
+}
+
+/// Turn `%(upstream:short)` + `%(upstream:track,nobracket)` into the signal fields.
+///
+/// The four shapes git emits, and the one distinction that has to survive:
+///
+/// | `upstream` | `track` | means |
+/// |---|---|---|
+/// | `""` | `""` | no upstream configured — never pushed, or detached |
+/// | `origin/x` | `""` | in sync |
+/// | `origin/x` | `ahead 1`, `behind 2`, `ahead 1, behind 2` | as it says |
+/// | `origin/x` | `gone` | configured, but the remote-tracking ref is gone |
+///
+/// **`""` and `gone` must not collapse into each other**, and neither may collapse
+/// into "in sync": "never pushed" and "pushed, then deleted upstream" are opposite
+/// facts about whether the work got anywhere, and both come back with no counts.
+/// That is why `ahead`/`behind` are `None` rather than `0` for a branch with no
+/// upstream — there is nothing to be zero commits away from.
+fn parse_upstream_track(upstream: &str, track: &str) -> WorktreeGitSignals {
+    if upstream.is_empty() {
+        return WorktreeGitSignals::default();
+    }
+    let mut signals = WorktreeGitSignals {
+        upstream: Some(upstream.to_owned()),
+        ..WorktreeGitSignals::default()
+    };
+    if track == "gone" {
+        signals.upstream_gone = true;
+        return signals;
+    }
+    // An upstream that exists is comparable, so the counts are `Some` even when
+    // they are zero — the empty `track` of a branch in sync means "0 and 0", which
+    // is a real answer and not a missing one.
+    signals.ahead = Some(0);
+    signals.behind = Some(0);
+    for part in track.split(',') {
+        let part = part.trim();
+        if let Some(n) = part.strip_prefix("ahead ") {
+            signals.ahead = n.parse().ok();
+        } else if let Some(n) = part.strip_prefix("behind ") {
+            signals.behind = n.parse().ok();
+        }
+    }
+    signals
+}
+
+/// Refresh [`UPSTREAMS`] for one repo, from rows the caller already has.
+///
+/// Entries for this repo's worktrees are replaced wholesale rather than merged, so
+/// a branch that lost its upstream, or a worktree that went away, does not leave a
+/// stale answer behind. Other repos' entries are untouched: the map is global and
+/// this runs once per repo per poll.
+async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
+    let by_path = repo_upstreams(repo_root).await;
+    let mut cache = UPSTREAMS.lock().expect("upstream cache mutex poisoned");
+    for wt in worktrees {
+        match by_path.get(&wt.path) {
+            Some(signals) => cache.insert(wt.id, signals.clone()),
+            None => cache.remove(&wt.id),
+        };
+    }
+}
+
+/// Recompute `dirty` for whichever of these worktrees has the stalest answer.
+///
+/// **Fire-and-forget, by design.** The poll returns whatever [`DIRTY`] already
+/// holds and this fills it in for the next one, so a rail with eighteen rows never
+/// makes the request that draws it wait on eighteen `git status` children. The
+/// glyph therefore appears about one poll after an IDE window opens, which is the
+/// price of the listing never getting slower — the trade
+/// [`worktree_status`]' doc comment describes from the other side.
+///
+/// Nothing runs while no window is open, because the poll is what kicks this. That
+/// is the same property the extension-badge RPC has, reached the same way, and it
+/// is why this is not a daemon-owned interval task.
+///
+/// Trashed worktrees are skipped: their row shows restore/delete controls, not
+/// state, and a checkout mid-`git worktree remove` is the one place a `git status`
+/// races something destructive.
+fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
+    /// One sweep at a time, however many windows are polling. Concurrent windows
+    /// collapse onto the running sweep instead of multiplying its git spawns —
+    /// the reason `LAST_SYNC` debounces the reconcile beside it.
+    static SWEEPING: std::sync::LazyLock<std::sync::Mutex<bool>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(false));
+
+    let due: Vec<(i64, String)> = {
+        let cache = DIRTY.lock().expect("dirty cache mutex poisoned");
+        targets
+            .iter()
+            .filter(|(id, _)| {
+                cache
+                    .get(id)
+                    .is_none_or(|(_, at)| at.elapsed() >= DIRTY_REFRESH_AGE)
+            })
+            .cloned()
+            .collect()
+    };
+    // Prune ids that are no longer registered anywhere in this poll's targets, so
+    // a long-lived daemon does not accumulate a row per worktree ever seen.
+    {
+        let live: std::collections::HashSet<i64> = targets.iter().map(|(id, _)| *id).collect();
+        DIRTY
+            .lock()
+            .expect("dirty cache mutex poisoned")
+            .retain(|id, _| live.contains(id));
+        UPSTREAMS
+            .lock()
+            .expect("upstream cache mutex poisoned")
+            .retain(|id, _| live.contains(id));
+    }
+    if due.is_empty() {
+        return;
+    }
+    {
+        let mut sweeping = SWEEPING.lock().expect("dirty sweep mutex poisoned");
+        if *sweeping {
+            return;
+        }
+        *sweeping = true;
+    }
+    tokio::spawn(async move {
+        for chunk in due.chunks(DIRTY_CONCURRENCY) {
+            let measured = futures_util::future::join_all(
+                chunk
+                    .iter()
+                    .map(|(id, path)| async move { (*id, git_is_dirty(FsPath::new(path)).await) }),
+            )
+            .await;
+            let mut cache = DIRTY.lock().expect("dirty cache mutex poisoned");
+            for (id, dirty) in measured {
+                match dirty {
+                    Some(dirty) => cache.insert(id, (dirty, std::time::Instant::now())),
+                    // A checkout that could not be read at all — an unmounted
+                    // volume, a `.git` mid-surgery — loses its entry rather than
+                    // keeping the last answer. The row then shows no glyph, which
+                    // is what "we do not know" has to look like.
+                    None => cache.remove(&id),
+                };
+            }
+        }
+        *SWEEPING.lock().expect("dirty sweep mutex poisoned") = false;
+    });
+}
+
+/// Whether one checkout has uncommitted work. `None` if git could not answer.
+///
+/// **`--no-optional-locks` is load-bearing, not tidiness.** Without it `git status`
+/// refreshes and rewrites `.git/index`, and this runs unprompted in every
+/// registered checkout: it would contend for `index.lock` with the developer's own
+/// git, and turn the daemon's own read into a filesystem event that a watcher in
+/// their dev server then rebuilds on. Verified on git 2.50.1 — with the flag, the
+/// index's mtime and size are unchanged across a run.
+///
+/// Not [`git_status`], which parses the same porcelain into a file list for the
+/// delete dialog. This wants one bit, so it never parses records — but it asks the
+/// same question, at git's default `-unormal`, because an untracked file *is* work
+/// that exists only in this checkout and is exactly what `git worktree remove`
+/// refuses on. Any answer narrower than that would have the glyph disagree with the
+/// dialog that blocks the delete.
+async fn git_is_dirty(dir: &FsPath) -> Option<bool> {
+    // `git_raw`, not `git`, for the reason `git_status` uses it: a porcelain code
+    // carries a significant leading space and this asks only whether there is a
+    // record at all, so trimming would answer `false` for an unstaged edit.
+    let out = git_raw(
+        dir,
+        &["--no-optional-locks", "status", "--porcelain=v1", "-z"],
+    )
+    .await
+    .ok()?;
+    Some(!out.iter().all(|b| *b == 0 || b.is_ascii_whitespace()))
+}
+
+/// The cached signals for one worktree, or `None` when nothing is known.
+///
+/// Read from [`worktree_view`], which is why this takes an id and not a path: the
+/// listing is built from database rows and must not spawn git — the halves that do
+/// are [`refresh_upstreams`] (on the poll) and [`spawn_dirty_sweep`] (behind it).
+fn git_signals_for(id: i64) -> Option<WorktreeGitSignals> {
+    let mut signals = UPSTREAMS
+        .lock()
+        .expect("upstream cache mutex poisoned")
+        .get(&id)
+        .cloned()
+        .unwrap_or_default();
+    if let Some((dirty, at)) = DIRTY.lock().expect("dirty cache mutex poisoned").get(&id) {
+        if at.elapsed() < DIRTY_MAX_AGE {
+            signals.dirty = Some(*dirty);
+        }
+    }
+    (!signals.is_empty()).then_some(signals)
+}
+
 /// Parse `git worktree list --porcelain` output. The first entry is the main
 /// checkout. Detached checkouts get the branch label `(detached)`; bare
 /// entries are skipped (nothing to open or run there).
@@ -1779,6 +2142,16 @@ struct WorktreeView {
     /// is unreadable. Free to compute — the config on this path is already parsed
     /// for `presets` and `nodes`.
     machine_vars: Option<usize>,
+    /// What git says about this checkout — uncommitted work, commits its upstream
+    /// does not have, an upstream that has been deleted. `None` when nothing is
+    /// known yet, which is what a freshly opened window sees for one poll.
+    ///
+    /// **Cached, and read here rather than computed here.** This view is built from
+    /// database rows on a 5s poll by every open window, so it must not spawn git —
+    /// the same rule that keeps [`worktree_status`] a separate on-demand endpoint.
+    /// See [`git_signals_for`] for which half is refreshed where.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    git: Option<WorktreeGitSignals>,
     /// The interpreted part of the checkout's `ide` config section.
     ///
     /// **Always present, with arrays that may be empty.** Omitting it when empty
@@ -2056,6 +2429,53 @@ fn extensions_view_for(
     }
 }
 
+/// This worktree's `ide.quicklinks`, with any `${veld.*}` reference resolved.
+///
+/// A quicklink is the one *rendered* string a project templates, so the two rules
+/// that govern it are different from a command's.
+///
+/// **Every value is percent-encoded** ([`veld_core::percent::encode_in_url`]), which
+/// is the URL analogue of what slugifying `${veld.branch}` does for a shell. The
+/// characters that matter are the ones `git check-ref-format` permits and a URL
+/// reads as structure: a branch called `feat#2` interpolated raw would truncate the
+/// link at a fragment and open the repo's front page instead of the branch, silently
+/// and for the one person unlucky enough to have named a branch that way. `/` is
+/// deliberately preserved, because a branch's slashes are *path* — `…/tree/feat/foo`
+/// is the address, `…/tree/feat%2Ffoo` is a 404 on every host.
+///
+/// **A reference that will not resolve drops the link** rather than emitting a
+/// half-substituted URL. The only way to reach that from a config `veld lint`
+/// accepts is a branch whose name starts with `-`, for which `worktree_builtins`
+/// omits `branch_raw` on purpose (see there — it is an argument-injection guard for
+/// `argv`, and this inherits it because the meanings have one owner). Vanishingly
+/// rare, and a missing bookmark is a better failure than a bookmark pointing at
+/// somewhere real and wrong.
+///
+/// Interpolation is skipped entirely when no URL mentions `${`, so a project that
+/// templates nothing — which is every project until it opts in — gets the same
+/// strings it always did without a `HashMap` being built per worktree per poll.
+fn resolved_quicklinks(
+    links: Vec<veld_core::ide::Quicklink>,
+    worktree_path: &str,
+    branch: &str,
+    config: &veld_core::config::VeldConfig,
+) -> Vec<veld_core::ide::Quicklink> {
+    if !links.iter().any(|link| link.url.contains("${")) {
+        return links;
+    }
+    let mut ctx = veld_core::variables::VariableContext::new();
+    for (name, value) in super::pty::worktree_builtins(FsPath::new(worktree_path), branch, config) {
+        ctx.set_builtin(&name, veld_core::percent::encode_in_url(&value));
+    }
+    links
+        .into_iter()
+        .filter_map(|link| {
+            let url = veld_core::variables::interpolate(&link.url, &ctx).ok()?;
+            Some(veld_core::ide::Quicklink { url, ..link })
+        })
+        .collect()
+}
+
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
@@ -2159,7 +2579,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
             // the partial moves do not leave `section` half-borrowed.
             let staleness_sensitivity = section.staleness_sensitivity_safe();
             IdeView {
-                quicklinks: section.quicklinks,
+                quicklinks: resolved_quicklinks(section.quicklinks, &wt.path, &wt.branch, c),
                 permissions: section.permissions,
                 panes,
                 // Set below, from `declare_root` rather than this worktree's own
@@ -2178,6 +2598,8 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     // `wt` is moved into the view below, so the guard read happens here — before
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
+    // Read before `wt` is moved into the view below, the same reason `deleting` is.
+    let git = git_signals_for(wt.id);
     let machine_vars = cfg.as_ref().map(|c| {
         c.vars
             .iter()
@@ -2192,6 +2614,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
         presets,
         nodes,
         machine_vars,
+        git,
         ide,
     }
 }
@@ -2355,7 +2778,14 @@ async fn maybe_fetch(repo_root: &FsPath) {
             .unwrap_or(true)
     };
     if due {
-        let _ = git(repo_root, &["fetch", "origin"]).await;
+        // **`--prune`, which is what makes `[gone]` a thing that can be observed.**
+        // A merge-and-delete leaves `origin/<branch>` behind locally until something
+        // prunes it, and until then `%(upstream:track)` reports the branch as merely
+        // in sync — so the rail's "this one is finished" glyph would never appear.
+        // Pruning only deletes remote-tracking refs the remote no longer has; it
+        // touches no local branch, no working tree and no worktree, which keeps it
+        // on the safe side of the same line the non-fast-forward fetch is on.
+        let _ = git(repo_root, &["fetch", "--prune", "origin"]).await;
         LAST_FETCH
             .lock()
             .expect("last-fetch mutex poisoned")
@@ -2845,6 +3275,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
     let mut availability = HashMap::new();
+    let mut sweep_targets = Vec::new();
     for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
         let available = match &memo {
@@ -2896,9 +3327,30 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
         // never touches a working tree — which is what makes a background fetch
         // safe where a background *fast-forward* is not.
         maybe_fetch(root.as_path()).await;
+        // The rows this repo's rail will show, read once and used twice: the
+        // upstream refresh needs them to key its answers by worktree id, and the
+        // dirty sweep needs their paths. `repo_view` reads them again from SQLite
+        // below; a second local read is cheaper than threading a borrow through it,
+        // and this way `list_repos` — which must not spawn git — needs no change.
+        let rows = db.list_worktrees(root.as_path()).unwrap_or_default();
+        // Synchronous: one `for-each-ref` for the whole repo, so the "not pushed"
+        // and "upstream gone" halves of the glyph are as fresh as the poll itself.
+        refresh_upstreams(root.as_path(), &rows).await;
+        sweep_targets.extend(
+            rows.iter()
+                // A trashed row shows restore/delete controls rather than state,
+                // and a checkout mid-`git worktree remove` is the one place a
+                // `git status` races something destructive.
+                .filter(|wt| wt.trashed_at.is_empty())
+                .map(|wt| (wt.id, wt.path.clone())),
+        );
         let git = repo_git_status(&db, &root).await;
         repos.push(repo_view(&db, repo, available, Some(git)).await?);
     }
+    // After the loop, and after the response is built: the `dirty` half costs a
+    // `git status` per checkout, so it fills the cache for the *next* poll rather
+    // than making this one wait for eighteen children.
+    spawn_dirty_sweep(sweep_targets);
     if memo.is_none() {
         LAST_SYNC.record(availability);
     }
@@ -4381,6 +4833,7 @@ mod tests {
             presets: None,
             nodes: Vec::new(),
             machine_vars: None,
+            git: None,
             ide: IdeView {
                 news,
                 ..Default::default()
@@ -6249,6 +6702,360 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Every shape `%(upstream:track,nobracket)` emits, and the two that must not
+    /// collapse into each other.
+    ///
+    /// **"never pushed" and "pushed, then deleted upstream" both come back with no
+    /// counts**, and they are opposite facts about whether the work got anywhere:
+    /// one is a branch that has never left the machine, the other is a branch whose
+    /// remote copy was removed (usually because its pull request landed). If the
+    /// parser folded either into "in sync", the rail would show nothing for the
+    /// case the feature exists to show.
+    #[test]
+    fn upstream_track_distinguishes_no_upstream_from_a_deleted_one() {
+        let none = parse_upstream_track("", "");
+        assert_eq!(none.upstream, None);
+        assert_eq!(none.ahead, None, "nothing to be zero commits away from");
+        assert_eq!(none.behind, None);
+        assert!(!none.upstream_gone);
+        assert!(none.is_empty(), "no upstream and no dirt is no glyph");
+
+        let gone = parse_upstream_track("origin/feat-x", "gone");
+        assert_eq!(gone.upstream.as_deref(), Some("origin/feat-x"));
+        assert!(gone.upstream_gone);
+        assert_eq!(
+            gone.ahead, None,
+            "git reports no counts for a gone upstream"
+        );
+        assert_eq!(gone.behind, None);
+        assert!(!gone.is_empty(), "a gone upstream is worth sending");
+    }
+
+    /// An upstream that exists is comparable, so its counts are `Some(0)` — a real
+    /// answer — where a branch with no upstream has `None`. Collapsing those is how
+    /// "in sync" and "unknown" become the same pixel.
+    #[test]
+    fn upstream_track_reads_the_counts_and_zero_is_an_answer() {
+        let synced = parse_upstream_track("origin/main", "");
+        assert_eq!(synced.ahead, Some(0));
+        assert_eq!(synced.behind, Some(0));
+        assert!(!synced.upstream_gone);
+
+        assert_eq!(
+            parse_upstream_track("origin/main", "ahead 3").ahead,
+            Some(3)
+        );
+        assert_eq!(
+            parse_upstream_track("origin/main", "behind 2").behind,
+            Some(2)
+        );
+
+        let both = parse_upstream_track("origin/main", "ahead 3, behind 2");
+        assert_eq!(both.ahead, Some(3));
+        assert_eq!(both.behind, Some(2));
+    }
+
+    /// `repo_upstreams` against real git, through the exact sequence this repo's own
+    /// workflow produces: branch, push, squash-merge into main, delete the remote
+    /// branch, `fetch --prune`.
+    ///
+    /// This is the test that pins the *premise* of the whole "already merged" glyph.
+    /// `git merge-base --is-ancestor` returns false after a squash merge and the
+    /// branch's own commits still exist, so `ahead` stays non-zero — `[gone]` is the
+    /// only thing git says that changes, and it only says it because the fetch
+    /// pruned. Drop `--prune` from `maybe_fetch` and this test is what fails.
+    #[tokio::test]
+    async fn repo_upstreams_reports_gone_after_a_squash_merge_and_branch_delete() {
+        use std::process::Command;
+
+        /// Runs git and returns stdout — the fixture needs `worktree list`'s output,
+        /// not only its exit status.
+        fn git(cwd: &std::path::Path, args: &[&str]) -> String {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-m", "A"]);
+
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-u", "origin", "main"]);
+
+        // A feature branch in its own worktree — created the way `create_worktree`
+        // creates one: `-b <branch> <path> origin/<default>`. **The start point
+        // being a remote-tracking ref is what gives the branch an upstream**, and
+        // therefore what makes `ahead` a number at all. A branch cut from the local
+        // `main` instead gets no upstream, `ahead` is `None`, and the "not pushed"
+        // glyph correctly says nothing — which is why this fixture uses the
+        // production start point rather than the shorter local one.
+        let feature = dir.path().join("feature");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                feature.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        std::fs::write(feature.join("b.txt"), "b").unwrap();
+        git(&feature, &["add", "b.txt"]);
+        git(&feature, &["commit", "-m", "B"]);
+
+        // **The key is the path git reports, not the path we passed to `worktree
+        // add`.** Both `%(worktreepath)` and `git worktree list --porcelain`
+        // resolve symlinks, so on macOS a `/var/folders/...` tempdir comes back as
+        // `/private/var/folders/...`. That is exactly why the map lines up with the
+        // database in production — `wt.path` is stored from `parse_worktree_list`,
+        // i.e. from the porcelain — and this reads it the same way rather than
+        // assuming the two spellings agree.
+        let listed = git(&work, &["worktree", "list", "--porcelain"]);
+        let key = listed
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .find(|path| path.ends_with("/feature"))
+            .expect("git must list the feature worktree")
+            .to_owned();
+
+        let by_path = repo_upstreams(FsPath::new(&work)).await;
+        let before = by_path.get(&key).expect("the feature worktree's branch");
+        assert_eq!(
+            before.ahead,
+            Some(1),
+            "one commit that its upstream (origin/main, from the start point) lacks"
+        );
+        assert_eq!(
+            before.upstream.as_deref(),
+            Some("origin/main"),
+            "a branch cut from a remote-tracking ref tracks it"
+        );
+        assert!(!before.upstream_gone);
+
+        // Push it, then squash-merge and delete the remote branch — `/ship`'s own
+        // `gh pr merge --squash --delete-branch`, without the forge.
+        git(&feature, &["push", "-u", "origin", "feature"]);
+        git(&work, &["merge", "--squash", "feature"]);
+        git(&work, &["commit", "-m", "B (#1)"]);
+        git(&work, &["push", "origin", "main"]);
+        git(&work, &["push", "origin", "--delete", "feature"]);
+        git(&work, &["fetch", "--prune", "origin"]);
+
+        let after = repo_upstreams(FsPath::new(&work)).await;
+        let gone = after.get(&key).expect("the feature worktree's branch");
+        assert!(
+            gone.upstream_gone,
+            "a squash-merged, remote-deleted branch must report a gone upstream"
+        );
+        assert_eq!(
+            gone.upstream.as_deref(),
+            Some("origin/feature"),
+            "the upstream is still configured — it is the remote ref that is gone"
+        );
+
+        // And every checked-out branch is keyed by its own worktree path, so the
+        // caller never has to match branch names itself.
+        let main_path = listed
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .find(|path| path.ends_with("/work"))
+            .expect("git must list the main worktree");
+        assert!(
+            after.contains_key(main_path),
+            "every checked-out branch must be keyed by its worktree path"
+        );
+    }
+
+    /// `git_is_dirty` against real git, over the three kinds of change that all
+    /// mean "work exists only here" — and the flag that stops the daemon's own
+    /// reading of it from writing to the repo.
+    #[tokio::test]
+    async fn git_is_dirty_sees_every_kind_of_change_without_touching_the_index() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().to_path_buf();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-m", "A"]);
+
+        assert_eq!(git_is_dirty(FsPath::new(&work)).await, Some(false));
+
+        // **The `--no-optional-locks` half.** This runs unprompted in every
+        // registered checkout, so a `git status` that refreshed and rewrote
+        // `.git/index` would contend with the developer's own git and turn the
+        // daemon's read into a filesystem event their dev server rebuilds on.
+        let index = work.join(".git/index");
+        let before = std::fs::metadata(&index).unwrap();
+        let (before_mtime, before_len) = (before.modified().unwrap(), before.len());
+        // A plain edit is the case that needs the index refreshed to be seen, so it
+        // is the one where a status *would* want to write. Touch the file's mtime
+        // out of step with its content the way an editor does.
+        std::fs::write(work.join("a.txt"), "changed").unwrap();
+        assert_eq!(
+            git_is_dirty(FsPath::new(&work)).await,
+            Some(true),
+            "an unstaged edit is work that exists only in this checkout"
+        );
+        let after = std::fs::metadata(&index).unwrap();
+        assert_eq!(
+            (after.modified().unwrap(), after.len()),
+            (before_mtime, before_len),
+            "reading dirtiness must not rewrite .git/index"
+        );
+
+        // An untracked file, alone: it is what `git worktree remove` refuses on, so
+        // the glyph has to agree with the dialog that blocks the delete.
+        git(&work, &["checkout", "--", "a.txt"]);
+        assert_eq!(git_is_dirty(FsPath::new(&work)).await, Some(false));
+        std::fs::write(work.join("scratch.md"), "notes").unwrap();
+        assert_eq!(
+            git_is_dirty(FsPath::new(&work)).await,
+            Some(true),
+            "an untracked file is work too — the delete dialog treats it as such"
+        );
+
+        // Not a repo at all: `None`, which the row renders as no glyph. Distinct
+        // from `Some(false)`, which would claim the checkout is clean.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(git_is_dirty(FsPath::new(empty.path())).await, None);
+    }
+
+    /// A templated quicklink resolves per worktree, and the resolution is
+    /// URL-encoded rather than pasted in raw.
+    #[test]
+    fn a_templated_quicklink_resolves_against_the_worktree() {
+        // The same minimal config `pty`'s own builtins tests use, deserialized
+        // rather than built field-by-field: `VeldConfig` has no `Default`, and a
+        // hand-built one would drift from what a real `veld.json` produces.
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "veld",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        let resolve = |url: &str, branch: &str| {
+            resolved_quicklinks(
+                vec![veld_core::ide::Quicklink {
+                    label: "GitHub".to_owned(),
+                    url: url.to_owned(),
+                }],
+                "/repo/wt",
+                branch,
+                &cfg,
+            )
+        };
+
+        let out = resolve(
+            "https://github.com/o/r/tree/${veld.branch_raw}",
+            "git-status-visual",
+        );
+        assert_eq!(out[0].url, "https://github.com/o/r/tree/git-status-visual");
+
+        // **A branch's slashes are path, not a segment to escape.** `feat%2Ffoo` is
+        // a 404 on every code host, which is the whole reason `encode_in_url` exists
+        // beside `encode_component` rather than reusing it.
+        let out = resolve("https://github.com/o/r/tree/${veld.branch_raw}", "feat/foo");
+        assert_eq!(out[0].url, "https://github.com/o/r/tree/feat/foo");
+
+        // ...and the character that made encoding necessary at all: git permits `#`
+        // in a refname, and a raw one truncates the URL at a fragment, so the link
+        // would silently open the repo's front page instead of the branch.
+        let out = resolve("https://github.com/o/r/tree/${veld.branch_raw}", "feat#2");
+        assert_eq!(out[0].url, "https://github.com/o/r/tree/feat%232");
+
+        // `${veld.branch}` is the slugified name, as everywhere else — which is why
+        // a URL wants `branch_raw`: this addresses a branch that does not exist.
+        let out = resolve("https://x/t/${veld.branch}", "feat/foo");
+        assert_eq!(out[0].url, "https://x/t/feat-foo");
+    }
+
+    /// An unresolvable reference **drops the link** rather than shipping a
+    /// half-substituted URL, and an untemplated list is returned untouched.
+    #[test]
+    fn a_quicklink_that_cannot_resolve_is_omitted_not_mangled() {
+        // The same minimal config `pty`'s own builtins tests use, deserialized
+        // rather than built field-by-field: `VeldConfig` has no `Default`, and a
+        // hand-built one would drift from what a real `veld.json` produces.
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "veld",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        let links = vec![
+            veld_core::ide::Quicklink {
+                label: "Plain".to_owned(),
+                url: "https://staging.example.com".to_owned(),
+            },
+            veld_core::ide::Quicklink {
+                label: "Branch".to_owned(),
+                url: "https://x/t/${veld.branch_raw}".to_owned(),
+            },
+        ];
+
+        // A branch starting with `-`: `worktree_builtins` omits `branch_raw` for it
+        // on purpose (an argument-injection guard for `argv`), and this inherits the
+        // omission because the meanings have one owner. A missing bookmark beats one
+        // pointing somewhere real and wrong.
+        let out = resolved_quicklinks(links.clone(), "/repo/wt", "-foo", &cfg);
+        assert_eq!(
+            out.iter().map(|l| l.label.as_str()).collect::<Vec<_>>(),
+            vec!["Plain"],
+            "the templated link is dropped; its untemplated neighbour is not"
+        );
+
+        // No `${` anywhere: the same values back, without a context being built per
+        // worktree per poll for every project that templates nothing.
+        let untemplated = vec![links[0].clone()];
+        assert_eq!(
+            resolved_quicklinks(untemplated.clone(), "/repo/wt", "-foo", &cfg),
+            untemplated
+        );
     }
 
     /// The staleness computation, against a real git repo: the direction of
