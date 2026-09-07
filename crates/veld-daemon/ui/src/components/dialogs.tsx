@@ -487,6 +487,29 @@ export function sourceForMode(input: {
 }
 
 /**
+ * The spin-off source a dialog is pointing at, resolved from the live list.
+ *
+ * **Keyed on the path, and that is the whole function.** `worktrees.id` is a
+ * SQLite rowid with no `AUTOINCREMENT`, so a permanent delete frees it and the
+ * next checkout created takes it — while this dialog can sit open for minutes
+ * with `sources` refreshing underneath it on the 5s poll. Keyed on the id, the
+ * selection silently re-resolved to whichever row inherited the number, and
+ * *that* row's path is what got sent.
+ *
+ * It is a one-line `find`, lifted out anyway: re-keying it on `w.id` is a
+ * type-valid change that compiles and passes every other test in this file, so
+ * the rule needs a test of its own rather than a reviewer's attention. It had
+ * neither, and shipped wrong once.
+ */
+export function spinOffSource<T extends { id: number; path: string }>(
+  sources: T[],
+  fromPath: string,
+): T | null {
+  if (fromPath === "") return null;
+  return sources.find((w) => w.path === fromPath) ?? null;
+}
+
+/**
  * Everything standing between the dialog and a create that would succeed.
  *
  * One function rather than a chain of inline `&&`s because the two branch
@@ -678,8 +701,8 @@ export function NewWorktreeDialog(props: {
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
   const taken = takenExcluding(props.takenAliases, pendingAlias);
   const collides = aliasCollides(alias, taken);
-  /** The spin-off source currently selected, resolved to its row. */
-  const from = props.sources.find((w) => w.path === fromPath) ?? null;
+  /** See [`spinOffSource`], which owns the identity rule. */
+  const from = spinOffSource(props.sources, fromPath);
   /**
    * A checkout path as the rail names it.
    *

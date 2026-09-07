@@ -3,6 +3,7 @@ import {
   branchForMode,
   createBlockers,
   sourceForMode,
+  spinOffSource,
   type SourceMode,
 } from "./dialogs";
 import type { RepoBranches } from "../api";
@@ -252,5 +253,42 @@ describe("createBlockers", () => {
     expect(createBlockers({ ...args, mode: "new_branch", branch: "" }).ready).toBe(
       false,
     );
+  });
+});
+
+describe("spinOffSource", () => {
+  const wt = (id: number, path: string) => ({ id, path });
+
+  it("resolves the picked source by path", () => {
+    const sources = [wt(1, "/repo"), wt(2, "/wt/a")];
+    expect(spinOffSource(sources, "/wt/a")).toEqual(wt(2, "/wt/a"));
+  });
+
+  it("resolves nothing for an empty selection", () => {
+    expect(spinOffSource([wt(1, "/repo")], "")).toBeNull();
+  });
+
+  it("resolves nothing once the picked source is gone", () => {
+    // The list is refreshed by the 5s poll while the dialog is open, so a
+    // binned or deleted source has to read as *absent* — that is what disables
+    // Create and shows the "no longer available" message.
+    expect(spinOffSource([wt(1, "/repo")], "/wt/a")).toBeNull();
+  });
+
+  it("does NOT follow a reused rowid onto a different checkout", () => {
+    // **The regression.** `worktrees.id` is a rowid with no AUTOINCREMENT: a
+    // permanent delete frees the number and the next checkout created takes
+    // it. Keyed on the id, this returned the impostor and its path went on the
+    // wire — a branch cut from, and uncommitted work copied out of, a checkout
+    // the user never picked.
+    const picked = wt(7, "/wt/the-one-i-picked");
+    const before = [wt(1, "/repo"), picked];
+    expect(spinOffSource(before, picked.path)).toEqual(picked);
+
+    // Same id, different checkout — what the next poll delivers.
+    const impostor = wt(7, "/wt/somebody-elses");
+    const after = [wt(1, "/repo"), impostor];
+    expect(spinOffSource(after, picked.path)).toBeNull();
+    expect(spinOffSource(after, picked.path)).not.toEqual(impostor);
   });
 });
