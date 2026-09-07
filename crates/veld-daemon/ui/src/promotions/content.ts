@@ -302,4 +302,33 @@ export const PROMOTIONS: Promotion[] = [
       "A closed lid, an update, a connection that dropped — the terminal is still there when you get back. Shells last while Veld is open, not 30 minutes past a drop.",
     glyph: "terminal",
   },
+  {
+    // **Promoted because of where it lives, not what it does.** The create
+    // dialog's other new sources (an existing local branch, a remote branch)
+    // are visible the moment you open it — a "Start from" select at the top —
+    // so nobody needs telling. The spin-off is the half that sits in a *row's*
+    // ⋯ menu, which is a place people open to rename and to bin and otherwise
+    // never read, and it is the half that changes what you do: a dirty tree
+    // stops being a reason to stash before trying a second approach.
+    //
+    // The headline starts from the reader's work rather than from the feature.
+    // "Spin off a worktree, changes included" was the first draft and opens on
+    // the mechanism; "Stop stashing before you try something else" was the
+    // second and is the struggle-then-relief shape the doc names.
+    //
+    // The **body** opened on the menu item, which is the same failure one level
+    // down — the doc's order is what changes about your day first, where to look
+    // second. It now states the outcome and names the menu item last.
+    //
+    // `panes` is the closest fit in a deliberately closed four-glyph set — none
+    // of them means "checkout", and adding a fifth is a new icon choice rather
+    // than a copy decision.
+    id: "worktree-spin-off",
+    since: "2026-09-07",
+    eyebrow: "New",
+    headline: "Take your uncommitted work to a new branch",
+    body:
+      "A second checkout starts exactly where one you are working in is — staged, unstaged and untracked files and all. Spin off…, in a worktree's ⋯ menu.",
+    glyph: "panes",
+  },
 ];
