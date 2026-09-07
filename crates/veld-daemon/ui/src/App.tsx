@@ -8351,9 +8351,18 @@ function Rail(props: {
   // section silently the moment the trash grows past the preview again. Cleared
   // here rather than at each of those call sites, because the count is the thing
   // that actually decides.
+  //
+  // `trashOpenFor === railRepo` is what makes that count the *right* one.
+  // `trashCount` describes the project the rail is drawing, which is not
+  // necessarily the project whose trash is open: without the guard, opening
+  // project A's trash and then merely looking at project B — whose trash almost
+  // always holds nothing — cleared A's flag, so coming back collapsed a pile
+  // nothing had happened to.
   useEffect(() => {
-    if (trashCount <= TRASH_PREVIEW) setTrashOpenFor(null);
-  }, [trashCount]);
+    if (trashOpenFor === railRepo && trashCount <= TRASH_PREVIEW) {
+      setTrashOpenFor(null);
+    }
+  }, [trashCount, trashOpenFor, railRepo]);
   // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   /**
