@@ -152,6 +152,93 @@ export interface WorktreeGitStatus {
   files: DirtyFile[];
 }
 
+/**
+ * One local branch of a repo, from {@link api.repoBranches}.
+ *
+ * `checked_out_in` is the field the picker cannot do without: git refuses
+ * `git worktree add` for a branch already checked out somewhere, so a list that
+ * cannot say which branches are taken offers choices that fail on click.
+ */
+export interface LocalBranch {
+  /** Short name (`feat/x`), exactly as git has it — never slugged. */
+  name: string;
+  /** The checkout holding it, or `null` when the branch is free. */
+  checked_out_in: string | null;
+  /** `origin/feat/x`, or `null` for a branch that tracks nothing. */
+  upstream: string | null;
+}
+
+/** One remote-tracking branch, from {@link api.repoBranches}. */
+export interface RemoteBranch {
+  /** `origin/feat/x` — the start point git is given. */
+  name: string;
+  /** `feat/x` — the local branch name offered by default. */
+  local_name: string;
+  /**
+   * Whether a local branch called `local_name` already exists. Such a branch
+   * cannot be *created* from the remote ref, so the picker steers to the
+   * local-branch source instead of letting the create fail.
+   */
+  has_local: boolean;
+}
+
+/**
+ * The branches a worktree can be created from.
+ *
+ * The remote half is as fresh as the last fetch — the repo poll fetches at most
+ * once a minute per repo — so a branch pushed seconds ago may not be listed
+ * yet. Reading it does not fetch, deliberately: it is a GET.
+ */
+export interface RepoBranches {
+  local: LocalBranch[];
+  remote: RemoteBranch[];
+}
+
+/**
+ * What a spin-off's carry-over did, on the create response.
+ *
+ * Present only when a spin-off asked for it. The worktree is created and
+ * registered *before* the carry-over runs, so `error` being set means the
+ * checkout exists without the changes — which is the one outcome a caller must
+ * not report as a plain success.
+ */
+export interface CarryOverReport {
+  /** How many paths the new checkout has uncommitted afterwards. */
+  files: number;
+  /**
+   * The source's `git status` changed while it was being read, so what arrived
+   * mixes two moments — an agent or a build writing the source mid-request.
+   */
+  drifted: boolean;
+  /** Why it did not happen. The worktree exists either way. */
+  error?: string;
+}
+
+/** {@link api.createWorktree}'s response: the worktree, plus its carry-over. */
+export interface CreatedWorktree extends Worktree {
+  carry_over?: CarryOverReport;
+}
+
+/**
+ * Where a new worktree's checkout comes from.
+ *
+ * A discriminated union, mirroring the daemon's tagged enum, so the
+ * combinations that mean nothing — a remote ref on a local checkout, a
+ * carry-over with no worktree to carry from — cannot be built by mistake.
+ */
+export type CreateWorktreeSource =
+  /** Cut the branch fresh, per the `git.createFrom` setting. The default. */
+  | { kind: "new_branch" }
+  /** Check out the existing local branch named by `branch`. */
+  | { kind: "local_branch" }
+  /** Create `branch` from a remote-tracking ref, tracking it. */
+  | { kind: "remote_branch"; remote_ref: string }
+  /**
+   * Cut `branch` from another checkout of the same repo. Unpushed commits come
+   * along for free; `carry_over` adds its staged, unstaged and untracked work.
+   */
+  | { kind: "worktree"; from_worktree: number; carry_over?: boolean };
+
 export interface Worktree {
   id: number;
   repo_root: string;
@@ -1355,10 +1442,25 @@ export const api = {
    * the daemon's assigned marker for a poll before changing to the chosen one; omit
    * them and the daemon assigns.
    */
+  /**
+   * The branches a worktree can be created from — local and remote-tracking.
+   *
+   * A GET that does not fetch. See {@link RepoBranches}.
+   */
+  repoBranches: (root: string) =>
+    request<RepoBranches>(
+      `/api/repos/branches?repo_root=${encodeURIComponent(root)}`,
+    ),
   createWorktree: (body: {
     repo_root: string;
     branch: string;
+    /**
+     * Superseded by `source`, and still sent so the request is meaningful to a
+     * daemon older than `source`. `source` wins wherever both are understood.
+     */
     create_branch: boolean;
+    /** Where the checkout comes from. See {@link CreateWorktreeSource}. */
+    source?: CreateWorktreeSource;
     alias?: string;
     /** What the rail shows. Omit (or send `""`) to render the alias. */
     display_name?: string;
@@ -1371,7 +1473,7 @@ export const api = {
     emoji?: string;
     marker_color?: string;
   }) =>
-    request<Worktree>("/api/worktrees", {
+    request<CreatedWorktree>("/api/worktrees", {
       method: "POST",
       body: JSON.stringify(body),
     }),

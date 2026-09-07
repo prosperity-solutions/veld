@@ -16,6 +16,7 @@ import {
   type SharesList,
   type SettingsDoc,
   type StatsResponse,
+  type CreatedWorktree,
   type Worktree,
   type WorktreeGitStatus,
   type ViewableFile,
@@ -2323,7 +2324,10 @@ function AppInner(props: {
     /** `lane` is where the new checkout is filed — `""` for ungrouped. Carried
      *  on the dialog state because the rail now has one create button per
      *  section, so "which lane" is decided by the click, not by the dialog. */
-    | { kind: "new-worktree"; lane: string }
+    /** `spinOffFrom` set means the ⋯ menu's "Spin off…" opened it, so the
+     *  dialog starts on that checkout as its source rather than on the default
+     *  new-branch create. */
+    | { kind: "new-worktree"; lane: string; spinOffFrom?: Worktree }
     | { kind: "sharing" }
     | { kind: "rename"; worktree: Worktree }
     /**
@@ -2755,6 +2759,21 @@ function AppInner(props: {
         key: "emoji",
         title: "Change marker…",
         onClick: () => setDialog({ kind: "marker", worktree: w }),
+      },
+      // A second checkout of where this one is *now* — a new branch from its
+      // HEAD, with its uncommitted work reproduced. It opens the create dialog
+      // with this row already chosen rather than being its own dialog: the two
+      // differ only in where the branch starts, and everything else a create
+      // asks (name, marker, lane) is asked identically.
+      //
+      // Filed into the same lane, because a spin-off belongs beside the thing
+      // it span off from — the alternative puts it in whichever section the
+      // rail last created into, which is not a decision the user made.
+      {
+        key: "spin-off",
+        title: "Spin off…",
+        onClick: () =>
+          setDialog({ kind: "new-worktree", lane: w.lane ?? "", spinOffFrom: w }),
       },
       // Lane assignment as a submenu of the *existing* lanes, plus "New lane…".
       // A free-text field here would let two rows sit in "review" and "Review"
@@ -6640,6 +6659,13 @@ function AppInner(props: {
       {dialog.kind === "new-worktree" && repo && (
         <NewWorktreeDialog
           onClose={closeDialog}
+          repoRoot={repo.root}
+          // Live checkouts only. A trashed row is on its way off the disk, so
+          // reading its index would race `git worktree remove` — the daemon
+          // refuses it too, and offering it here would only make that refusal
+          // arrive after the click.
+          sources={worktrees.filter((w) => !w.trashed_at && !isDeleting(w))}
+          spinOffFrom={dialog.spinOffFrom}
           takenAliases={worktrees.map((w) => w.alias)}
           lane={dialog.lane}
           usedBy={markerUsedBy.emoji}
@@ -6648,7 +6674,7 @@ function AppInner(props: {
           onStyleChange={(style) => void saveSettings({ "worktree.markerStyle": style })}
           createFrom={gitCreateFrom(settings ?? {})}
           onCreate={async (body) => {
-            let created: Worktree;
+            let created: CreatedWorktree;
             try {
               created = await api.createWorktree({
                 repo_root: repo.root,
@@ -6665,6 +6691,34 @@ function AppInner(props: {
               // user reads why the rest did not.
               await refresh();
               throw e;
+            }
+            // What the carry-over did, said out loud.
+            //
+            // **The failure case is the reason this is here at all.** The
+            // checkout is created and registered before its uncommitted work is
+            // reproduced, so a create that returns 200 with `carry_over.error`
+            // set is a worktree that exists *without* the changes — and the
+            // dialog has already closed on what looks like a plain success.
+            // Silence there is the one outcome that loses somebody's work
+            // without telling them.
+            const carried = created.carry_over;
+            if (carried?.error) {
+              notifyError(
+                `${worktreeLabel(created)} was created, but its changes did not come across`,
+                carried.error,
+              );
+            } else if (carried?.drifted) {
+              // Not a failure: the changes arrived. But something wrote the
+              // source while it was being read, so what arrived is a mixture
+              // of two moments and the user is the only one who can tell
+              // whether that matters.
+              notifyRedirect(
+                `Carried ${carried.files} file${carried.files === 1 ? "" : "s"} across, but the source changed while it was being read — check ${worktreeLabel(created)}`,
+              );
+            } else if (carried && carried.files > 0) {
+              notifyDone(
+                `Carried ${carried.files} file${carried.files === 1 ? "" : "s"} across to ${worktreeLabel(created)}`,
+              );
             }
             // Newest first, in the section it was created into. Unplaced rows sort
             // last (`WT_ORDER`), so a new checkout used to appear at the bottom of

@@ -44,6 +44,10 @@ pub fn routes() -> Router {
         .route("/api/repos/update-main", post(update_main))
         .route("/api/repos/revert-root", post(revert_repo_root))
         .route("/api/repos/import", post(import_repo))
+        // The branches a worktree can be created from. A GET: it reads refs and
+        // fetches nothing (see `list_branches`), so it stays inside this
+        // router's read-only-GET contract.
+        .route("/api/repos/branches", get(list_branches))
         .route("/api/worktrees", post(create_worktree))
         .route(
             "/api/worktrees/{id}",
@@ -668,12 +672,28 @@ pub(crate) fn open_desktop_db() -> Result<Db, ApiError> {
 /// `.trim()` would silently destroy — which is exactly the bug that shipped
 /// when `git_status` used [`git`] and plain edits went undetected.
 async fn git_raw(dir: &FsPath, args: &[&str]) -> Result<Vec<u8>, String> {
+    git_raw_with_index(dir, None, args).await
+}
+
+/// [`git_raw`], plus the option of pointing git at an index file that is not
+/// the checkout's own.
+///
+/// `GIT_INDEX_FILE` is the only way to stage into something other than the
+/// working checkout's index, and staging into a scratch copy is how
+/// [`capture_uncommitted`] learns what `git add` *would* do without doing it
+/// to a checkout somebody is working in.
+async fn git_raw_with_index(
+    dir: &FsPath,
+    index: Option<&FsPath>,
+    args: &[&str],
+) -> Result<Vec<u8>, String> {
     let path_env = cached_user_path().await;
-    let output = tokio::process::Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .env("PATH", path_env)
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.arg("-C").arg(dir).args(args).env("PATH", path_env);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    let output = cmd
         .output()
         .await
         .map_err(|e| format!("failed to run git: {e}"))?;
@@ -695,6 +715,15 @@ pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&git_raw(dir, args).await?)
         .trim()
         .to_string())
+}
+
+/// [`git`], run against a scratch index file. See [`git_raw_with_index`].
+async fn git_with_index(dir: &FsPath, index: &FsPath, args: &[&str]) -> Result<String, String> {
+    Ok(
+        String::from_utf8_lossy(&git_raw_with_index(dir, Some(index), args).await?)
+            .trim()
+            .to_string(),
+    )
 }
 
 /// One file that stops `git worktree remove` from succeeding, as reported by
@@ -936,6 +965,332 @@ async fn discover_worktrees(repo_root: &FsPath) -> Result<Vec<DiscoveredWorktree
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
     Ok(canonicalize_discovered(parse_worktree_list(&porcelain)))
+}
+
+/// One local branch of a repo, as the create dialog's source picker needs it.
+///
+/// `checked_out_in` is the load-bearing field: git refuses `git worktree add`
+/// for a branch that is already checked out in another worktree, so a picker
+/// that cannot say which branches are taken offers choices that fail on click.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct LocalBranchView {
+    /// Short name (`feat/x`), exactly as git has it — never slugged, since it
+    /// is passed straight back as a ref.
+    name: String,
+    /// The checkout that currently holds it, or `None` when the branch is free.
+    checked_out_in: Option<String>,
+    /// `origin/feat/x`, or `None` for a branch that tracks nothing.
+    upstream: Option<String>,
+}
+
+/// One remote-tracking branch, as the create dialog's source picker needs it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+struct RemoteBranchView {
+    /// `origin/feat/x` — what a `git worktree add` start-point argument names.
+    name: String,
+    /// `feat/x` — the local branch name the dialog offers by default. The
+    /// remote's own name is stripped, because a local branch called
+    /// `origin/feat/x` is legal, confusing, and never what was meant.
+    local_name: String,
+    /// Whether a local branch called `local_name` already exists. Such a
+    /// branch cannot be *created* from the remote ref, so the dialog steers
+    /// the user to the local-branch source instead of letting the create fail.
+    has_local: bool,
+}
+
+/// The branches a repo can produce a worktree from.
+#[derive(Debug, Serialize)]
+struct BranchesView {
+    local: Vec<LocalBranchView>,
+    remote: Vec<RemoteBranchView>,
+}
+
+/// Parse `git for-each-ref refs/heads` in the format
+/// `<short>\t<upstream:short>\t<worktreepath>`.
+///
+/// **The worktree path is last on purpose.** A refname cannot contain a tab
+/// (`git check-ref-format` rejects every ASCII control character), but a
+/// *filesystem path* can — so the split is `splitn(3, …)` and the trailing
+/// field keeps whatever it holds, rather than a fourth field appearing out of
+/// a directory somebody named with a tab.
+fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
+    out.lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let mut fields = line.splitn(3, '\t');
+            let name = fields.next()?;
+            if name.is_empty() {
+                return None;
+            }
+            let upstream = fields.next().unwrap_or("");
+            let worktree = fields.next().unwrap_or("");
+            Some(LocalBranchView {
+                name: name.to_string(),
+                checked_out_in: (!worktree.is_empty()).then(|| worktree.to_string()),
+                upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
+            })
+        })
+        .collect()
+}
+
+/// Parse `git for-each-ref refs/remotes` in the format
+/// `<short>\t<symref>`, given the local branch names for the `has_local` flag.
+///
+/// **Symbolic refs are skipped.** `refs/remotes/origin/HEAD` is a symref to the
+/// remote's default branch and shortens to the bare remote name (`origin`),
+/// which is not a branch anybody can check out — offering it would put a row
+/// called "origin" in the picker that duplicates whatever `origin/main` already
+/// is.
+fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBranchView> {
+    out.lines()
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let (name, symref) = line.split_once('\t').unwrap_or((line, ""));
+            if name.is_empty() || !symref.is_empty() {
+                return None;
+            }
+            // `origin/feat/x` → `feat/x`. Only the first component is the
+            // remote, so `split_once` and not `rsplit_once`: a branch called
+            // `feat/x` under `origin` must not become `x`.
+            let (_remote, local_name) = name.split_once('/')?;
+            if local_name.is_empty() {
+                return None;
+            }
+            Some(RemoteBranchView {
+                name: name.to_string(),
+                local_name: local_name.to_string(),
+                has_local: local.iter().any(|b| b.name == local_name),
+            })
+        })
+        .collect()
+}
+
+/// The branches a worktree can be created from: local, and remote-tracking.
+///
+/// A GET, and side-effect-free like every other GET on this router — in
+/// particular **it does not fetch**. The remote-tracking refs it reports are as
+/// fresh as the last fetch, which `refresh_repos` already performs at most once
+/// a minute per repo while an IDE window is open (see `maybe_fetch`), so a
+/// remote branch pushed in the last minute may not be listed yet. That is the
+/// deliberate trade: a picker that fetched on open would spawn a network
+/// operation from a read, and would do it again on every re-render.
+async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>, ApiError> {
+    let repo_root = PathBuf::from(&q.repo_root);
+    // Registered repos only, matching every other repo-scoped endpoint: this
+    // spawns git in a caller-supplied directory, and the registry is what makes
+    // that directory one the user already chose.
+    let db = open_desktop_db()?;
+    db.get_repo(&repo_root)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
+    let heads = git(
+        &repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)",
+            "refs/heads",
+        ],
+    )
+    .await
+    .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let local = parse_local_branches(&heads);
+    let remotes = git(
+        &repo_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)\t%(symref)",
+            "refs/remotes",
+        ],
+    )
+    .await
+    .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    let remote = parse_remote_branches(&remotes, &local);
+    Ok(Json(BranchesView { local, remote }))
+}
+
+// ---------------------------------------------------------------------------
+// Carrying uncommitted work into a spin-off
+// ---------------------------------------------------------------------------
+
+/// A snapshot of one checkout's uncommitted state, as two git tree objects.
+///
+/// Two trees rather than a patch, because the pair is an exact model of what a
+/// checkout can be in: `staged_tree` is the index, `full_tree` is the index
+/// plus every unstaged edit, deletion and untracked file. Every combination
+/// falls out of the pair correctly — a staged add that was then edited, a
+/// deletion staged but the file still on disk, a mode flip — where a textual
+/// diff has to reconstruct each of them and a filesystem copy cannot see the
+/// index at all.
+///
+/// Both trees are built from **copies** of the source's index file, so the
+/// capture writes nothing but shared objects. That is the constraint the whole
+/// mechanism is shaped by: the source is somebody's live checkout, quite
+/// possibly with an agent editing it, and the obvious alternative —
+/// `git stash create`, which produces exactly this snapshot as one commit —
+/// rewrites the source's index under `index.lock` even with
+/// `--no-optional-locks` (measured, git 2.50). A spin-off must not be able to
+/// make a concurrent `git add` in the source fail.
+#[derive(Debug)]
+struct CapturedWork {
+    /// The commit both trees are relative to: the source's `HEAD`, read once,
+    /// and the start point the spin-off's branch is then cut from. Reading it
+    /// once is what stops a commit landing in the source mid-capture leaving
+    /// the trees describing a different base than the new branch has — the
+    /// staged/unstaged split is only meaningful against one HEAD.
+    head: String,
+    /// The source's index as a tree — its **staged** view.
+    staged_tree: String,
+    /// The index plus every unstaged edit, deletion and untracked (non-ignored)
+    /// file — its **working-tree** view.
+    full_tree: String,
+    /// The source's `git status` changed while it was being read, so the two
+    /// trees may mix two moments.
+    ///
+    /// Reported, never retried. Waiting for a live checkout to fall quiet is
+    /// not a promise this endpoint can keep, and a silent torn snapshot is the
+    /// one outcome worse than a named one.
+    drifted: bool,
+}
+
+/// Snapshot `src`'s uncommitted state without writing anything of `src`'s.
+///
+/// Refuses, before anything is created, for the two states the two-tree model
+/// cannot represent — see the guards. Everything else it delegates to git:
+/// ignore rules, clean filters, deletion detection and type changes are all
+/// `git add`'s answers, not ours, which is why this is `add -A` into a scratch
+/// index and not a directory walk.
+async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
+    // A checkout mid-merge has conflict stages in its index, and `write-tree`
+    // cannot represent an unmerged index at all — it exits 128 with
+    // `error building trees`. Splicing the stages across instead was
+    // considered and rejected: the *merge* (`MERGE_HEAD`, `MERGE_MSG`) is
+    // per-worktree state that no tree object carries, so the spin-off would
+    // get conflict markers in a checkout where `git merge --abort` has nothing
+    // to abort — a worse place to be than not having the changes.
+    if !git(src, &["ls-files", "--unmerged"]).await?.is_empty() {
+        return Err(
+            "that checkout is in the middle of a merge, so its uncommitted changes cannot \
+             be carried across — finish or abort the merge first, or create the worktree \
+             without carrying them"
+                .to_owned(),
+        );
+    }
+    // A sparse checkout's out-of-cone files are absent from disk, which
+    // `git add -A` reads as deletions — so `full_tree` would instruct the new
+    // checkout to delete every path outside the cone, and the new checkout is
+    // not sparse. Refusing beats materialising that.
+    if git(src, &["config", "--bool", "core.sparseCheckout"])
+        .await
+        .as_deref()
+        == Ok("true")
+    {
+        return Err(
+            "that checkout is sparse, so its uncommitted changes cannot be carried across \
+             — create the worktree without carrying them"
+                .to_owned(),
+        );
+    }
+
+    let head = git(src, &["rev-parse", "HEAD"]).await?;
+    // A linked worktree has its own index under `.git/worktrees/<name>/`, which
+    // is what `--absolute-git-dir` resolves to from inside it — the main
+    // checkout's `.git/index` would be a different checkout's staged state.
+    let git_dir = PathBuf::from(git(src, &["rev-parse", "--absolute-git-dir"]).await?);
+    let index = git_dir.join("index");
+
+    // The status either side of the capture. `--no-optional-locks` on both, so
+    // a *read* cannot be the thing that takes the source's index lock: git
+    // opportunistically rewrites the index's stat cache after a status, and
+    // this endpoint's whole promise is that it does not write the source.
+    let status_args = &["--no-optional-locks", "status", "--porcelain=v1", "-z"];
+    let before = git_raw(src, status_args).await?;
+
+    let scratch = tempfile::TempDir::new()
+        .map_err(|e| format!("failed to create a scratch directory: {e}"))?;
+    let staged_index = scratch.path().join("staged.index");
+    let full_index = scratch.path().join("full.index");
+    // Copied, not shared: every git call below writes the index it is pointed
+    // at. A missing index file means there is no staged state to read at all,
+    // which for a real checkout means something is wrong with it — refuse
+    // rather than proceed against an empty index, whose `write-tree` is the
+    // empty tree and whose `read-tree -u --reset` would empty the new checkout.
+    for dest in [&staged_index, &full_index] {
+        std::fs::copy(&index, dest)
+            .map_err(|e| format!("failed to read {}: {e}", index.display()))?;
+    }
+
+    let staged_tree = git_with_index(src, &staged_index, &["write-tree"]).await?;
+    // `add -A` against the *copy*. It stages every unstaged edit, every
+    // deletion and every untracked file into that index and touches nothing of
+    // the source's but the shared object database — and it applies the same
+    // ignore rules a plain `git add` does, so `target/` and `node_modules/`
+    // are never captured. That exclusion is the reason this is `add` and not a
+    // directory copy: an ignored tree is routinely tens of gigabytes.
+    git_with_index(src, &full_index, &["add", "-A", "--"]).await?;
+    let full_tree = git_with_index(src, &full_index, &["write-tree"]).await?;
+
+    let after = git_raw(src, status_args).await?;
+    Ok(CapturedWork {
+        head,
+        staged_tree,
+        full_tree,
+        drifted: before != after,
+    })
+}
+
+/// Reconstitute a [`CapturedWork`] in a checkout that is sitting clean at
+/// [`CapturedWork::head`].
+///
+/// Two `read-tree`s and deliberately nothing else. There is **no
+/// `update-index --refresh`** afterwards: it is unnecessary (`git status` in
+/// the new checkout is already correct without it, measured) and it exits 1 by
+/// design when it finds a genuinely-modified file, so a caller that checked its
+/// status would be reading a healthy result as a failure.
+async fn apply_captured(dest: &FsPath, work: &CapturedWork) -> Result<(), String> {
+    // The working-tree view, with `-u --reset`: writes every captured file to
+    // disk and removes the ones the source had deleted.
+    git(dest, &["read-tree", "-u", "--reset", &work.full_tree]).await?;
+    // Then the staged view over the index **alone** — no `-u`, so the files on
+    // disk stay as the line above left them. This is what reproduces the split
+    // rather than presenting everything as staged. An untracked file is in
+    // `full_tree` and not in `staged_tree`, so it lands on disk and is
+    // untracked again here, which is exactly right.
+    git(dest, &["read-tree", &work.staged_tree]).await?;
+    Ok(())
+}
+
+/// What a spin-off's carry-over actually did, reported alongside the created
+/// worktree.
+///
+/// It exists because the alternative is a silent partial success: the checkout
+/// is created and registered *before* the carry-over runs, so without this
+/// field a caller cannot tell "spun off with your changes" from "spun off,
+/// changes left behind".
+/// The create response: the worktree, plus what its carry-over did.
+///
+/// `worktree` is **flattened**, so this is wire-compatible with the plain
+/// `WorktreeView` every caller read before — a client that ignores
+/// `carry_over` sees exactly the object it always saw.
+#[derive(Serialize)]
+struct CreatedWorktreeView {
+    #[serde(flatten)]
+    worktree: WorktreeView,
+    /// Present only for a spin-off that was asked to carry work across.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    carry_over: Option<CarryOverReport>,
+}
+
+#[derive(Debug, Serialize)]
+struct CarryOverReport {
+    /// How many paths the new checkout has uncommitted afterwards — what
+    /// `git status` reports in it. A count, because "your changes came across"
+    /// is only worth saying with a number next to it.
+    files: usize,
+    /// See [`CapturedWork::drifted`].
+    drifted: bool,
+    /// Why the carry-over did not happen. The worktree exists either way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2633,14 +2988,54 @@ async fn remove_repo(Json(body): Json<RemoveRepoBody>) -> Result<StatusCode, Api
 // Worktrees
 // ---------------------------------------------------------------------------
 
+/// Where a new worktree's checkout comes from.
+///
+/// A **tagged enum** rather than a handful of optional fields, so the
+/// combinations that mean nothing cannot be expressed on the wire at all: a
+/// remote ref together with a source worktree, a carry-over with no worktree to
+/// carry from, a `remote_ref` on a plain local checkout. Flat optionals would
+/// have made each of those a runtime check somebody has to remember to write.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum CreateFrom {
+    /// Cut `branch` fresh — from `origin/<default>` or the repo's local `HEAD`
+    /// per the `git.createFrom` setting. **The default**, and what a client
+    /// that predates this field asks for by sending `create_branch: true`.
+    NewBranch,
+    /// Check out the existing local branch named by `branch`. What
+    /// `create_branch: false` means.
+    LocalBranch,
+    /// Create `branch` from the remote-tracking ref `remote_ref`
+    /// (`origin/feat/x`), tracking it.
+    RemoteBranch { remote_ref: String },
+    /// Cut `branch` from another checkout of the same repo — a spin-off.
+    ///
+    /// Unpushed commits come along for free, because the branch starts at that
+    /// checkout's `HEAD`. `carry_over` is the rest: its staged, unstaged and
+    /// untracked work, reproduced in the new checkout (see
+    /// [`capture_uncommitted`]).
+    Worktree {
+        from_worktree: i64,
+        #[serde(default)]
+        carry_over: bool,
+    },
+}
+
 #[derive(Deserialize)]
 struct CreateWorktreeBody {
     repo_root: String,
     branch: String,
     /// Create `branch` (from the repo's current HEAD) instead of checking out
     /// an existing one.
+    ///
+    /// Superseded by `source`, and kept because it is the whole wire contract
+    /// of every client written before `source` existed. Read only when `source`
+    /// is absent.
     #[serde(default)]
     create_branch: bool,
+    /// Where the checkout comes from. Absent falls back to `create_branch`.
+    #[serde(default)]
+    source: Option<CreateFrom>,
     /// Custom alias; defaults to a slug of the branch name.
     #[serde(default)]
     alias: Option<String>,
@@ -2675,8 +3070,21 @@ struct CreateWorktreeBody {
 
 async fn create_worktree(
     Json(body): Json<CreateWorktreeBody>,
-) -> Result<Json<WorktreeView>, ApiError> {
+) -> Result<Json<CreatedWorktreeView>, ApiError> {
     validate_branch(&body.branch)?;
+    // One resolution point for the two spellings of the same question, so
+    // nothing below reads `create_branch` and nothing has to remember which
+    // takes precedence.
+    let source = match &body.source {
+        Some(s) => s,
+        None if body.create_branch => &CreateFrom::NewBranch,
+        None => &CreateFrom::LocalBranch,
+    };
+    // A remote ref is passed to git as a start point, so it gets the same
+    // shape check the branch does.
+    if let CreateFrom::RemoteBranch { remote_ref } = source {
+        validate_branch(remote_ref)?;
+    }
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
     }
@@ -2854,82 +3262,193 @@ async fn create_worktree(
     }
 
     let path_str = checkout_path.to_string_lossy().into_owned();
-    // Born-current create (`git.createFrom = "origin"`, the default): fetch the
-    // remote and cut the new branch from `origin/<default>` rather than the local
-    // HEAD, so a worktree is never *born* behind the remote — missing the latest
-    // DB migrations, conflicting with open PRs. The compounding failure this
-    // addresses is that nobody goes back to update `main`, so each new worktree
-    // used to be as stale as the last fetch of main.
-    //
-    // Falls back to local HEAD (the previous behaviour) when the fetch or the
-    // origin ref fails — offline, a repo with no remote, or the main checkout on
-    // a branch with no origin counterpart — never silently, but never blocking
-    // the create either.
-    let base_on_origin = body.create_branch && db.git_create_from() == GitCreateSource::Origin;
-    let mut start_point: Option<String> = None;
-    if base_on_origin {
-        // The default branch is the main checkout's branch — the same thing the
-        // "update main" control fast-forwards.
-        let default_branch = db
-            .list_worktrees(&repo_root)
-            .map_err(db_err)?
-            .into_iter()
-            .find(|w| w.is_main)
-            .map(|w| w.branch);
-        if let Some(dbranch) = default_branch {
-            // Base on origin only if the remote actually has that branch. The
-            // fetch succeeding is not enough: a repo whose main checkout sits on
-            // a local-only branch (never pushed) would otherwise fail the create
-            // against a `refs/remotes/origin/<branch>` that does not exist,
-            // instead of falling back to local HEAD as the comment promises.
-            // `--quiet` keeps the probe off stderr (the `git` helper surfaces
-            // stderr on failure).
-            if git(&repo_root, &["fetch", "origin"]).await.is_ok()
-                && git(
-                    &repo_root,
-                    &[
-                        "rev-parse",
-                        "--verify",
-                        "--quiet",
-                        &format!("refs/remotes/origin/{dbranch}"),
-                    ],
-                )
-                .await
-                .is_ok()
-            {
-                start_point = Some(format!("origin/{dbranch}"));
+    // The four sources, each resolved to a `git worktree add` argv — plus, for
+    // a spin-off asked to carry work across, a snapshot taken **before**
+    // anything is created, so a checkout that cannot be captured (mid-merge,
+    // sparse) is refused with nothing on disk to clean up.
+    let mut captured: Option<CapturedWork> = None;
+    let git_args: Vec<String> = match source {
+        CreateFrom::NewBranch => {
+            // Born-current create (`git.createFrom = "origin"`, the default):
+            // fetch the remote and cut the new branch from `origin/<default>`
+            // rather than the local HEAD, so a worktree is never *born* behind
+            // the remote — missing the latest DB migrations, conflicting with
+            // open PRs. The compounding failure this addresses is that nobody
+            // goes back to update `main`, so each new worktree used to be as
+            // stale as the last fetch of main.
+            //
+            // Falls back to local HEAD (the previous behaviour) when the fetch
+            // or the origin ref fails — offline, a repo with no remote, or the
+            // main checkout on a branch with no origin counterpart — never
+            // silently, but never blocking the create either.
+            let mut start_point: Option<String> = None;
+            if db.git_create_from() == GitCreateSource::Origin {
+                // The default branch is the main checkout's branch — the same
+                // thing the "update main" control fast-forwards.
+                let default_branch = db
+                    .list_worktrees(&repo_root)
+                    .map_err(db_err)?
+                    .into_iter()
+                    .find(|w| w.is_main)
+                    .map(|w| w.branch);
+                if let Some(dbranch) = default_branch {
+                    // Base on origin only if the remote actually has that
+                    // branch. The fetch succeeding is not enough: a repo whose
+                    // main checkout sits on a local-only branch (never pushed)
+                    // would otherwise fail the create against a
+                    // `refs/remotes/origin/<branch>` that does not exist,
+                    // instead of falling back to local HEAD as the comment
+                    // promises. `--quiet` keeps the probe off stderr (the `git`
+                    // helper surfaces stderr on failure).
+                    if git(&repo_root, &["fetch", "origin"]).await.is_ok()
+                        && git(
+                            &repo_root,
+                            &[
+                                "rev-parse",
+                                "--verify",
+                                "--quiet",
+                                &format!("refs/remotes/origin/{dbranch}"),
+                            ],
+                        )
+                        .await
+                        .is_ok()
+                    {
+                        start_point = Some(format!("origin/{dbranch}"));
+                    }
+                }
             }
+            let mut a = vec![
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                body.branch.clone(),
+                "--".into(),
+                path_str.clone(),
+            ];
+            // `git worktree add -b <branch> <path> <start-point>`. The new
+            // branch tracks `origin/<default>` as its upstream, which is what
+            // makes a later staleness check against the base well-defined.
+            if let Some(sp) = start_point {
+                a.push(sp);
+            }
+            a
         }
-    }
-    let git_args: Vec<String> = if body.create_branch {
-        let mut a = vec![
-            "worktree".into(),
-            "add".into(),
-            "-b".into(),
-            body.branch.clone(),
-            "--".into(),
-            path_str.clone(),
-        ];
-        // `git worktree add -b <branch> <path> <start-point>`. The new branch
-        // tracks `origin/<default>` as its upstream, which is what makes a later
-        // staleness check against the base well-defined.
-        if let Some(sp) = start_point {
-            a.push(sp);
-        }
-        a
-    } else {
-        vec![
+        CreateFrom::LocalBranch => vec![
             "worktree".into(),
             "add".into(),
             "--".into(),
             path_str.clone(),
             body.branch.clone(),
-        ]
+        ],
+        CreateFrom::RemoteBranch { remote_ref } => {
+            // Fetch the ref's own remote first, for the same born-current
+            // reason `NewBranch` fetches: a checkout of `origin/feat/x` should
+            // start at what the remote has now, not at whatever the last poll
+            // happened to bring in. Best-effort — offline is not a reason to
+            // refuse a checkout of the ref already on disk.
+            if let Some((remote, _)) = remote_ref.split_once('/') {
+                let _ = git(&repo_root, &["fetch", remote]).await;
+            }
+            // `--track` states the intent rather than relying on
+            // `branch.autoSetupMerge`'s default, so the new branch has a
+            // well-defined upstream whatever the user's git config says.
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "--track".into(),
+                "-b".into(),
+                body.branch.clone(),
+                "--".into(),
+                path_str.clone(),
+                remote_ref.clone(),
+            ]
+        }
+        CreateFrom::Worktree {
+            from_worktree,
+            carry_over,
+        } => {
+            let src = db
+                .get_worktree(*from_worktree)
+                .map_err(db_err)?
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree to branch off"))?;
+            // Same repo only. Cutting a branch from another repository's HEAD
+            // would produce a checkout whose history has nothing to do with the
+            // repo the rail files it under.
+            if !std::path::Path::new(&src.repo_root).eq(std::path::Path::new(&repo.root)) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "that worktree belongs to a different repository",
+                ));
+            }
+            // A trashed checkout is on its way off the disk, so reading its
+            // index is a race against `git worktree remove`.
+            if !src.trashed_at.is_empty() {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "that worktree is in the trash — restore it first",
+                ));
+            }
+            let src_path = PathBuf::from(&src.path);
+            // The capture also reads the source's HEAD, and the branch is cut
+            // from that exact commit rather than from a second `rev-parse`:
+            // the staged/unstaged split only means anything against one HEAD,
+            // so a commit landing in the source mid-request must not leave the
+            // trees and the branch describing different bases.
+            let head = if *carry_over {
+                let work = capture_uncommitted(&src_path)
+                    .await
+                    .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+                let head = work.head.clone();
+                captured = Some(work);
+                head
+            } else {
+                git(&src_path, &["rev-parse", "HEAD"])
+                    .await
+                    .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?
+            };
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                body.branch.clone(),
+                "--".into(),
+                path_str.clone(),
+                head,
+            ]
+        }
     };
     let git_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
     git(&repo_root, &git_refs)
         .await
         .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+
+    // Reproduce the source's uncommitted work, now that there is a clean
+    // checkout at its HEAD to reproduce it into.
+    //
+    // **A failure here is reported, not raised.** The checkout exists and is
+    // about to be registered, so a 4xx would tell the caller the create failed
+    // while leaving a real worktree in the rail — the same shape of lie the
+    // alias rename below is careful to avoid. `carry_over.error` is how the
+    // client tells "spun off with your changes" from "spun off without them".
+    let carry_over = match captured {
+        None => None,
+        Some(work) => {
+            let error = apply_captured(&checkout_path, &work).await.err();
+            // Counted from the new checkout rather than from the capture, so
+            // the number describes what actually arrived. A status that cannot
+            // be read leaves the count at 0 next to whatever `error` says,
+            // which is honest — it is not a claim that nothing came across.
+            let files = git_status(&checkout_path)
+                .await
+                .map(|f| f.len())
+                .unwrap_or(0);
+            Some(CarryOverReport {
+                files,
+                drifted: work.drifted,
+                error,
+            })
+        }
+    };
 
     let worktrees = sync_repo_worktrees(&db, &repo_root).await?;
     let created = worktrees
@@ -3004,7 +3523,10 @@ async fn create_worktree(
         }
         _ => created,
     };
-    Ok(Json(worktree_view(&db, created)))
+    Ok(Json(CreatedWorktreeView {
+        worktree: worktree_view(&db, created),
+        carry_over,
+    }))
 }
 
 /// Partial update. Both fields are optional so the alias-only callers that
@@ -4313,6 +4835,323 @@ mod tests {
         git(dir, args).await.expect("git should succeed");
     }
 
+    // -----------------------------------------------------------------------
+    // Branch listing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn local_branches_report_which_checkout_holds_them() {
+        // Tab-separated `<short>\t<upstream>\t<worktreepath>`, and the path is
+        // last so a directory with a tab in its name cannot shift the fields.
+        let out = "main\torigin/main\t/repo\n\
+                   feat/x\torigin/feat/x\t\n\
+                   local-only\t\t\n\
+                   odd\t\t/repo/we\tird\n";
+        let got = parse_local_branches(out);
+        assert_eq!(
+            got,
+            vec![
+                LocalBranchView {
+                    name: "main".into(),
+                    checked_out_in: Some("/repo".into()),
+                    upstream: Some("origin/main".into()),
+                },
+                LocalBranchView {
+                    name: "feat/x".into(),
+                    checked_out_in: None,
+                    upstream: Some("origin/feat/x".into()),
+                },
+                LocalBranchView {
+                    name: "local-only".into(),
+                    checked_out_in: None,
+                    upstream: None,
+                },
+                LocalBranchView {
+                    name: "odd".into(),
+                    checked_out_in: Some("/repo/we\tird".into()),
+                    upstream: None,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_branches_skip_the_symref_and_keep_slashes_in_the_local_name() {
+        // `refs/remotes/origin/HEAD` shortens to the bare remote name and
+        // carries a symref — it is not a branch and must not become a row.
+        let out = "origin\trefs/remotes/origin/main\n\
+                   origin/main\t\n\
+                   origin/feat/x\t\n\
+                   upstream/main\t\n";
+        let local = vec![LocalBranchView {
+            name: "main".into(),
+            checked_out_in: None,
+            upstream: None,
+        }];
+        let got = parse_remote_branches(out, &local);
+        assert_eq!(
+            got,
+            vec![
+                RemoteBranchView {
+                    name: "origin/main".into(),
+                    // A local `main` exists, so creating it from the remote ref
+                    // would fail — the picker needs to know before the click.
+                    local_name: "main".into(),
+                    has_local: true,
+                },
+                RemoteBranchView {
+                    // `split_once`, not `rsplit_once`: `feat/x` must survive
+                    // whole rather than becoming `x`.
+                    name: "origin/feat/x".into(),
+                    local_name: "feat/x".into(),
+                    has_local: false,
+                },
+                RemoteBranchView {
+                    name: "upstream/main".into(),
+                    local_name: "main".into(),
+                    has_local: true,
+                },
+            ]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Spin-off carry-over
+    // -----------------------------------------------------------------------
+
+    /// Build a repo whose dirty state covers every combination the two-tree
+    /// model has to represent, and return its path.
+    async fn dirty_repo(root: &FsPath) {
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("edited.txt"), "one").unwrap();
+        std::fs::write(root.join("binary.bin"), [0u8, 1, 2, 255]).unwrap();
+        std::fs::write(root.join("run.sh"), "#!/bin/sh\n").unwrap();
+        // Actually executable, so git records mode 100755 and the assertion
+        // below is testing the mechanism rather than a 0644 file it created.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(root.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+        std::fs::write(root.join("gone.txt"), "bye").unwrap();
+        std::fs::write(root.join("unstaged-delete.txt"), "bye too").unwrap();
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("edited.txt", root.join("link.txt")).unwrap();
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Unstaged edit, including a binary one.
+        std::fs::write(root.join("edited.txt"), "one-two").unwrap();
+        std::fs::write(root.join("binary.bin"), [255u8, 254, 0, 7]).unwrap();
+        // Staged addition.
+        std::fs::write(root.join("staged.txt"), "s").unwrap();
+        run_git(root, &["add", "staged.txt"]).await;
+        // Staged deletion whose file is still on disk, so it reads as a staged
+        // delete *and* an untracked file.
+        run_git(root, &["rm", "-q", "--cached", "gone.txt"]).await;
+        // Unstaged deletion.
+        std::fs::remove_file(root.join("unstaged-delete.txt")).unwrap();
+        // Untracked, one of them nested.
+        std::fs::write(root.join("untracked.txt"), "u").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        std::fs::write(root.join("sub/deep.txt"), "d").unwrap();
+        // Ignored — must NOT come across. This is the whole reason the capture
+        // is `git add` and not a directory copy.
+        std::fs::write(root.join("ignored.txt"), "never").unwrap();
+    }
+
+    /// The mechanism, end to end against real git: a spin-off's checkout must
+    /// come out with the **same `git status`** as its source — the
+    /// staged/unstaged split included — while the source is left byte-identical.
+    #[tokio::test]
+    async fn a_spin_off_reproduces_every_shape_of_uncommitted_work() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("main");
+        std::fs::create_dir(&src).unwrap();
+        let src = FsPath::new(&src);
+        dirty_repo(src).await;
+
+        let before = git_status(src).await.unwrap();
+        assert!(
+            !before.iter().any(|f| f.path == "ignored.txt"),
+            "the ignored file must not even be dirty in the source"
+        );
+
+        // The source's index file, before the capture reads it.
+        let git_dir = PathBuf::from(
+            git(src, &["rev-parse", "--absolute-git-dir"])
+                .await
+                .unwrap(),
+        );
+        let index_before = std::fs::read(git_dir.join("index")).unwrap();
+
+        let work = capture_uncommitted(src).await.expect("capture should work");
+
+        // **The source is untouched.** This is the constraint that rules out
+        // `git stash create`, which rewrites this file under its lock.
+        assert_eq!(
+            std::fs::read(git_dir.join("index")).unwrap(),
+            index_before,
+            "the capture must not write the source's index"
+        );
+        assert_eq!(
+            git_status(src).await.unwrap(),
+            before,
+            "the capture must not change the source's status"
+        );
+
+        let dest = dir.path().join("spin");
+        run_git(
+            src,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "spin",
+                "--",
+                dest.to_str().unwrap(),
+                &work.head,
+            ],
+        )
+        .await;
+        let dest = FsPath::new(&dest);
+        apply_captured(dest, &work)
+            .await
+            .expect("apply should work");
+
+        assert_eq!(
+            git_status(dest).await.unwrap(),
+            before,
+            "the spin-off's status must match the source's, staged/unstaged split included"
+        );
+        // Spot-checks that a matching status alone would not prove.
+        assert_eq!(
+            std::fs::read(dest.join("binary.bin")).unwrap(),
+            vec![255u8, 254, 0, 7],
+            "binary contents must survive"
+        );
+        assert!(
+            !dest.join("ignored.txt").exists(),
+            "an ignored file must never be carried across"
+        );
+        assert!(
+            !dest.join("unstaged-delete.txt").exists(),
+            "a file deleted in the source must be absent here too"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub/deep.txt")).unwrap(),
+            "d",
+            "a nested untracked file must arrive"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::read_link(dest.join("link.txt")).unwrap(),
+                std::path::Path::new("edited.txt"),
+                "a symlink must arrive as a symlink, not as its target's bytes"
+            );
+            assert!(
+                std::fs::metadata(dest.join("run.sh"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o111
+                    != 0,
+                "the executable bit must survive"
+            );
+        }
+        assert!(!work.drifted, "nothing wrote the source during the capture");
+    }
+
+    /// A clean source is a legitimate spin-off: the capture must succeed and
+    /// the new checkout must come out clean, not emptied.
+    #[tokio::test]
+    async fn a_spin_off_of_a_clean_checkout_carries_nothing_and_breaks_nothing() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("main");
+        std::fs::create_dir(&src).unwrap();
+        let src = FsPath::new(&src);
+        run_git(src, &["init", "-q"]).await;
+        run_git(src, &["config", "user.email", "t@t"]).await;
+        run_git(src, &["config", "user.name", "t"]).await;
+        std::fs::write(src.join("a.txt"), "a").unwrap();
+        run_git(src, &["add", "-A"]).await;
+        run_git(src, &["commit", "-qm", "init"]).await;
+
+        let work = capture_uncommitted(src).await.expect("capture should work");
+        let dest = dir.path().join("spin");
+        run_git(
+            src,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "spin",
+                "--",
+                dest.to_str().unwrap(),
+                &work.head,
+            ],
+        )
+        .await;
+        let dest = FsPath::new(&dest);
+        apply_captured(dest, &work)
+            .await
+            .expect("apply should work");
+        assert!(
+            git_status(dest).await.unwrap().is_empty(),
+            "a clean source must produce a clean spin-off"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("a.txt")).unwrap(),
+            "a",
+            "and must not have emptied the checkout"
+        );
+    }
+
+    /// `write-tree` cannot represent an unmerged index, so the capture refuses
+    /// **before** anything is created rather than failing halfway.
+    #[tokio::test]
+    async fn a_checkout_mid_merge_refuses_the_carry_over_instead_of_half_doing_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        run_git(root, &["init", "-q", "-b", "main"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("f.txt"), "base").unwrap();
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "base"]).await;
+        run_git(root, &["checkout", "-q", "-b", "side"]).await;
+        std::fs::write(root.join("f.txt"), "side").unwrap();
+        run_git(root, &["commit", "-qam", "side"]).await;
+        run_git(root, &["checkout", "-q", "main"]).await;
+        std::fs::write(root.join("f.txt"), "mainline").unwrap();
+        run_git(root, &["commit", "-qam", "mainline"]).await;
+        // Expected to fail — that is what leaves the conflict stages behind.
+        let _ = git(root, &["merge", "side"]).await;
+        assert!(
+            !git(root, &["ls-files", "--unmerged"])
+                .await
+                .unwrap()
+                .is_empty(),
+            "the setup must actually have produced an unmerged index"
+        );
+
+        let e = capture_uncommitted(root)
+            .await
+            .expect_err("a mid-merge checkout must be refused");
+        assert!(
+            e.contains("middle of a merge"),
+            "the refusal must say why, not surface git's `error building trees`: {e}"
+        );
+    }
+
     #[test]
     fn branch_validation() {
         assert!(validate_branch("feat/checkout-v2").is_ok());
@@ -4591,6 +5430,37 @@ mod tests {
                     "{method} {uri} must require the CSRF header"
                 );
             }
+        }
+
+        /// The branch list is a GET, so it must answer without the CSRF header
+        /// — and it must answer about *registered* repos only. A 404 here (not
+        /// a 403, and not a 200) pins both halves: the route is reachable
+        /// unauthenticated-by-header, and `/tmp` is not a repo veld manages.
+        #[tokio::test]
+        async fn listing_branches_is_a_get_scoped_to_registered_repos() {
+            let res = super::super::routes()
+                .oneshot(req("GET", "/api/repos/branches?repo_root=/tmp", false, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// An unrecognised `source.kind` must be a deserialization failure, not
+        /// a silent fall-through to the default create. The tagged enum is what
+        /// buys this; a set of flat optional fields would have accepted the
+        /// typo and quietly cut a branch from origin instead.
+        #[tokio::test]
+        async fn an_unknown_create_source_is_rejected_rather_than_defaulted() {
+            let res = super::super::routes()
+                .oneshot(req(
+                    "POST",
+                    "/api/worktrees",
+                    true,
+                    r#"{"repo_root":"/tmp","branch":"b","source":{"kind":"worktee"}}"#,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
         }
 
         #[tokio::test]

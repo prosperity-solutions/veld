@@ -31,8 +31,11 @@ iroh = { workspace = true }
 iroh-tickets = { workspace = true }
 portable-pty = "0.9"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+# Scratch index files for a spin-off's carry-over (`desktop::capture_uncommitted`)
+# — already a dev-dependency of every crate here, and already in
+# THIRD-PARTY-LICENSES.md, so promoting it adds no new third-party licence.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tokio-tungstenite = { version = "0.28", default-features = false }
 tower = { version = "0.5", features = ["util"] }
