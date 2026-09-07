@@ -1155,28 +1155,53 @@ button.lane-empty {
   flex-direction: column;
   gap: 2px;
   padding: 10px 8px;
-  /* Anchors the lane-drop bar on the dock's own top edge. */
+  /* Anchors the lane-drop bar on the dock's own top edge — which is why the
+     scrolling happens one level in, on `.rail-dock-scroll`. A pseudo-element is
+     positioned against its element's content box, so a scrolling `.rail-dock`
+     would carry the bar away from the edge it is drawn to mark. */
   position: relative;
   border-top: 1px solid var(--border);
-  /* The dock is `flex: none` under a `flex: 1` scroller, so its content height is
-     taken from the list above it, which can shrink to nothing — and the two
-     sections pinned here are both unbounded. The trash holds rows until the
-     retention clock runs out, and emptying it moves every one of them into
-     Deleting at once. Past a screenful the dock stopped being a dock: it pushed
-     the lanes being worked in out of the rail, and then overflowed the rail
-     itself, which clips (`.rail` is `overflow: hidden`) — rows off the bottom
-     with no scrollbar to reach them.
+}
 
-     `vh` rather than a percentage because `.rail`'s own height comes from being
-     stretched, and a max-height that silently resolves to `none` is the failure
-     this rule exists to prevent. It only ever bites on a dock that was going to
-     be too tall anyway; the trash's own preview (`.trash-more`) keeps the
-     ordinary case far below it, and this is what holds when the reader opens
-     that preview. `rowTargetAt` already clamps each section to this container's
-     box, so a section scrolled half out of the dock is still a correct drop
-     target. */
+/* The dock's scrollport.
+ *
+ * The dock is `flex: none` under a `flex: 1` scroller, so its height comes out of
+ * the list above it, which can shrink to nothing — and both sections pinned here
+ * are unbounded. The trash holds rows until the retention clock runs out (its own
+ * preview, `.trash-more`, keeps the ordinary case small, but the reader can open
+ * it), and emptying the trash moves every row into Deleting at once. Past a
+ * screenful the dock stopped being a dock: it pushed the lanes being worked in
+ * out of the rail and then overflowed the rail itself, which clips (`.rail` is
+ * `overflow: hidden`) — rows off the bottom with no scrollbar to reach them.
+ *
+ * `vh` rather than a percentage because `.rail`'s own height comes from being
+ * stretched, and a max-height that silently resolves to `none` is the failure
+ * this rule exists to prevent. `rowTargetAt` clamps every section to this box
+ * (`dockScrollRef`), so a section scrolled half out of it is still a correct drop
+ * target. */
+.rail-dock-scroll {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   max-height: 45vh;
   overflow-y: auto;
+}
+
+/* Which section yields when the dock runs out of room, and it must be Deleting.
+ *
+ * The trash is the rail's permanent bottom anchor and a drop target; scrolled out
+ * of the dock it is not merely invisible but *unhittable*, because `rowTargetAt`
+ * resolves a pointer over the dock to the section it can see — Deleting, which
+ * refuses drops — and answers "nowhere". Emptying a full trash is exactly the
+ * moment Deleting is tall, so that is the moment drag-to-trash would have stopped
+ * working. Deleting scrolls inside itself instead (`min-height: 0` is what lets a
+ * flex item shrink below its content at all), and the trash keeps its size. */
+.rail-dock-scroll .rail-group.deleting {
+  min-height: 0;
+  overflow-y: auto;
+}
+.rail-dock-scroll .rail-group.trash {
+  flex: none;
 }
 
 /* A row that can be picked up says so once you have hold of it, the same way a

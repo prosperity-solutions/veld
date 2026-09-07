@@ -6104,7 +6104,13 @@ function AppInner(props: {
   /** Move the rail's selection up or down, in the order it renders — the
    *  flattened `railGroups`, not raw `worktrees` — wrapping at both ends:
    *  past the last worktree goes to the first and vice versa, rather than
-   *  stopping dead at either end of the rail. */
+   *  stopping dead at either end of the rail.
+   *
+   *  Every section's order is the daemon's `WT_ORDER` except the trash, which
+   *  `railGroups` sorts newest-binned first; stepping matches what the rail
+   *  draws, which is the contract this reads by. It steps onto rows the rail is
+   *  not currently drawing — a folded section's, and a trashed one behind the
+   *  `+N` — which is long-standing and unchanged here. */
   function stepWorktree(delta: number) {
     const wt = worktreeRef.current;
     if (!wt) return;
@@ -8321,7 +8327,33 @@ function Rail(props: {
   // this is "let me look for a second", not a preference, and the trash is folded
   // shut by default (`defaultFoldedSections`) — an expansion that outlived the
   // window would quietly restore the unbounded section the cap exists to stop.
-  const [trashExpanded, setTrashExpanded] = useState(false);
+  // Which repo's trash the reader has opened, or `null` for "everyone sees the
+  // preview". Keyed by repo root rather than a bare boolean because `Rail` is not
+  // remounted on a project switch: a flag set on one project's pile carried
+  // straight into the next project's trash and drew it fully expanded, which
+  // nobody asked for.
+  //
+  // Local and transient on purpose: this is "let me look for a second", not a
+  // preference. The trash is folded shut by default (`defaultFoldedSections`), so
+  // an expansion that outlived the window would quietly restore the unbounded
+  // section the cap exists to stop. Folding does NOT clear it — the fold is "put
+  // it away", and finding a section the way you left it is what every other
+  // section in this rail does.
+  const [trashOpenFor, setTrashOpenFor] = useState<string | null>(null);
+  // Every worktree here belongs to the selected repo (`repo?.worktrees`), so the
+  // first row names the project the rail is drawing.
+  const railRepo = props.worktrees[0]?.repo_root ?? "";
+  const trashCount =
+    groups.find((g) => g.key === TRASH_LANE)?.worktrees.length ?? 0;
+  const trashExpanded = trashOpenFor === railRepo;
+  // The pile the reader opened can go away under them — a restore, or a delete
+  // that finished — and a flag left set behind it is not inert: it re-opens the
+  // section silently the moment the trash grows past the preview again. Cleared
+  // here rather than at each of those call sites, because the count is the thing
+  // that actually decides.
+  useEffect(() => {
+    if (trashCount <= TRASH_PREVIEW) setTrashOpenFor(null);
+  }, [trashCount]);
   // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   /**
@@ -8346,6 +8378,17 @@ function Rail(props: {
     g.editable ? laneIndex.get(g.lane) : undefined;
   const listRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
+  /**
+   * The dock's inner scroller — the box that actually clips its sections.
+   *
+   * Separate from [`dockRef`] because the two questions differ once the dock can
+   * scroll. "Is the pointer over the dock" is asked of the whole strip, padding
+   * included, and is answered by the outer element; "which part of a section is
+   * on screen" is a clipping question, and only the scrollport can answer it.
+   * Handing `rowTargetAt` the outer box would let it accept a drop against a
+   * section scrolled out of view.
+   */
+  const dockScrollRef = useRef<HTMLDivElement>(null);
 
   /**
    * The lane a pointer at `clientY` is aiming at, or `null` when the rail holds
@@ -8442,7 +8485,7 @@ function Rail(props: {
     // pointer over the dock could be answered by whichever section happens to
     // overhang it. Clipping each section to its container is the same guard one
     // level down, for a section that is only half in view.
-    for (const container of [listRef.current, dockRef.current]) {
+    for (const container of [listRef.current, dockScrollRef.current]) {
       if (!container) continue;
       const outer = container.getBoundingClientRect();
       if (x < outer.left || x > outer.right) continue;
@@ -8591,6 +8634,23 @@ function Rail(props: {
     // outlives both — widen the rail again and the section is still shut.
     const hasHeader = group.label !== null && props.wide;
     const folded = hasHeader && props.folded.has(group.key);
+    // What the section draws, which is everything it holds except in an
+    // unexpanded trash. `hidden` is 0 for every other section, so the "+N"
+    // control below needs no key test of its own — and the header's own count,
+    // the empty-lane placeholder and the reductions below still read
+    // `group.worktrees`, because those speak for the section, not for what is on
+    // screen. Computed here, ahead of them, because `holdsActive` asks whether
+    // the selected row was actually drawn.
+    const { rows, hidden } =
+      group.key === TRASH_LANE
+        ? trashPreview(group.worktrees, trashExpanded)
+        : { rows: group.worktrees, hidden: 0 };
+    // The control's one sentence, said the same way in the tooltip and in the
+    // accessible name — which starts with the visible text, so a voice-control
+    // user can activate it by reading it out (WCAG 2.5.3).
+    const trashMoreLabel = trashExpanded
+      ? `Fewer — show only the ${TRASH_PREVIEW} most recently trashed`
+      : `+${hidden} — show ${hidden} more trashed worktree${hidden === 1 ? "" : "s"}`;
     // Everything below is computed only for a section that is actually hiding
     // rows. Each walks every worktree in the section — its runs, then its
     // sessions — and an open section already says all of it on the rows.
@@ -8622,11 +8682,16 @@ function Rail(props: {
     // showed nothing selected at all. It is not an exotic state. Folding the
     // section you are working in reaches it, and so does landing in an
     // already-folded one from ⌘K, a notification, or the worktree the URL
-    // restores on load. Same rule as the alert and the activity glyph — the
+    // restores on load — and, since the trash draws only its newest
+    // [`TRASH_PREVIEW`], a selected worktree binned three bins ago, which is why
+    // this asks whether the row was *drawn* rather than only whether the section
+    // is folded. Same rule as the alert and the activity glyph — the
     // header carries what the hidden row would have said, in that row's own
     // language — which is why it is the row's accent rather than a fourth glyph:
     // "you are here" is not news to be listed beside the others.
-    const holdsActive = folded && group.worktrees.some((w) => w.id === props.active?.id);
+    const holdsActive =
+      group.worktrees.some((w) => w.id === props.active?.id) &&
+      (folded || !rows.some((w) => w.id === props.active?.id));
     const hiddenInbox = folded
       ? inbox.groupState(
           // Trashed rows are silent here for the reason they are silent on a row
@@ -8676,19 +8741,6 @@ function Rail(props: {
     // confirmation.
     const dropInto =
       dragPath !== null && canDropOn(group) && dropAt?.key === group.key;
-    // What the section draws, which is everything it holds except in an
-    // unexpanded trash. `hidden` is 0 for every other section, so the "+N"
-    // control below needs no key test of its own — and the header's folded count,
-    // the empty-lane placeholder and every reduction above still read
-    // `group.worktrees`, because those speak for the section, not for what is on
-    // screen.
-    const { rows, hidden } =
-      group.key === TRASH_LANE
-        ? trashPreview(group.worktrees, trashExpanded)
-        : { rows: group.worktrees, hidden: 0 };
-    const trashMoreLabel = trashExpanded
-      ? `Show only the ${TRASH_PREVIEW} most recently trashed`
-      : `Show ${hidden} more trashed worktree${hidden === 1 ? "" : "s"}`;
     // Where the dragged lane would land, drawn in the gutter beside the hovered
     // section. Which side is the travel direction: carrying a lane *up* onto this
     // one puts it above, carrying it *down* puts it below. Exactly one section
@@ -9413,8 +9465,13 @@ function Rail(props: {
                     type="button"
                     className="trash-more"
                     aria-label={trashMoreLabel}
-                    aria-expanded={trashExpanded}
-                    onClick={() => setTrashExpanded((open) => !open)}
+                    /* No `aria-expanded`: a disclosure's controlled region has to
+                       follow its trigger, and the rows this reveals are rendered
+                       above it. The state is in the name instead — "+7 …" against
+                       "Fewer …" — which is what a reader hears either way. */
+                    onClick={() =>
+                      setTrashOpenFor((open) => (open === railRepo ? null : railRepo))
+                    }
                   >
                     {trashExpanded ? "Fewer" : `+${hidden}`}
                   </button>
@@ -9554,7 +9611,14 @@ function Rail(props: {
           }`}
           ref={dockRef}
         >
-          {docked.map((group) => renderGroup(group))}
+          {/* The scroller is inside the dock, not the dock itself. The lane-drop
+              bar is a pseudo-element on `.rail-dock` and is positioned against
+              its content box, so making that box the scrolling one put the bar
+              wherever the reader had scrolled to — absent from the dock's own
+              edge, which is the one place the bar means anything. */}
+          <div className="rail-dock-scroll" ref={dockScrollRef}>
+            {docked.map((group) => renderGroup(group))}
+          </div>
         </div>
       )}
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is
