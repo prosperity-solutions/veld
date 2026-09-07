@@ -859,13 +859,16 @@ fn parse_git_status(porcelain: &str) -> Vec<DirtyFile> {
         // `R ` — the marker sits in `X` (byte 0) and byte 1 is a *space*. This
         // tested byte 1 alone, so the skip never fired for the only shape that
         // produces the extra field. It went unnoticed because the malformed-
-        // record guard above rejects most origin paths by accident: a bare
-        // `a.txt` has no space at byte 2. An origin path *with* a space
-        // there sails through it and is reported as a file that does not
-        // exist — `IMG 1234.jpg` renamed becomes a file called `1234.jpg`
-        // with a status code of `IM`, and `01 Track.mp3` becomes
-        // `Track.mp3`. Those are ordinary filenames, which is what makes this
-        // reachable rather than theoretical. Pinned by
+        // record guard above rejects most origin paths by accident, and the
+        // condition is exact: that guard requires a space at **byte 2**, so
+        // only an origin path whose *third character* is a space gets through
+        // and is reported as a file that does not exist. `PR review notes.md`
+        // becomes a file called `review notes.md` with a status code of `PR`;
+        // `01 Track.mp3` becomes `Track.mp3` with code `01`. Two-character
+        // prefixes, which is what makes this reachable rather than
+        // theoretical — and note that a *longer* prefix does not qualify:
+        // `IMG 1234.jpg` has `G` at byte 2, so the guard rejects it and no
+        // phantom appears. Pinned by
         // `a_rename_origin_is_never_reported_as_a_file_of_its_own`.
         let marks_origin = |c: u8| c == b'R' || c == b'C';
         if marks_origin(code.as_bytes()[0]) || marks_origin(code.as_bytes()[1]) {
@@ -5031,20 +5034,26 @@ mod tests {
     /// the code is `R ` and byte 1 is a space.
     ///
     /// Most origin paths were rejected by accident anyway — the
-    /// malformed-record guard needs a space at byte 2, which `a.txt` has not.
-    /// The ones that got through reported a file that does not exist, in the
-    /// trash dialog's "what is in the way" list and in the count a spin-off
-    /// reports back. `IMG 1234.jpg` and `01 Track.mp3` are the shape, which is
-    /// what makes this reachable rather than theoretical.
+    /// malformed-record guard needs a space at **byte 2**, i.e. a
+    /// two-character prefix. The ones that got through reported a file that
+    /// does not exist, in the trash dialog's "what is in the way" list and in
+    /// the count a spin-off reports back.
+    ///
+    /// **Every assertion here uses a name that actually gets through**, and
+    /// that is not a detail: an earlier version of this test used
+    /// `IMG 1234.jpg`, whose space is at byte *3*, so the guard rejected it and
+    /// the assertion passed against the bug it was written for. A review round
+    /// caught that by compiling the pre-fix parser and running it. Keep the
+    /// prefixes two characters long, or this test stops testing anything.
     #[test]
     fn a_rename_origin_is_never_reported_as_a_file_of_its_own() {
-        // `git mv "IMG 1234.jpg" photo.jpg` — an ordinary filename whose
+        // `git mv "PR review notes.md" notes.md` — an ordinary filename whose
         // third character is a space, which is all it takes.
-        let got = parse_git_status("R  photo.jpg\0IMG 1234.jpg\0");
+        let got = parse_git_status("R  notes.md\0PR review notes.md\0");
         assert_eq!(
             got,
             vec![DirtyFile {
-                path: "photo.jpg".to_owned(),
+                path: "notes.md".to_owned(),
                 kind: "renamed",
             }],
             "the origin path must not become a second file"
@@ -5061,15 +5070,22 @@ mod tests {
         // Renamed *and* then modified in the worktree — `R` in the index
         // column, `M` in the worktree column, still one path.
         assert_eq!(
-            parse_git_status("RM photo.jpg\0IMG 1234.jpg\0").len(),
+            parse_git_status("RM notes.md\0PR review notes.md\0").len(),
             1,
             "a renamed-then-edited file is still one path"
         );
-        // And the accidentally-safe case stays safe.
+        // The accidentally-safe shapes stay safe: a short origin path, and a
+        // longer prefix whose space falls past byte 2.
         assert_eq!(
-            parse_git_status("R  photo.jpg\0a.jpg\0").len(),
+            parse_git_status("R  notes.md\0a.md\0").len(),
             1,
             "a short origin path was already skipped, and must stay skipped"
+        );
+        assert_eq!(
+            parse_git_status("R  photo.jpg\0IMG 1234.jpg\0").len(),
+            1,
+            "and a three-character prefix never reached the bug in the first \
+             place — kept so the byte-2 boundary is written down"
         );
     }
 
