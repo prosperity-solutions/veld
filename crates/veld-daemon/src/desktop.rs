@@ -852,8 +852,21 @@ fn parse_git_status(porcelain: &str) -> Vec<DirtyFile> {
         });
         // A rename/copy record is followed by its `<original>` as its own
         // NUL-delimited field with no `<XY> ` prefix; skip it so it is not
-        // rendered as a second (pathless) file.
-        if code.as_bytes()[1] == b'R' || code.as_bytes()[1] == b'C' {
+        // rendered as a second file.
+        //
+        // **Both columns, and the index column is the one that matters.** Git
+        // detects renames against the index, so a staged rename's code is
+        // `R ` — the marker sits in `X` (byte 0) and byte 1 is a *space*. This
+        // tested byte 1 alone, so the skip never fired for the only shape that
+        // produces the extra field. It went unnoticed because the malformed-
+        // record guard above rejects most origin paths by accident: a bare
+        // `a.txt` has no space at byte 2. An origin path *with* a space
+        // there — `ab cd.txt`, from `git mv "ab cd.txt" zz.txt` — sails
+        // through it and is reported as a file called `cd.txt` with code `ab`,
+        // which is a path that does not exist. Pinned by
+        // `a_rename_origin_is_never_reported_as_a_file_of_its_own`.
+        let marks_origin = |c: u8| c == b'R' || c == b'C';
+        if marks_origin(code.as_bytes()[0]) || marks_origin(code.as_bytes()[1]) {
             i += 1;
         }
     }
@@ -5008,6 +5021,48 @@ mod tests {
         assert!(
             root.join("keep.log").exists(),
             "ignored files are not blocked by remove and must survive"
+        );
+    }
+
+    /// A rename's `<original>` field is not a file, and the guard that skips it
+    /// tested the wrong column: git detects renames against the **index**, so
+    /// the code is `R ` and byte 1 is a space.
+    ///
+    /// Most origin paths were rejected by accident anyway — the
+    /// malformed-record guard needs a space at byte 2, which `a.txt` has not.
+    /// The first case here is the one that got through, and it reported a file
+    /// that does not exist: in the trash dialog's "what is in the way" list,
+    /// and in the count a spin-off reports back.
+    #[test]
+    fn a_rename_origin_is_never_reported_as_a_file_of_its_own() {
+        // `git mv "ab cd.txt" zz.txt` — the origin has a space at byte 2.
+        let got = parse_git_status("R  zz.txt\0ab cd.txt\0");
+        assert_eq!(
+            got,
+            vec![DirtyFile {
+                path: "zz.txt".to_owned(),
+                kind: "renamed",
+            }],
+            "the origin path must not become a second file"
+        );
+        // A copy, same shape.
+        assert_eq!(
+            parse_git_status("C  new.txt\0ab cd.txt\0").len(),
+            1,
+            "a copy's origin is not a file either"
+        );
+        // Renamed *and* then modified in the worktree — `R` in the index
+        // column, `M` in the worktree column, still one path.
+        assert_eq!(
+            parse_git_status("RM zz.txt\0ab cd.txt\0").len(),
+            1,
+            "a renamed-then-edited file is still one path"
+        );
+        // And the accidentally-safe case stays safe.
+        assert_eq!(
+            parse_git_status("R  zz.txt\0a.txt\0").len(),
+            1,
+            "a short origin path was already skipped, and must stay skipped"
         );
     }
 
