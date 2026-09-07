@@ -41,6 +41,8 @@ import {
   DELETING_LANE,
   DETACHED_LANE,
   TRASH_LANE,
+  TRASH_PREVIEW,
+  trashPreview,
 } from "./model";
 
 const wt = (path: string): Worktree => ({
@@ -965,6 +967,57 @@ describe("railGroups", () => {
     expect(groups[groups.length - 1].key).toBe(TRASH_LANE);
   });
 
+  it("orders the trash by when each row was binned, newest first", () => {
+    // The one section railGroups sorts. WT_ORDER puts these in lane-then-label
+    // order, which says nothing about a trash — "what did I just bin" does, and
+    // it is what the rail's preview shows.
+    const groups = railGroups(
+      [
+        rw("/wts/old", { trashed_at: "2026-01-01T00:00:00.000000Z" }),
+        rw("/wts/newest", { trashed_at: "2026-03-01T00:00:00.000000Z" }),
+        rw("/wts/mid", { trashed_at: "2026-02-01T00:00:00.000000Z" }),
+      ],
+      [],
+    );
+    const trash = groups.find((g) => g.key === TRASH_LANE)!;
+    expect(trash.worktrees.map((w) => w.path)).toEqual([
+      "/wts/newest",
+      "/wts/mid",
+      "/wts/old",
+    ]);
+  });
+
+  it("keeps the daemon's order between rows binned at the same instant", () => {
+    // The sort is stable, so a tie falls through to WT_ORDER rather than to
+    // whatever the engine's comparator happens to do with it.
+    const at = "2026-01-01T00:00:00.000000Z";
+    const groups = railGroups(
+      [
+        rw("/wts/first", { trashed_at: at }),
+        rw("/wts/second", { trashed_at: at }),
+        rw("/wts/third", { trashed_at: at }),
+      ],
+      [],
+    );
+    const trash = groups.find((g) => g.key === TRASH_LANE)!;
+    expect(trash.worktrees.map((w) => w.path)).toEqual([
+      "/wts/first",
+      "/wts/second",
+      "/wts/third",
+    ]);
+  });
+
+  it("does not reorder the caller's array while sorting the trash", () => {
+    // `filter` makes the copy the sort runs on. Without it, sorting the trash
+    // would silently rewrite the list every other section is segmented from.
+    const input = [
+      rw("/wts/old", { trashed_at: "2026-01-01T00:00:00.000000Z" }),
+      rw("/wts/new", { trashed_at: "2026-03-01T00:00:00.000000Z" }),
+    ];
+    railGroups(input, []);
+    expect(input.map((w) => w.path)).toEqual(["/wts/old", "/wts/new"]);
+  });
+
   it("pulls actively-deleting worktrees into their own terminal lane", () => {
     const deleting = rw("/wts/going", {
       trashed_at: "2026-01-01T00:00:00Z",
@@ -1197,6 +1250,39 @@ describe("detachedInSection", () => {
       }),
     ];
     expect(detachedInSection(wts, lanes, "")).toEqual([]);
+  });
+});
+
+describe("trashPreview", () => {
+  const binned = (n: number) =>
+    Array.from({ length: n }, (_, i) => rw(`/wts/t${i}`));
+
+  it("shows everything while the trash is small enough", () => {
+    const { rows, hidden } = trashPreview(binned(TRASH_PREVIEW), false);
+    expect(rows).toHaveLength(TRASH_PREVIEW);
+    // Never a "+0": the caller renders the control on `hidden > 0`.
+    expect(hidden).toBe(0);
+  });
+
+  it("keeps the leading rows and counts the rest", () => {
+    // Leading, not arbitrary: `railGroups` has already put the newest first, so
+    // these are the two most recent bins — the ones an undo is aimed at.
+    const { rows, hidden } = trashPreview(binned(25), false);
+    expect(rows.map((w) => w.path)).toEqual(["/wts/t0", "/wts/t1"]);
+    expect(hidden).toBe(23);
+  });
+
+  it("shows all of it once expanded", () => {
+    // The cap is a fold, not a limit. Every trashed row carries its own Restore
+    // and Delete, so there has to be a way to reach the ones past the preview.
+    const { rows, hidden } = trashPreview(binned(25), true);
+    expect(rows).toHaveLength(25);
+    expect(hidden).toBe(0);
+  });
+
+  it("does not copy the list when there is nothing to fold away", () => {
+    const all = binned(1);
+    expect(trashPreview(all, false).rows).toBe(all);
   });
 });
 

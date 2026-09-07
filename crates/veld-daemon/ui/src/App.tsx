@@ -95,6 +95,8 @@ import {
   DETACHED_LANE,
   isDetached,
   TRASH_LANE,
+  TRASH_PREVIEW,
+  trashPreview,
   type PendingAction,
   type RailGroup,
   type PendingMap,
@@ -8314,6 +8316,12 @@ function Rail(props: {
   // the bar can be seen, since the last lane's own bar is inside the scroller and
   // the dock is used precisely when that lane is scrolled out of view.
   const [onDock, setOnDock] = useState(false);
+  // Whether the trash is showing everything it holds rather than the newest
+  // `TRASH_PREVIEW` and a count for the rest. Local and transient on purpose:
+  // this is "let me look for a second", not a preference, and the trash is folded
+  // shut by default (`defaultFoldedSections`) — an expansion that outlived the
+  // window would quietly restore the unbounded section the cap exists to stop.
+  const [trashExpanded, setTrashExpanded] = useState(false);
   // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   /**
@@ -8668,6 +8676,19 @@ function Rail(props: {
     // confirmation.
     const dropInto =
       dragPath !== null && canDropOn(group) && dropAt?.key === group.key;
+    // What the section draws, which is everything it holds except in an
+    // unexpanded trash. `hidden` is 0 for every other section, so the "+N"
+    // control below needs no key test of its own — and the header's folded count,
+    // the empty-lane placeholder and every reduction above still read
+    // `group.worktrees`, because those speak for the section, not for what is on
+    // screen.
+    const { rows, hidden } =
+      group.key === TRASH_LANE
+        ? trashPreview(group.worktrees, trashExpanded)
+        : { rows: group.worktrees, hidden: 0 };
+    const trashMoreLabel = trashExpanded
+      ? `Show only the ${TRASH_PREVIEW} most recently trashed`
+      : `Show ${hidden} more trashed worktree${hidden === 1 ? "" : "s"}`;
     // Where the dragged lane would land, drawn in the gutter beside the hovered
     // section. Which side is the travel direction: carrying a lane *up* onto this
     // one puts it above, carrying it *down* puts it below. Exactly one section
@@ -9006,7 +9027,7 @@ function Rail(props: {
                 </div>
               )
             )}
-            {!folded && group.worktrees.map((w, index) => {
+            {!folded && rows.map((w, index) => {
               // The trash draws no insertion caret. Everywhere else a drop is a
               // *position* and the caret says which one; a drop on the trash is a
               // destination — `dropZone` hands it to `onTrashDrop` and throws the
@@ -9025,8 +9046,8 @@ function Rail(props: {
                 ordered &&
                 dropAt !== null &&
                 dropAt.key === group.key &&
-                index === group.worktrees.length - 1 &&
-                dropAt.index >= group.worktrees.length;
+                index === rows.length - 1 &&
+                dropAt.index >= rows.length;
               const runs = runsForWorktree(props.envs, w);
               const status = worktreeStatus(runs);
               const running = status !== "stopped";
@@ -9365,6 +9386,40 @@ function Rail(props: {
                 </Fragment>
               );
             })}
+            {/* The rest of the trash, one click away.
+
+                The trash is the only section with no upper bound — rows stay in
+                it until the retention clock runs out or somebody empties it — so
+                unfolded it grew until it owned the rail and pushed the lanes
+                being worked in off the top of the scroller. It shows the newest
+                [`TRASH_PREVIEW`] instead, and this is the way back to the others.
+
+                A control, never a label. Restore and Delete live on each trashed
+                row, so a count that could not be opened would leave every
+                worktree past the second with no action but "Empty the trash",
+                which deletes all of them — the cap has to hide rows, not what you
+                can do to them.
+
+                Rendered in the collapsed rail too, where the section can least
+                afford the height, which is why the visible text is the bare
+                "+23" and the sentence lives in the tooltip and the accessible
+                name. Not while folded: a folded section is a header and nothing
+                else, and its own count already reports the total. */}
+            {group.key === TRASH_LANE &&
+              !folded &&
+              group.worktrees.length > TRASH_PREVIEW && (
+                <Tooltip label={trashMoreLabel}>
+                  <button
+                    type="button"
+                    className="trash-more"
+                    aria-label={trashMoreLabel}
+                    aria-expanded={trashExpanded}
+                    onClick={() => setTrashExpanded((open) => !open)}
+                  >
+                    {trashExpanded ? "Fewer" : `+${hidden}`}
+                  </button>
+                </Tooltip>
+              )}
             {/* The trash's drop target, drawn OVER whatever the section is
                 showing rather than in place of it.
 

@@ -620,7 +620,9 @@ export const UNGROUPED_LABEL = "Worktrees";
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
  * only *segments* the list — it must not re-sort, or the manual order the user
- * dragged would be silently re-derived here from a different rule.
+ * dragged would be silently re-derived here from a different rule. **The trash is
+ * the one exception**, and only because nothing in it was ever placed by hand;
+ * see the sort below.
  *
  * Empty lanes are kept, because a lane you just created and have not filled yet
  * still needs somewhere to drop a worktree. The **trash is always kept too** — it
@@ -635,7 +637,24 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
   // terminal deleting lane: it is still a trashed row until the worker drops it,
   // but the two states are not the same thing and must not share a lane.
   const deleting = worktrees.filter((w) => w.deleting);
-  const trashed = worktrees.filter((w) => w.trashed_at && !w.deleting);
+  // The one section this function orders rather than merely segments, and the
+  // exception to the rule above: no row in the trash was ever placed by hand — a
+  // drop here is a bin, not a position (`onTrashDrop` throws the index away) — so
+  // `WT_ORDER`'s lane-then-label order carries no user intent to preserve, while
+  // "what did I just bin" is the only question this section is ever asked.
+  // Newest first, so the rail's preview ([`TRASH_PREVIEW`]) holds the rows most
+  // likely to be restored rather than whichever two sort first alphabetically.
+  //
+  // A string compare IS a chronological compare here: `trashed_at` is RFC 3339
+  // UTC with a `Z` suffix and fixed-width microseconds (`db::ts_to_str`). Ties
+  // keep `WT_ORDER`'s order, because `Array.prototype.sort` is stable — and
+  // `filter` has already made the copy this sorts, so the caller's array is
+  // untouched.
+  const trashed = worktrees
+    .filter((w) => w.trashed_at && !w.deleting)
+    .sort((a, b) =>
+      a.trashed_at < b.trashed_at ? 1 : a.trashed_at > b.trashed_at ? -1 : 0,
+    );
   // Detached checkouts come out of every other section, whatever lane they were
   // filed into: a detached HEAD is a state that overrides where a row belongs
   // (same rule the trash applies to trashed rows).
@@ -750,6 +769,51 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     worktrees: trashed,
   });
   return groups;
+}
+
+/**
+ * How many trashed worktrees the rail draws before it folds the rest away behind
+ * a "+N" the reader can click.
+ *
+ * The trash has no upper bound of its own — a worktree stays in it until the
+ * retention clock runs out or somebody empties it — so an unfolded trash used to
+ * grow until it owned the rail, pushing the lanes a person actually works in off
+ * the top of the scroller. Two is enough to say *what* is in there and to keep
+ * the undo of the last bin one click away, which is what the section is for
+ * minutes after a trash and almost never after that.
+ *
+ * Not a setting. A number nobody will tune is a number that costs a config field,
+ * a schema row and a docs line to say "two".
+ */
+export const TRASH_PREVIEW = 2;
+
+/**
+ * Split the trash into the rows the rail draws and a count for the rest.
+ *
+ * `expanded` is the reader having clicked the "+N" — it shows everything, which
+ * is what keeps this a *fold* rather than a limit. That distinction is the whole
+ * design: every trashed row carries Restore and Delete on itself, so a cap with
+ * no way past it would strand every worktree past the second one with no action
+ * left but "Empty the trash", which deletes all of them. Hiding a row must never
+ * be the same thing as removing what you can do to it.
+ *
+ * `hidden` is 0 whenever nothing is folded away, so the caller renders the
+ * control on `hidden > 0` and can never draw a "+0".
+ *
+ * Pure, and here rather than inline in the rail, because this package has no
+ * component tests: a slice written into JSX is a slice nothing can pin.
+ */
+export function trashPreview(
+  worktrees: Worktree[],
+  expanded: boolean,
+): { rows: Worktree[]; hidden: number } {
+  if (expanded || worktrees.length <= TRASH_PREVIEW) {
+    return { rows: worktrees, hidden: 0 };
+  }
+  return {
+    rows: worktrees.slice(0, TRASH_PREVIEW),
+    hidden: worktrees.length - TRASH_PREVIEW,
+  };
 }
 
 /**

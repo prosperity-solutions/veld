@@ -869,6 +869,42 @@ button.lane-empty {
   color: var(--accent);
 }
 
+/* "+23" — the rest of the trash, folded behind one click.
+ *
+ * Row-shaped and row-width, because it stands in for the rows it hides: it sits
+ * in the list where they would be, and reaches the same edges, so the section
+ * reads as continuing rather than as ending in a caption. Muted like `.lane-empty`
+ * — it is the least important thing in the section until somebody wants it — but
+ * a solid hairline rather than that one's dashes, which mean "a drop lands here"
+ * everywhere else in this rail and would be a promise this control cannot keep.
+ *
+ * Shorter than a row on purpose (20px against `.wt-row`'s 28px): a count of
+ * things you cannot see should not weigh as much as a thing you can. It carries
+ * its own `cursor` because it renders in the collapsed rail too, at 64px, where
+ * "+23" is the entire visible affordance and nothing around it says it is
+ * clickable. */
+.trash-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  margin: 0 3px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  user-select: none;
+  cursor: pointer;
+}
+.trash-more:hover {
+  border-color: var(--border2);
+  color: var(--text);
+}
+
 /* --- Dropping a worktree on the trash ---------------------------------------
  *
  * The trash is the one section in the rail where a drop takes a worktree OUT of
@@ -1122,6 +1158,25 @@ button.lane-empty {
   /* Anchors the lane-drop bar on the dock's own top edge. */
   position: relative;
   border-top: 1px solid var(--border);
+  /* The dock is `flex: none` under a `flex: 1` scroller, so its content height is
+     taken from the list above it, which can shrink to nothing — and the two
+     sections pinned here are both unbounded. The trash holds rows until the
+     retention clock runs out, and emptying it moves every one of them into
+     Deleting at once. Past a screenful the dock stopped being a dock: it pushed
+     the lanes being worked in out of the rail, and then overflowed the rail
+     itself, which clips (`.rail` is `overflow: hidden`) — rows off the bottom
+     with no scrollbar to reach them.
+
+     `vh` rather than a percentage because `.rail`'s own height comes from being
+     stretched, and a max-height that silently resolves to `none` is the failure
+     this rule exists to prevent. It only ever bites on a dock that was going to
+     be too tall anyway; the trash's own preview (`.trash-more`) keeps the
+     ordinary case far below it, and this is what holds when the reader opens
+     that preview. `rowTargetAt` already clamps each section to this container's
+     box, so a section scrolled half out of the dock is still a correct drop
+     target. */
+  max-height: 45vh;
+  overflow-y: auto;
 }
 
 /* A row that can be picked up says so once you have hold of it, the same way a
