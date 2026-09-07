@@ -220,9 +220,20 @@ jobs:
           # Mirrors `veld_core::signing::parse_version_field`: a hit whose field
           # is not printable ASCII followed by NUL padding is NOT a record, and
           # the Rust reader skips it. Counting every occurrence of the magic
-          # instead would let one unlucky 16-byte sequence in a dependency — or
-          # a const-folded copy of the needle on some target — fail a release the
-          # runtime would read perfectly.
+          # instead would let one unlucky 16-byte sequence in a dependency fail a
+          # release the runtime would read perfectly.
+          #
+          # The tolerance stops there, and deliberately. A *const-folded copy of
+          # the needle* is not a false alarm to be waved through: v16.66.0 failed
+          # here because the `x86_64-unknown-linux-gnu` helper carried one
+          # immediately before a `rustls` error string, whose text is printable
+          # ASCII and therefore a perfectly well-formed field. The runtime reader
+          # would not have "read it perfectly" — it would have seen two
+          # disagreeing records, returned `None`, and refused to install the
+          # helper on every privileged machine. This step is the only gate that
+          # catches that, so widening the tolerance to make it quiet is the one
+          # edit to never make here; fix the binary instead (see
+          # `veld_core::signing::version_record_magic_at_runtime`).
           def field_version(raw):
               end = raw.find(b"\0")
               end = len(raw) if end < 0 else end

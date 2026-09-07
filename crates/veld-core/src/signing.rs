@@ -1047,7 +1047,9 @@ pub fn relaunch_guard(binary: &Path) -> Option<String> {
 /// other and reproduced the exact byte sequence anyway
 /// (`the_scanners_own_needle_is_not_a_second_record` is what found it). That
 /// mitigation depended on layout; this one depends on arithmetic. The plaintext
-/// appears only where [`version_record`] writes it.
+/// appears only where [`version_record`] writes it — provided nothing hands the
+/// arithmetic to the optimiser, which is the third way this has now failed; see
+/// [`version_record_magic_at_runtime`].
 const VERSION_MAGIC_OBFUSCATED: [u8; 16] = [
     0xff, 0xa3, 0x29, 0x7e, 0x79, 0x3e, 0xed, 0xb2, 0x0f, 0x11, 0x20, 0xc7, 0xf7, 0x9c, 0x5c, 0xc2,
 ];
@@ -1109,6 +1111,48 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
     out
 }
 
+/// The plaintext magic, recovered at run time behind an optimisation barrier.
+///
+/// [`version_record_magic`] is a `const fn`, and calling it from a *non*-const
+/// context is not enough to keep it out of the binary: on some targets LLVM
+/// evaluates it at compile time anyway and materialises the plaintext needle as
+/// a 16-byte constant in the scanner's own `.rodata` — precisely what
+/// [`VERSION_MAGIC_OBFUSCATED`] exists to prevent, arrived at from the other
+/// direction.
+///
+/// This is not hypothetical: it broke the v16.66.0 release. The
+/// `x86_64-unknown-linux-gnu` build of `veld-helper` carried the folded needle
+/// immediately before a `rustls` error string, so the binary held two
+/// well-formed records — its own version, and `EmptyTicketValue…` — and
+/// [`version_in_signed_bytes`] reads that as "no single answer", i.e. as
+/// unversioned, i.e. as a helper no privileged install may update onto. The same
+/// source built for `aarch64-apple-darwin` carried exactly one. Nothing about
+/// the source changed; the optimiser's mind did.
+///
+/// [`std::hint::black_box`] on the key is what stops the fold. The key stops
+/// being a value the optimiser may assume, so the XOR cannot be performed before
+/// the program runs, and the plaintext exists only in this function's stack
+/// frame — never in the file.
+///
+/// `black_box` is documented as best-effort, so this is a barrier and not a
+/// proof, and no test here can speak for it: the tests in this crate and in
+/// `crates/veld-helper/tests/version_record.rs` build the **host** arch in the
+/// **debug** profile, and the fold happened in release on another target. What
+/// makes that acceptable is the direction of the failure. If a future toolchain
+/// folds through the barrier anyway, `release.yml`'s `Package client binaries`
+/// step counts the records in the cross-compiled artifact and fails the release
+/// — before publishing, not after installing. Fail-closed, and the only check
+/// that can see it, which is why that step's tolerance must never be widened to
+/// silence a second record.
+fn version_record_magic_at_runtime() -> [u8; 16] {
+    let key = std::hint::black_box(VERSION_MAGIC_KEY);
+    let mut magic = [0u8; 16];
+    for (out, obfuscated) in magic.iter_mut().zip(VERSION_MAGIC_OBFUSCATED) {
+        *out = obfuscated ^ key;
+    }
+    magic
+}
+
 /// The version recorded inside `bytes`, or `None` when there isn't exactly one
 /// answer.
 ///
@@ -1123,7 +1167,7 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
 /// and refusing that would wedge the updater on the very artifacts it exists to
 /// install. Requiring one *value* keeps the strictness where it belongs.
 pub fn version_in_signed_bytes(bytes: &[u8]) -> Option<String> {
-    let magic = version_record_magic();
+    let magic = version_record_magic_at_runtime();
     let mut found: Option<String> = None;
     for start in 0..bytes.len().saturating_sub(VERSION_RECORD_LEN - 1) {
         if bytes[start..start + 16] != magic {
@@ -1383,6 +1427,18 @@ mod tests {
         for (i, byte) in magic.iter().enumerate() {
             assert_eq!(*byte, VERSION_MAGIC_OBFUSCATED[i] ^ VERSION_MAGIC_KEY);
         }
+    }
+
+    /// The scanner's runtime magic and the record's compile-time magic are the
+    /// same 16 bytes.
+    ///
+    /// They are two functions because one must not be const-evaluable and the
+    /// other must be — see [`version_record_magic_at_runtime`]. Nothing in the
+    /// compiler ties them together, and if they ever drift the helper stops
+    /// finding its own record: no test of either half alone would notice.
+    #[test]
+    fn the_runtime_magic_matches_the_record_magic() {
+        assert_eq!(version_record_magic_at_runtime(), version_record_magic());
     }
 
     /// A FIFO where the signature should be is refused, not waited on.
