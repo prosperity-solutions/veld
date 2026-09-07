@@ -861,9 +861,11 @@ fn parse_git_status(porcelain: &str) -> Vec<DirtyFile> {
         // produces the extra field. It went unnoticed because the malformed-
         // record guard above rejects most origin paths by accident: a bare
         // `a.txt` has no space at byte 2. An origin path *with* a space
-        // there — `ab cd.txt`, from `git mv "ab cd.txt" zz.txt` — sails
-        // through it and is reported as a file called `cd.txt` with code `ab`,
-        // which is a path that does not exist. Pinned by
+        // there sails through it and is reported as a file that does not
+        // exist — `IMG 1234.jpg` renamed becomes a file called `1234.jpg`
+        // with a status code of `IM`, and `01 Track.mp3` becomes
+        // `Track.mp3`. Those are ordinary filenames, which is what makes this
+        // reachable rather than theoretical. Pinned by
         // `a_rename_origin_is_never_reported_as_a_file_of_its_own`.
         let marks_origin = |c: u8| c == b'R' || c == b'C';
         if marks_origin(code.as_bytes()[0]) || marks_origin(code.as_bytes()[1]) {
@@ -5030,37 +5032,42 @@ mod tests {
     ///
     /// Most origin paths were rejected by accident anyway — the
     /// malformed-record guard needs a space at byte 2, which `a.txt` has not.
-    /// The first case here is the one that got through, and it reported a file
-    /// that does not exist: in the trash dialog's "what is in the way" list,
-    /// and in the count a spin-off reports back.
+    /// The ones that got through reported a file that does not exist, in the
+    /// trash dialog's "what is in the way" list and in the count a spin-off
+    /// reports back. `IMG 1234.jpg` and `01 Track.mp3` are the shape, which is
+    /// what makes this reachable rather than theoretical.
     #[test]
     fn a_rename_origin_is_never_reported_as_a_file_of_its_own() {
-        // `git mv "ab cd.txt" zz.txt` — the origin has a space at byte 2.
-        let got = parse_git_status("R  zz.txt\0ab cd.txt\0");
+        // `git mv "IMG 1234.jpg" photo.jpg` — an ordinary filename whose
+        // third character is a space, which is all it takes.
+        let got = parse_git_status("R  photo.jpg\0IMG 1234.jpg\0");
         assert_eq!(
             got,
             vec![DirtyFile {
-                path: "zz.txt".to_owned(),
+                path: "photo.jpg".to_owned(),
                 kind: "renamed",
             }],
             "the origin path must not become a second file"
         );
         // A copy, same shape.
         assert_eq!(
-            parse_git_status("C  new.txt\0ab cd.txt\0").len(),
+            // `\u{0}` rather than `\0` here only because the origin path
+            // starts with a digit, and `"\001 Track.mp3"` reads like an octal
+            // escape to a human even though Rust has none.
+            parse_git_status("C  new.txt\u{0}01 Track.mp3\0").len(),
             1,
             "a copy's origin is not a file either"
         );
         // Renamed *and* then modified in the worktree — `R` in the index
         // column, `M` in the worktree column, still one path.
         assert_eq!(
-            parse_git_status("RM zz.txt\0ab cd.txt\0").len(),
+            parse_git_status("RM photo.jpg\0IMG 1234.jpg\0").len(),
             1,
             "a renamed-then-edited file is still one path"
         );
         // And the accidentally-safe case stays safe.
         assert_eq!(
-            parse_git_status("R  zz.txt\0a.txt\0").len(),
+            parse_git_status("R  photo.jpg\0a.jpg\0").len(),
             1,
             "a short origin path was already skipped, and must stay skipped"
         );
