@@ -885,8 +885,10 @@ button.lane-empty {
  * pointer would move the whole list above it as well.
  *
  * `.rail-group` is the positioning context (it already is one, for the lane
- * bars). `pointer-events: none` because the section underneath is the actual
- * drop target and the drag events must reach it. */
+ * bars). `pointer-events: none` because this is a picture of a drop and the
+ * section underneath is the actual target: the drop no longer resolves through
+ * hit testing at all, but the overlay outlives its drag by a frame and must not
+ * be something the next press can land on. */
 .trash-drop {
   position: absolute;
   inset: 0;
@@ -940,12 +942,17 @@ button.lane-empty {
    the secondary gesture at the expense of the primary one: what you do to a
    section is fold it and click the rows inside, while dragging a lane into a new
    order is the rare, deliberate act. Pressing is the moment the two stop
-   competing, so that is where the hand belongs — and it is the last moment a
-   page can draw one at all, because a native drag hands the cursor to the OS the
-   instant it starts.
+   competing, so that is where the hand belongs.
+
+   This covers the press only. Once the press becomes a drag the pointer is off
+   the header and `body.pointer-dragging` takes over — which it can, now that the
+   drag is the page's rather than the OS's: a native drag took the cursor away at
+   the instant it started, and this rule was the last moment anything could draw
+   one.
 
    Only on a real lane in the expanded rail — the class carries that decision (it
-   is the same expression that sets `draggable`), the cursor only reports it. */
+   is the same expression that gates `onPointerDown`), the cursor only reports
+   it. */
 .lane-head.draggable:active {
   cursor: grabbing;
 }
@@ -1125,12 +1132,12 @@ button.lane-empty {
    hover overrode that with the secondary gesture and made every row read as
    something to move rather than something to open. Dragging is real but rarer,
    and it does not need advertising to be found — pressing and holding is the
-   gesture people already try, and it is the only window in which a page can draw
-   a hand at all, since a native drag gives the cursor to the OS.
+   gesture people already try. Past the press, `body.pointer-dragging` carries
+   the cursor for the rest of the drag.
 
-   The class carries the decision (it is the same expression that sets
-   `draggable`, so the cursor cannot claim a row is movable when it is not); the
-   cursor only reports it.
+   The class carries the decision (it is the same expression that gates
+   `onPointerDown`, so the cursor cannot claim a row is movable when it is not);
+   the cursor only reports it.
 
    The nested controls need no override here: `.wt-edit`, `.wt-run` and
    `.wt-alert` each declare `cursor: pointer` on themselves, and a cursor
@@ -1144,6 +1151,62 @@ button.lane-empty {
    under the pointer makes the drop target move as you aim at it. */
 .wt-row.dragging {
   opacity: 0.4;
+}
+
+/* Set on `<body>` for the length of any rail drag — rows, lane headers, project
+   squares — by `usePointerDrag`.
+
+   A pointer drag is an ordinary press, so without this the page carries on
+   behaving like one: the cursor becomes whatever it is passing over (a row's
+   `pointer`, a terminal's `text`, a resizer's `col-resize`), and a move with a
+   button held selects text the whole way. A native drag handed both problems to
+   the OS; this is the half of that which had to come back.
+
+   `!important` on a descendant selector, which this stylesheet otherwise spends
+   sparingly, because it is competing with a `cursor` declared on the element
+   under the pointer — and specificity cannot win that, since the whole point is
+   that we do not know what is under the pointer. It applies only while a drag is
+   in flight, and a drag always ends: `end()` removes the class on release,
+   cancel, Escape, lost focus and unmount alike. */
+body.pointer-dragging,
+body.pointer-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+}
+
+/* The thing you are holding: a clone of the dragged element, made and flown by
+   `usePointerDrag` (see `mountGhost`). The caret says where the drop lands; this
+   says what is in your hand, and a drag across the window without it is a cursor
+   moving over a page that never acknowledged the press.
+
+   Deliberately thin. Everything that makes the copy look like a row still comes
+   from `.wt-row`, `.lane-head` and `.project-sq` — none of them scoped to an
+   ancestor, so they keep applying to a node parked on `<body>`. Position, size
+   and the backing colour are set inline instead, because they have to beat the
+   element's own rules; `mountGhost` explains why the backing exists at all. */
+.drag-ghost {
+  /* The drag resolves its target geometrically, from `getBoundingClientRect` on
+     the rail's own nodes, so a ghost under the cursor could not confuse it even
+     if it were hittable. This is for the cursor and for a stray `:hover`. */
+  pointer-events: none;
+  /* Above everything. Nothing modal can be open mid-drag, but the ghost has to
+     clear the rail, the topbar and a Mantine portal alike, and a number chosen
+     to lose to one of them would only ever be discovered by dragging over it.
+     Every z-index this stylesheet sets is single-digit. */
+  z-index: 300;
+  /* Not opaque: the ghost starts exactly over the row it was copied from, and a
+     solid copy would read as the row having failed to fade. Not faint either —
+     `.wt-row.dragging` is already at 0.4, and the point of the pair is that what
+     you are carrying is the more present of the two. */
+  opacity: 0.85;
+  /* Lifted off the page, which is the whole claim the ghost is making. */
+  box-shadow: var(--shadow);
+  /* It moves every frame and nothing else on the page does. */
+  will-change: transform;
+  /* A transition inherited from the original would apply to the transform this
+     is moved with, and the ghost would trail the cursor by its duration — which
+     reads as the drag lagging rather than as the ghost easing. */
+  transition: none;
 }
 /* The insertion caret — the same 3px glowing bar the pane tab strip uses, turned
  * horizontal.
@@ -1274,6 +1337,12 @@ button.lane-empty {
   max-width: 100%;
   overflow: hidden;
   cursor: pointer;
+  /* A row is a control, not prose. It reads as text you could select, and while
+     the row was `draggable` the browser suppressed that for free; a pointer
+     drag does not, and a press that selects an alias before it crosses the
+     threshold leaves Chromium dragging the selected text instead of the row.
+     `.lane-head` and `.project-sq` have said this for the same reason. */
+  user-select: none;
   /* Fixed so collapsing the rail doesn't reflow the list: expanded rows are
      as tall as their 17px controls, collapsed ones only as tall as the
      emoji. Must clear the tallest expanded child plus vertical padding. */

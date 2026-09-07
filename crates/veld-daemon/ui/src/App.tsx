@@ -67,6 +67,7 @@ import {
   detachedInSection,
   freshRunName,
   fuzzyMatch,
+  insertionTarget,
   laneDropTarget,
   liveRuns,
   moveLane,
@@ -100,6 +101,7 @@ import {
   type WorktreeStatus,
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
+import { usePointerDrag } from "./shared/pointerDrag";
 import { worktreeLabel } from "./shared/worktreeName";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
 import { NodeActions } from "./shared/NodeActions";
@@ -7984,12 +7986,6 @@ function RailResizer(props: {
   );
 }
 
-/** Whether a drag is over the lower half of the row it is on. */
-function below(e: React.DragEvent): boolean {
-  const box = e.currentTarget.getBoundingClientRect();
-  return e.clientY > box.top + box.height / 2;
-}
-
 /**
  * The rail's insertion caret — the same 3px glowing bar the pane tab strip uses,
  * turned horizontal.
@@ -8050,8 +8046,9 @@ function ProjectCaret() {
  * Dragging a square rewrites the order for **every** window, because it is the
  * daemon's (`repos.sort_position`, schema v16) rather than this page's. That is not
  * incidental: ⌘1…⌘9 address a *position*, so a per-window order would make one chord
- * mean two projects. The drag mirrors the rail's own lane drag — same dataTransfer
- * discipline, same "drop on a row, land at its index" gesture.
+ * mean two projects. The drag mirrors the rail's own — same press-move-release
+ * substrate ([`usePointerDrag`]), same caret, same "the release point is the
+ * answer" resolution.
  */
 function ProjectColumn(props: {
   repos: Repo[];
@@ -8064,9 +8061,9 @@ function ProjectColumn(props: {
   onImport: () => void;
 }) {
   // Which square is being dragged, and where the caret is. Both are this
-  // component's alone — the rail's two drags are keyed on their own state for the
-  // reason its `onDragStart` explains, and a third one must not join that
-  // arrangement by sharing any of it.
+  // component's alone — the rail keeps its two drags on their own state for the
+  // reason recorded there, and a third one must not join that arrangement by
+  // sharing any of it.
   //
   // `dropAt` is a caret position (`0…length`, "insert before this index"), not the
   // index of a square — see `dropTargetIndex` for why the two are not the same
@@ -8074,42 +8071,64 @@ function ProjectColumn(props: {
   const [dragRoot, setDragRoot] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const roots = props.repos.map((r) => r.root);
+  const colRef = useRef<HTMLDivElement>(null);
   const endDrag = () => {
     setDragRoot(null);
     setDropAt(null);
   };
-  /** Commit whatever the caret is pointing at. Shared by every square's `onDrop`
-   *  and the column's own, so a release in the padding below the last square lands
-   *  the same way a release on a square does. */
-  const commitDrop = () => {
-    const from = roots.indexOf(dragRoot ?? "");
-    const at = dropAt;
-    endDrag();
-    if (from === -1 || at === null) return;
-    const to = dropTargetIndex(from, at);
-    if (to === null) return;
-    props.onReorder(from, to);
+  /**
+   * Where the caret goes for a pointer at (`x`, `y`), or `null` for a pointer
+   * that has left the column.
+   *
+   * Measured off the squares' own boxes rather than resolved from the element
+   * under the pointer, which is what makes the padding below the last square a
+   * target instead of a gap the drag falls through — the column used to need a
+   * drop zone of its own to cover exactly that, because the only other way to
+   * reach the last position was the bottom half of the final square. `null`
+   * outside the column is the other half of the same idea: a square carried off
+   * to the panes and released has nowhere to land, and says so by showing no
+   * caret before it is let go.
+   *
+   * `data-project-index` rather than the class, because the column's last child
+   * is a `.project-sq` too — the ＋ — and it is not a position.
+   */
+  const targetAt = (x: number, y: number): number | null => {
+    const col = colRef.current;
+    if (!col) return null;
+    const box = col.getBoundingClientRect();
+    if (x < box.left || x > box.right || y < box.top || y > box.bottom) {
+      return null;
+    }
+    const squares = [
+      ...col.querySelectorAll<HTMLElement>("[data-project-index]"),
+    ].map((el) => el.getBoundingClientRect());
+    return insertionTarget(squares, y);
   };
+  const drag = usePointerDrag<string>({
+    onBegin: setDragRoot,
+    onMove: (_root, x, y) => setDropAt(targetAt(x, y)),
+    onDrop: (root, x, y) => {
+      // Resolved again from the release point rather than read back out of
+      // `dropAt`: the caret and the commit then answer one question with one
+      // piece of code, so what lands is what was on screen.
+      const at = targetAt(x, y);
+      endDrag();
+      const from = roots.indexOf(root);
+      if (from === -1 || at === null) return;
+      const to = dropTargetIndex(from, at);
+      if (to === null) return;
+      props.onReorder(from, to);
+    },
+    onCancel: endDrag,
+    scroller: () => colRef.current,
+  });
   return (
     <div
       className="project-col"
       role="tablist"
       aria-label="Projects"
       aria-orientation="vertical"
-      // The column itself accepts the drop, so a release in the padding under the
-      // last square is a drop at the end rather than a cancelled drag. Without it
-      // the only way to reach the last position is to hit the bottom half of the
-      // final square exactly.
-      onDragOver={(e) => {
-        if (!dragRoot) return;
-        e.preventDefault();
-        e.dataTransfer.dropEffect = "move";
-      }}
-      onDrop={(e) => {
-        if (!dragRoot) return;
-        e.preventDefault();
-        commitDrop();
-      }}
+      ref={colRef}
     >
       {props.repos.map((r, index) => {
         const summary = inbox.groupState(projectWorktreeIds(r), props.showWorking);
@@ -8133,15 +8152,21 @@ function ProjectColumn(props: {
               position="right"
               withArrow
             >
-            {/* A div with role=tab, not a <button>, and the reason is the drag: a
-                native button consumes the mousedown for its own activation
-                behaviour, so `draggable` on one never starts a drag in Chromium.
-                The rail's own rows are divs for a related reason (nested controls)
-                — see the note there. `onKeyDown` restores the Enter/Space a real
+            {/* A div with role=tab, not a <button>. The original reason was the
+                drag — a native button consumes the mousedown for its own
+                activation behaviour, so `draggable` on one never started a drag
+                in Chromium — and that constraint is gone: a pointer drag needs
+                nothing from the mousedown a button eats. What is left is a free
+                choice this change deliberately does not spend, since converting
+                it back means re-deciding the button's default styling, its focus
+                ring and the `onKeyDown` below in one go. The rail's own rows are
+                divs for a reason that still stands on its own (nested controls) —
+                see the note there. `onKeyDown` restores the Enter/Space a real
                 button would have had. */}
             <div
               role="tab"
               tabIndex={0}
+              data-project-index={index}
               aria-selected={active}
               className={`project-sq${active ? " active" : ""}${
                 r.available ? "" : " unavailable"
@@ -8151,40 +8176,11 @@ function ProjectColumn(props: {
                 e.preventDefault();
                 props.onSelect(r.root);
               }}
-              draggable
-              onDragStart={(e) => {
-                setDragRoot(r.root);
-                e.dataTransfer.effectAllowed = "move";
-                // Firefox ignores a drag with no payload. Prefixed like the rail's
-                // lane drag, so anything outside this column that reads the plain
-                // text can tell what it is being offered.
-                e.dataTransfer.setData("text/plain", `project:${r.root}`);
-              }}
-              onDragOver={(e) => {
-                if (!dragRoot) return;
-                // Only for a drag this column started. Without the guard a worktree
-                // or a lane dragged out of the rail would paint a drop indicator on
-                // a target that cannot accept it.
-                e.preventDefault();
-                e.dataTransfer.dropEffect = "move";
-                // Above the midpoint inserts before this square, below it after —
-                // the gesture the rail already uses, and the reason the indicator
-                // is a caret between squares rather than a ring around one: a ring
-                // cannot say which side of the target you are about to land on.
-                const box = e.currentTarget.getBoundingClientRect();
-                setDropAt(e.clientY < box.top + box.height / 2 ? index : index + 1);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                // The column below also accepts drops (so a release in the padding
-                // lands at the end), and without this the event bubbled into it
-                // with the pre-`endDrag` closure still live — every drop on a square
-                // fired `commitDrop` twice, i.e. two identical POSTs and two polls
-                // per drag.
-                e.stopPropagation();
-                commitDrop();
-              }}
-              onDragEnd={endDrag}
+              // The press that moves a square is the press that selects it; which
+              // one it turns out to be is decided by how far it travels. The
+              // click is swallowed for a real drag, so this and `onClick` below
+              // cannot both fire.
+              onPointerDown={(e) => drag.start(e, r.root)}
               onClick={() => props.onSelect(r.root)}
               onContextMenu={(e) => props.onMenu(e, r)}
             >
@@ -8305,6 +8301,12 @@ function Rail(props: {
   // because the two drags have different drop targets and different feedback —
   // and a single "what is being dragged" value made every handler on both sides
   // ask what kind it was before doing anything.
+  //
+  // Exclusive with the row drag, and structurally so: one `pointerdown` reaches
+  // exactly one of the two `start` calls, since a row is not inside a header.
+  // Under native drag-and-drop this was a convention instead — each drag's start
+  // handler cleared the other's state by hand, because a `dragend` that never
+  // arrived could otherwise leave both live and both sets of zones armed.
   const [dragLane, setDragLane] = useState<string | null>(null);
   const [laneDropAt, setLaneDropAt] = useState<number | null>(null);
   // Whether the dock, rather than a section in the list, is the thing under the
@@ -8312,23 +8314,6 @@ function Rail(props: {
   // the bar can be seen, since the last lane's own bar is inside the scroller and
   // the dock is used precisely when that lane is scrolled out of view.
   const [onDock, setOnDock] = useState(false);
-  // `dragend` fires on the source node, so the rail's own `onDragEnd` only ever
-  // sees a drag whose source is still mounted. A lane renamed in ANOTHER window
-  // changes the section's key, React unmounts it, and the event then fires on a
-  // detached node and reaches nothing — leaving `dragLane` set for good. That is
-  // not cosmetic: the list keeps a live drop zone, so the next unrelated drag
-  // over the rail (a file from Finder) would be accepted and reorder a lane
-  // nobody grabbed. The window always hears it.
-  useEffect(() => {
-    if (dragLane === null) return;
-    const done = () => endDrag();
-    window.addEventListener("dragend", done);
-    window.addEventListener("drop", done);
-    return () => {
-      window.removeEventListener("dragend", done);
-      window.removeEventListener("drop", done);
-    };
-  }, [dragLane]);
   // Positions of the lane sections, by lane name.
   const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
   /**
@@ -8352,6 +8337,7 @@ function Rail(props: {
   const laneAtOf = (g: RailGroup) =>
     g.editable ? laneIndex.get(g.lane) : undefined;
   const listRef = useRef<HTMLDivElement>(null);
+  const dockRef = useRef<HTMLDivElement>(null);
 
   /**
    * The lane a pointer at `clientY` is aiming at, or `null` when the rail holds
@@ -8402,34 +8388,6 @@ function Rail(props: {
     setLaneDropAt(null);
     setOnDock(false);
   };
-  // A target's highlight follows the pointer *out* of it, not only into the next
-  // one. Nothing else retracted it: `dropAt` is written by whichever zone the
-  // pointer was last over and lasted until some other zone overwrote it, so
-  // dragging off a section and stopping anywhere that takes no drop — a pinned
-  // lane, the gap under the sections, the panes, outside the window — left it
-  // lit, still promising a landing it would no longer accept.
-  //
-  // `defaultPrevented` is what a claim looks like here. Accepting a drag *is*
-  // calling `preventDefault` — the browser gives no other way to say yes — so an
-  // event that reaches this listener unclaimed is proof that nothing under the
-  // pointer would take the drop. It is the same test `laneDrop` and the stray
-  // file-drop guard already read, rather than a second convention beside them.
-  // (Most row and section zones stop propagation as well and never arrive here
-  // at all, which is the same answer reached one step earlier.)
-  //
-  // On the window, because "over no target" has to include "not over the rail";
-  // mounted only while a drag of ours is in flight, so nothing listens at rest.
-  useEffect(() => {
-    if (dragPath === null && dragLane === null) return;
-    const clear = (e: DragEvent) => {
-      if (e.defaultPrevented) return;
-      setDropAt(null);
-      setLaneDropAt(null);
-      setOnDock(false);
-    };
-    window.addEventListener("dragover", clear);
-    return () => window.removeEventListener("dragover", clear);
-  }, [dragPath, dragLane]);
   // Dropping is disabled while the rail is collapsed. A 64px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
   // whose result you cannot see is a reorder you did not mean.
@@ -8442,121 +8400,162 @@ function Rail(props: {
   const canDropOn = (group: RailGroup) => !group.pinned || group.key === TRASH_LANE;
 
   /**
-   * Drop handlers for a section, resolving to an insertion index.
+   * Which section a pointer at (`x`, `y`) is over and which slot in it, or
+   * `null` for a pointer that is over no section at all.
    *
-   * `half` splits a row into its top and bottom halves so the gap *below* the last
-   * row is reachable — without it, appending to a group was impossible: the row's
-   * own handler stops propagation before the section's `index = length` handler
-   * runs, and a flex column has no blank space under its last child to aim at.
+   * Two DOM reads and one pure choice, the same shape as [`laneTargetAt`]: the
+   * section is the one whose box contains the point, the slot is
+   * [`insertionTarget`] over that section's rows. What replacing per-element
+   * drop zones with this buys is the append. A row's zone had to stop
+   * propagation — otherwise the section's own zone fired too and the caret
+   * flickered between the two — so the section never saw a pointer that was over
+   * a row, and a flex column has no blank space under its last child to aim at;
+   * between them, the only way to append to a lane was the lower half of its
+   * final row, exactly. Resolved geometrically, the section's padding and
+   * everything below its last row mean "at the end", which is what they look
+   * like they mean.
    *
-   * The trash ignores the insertion index: dropping there is a bin, not a
-   * position.
+   * `null` is an ordinary answer rather than something inferred. Native
+   * drag-and-drop had no way to ask *would anything take this*, so the rail read
+   * `defaultPrevented` as a claim between its own handlers and mounted a window
+   * listener to retract a caret the pointer had left behind; here, "over
+   * nothing" is what the function returns.
+   *
+   * The trash resolves like any other section and then ignores the index:
+   * dropping there is a bin, not a position.
    */
-  const dropZone = (group: RailGroup, index: number, half = false) => ({
-    onDragOver: (e: React.DragEvent) => {
-      if (!dragPath || !canDropOn(group)) return;
-      // Both required: preventDefault marks the element a valid drop target, and
-      // without stopPropagation the enclosing section's own zone also fires and the
-      // indicator flickers between the two.
-      e.preventDefault();
-      e.stopPropagation();
-      setDropAt({ key: group.key, index: index + (half && below(e) ? 1 : 0) });
-    },
-    onDrop: (e: React.DragEvent) => {
-      if (!dragPath || !canDropOn(group)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (group.key === TRASH_LANE) {
-        props.onTrashDrop(dragPath);
-      } else {
-        props.onMove(dragPath, group.key, index + (half && below(e) ? 1 : 0));
+  const rowTargetAt = (
+    x: number,
+    y: number,
+  ): { key: string; index: number } | null => {
+    // The two containers are tested separately, and only while the point is
+    // inside one of them. `getBoundingClientRect` is layout, not clipping: a
+    // section scrolled out of the list still reports a box, and without this a
+    // pointer over the dock could be answered by whichever section happens to
+    // overhang it. Clipping each section to its container is the same guard one
+    // level down, for a section that is only half in view.
+    for (const container of [listRef.current, dockRef.current]) {
+      if (!container) continue;
+      const outer = container.getBoundingClientRect();
+      if (x < outer.left || x > outer.right) continue;
+      if (y < outer.top || y > outer.bottom) continue;
+      for (const el of container.querySelectorAll<HTMLElement>("[data-group-key]")) {
+        const box = el.getBoundingClientRect();
+        if (y < Math.max(box.top, outer.top)) continue;
+        if (y > Math.min(box.bottom, outer.bottom)) continue;
+        const group = groups.find((g) => g.key === el.dataset.groupKey);
+        // A section that takes no drop is not a miss to look past — it is the
+        // answer, and the answer is "nowhere".
+        if (!group || !canDropOn(group)) return null;
+        const rows = [...el.querySelectorAll<HTMLElement>("[data-row]")].map(
+          (row) => row.getBoundingClientRect(),
+        );
+        return { key: group.key, index: insertionTarget(rows, y) };
       }
-      endDrag();
+    }
+    return null;
+  };
+
+  /**
+   * Where a carried lane would land for a pointer at (`x`, `y`): a lane index,
+   * plus whether the **dock** is the thing under the pointer.
+   *
+   * Inside the scroller the answer is the list's geometry, resolved once for the
+   * whole column rather than per section — a dragged lane always has somewhere
+   * to land, which per-section targets could not promise. Dropping a lane means
+   * displacement, it takes the target lane's place, so there is no midpoint to
+   * consult: a lane is a block, and unlike a row it has no "above me" and "below
+   * me" halves. Which side the bar is drawn on is a rendering question, answered
+   * from the travel direction in `renderGroup`.
+   *
+   * The dock is answered first and answered flatly: **always the last lane,
+   * never the geometry**. It sits *outside* the scroller, and
+   * `getBoundingClientRect` is layout rather than clipping — a section below the
+   * fold has a bottom below the dock's own Y, so running the dock's pointer
+   * through `laneTargetAt` picks whichever section happens to overhang instead
+   * of the last lane. That is wrong exactly when the dock target is useful: a
+   * rail long enough to scroll, scrolled up, with the last lane off-screen. The
+   * dock means "the bottom", so it says so directly — its whole area, the Trash
+   * header included, because a dock that answered differently depending on which
+   * of its two sections you were over would be a distinction nothing on screen
+   * makes. `dock` is also what makes it draw its own bar, since the last lane's
+   * own bar lives inside the scroller and is out of sight in that very case.
+   *
+   * `null` for a pointer outside both, and for a rail holding no lanes: nothing
+   * to draw, nothing to commit.
+   */
+  const laneTargetAtPoint = (
+    x: number,
+    y: number,
+  ): { index: number; dock: boolean } | null => {
+    const inside = (el: HTMLElement | null) => {
+      if (!el) return false;
+      const box = el.getBoundingClientRect();
+      return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
+    };
+    if (props.lanes.length === 0) return null;
+    if (inside(dockRef.current)) {
+      return { index: props.lanes.length - 1, dock: true };
+    }
+    if (!inside(listRef.current)) return null;
+    const to = laneTargetAt(y);
+    return to === null ? null : { index: to, dock: false };
+  };
+
+  /**
+   * The two rail drags, on the shared press-move-release substrate.
+   *
+   * Each is a resolver and four callbacks, and the resolver runs twice: once per
+   * move to draw the target, once more on release to commit it. That repetition
+   * is the point — the caret and the write answer the same question with the
+   * same code, so the rail cannot commit a drop it was not showing.
+   *
+   * `endDrag` before the write in both, because both writes re-render the rail
+   * and the feedback for a gesture that is over should not survive into it.
+   */
+  const rowDrag = usePointerDrag<string>({
+    onBegin: setDragPath,
+    // Only when the answer changed. `pointermove` fires far more often than the
+    // caret can move, and the rail is a big subtree to re-render for a target
+    // that is still the same row's top half; returning the previous object makes
+    // React bail out of the render entirely.
+    onMove: (_path, x, y) => {
+      const at = rowTargetAt(x, y);
+      setDropAt((prev) =>
+        prev?.key === at?.key && prev?.index === at?.index ? prev : at,
+      );
     },
+    onDrop: (path, x, y) => {
+      const at = rowTargetAt(x, y);
+      endDrag();
+      if (at === null) return;
+      // The trash is a destination, not a position — the index is thrown away.
+      if (at.key === TRASH_LANE) props.onTrashDrop(path);
+      else props.onMove(path, at.key, at.index);
+    },
+    onCancel: endDrag,
+    scroller: () => listRef.current,
   });
 
-  /**
-   * The dock's own lane drop: always the last lane, never the geometry.
-   *
-   * The dock sits *outside* the scroller, and `getBoundingClientRect` is layout,
-   * not clipping — a section below the fold has a bottom below the dock's own Y,
-   * so running the dock's pointer through `laneTargetAt` picks whichever section
-   * happens to overhang rather than the last lane. That is wrong exactly when the
-   * dock target is useful: a rail long enough to scroll, scrolled up, where the
-   * last lane is off-screen. The dock means "the bottom", so it says so directly
-   * — its whole area, the Trash header included, because a dock that answered
-   * differently depending on which of its two sections you were over would be a
-   * distinction nothing on screen makes.
-   *
-   * It draws its own bar, too (`onDock`): the last lane's bar lives inside the
-   * scroller, so in the very case this exists for it is scrolled out of sight and
-   * the dock would accept a drop while showing nothing.
-   */
-  const laneDockDrop = (() => {
-    const last = props.lanes.at(-1);
-    if (dragLane === null || !last) return null;
-    const take = (e: React.DragEvent) => {
-      if (e.defaultPrevented) return false;
-      e.preventDefault();
-      return true;
-    };
-    return {
-      onDragOver: (e: React.DragEvent) => {
-        if (!take(e)) return;
-        setLaneDropAt(props.lanes.length - 1);
-        setOnDock(true);
-      },
-      onDrop: (e: React.DragEvent) => {
-        if (!take(e)) return;
-        props.onMoveLane(dragLane, last.name);
-        endDrag();
-      },
-    };
-  })();
-
-  /**
-   * The lane drag's drop zone inside the scroller: the list as a whole, not the
-   * sections.
-   *
-   * One owner within the column. Every section and row bails out of its own
-   * handlers while a lane is in flight (each drop zone answers only to its own
-   * drag), so the event reaches here from anywhere in the list and
-   * [`laneTargetAt`] decides what it means. A dragged lane always has somewhere
-   * to land, which is what per-section targets could not promise; below the
-   * scroller, `laneDockDrop` above owns the same gesture.
-   *
-   * Dropping a lane means displacement — it takes the target lane's place — so
-   * there is no midpoint to consult: a lane is a block, and unlike a row it has
-   * no "above me" and "below me" halves. Which side the bar is drawn on is a
-   * rendering question, answered from the travel direction in `renderGroup`.
-   */
-  const laneDrop = dragLane === null
-    ? null
-    : {
-        onDragOver: (e: React.DragEvent) => {
-          if (e.defaultPrevented) return;
-          const to = laneTargetAt(e.clientY);
-          if (to === null) return;
-          e.preventDefault();
-          setLaneDropAt(to);
-          setOnDock(false);
-        },
-        onDrop: (e: React.DragEvent) => {
-          // A nested handler that already claimed this drop wins, and says so
-          // by having called `preventDefault`. Without this the container is a
-          // second, invisible consumer of the same event: a future "drop a lane
-          // on the trash" would delete the lane *and* reorder one, because
-          // `stopPropagation` is the only other way to stop this and nothing
-          // here would remind its author to call it.
-          if (e.defaultPrevented) return;
-          const to = laneTargetAt(e.clientY);
-          const onto = to === null ? undefined : props.lanes[to];
-          if (!onto) return;
-          e.preventDefault();
-          props.onMoveLane(dragLane, onto.name);
-          endDrag();
-        },
-      };
+  const laneDrag = usePointerDrag<string>({
+    onBegin: setDragLane,
+    onMove: (_lane, x, y) => {
+      const at = laneTargetAtPoint(x, y);
+      setLaneDropAt(at?.index ?? null);
+      setOnDock(at?.dock ?? false);
+    },
+    onDrop: (lane, x, y) => {
+      const at = laneTargetAtPoint(x, y);
+      endDrag();
+      const onto = at === null ? undefined : props.lanes[at.index];
+      if (!onto) return;
+      // `moveLane` returns null for a lane dropped on itself, so a no-op drop
+      // costs nothing here and needs no guard of its own.
+      props.onMoveLane(lane, onto.name);
+    },
+    onCancel: endDrag,
+    scroller: () => listRef.current,
+  });
 
   /**
    * Render one rail section — a lane, a user lane, or one of the two
@@ -8696,15 +8695,12 @@ function Rail(props: {
               // outline saying the same thing in the same colour.
               dropInto && group.key !== TRASH_LANE ? " drop-in" : ""
             }${group.editable && dragLane === group.lane ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
-            // The section itself is the fallback target, and it resolves to its
-            // FIRST position rather than its last. What actually reaches this
-            // handler is the header and the padding above it — the rows stop
-            // propagation — and both sit at the *top* of the section, so
-            // appending here contradicted where the pointer was: dragging down
-            // into a lane crossed its header and the caret jumped to the bottom.
-            // Appending is still reachable, and unambiguously so: it is the lower
-            // half of the last row.
-            {...dropZone(group, 0)}
+            /* What `rowTargetAt` measures a row drop against: the box is the
+               section, and the rows inside it are the slots. Every section
+               carries one, droppable or not — a pinned lane the drag cannot
+               enter has to be able to say so, and a section that carried no key
+               would instead be looked straight through. */
+            data-group-key={group.key}
             /* What `laneTargetAt` measures. Only a real lane carries one, so the
                ungrouped section and the pinned lanes are not lane targets — a
                pointer over them resolves to the nearest lane instead. */
@@ -8723,23 +8719,13 @@ function Rail(props: {
 
                    Only a real lane, and only expanded: the ungrouped section and
                    the trash hold no place in the lane order, and a collapsed rail
-                   renders no headers at all. */
-                draggable={group.editable && canDrag}
-                onDragStart={(e) => {
-                  setDragLane(group.lane);
-                  // The two drags are exclusive, and this is what makes that
-                  // true rather than conventional: every drop zone answers only
-                  // to its own drag, so a `dragend` that never arrived (the
-                  // source unmounted by the 5s poll, say) would otherwise leave
-                  // both live and both sets of handlers armed at once.
-                  setDragPath(null);
-                  setDropAt(null);
-                  e.dataTransfer.effectAllowed = "move";
-                  // Firefox ignores a drag with no payload. Prefixed because a
-                  // worktree drag puts a bare path here and something outside the
-                  // rail may yet read it — the rail itself keys off the state.
-                  e.dataTransfer.setData("text/plain", `lane:${group.lane}`);
-                }}
+                   renders no headers at all — so a header with no handler is how
+                   "this one does not move" is said. */
+                onPointerDown={
+                  group.editable && canDrag
+                    ? (e) => laneDrag.start(e, group.lane)
+                    : undefined
+                }
                 onContextMenu={
                   hasMenu ? (e) => props.onLaneMenu(e, group.lane) : undefined
                 }
@@ -8784,10 +8770,13 @@ function Rail(props: {
                    already exists, which is the one shape where a click target
                    that cannot be focused is honest rather than a hole.
 
-                   A drag of this same bar does not also fold it: Chromium
-                   emits no `click` after a completed drag, so the release that
-                   drops a lane in its new place is not a second gesture here.
-                   Measured, not assumed. */
+                   A drag of this same bar does not also fold it — and that is
+                   now something the drag arranges rather than something the
+                   browser does. A native drag ended without a `click`; a pointer
+                   drag ends in an ordinary `pointerup` and would produce one, so
+                   `usePointerDrag` swallows exactly one click in the capture
+                   phase at the end of every drag. Without it, every lane reorder
+                   would also fold the lane it had just moved. */
                 onClick={(e) => {
                   if (
                     (e.target as Element).closest(
@@ -9153,19 +9142,19 @@ function Rail(props: {
                             ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
                             : `${worktreeLabel(w)} — ${w.branch}${stateNote}`
                   }
-                  draggable={rowDraggable}
-                  onDragStart={(e) => {
-                    setDragPath(w.path);
-                    // Exclusive with the lane drag — see the lane header's own
-                    // `onDragStart`.
-                    setDragLane(null);
-                    setLaneDropAt(null);
-                    e.dataTransfer.effectAllowed = "move";
-                    // Firefox ignores a drag with no payload, and the path is the
-                    // key everything downstream uses anyway.
-                    e.dataTransfer.setData("text/plain", w.path);
-                  }}
-                  {...dropZone(group, index, true)}
+                  /* What `rowTargetAt` counts as a slot. Valueless: the index is
+                     the element's position among its section's rows, which the
+                     query already gives, and duplicating it here would be a
+                     second copy of the order to keep in step. */
+                  data-row=""
+                  /* The press that moves a row is the press that selects it;
+                     which one it turns out to be is decided by how far it
+                     travels, and the click is swallowed for a real drag so this
+                     and `onClick` below cannot both fire. A row that cannot be
+                     dragged simply has no handler. */
+                  onPointerDown={
+                    rowDraggable ? (e) => rowDrag.start(e, w.path) : undefined
+                  }
                   /* A pending removal is not selectable: selecting it would open
                      panes, terminals and a browser rooted at a directory that is
                      about to stop existing. The restore control and the context
@@ -9406,8 +9395,11 @@ function Rail(props: {
                 deletion would make people avoid a gesture that is safe.
 
                 `aria-hidden`, and `pointer-events: none` in the CSS: it is a
-                picture of a drop, and the section underneath is the real target —
-                the drag events have to reach it. */}
+                picture of a drop, and the section underneath is the real target.
+                Nothing now depends on events passing *through* it — the drop is
+                resolved from the pointer's position against the section's box —
+                but an overlay that is only a picture should not be hit-testable
+                either, and it outlives its drag by a frame. */}
             {group.key === TRASH_LANE && dragPath !== null && (
               <div
                 className={`trash-drop${dropInto ? " over" : ""}`}
@@ -9486,19 +9478,15 @@ function Rail(props: {
           </Tooltip>
         )}
       </div>
-      <div
-        className="rail-list"
-        ref={listRef}
-        onDragEnd={endDrag}
-        {...(laneDrop ?? {})}
-      >
+      <div className="rail-list" ref={listRef}>
         {scroll.map((group) => renderGroup(group))}
       </div>
       {/* The dock takes a lane drop too, though it holds no lane. It is the
           natural overshoot for "pull this lane to the bottom", and it is the
           strip immediately under the edge you have to reach to get there —
           refusing there made the last position the one place the gesture could
-          miss. Its own handler, not the list's: see `laneDockDrop`. */}
+          miss. It resolves differently from the list, too — see
+          `laneTargetAtPoint`. */}
       {dockVisible && (
         <div
           className={`rail-dock${
@@ -9509,8 +9497,7 @@ function Rail(props: {
               ? " lane-drop-into"
               : ""
           }`}
-          onDragEnd={endDrag}
-          {...(laneDockDrop ?? {})}
+          ref={dockRef}
         >
           {docked.map((group) => renderGroup(group))}
         </div>
