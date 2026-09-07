@@ -920,6 +920,35 @@ export function laneDropTarget(
 }
 
 /**
+ * Where an item dropped at `clientY` belongs in a vertical column, as an
+ * insertion index into `boxes`.
+ *
+ * The sibling of [`laneDropTarget`] for the two columns whose items *are* the
+ * order: the rail's worktree rows and the project switcher's squares. Same
+ * discipline — the answer comes from the pointer's Y against the items' boxes,
+ * not from whatever element happens to be under it — but a different question,
+ * because these drops land *between* items rather than *on* one. The boundary is
+ * each box's own midpoint, so the top half of a row means "before it" and the
+ * bottom half "after it", and the gaps between rows, the list's padding and
+ * everything below the last row resolve like the nearest half they adjoin
+ * instead of belonging to nothing.
+ *
+ * `boxes` must be in rendered order. Returns `boxes.length` for a drop past the
+ * final midpoint, and `0` for an empty column — an insertion point is always in
+ * range, which is what lets a caller drop into a lane holding no rows at all.
+ */
+export function insertionTarget(
+  boxes: Array<{ top: number; bottom: number }>,
+  clientY: number,
+): number {
+  for (let i = 0; i < boxes.length; i++) {
+    const b = boxes[i];
+    if (clientY < b.top + (b.bottom - b.top) / 2) return i;
+  }
+  return boxes.length;
+}
+
+/**
  * The lane order after moving the lane `name` onto the place currently held by
  * the lane `onto`.
  *

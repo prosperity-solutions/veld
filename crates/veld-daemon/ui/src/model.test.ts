@@ -10,6 +10,7 @@ import {
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
+  insertionTarget,
   laneDropTarget,
   liveRuns,
   MAIN_LANE,
@@ -1387,6 +1388,47 @@ describe("laneDropTarget", () => {
       laneDropTarget([{ index: Number.NaN, bottom: 50 }, ...sections], 30),
     ).toBe(0);
     expect(laneDropTarget([{ index: Number.NaN, bottom: 50 }], 30)).toBeNull();
+  });
+});
+
+describe("insertionTarget", () => {
+  // Three rows stacked with a 2px gap, as the rail's list renders them:
+  // 0 spans 10-40, 1 spans 42-72, 2 spans 74-104. Midpoints 25, 57, 89.
+  const rows = [
+    { top: 10, bottom: 40 },
+    { top: 42, bottom: 72 },
+    { top: 74, bottom: 104 },
+  ];
+
+  it("splits each row at its own midpoint", () => {
+    expect(insertionTarget(rows, 20)).toBe(0);
+    expect(insertionTarget(rows, 30)).toBe(1);
+    expect(insertionTarget(rows, 50)).toBe(1);
+    expect(insertionTarget(rows, 60)).toBe(2);
+  });
+
+  it("gives the gap to the row below it", () => {
+    // 41 is between two rows and belongs to neither element. It reads as
+    // "before row 1", which is the same place "after row 0" names.
+    expect(insertionTarget(rows, 41)).toBe(1);
+  });
+
+  it("puts everything above the first midpoint at the very top", () => {
+    // The list's padding is up here, and a drop on it has to mean the top of
+    // the lane rather than nothing at all.
+    expect(insertionTarget(rows, 10)).toBe(0);
+    expect(insertionTarget(rows, -400)).toBe(0);
+  });
+
+  it("puts everything below the last midpoint at the very end", () => {
+    expect(insertionTarget(rows, 104)).toBe(3);
+    expect(insertionTarget(rows, 5000)).toBe(3);
+  });
+
+  it("aims at the only slot an empty column has", () => {
+    // A lane with no rows still takes drops — that is how the first worktree
+    // gets into a lane someone just made.
+    expect(insertionTarget([], 42)).toBe(0);
   });
 });
 
