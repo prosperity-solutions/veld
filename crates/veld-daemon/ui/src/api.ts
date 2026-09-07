@@ -185,9 +185,12 @@ export interface RemoteBranch {
 /**
  * The branches a worktree can be created from.
  *
- * The remote half is as fresh as the last fetch — the repo poll fetches at most
- * once a minute per repo — so a branch pushed seconds ago may not be listed
- * yet. Reading it does not fetch, deliberately: it is a GET.
+ * Reading it does not fetch, deliberately: it is a GET. So the remote half is
+ * as fresh as the last fetch, and **only `origin` is kept fresh for you** — the
+ * repo poll's throttled fetch runs `git fetch origin`, while this lists every
+ * remote. A branch pushed seconds ago may not be listed yet either way; the
+ * create path fetches the chosen ref's own remote, so the checkout is current
+ * even when this list was not.
  */
 export interface RepoBranches {
   local: LocalBranch[];
@@ -197,10 +200,12 @@ export interface RepoBranches {
 /**
  * What a spin-off's carry-over did, on the create response.
  *
- * Present only when a spin-off asked for it. The worktree is created and
- * registered *before* the carry-over runs, so `error` being set means the
- * checkout exists without the changes — which is the one outcome a caller must
- * not report as a plain success.
+ * Present only when a spin-off asked for it. The worktree is created — and
+ * about to be registered — *before* the carry-over runs, so `error` being set
+ * means the checkout exists without the changes, which is the one outcome a
+ * caller must not report as a plain success. `files` can be non-zero alongside
+ * `error`: that is a partial apply, and the two are reported separately so a
+ * caller can say so rather than denying work that did arrive.
  */
 export interface CarryOverReport {
   /** How many paths the new checkout has uncommitted afterwards. */
@@ -236,6 +241,10 @@ export type CreateWorktreeSource =
   /**
    * Cut `branch` from another checkout of the same repo. Unpushed commits come
    * along for free; `carry_over` adds its staged, unstaged and untracked work.
+   *
+   * **`carry_over` omitted means `false` on the wire**, which is the opposite
+   * of the create dialog's own default — the dialog ticks it and sends it
+   * explicitly. A caller that wants the work carried has to say so.
    */
   | { kind: "worktree"; from_worktree: number; carry_over?: boolean };
 
@@ -1455,8 +1464,13 @@ export const api = {
     repo_root: string;
     branch: string;
     /**
-     * Superseded by `source`, and still sent so the request is meaningful to a
-     * daemon older than `source`. `source` wins wherever both are understood.
+     * Superseded by `source`, and still sent — but **not for the reason it
+     * looks like.** This bundle is compiled into the daemon binary it talks to
+     * (`build.rs` → `include_str!` in `management.rs`), so a new UI can never
+     * meet an old daemon; the skew that does happen is the reverse, a cached
+     * tab against a new daemon, which the *daemon's* fallback handles. What
+     * this field buys is a documented contract for anything else POSTing here.
+     * `source` wins wherever both are present.
      */
     create_branch: boolean;
     /** Where the checkout comes from. See {@link CreateWorktreeSource}. */

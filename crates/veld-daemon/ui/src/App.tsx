@@ -6695,16 +6695,24 @@ function AppInner(props: {
             // What the carry-over did, said out loud.
             //
             // **The failure case is the reason this is here at all.** The
-            // checkout is created and registered before its uncommitted work is
-            // reproduced, so a create that returns 200 with `carry_over.error`
-            // set is a worktree that exists *without* the changes — and the
-            // dialog has already closed on what looks like a plain success.
-            // Silence there is the one outcome that loses somebody's work
-            // without telling them.
+            // checkout is created — and about to be registered — before its
+            // uncommitted work is reproduced, so a create that returns 200 with
+            // `carry_over.error` set is a worktree that exists *without* the
+            // changes, and the dialog has already closed on what looks like a
+            // plain success. Silence there is the one outcome that loses
+            // somebody's work without telling them.
             const carried = created.carry_over;
             if (carried?.error) {
+              // `files > 0` alongside an error is a **partial** apply: the
+              // working-tree pass landed and the staged pass did not, or the
+              // first failed midway. The daemon reports both numbers precisely
+              // so this message can too — a flat "did not come across" would
+              // deny work that is sitting in the new checkout, and send the
+              // user to re-do it.
               notifyError(
-                `${worktreeLabel(created)} was created, but its changes did not come across`,
+                carried.files > 0
+                  ? `${worktreeLabel(created)} was created, but only ${carried.files} file${carried.files === 1 ? "" : "s"} of its changes came across`
+                  : `${worktreeLabel(created)} was created, but its changes did not come across`,
                 carried.error,
               );
             } else if (carried?.drifted) {

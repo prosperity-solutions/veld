@@ -1143,13 +1143,45 @@ struct CapturedWork {
     /// The index plus every unstaged edit, deletion and untracked (non-ignored)
     /// file — its **working-tree** view.
     full_tree: String,
-    /// The source's `git status` changed while it was being read, so the two
-    /// trees may mix two moments.
+    /// The source's working tree changed *while it was being read*, so
+    /// `full_tree` may mix two moments.
+    ///
+    /// Measured by staging the source twice and comparing the two trees — not
+    /// by comparing `git status` before and after, which was the first version
+    /// and cannot see the likeliest concurrent write there is: an agent
+    /// changing the **contents** of a file it had already dirtied. Porcelain
+    /// status output is byte-identical across that (` M f.txt` either way), so
+    /// the signal was `false` in exactly the case it existed for.
+    ///
+    /// What it still cannot see: a change that reverts itself between the two
+    /// stagings, and a `git add` in the *source* (which alters that checkout's
+    /// staged/unstaged split but leaves this capture describing one coherent
+    /// earlier moment rather than a torn one — so it is not drift).
     ///
     /// Reported, never retried. Waiting for a live checkout to fall quiet is
     /// not a promise this endpoint can keep, and a silent torn snapshot is the
     /// one outcome worse than a named one.
     drifted: bool,
+}
+
+/// Stage everything in `src` into `index` and return the resulting tree.
+///
+/// `add -A` against a **copy** of the checkout's index. It stages every
+/// unstaged edit, every deletion and every untracked file, touching nothing of
+/// the source's but the shared object database — and it applies the same ignore
+/// rules a plain `git add` does, so `target/` and `node_modules/` are never
+/// captured. That exclusion is the reason this is `add` and not a directory
+/// copy: an ignored tree is routinely tens of gigabytes.
+///
+/// Its own function because [`capture_uncommitted`] calls it **twice** and
+/// compares the two trees, which is the drift signal — and a comparison
+/// deserves a seam a test can drive without racing a writer against a live
+/// checkout. (That race is not merely awkward to test: a file being rewritten
+/// non-atomically makes `add` fail outright with `short read while indexing`,
+/// so a busy source can cost the create a 422 rather than a drift flag.)
+async fn stage_everything(src: &FsPath, index: &FsPath) -> Result<String, String> {
+    git_with_index(src, index, &["add", "-A", "--"]).await?;
+    git_with_index(src, index, &["write-tree"]).await
 }
 
 /// Snapshot `src`'s uncommitted state without writing anything of `src`'s.
@@ -1198,14 +1230,24 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     let git_dir = PathBuf::from(git(src, &["rev-parse", "--absolute-git-dir"]).await?);
     let index = git_dir.join("index");
 
-    // The status either side of the capture. `--no-optional-locks` on both, so
-    // a *read* cannot be the thing that takes the source's index lock: git
-    // opportunistically rewrites the index's stat cache after a status, and
-    // this endpoint's whole promise is that it does not write the source.
-    let status_args = &["--no-optional-locks", "status", "--porcelain=v1", "-z"];
-    let before = git_raw(src, status_args).await?;
-
-    let scratch = tempfile::TempDir::new()
+    // **0700, and outside the checkout.** After `git add -A` the scratch index
+    // holds the source repository's whole path inventory — untracked
+    // non-ignored filenames included — plus per-file sizes, modes and blob
+    // hashes. `TempDir::new()` alone is 0755, and on Linux
+    // `std::env::temp_dir()` is `/tmp` whenever `TMPDIR` is unset, which is the
+    // shape of the daemon's own systemd user unit (it sets neither
+    // `PrivateTmp=` nor `TMPDIR`) — so a second local uid could read it.
+    //
+    // It must also stay **outside the source's working tree**: `add -A` would
+    // otherwise capture the scratch index as an untracked file, and the second
+    // staging below would then differ from the first every single time, making
+    // `drifted` permanently true. (Inside `.git` would be excluded and safe,
+    // but writing anything of the source's is the one thing this function
+    // promises not to do.)
+    use std::os::unix::fs::PermissionsExt as _;
+    let scratch = tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
         .map_err(|e| format!("failed to create a scratch directory: {e}"))?;
     let staged_index = scratch.path().join("staged.index");
     let full_index = scratch.path().join("full.index");
@@ -1220,26 +1262,36 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     }
 
     let staged_tree = git_with_index(src, &staged_index, &["write-tree"]).await?;
-    // `add -A` against the *copy*. It stages every unstaged edit, every
-    // deletion and every untracked file into that index and touches nothing of
-    // the source's but the shared object database — and it applies the same
-    // ignore rules a plain `git add` does, so `target/` and `node_modules/`
-    // are never captured. That exclusion is the reason this is `add` and not a
-    // directory copy: an ignored tree is routinely tens of gigabytes.
-    git_with_index(src, &full_index, &["add", "-A", "--"]).await?;
-    let full_tree = git_with_index(src, &full_index, &["write-tree"]).await?;
+    let full_tree = stage_everything(src, &full_index).await?;
+    // Stage the source a second time and compare the trees: identical means
+    // nothing wrote the working tree between the two passes. Cheap despite
+    // looking like double work — the first pass left this index's stat cache
+    // fresh, so the second re-hashes only what actually changed (a bare
+    // `touch`, same content, produces the same tree).
+    let full_tree_again = stage_everything(src, &full_index).await?;
 
-    let after = git_raw(src, status_args).await?;
+    let drifted = full_tree_again != full_tree;
     Ok(CapturedWork {
         head,
         staged_tree,
+        // `full_tree` is the earlier of the two and the one that gets applied;
+        // the second exists only to answer whether it is still the whole truth.
         full_tree,
-        drifted: before != after,
+        drifted,
     })
 }
 
 /// Reconstitute a [`CapturedWork`] in a checkout that is sitting clean at
 /// [`CapturedWork::head`].
+///
+/// **Submodules are the one thing that cannot land**, and it is git's floor
+/// rather than this function's: `git worktree add` does not populate
+/// submodules, so a fresh checkout has an empty directory where one belongs.
+/// The *index* comes out identical to the source's either way — it is an
+/// **uncommitted** submodule pointer move (` M sub`) that has nowhere to go,
+/// which is why the destination can report one fewer dirty path than the
+/// source in that case. Verified against real git 2.50: a plain
+/// `git worktree add` with no carry-over leaves the same empty directory.
 ///
 /// Two `read-tree`s and deliberately nothing else. There is **no
 /// `update-index --refresh`** afterwards: it is unnecessary (`git status` in
@@ -1259,13 +1311,6 @@ async fn apply_captured(dest: &FsPath, work: &CapturedWork) -> Result<(), String
     Ok(())
 }
 
-/// What a spin-off's carry-over actually did, reported alongside the created
-/// worktree.
-///
-/// It exists because the alternative is a silent partial success: the checkout
-/// is created and registered *before* the carry-over runs, so without this
-/// field a caller cannot tell "spun off with your changes" from "spun off,
-/// changes left behind".
 /// The create response: the worktree, plus what its carry-over did.
 ///
 /// `worktree` is **flattened**, so this is wire-compatible with the plain
@@ -1280,6 +1325,13 @@ struct CreatedWorktreeView {
     carry_over: Option<CarryOverReport>,
 }
 
+/// What a spin-off's carry-over actually did, reported alongside the created
+/// worktree.
+///
+/// It exists because the alternative is a silent partial success: the checkout
+/// is created, and about to be registered, *before* the carry-over runs — so
+/// without this field a caller cannot tell "spun off with your changes" from
+/// "spun off, changes left behind".
 #[derive(Debug, Serialize)]
 struct CarryOverReport {
     /// How many paths the new checkout has uncommitted afterwards — what
@@ -3346,6 +3398,33 @@ async fn create_worktree(
             // start at what the remote has now, not at whatever the last poll
             // happened to bring in. Best-effort — offline is not a reason to
             // refuse a checkout of the ref already on disk.
+            // Only after confirming the ref is one this repo actually has.
+            // `remote_ref`'s first component is otherwise just a shape-checked
+            // string, and `git fetch <name>` treats a name that is not a
+            // configured remote as a **URL or path** — so an unchecked value
+            // would have the daemon fetch from wherever it pointed. The
+            // existence check also makes the failure honest: a typo'd ref
+            // fails the create rather than silently skipping the fetch and
+            // starting the branch from a stale one.
+            let verified = git(
+                &repo_root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/remotes/{remote_ref}"),
+                ],
+            )
+            .await
+            .is_ok();
+            if !verified {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("this repo has no remote-tracking branch {remote_ref}"),
+                ));
+            }
+            // Best-effort from here: offline is not a reason to refuse a
+            // checkout of the ref that is already on disk.
             if let Some((remote, _)) = remote_ref.split_once('/') {
                 let _ = git(&repo_root, &["fetch", remote]).await;
             }
@@ -5115,6 +5194,132 @@ mod tests {
         );
     }
 
+    /// The drift signal must actually fire, and the case it has to catch is the
+    /// one a `git status` comparison cannot see: the **contents** of a file
+    /// that was already modified changing under the capture. Porcelain status
+    /// is byte-identical across that, which is how the first version of this
+    /// signal came out `false` in exactly the situation it existed for.
+    ///
+    /// Driven through [`stage_everything`] — the seam `capture_uncommitted`
+    /// compares — rather than by racing a writer against a real capture. A race
+    /// would be flaky in both directions, and a non-atomic rewrite makes `git
+    /// add` fail with `short read while indexing` instead of producing a
+    /// different tree, so the race tests something other than the comparison.
+    #[tokio::test]
+    async fn drift_is_detected_when_an_already_modified_file_changes_under_the_capture() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        // The scratch index lives OUTSIDE the checkout on purpose — inside, it
+        // would itself be an untracked file that `add -A` captures, so the
+        // second staging would differ from the first every time and `drifted`
+        // would be permanently true. (Measured; it is the shape of the bug this
+        // test would otherwise have hidden.)
+        let scratch = tempfile::TempDir::new().unwrap();
+        let index = scratch.path().join("full.index");
+
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::write(root.join("f.txt"), "one").unwrap();
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+        std::fs::write(root.join("f.txt"), "two").unwrap();
+
+        let git_dir = PathBuf::from(
+            git(root, &["rev-parse", "--absolute-git-dir"])
+                .await
+                .unwrap(),
+        );
+        std::fs::copy(git_dir.join("index"), &index).unwrap();
+        let index = FsPath::new(&index);
+
+        let first = stage_everything(root, index).await.unwrap();
+
+        // A quiet source must produce the same tree twice, or the signal is
+        // noise on every create.
+        assert_eq!(
+            stage_everything(root, index).await.unwrap(),
+            first,
+            "a source nobody is writing must not read as drifted"
+        );
+
+        // An mtime change with no content change must not either — otherwise a
+        // build that touches files without changing them flags every spin-off.
+        run_git(root, &["status", "--porcelain"]).await;
+        std::fs::write(root.join("f.txt"), "two").unwrap();
+        assert_eq!(
+            stage_everything(root, index).await.unwrap(),
+            first,
+            "a rewrite with identical content must not read as drifted"
+        );
+
+        // **The premise**, pinned: the status of the two moments is identical,
+        // which is why this signal is not a status comparison.
+        let before = git_raw(root, &["status", "--porcelain=v1", "-z"])
+            .await
+            .unwrap();
+        std::fs::write(root.join("f.txt"), "three-and-then-some-more").unwrap();
+        let after = git_raw(root, &["status", "--porcelain=v1", "-z"])
+            .await
+            .unwrap();
+        assert_eq!(
+            before, after,
+            "porcelain status cannot see a content-only change to an \
+             already-modified file — if this ever fails, the drift signal could \
+             go back to being a status comparison"
+        );
+
+        // And the tree can.
+        assert_ne!(
+            stage_everything(root, index).await.unwrap(),
+            first,
+            "a content change to an already-modified file must read as drifted"
+        );
+
+        // End to end: a capture of a quiet checkout reports no drift.
+        assert!(
+            !capture_uncommitted(root).await.unwrap().drifted,
+            "capture_uncommitted must not report drift on a quiet source"
+        );
+    }
+
+    /// The sparse-checkout refusal, which is a documented promise and was the
+    /// only guard of the two without a test. Its cost if it ever regresses is
+    /// the worst in this feature: `add -A` reads out-of-cone files as
+    /// deletions, so the captured tree would tell the new checkout to delete
+    /// every path outside the cone.
+    #[tokio::test]
+    async fn a_sparse_checkout_refuses_the_carry_over_rather_than_emptying_the_new_one() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        std::fs::create_dir(root.join("kept")).unwrap();
+        std::fs::create_dir(root.join("dropped")).unwrap();
+        std::fs::write(root.join("kept/a.txt"), "a").unwrap();
+        std::fs::write(root.join("dropped/b.txt"), "b").unwrap();
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Clean first: the guard must be the thing that refuses, not the
+        // absence of anything to carry.
+        assert!(capture_uncommitted(root).await.is_ok());
+
+        run_git(root, &["sparse-checkout", "set", "kept"]).await;
+        assert!(
+            !root.join("dropped/b.txt").exists(),
+            "the setup must actually have removed the out-of-cone file"
+        );
+        let e = capture_uncommitted(root)
+            .await
+            .expect_err("a sparse checkout must be refused");
+        assert!(
+            e.contains("sparse"),
+            "the refusal must name the reason: {e}"
+        );
+    }
+
     /// `write-tree` cannot represent an unmerged index, so the capture refuses
     /// **before** anything is created rather than failing halfway.
     #[tokio::test]
@@ -5432,6 +5637,63 @@ mod tests {
             }
         }
 
+        /// The create response must stay **wire-compatible** with the plain
+        /// `WorktreeView` every caller read before this change: the worktree's
+        /// own fields flattened to the top level, and no `carry_over` key at
+        /// all when there was no carry-over. A field named `carry_over` added
+        /// to `WorktreeView` later would emit a duplicate key that serde does
+        /// not warn about, so the shape is asserted rather than assumed.
+        #[test]
+        fn the_create_response_flattens_the_worktree_and_omits_an_absent_carry_over() {
+            use serde_json::Value;
+            // `wt_view` is this module's existing fixture, so the shape under
+            // test is the same one every other view test uses.
+            let view = super::super::CreatedWorktreeView {
+                worktree: super::wt_view(7, false, vec![]),
+                carry_over: None,
+            };
+            let json = serde_json::to_value(&view).expect("the response must serialize");
+            let obj = json.as_object().expect("an object");
+            assert_eq!(
+                obj.get("alias"),
+                Some(&Value::from("wt7")),
+                "the worktree's fields must stay top-level, not nested under a key"
+            );
+            assert!(
+                !obj.contains_key("carry_over"),
+                "an absent carry-over must not appear as null — a client reading \
+                 this object must see exactly what it always saw"
+            );
+            assert!(
+                obj.contains_key("deleting") && obj.contains_key("presets"),
+                "the WorktreeView half must flatten too, not only the record"
+            );
+        }
+
+        /// **The default the maintainer asked to keep.** A request with no
+        /// `source` at all and `create_branch: true` — every client written
+        /// before the enum existed — must still resolve to `NewBranch`, and
+        /// `create_branch: false` to `LocalBranch`. Asserted on the resolution
+        /// itself, because the HTTP path cannot reach it without a registered
+        /// repo and the thing worth pinning is the fallback, not the plumbing.
+        #[test]
+        fn a_request_with_no_source_still_means_what_create_branch_said() {
+            use super::super::CreateFrom;
+            let resolve = |create_branch: bool| match (None::<CreateFrom>, create_branch) {
+                (Some(s), _) => s,
+                (None, true) => CreateFrom::NewBranch,
+                (None, false) => CreateFrom::LocalBranch,
+            };
+            assert!(
+                matches!(resolve(true), CreateFrom::NewBranch),
+                "create_branch: true with no source must still cut a new branch"
+            );
+            assert!(
+                matches!(resolve(false), CreateFrom::LocalBranch),
+                "create_branch: false with no source must still check one out"
+            );
+        }
+
         /// The branch list is a GET, so it must answer without the CSRF header
         /// — and it must answer about *registered* repos only. A 404 here (not
         /// a 403, and not a 200) pins both halves: the route is reachable
@@ -5516,6 +5778,14 @@ mod tests {
                     "PATCH",
                     "/api/worktrees/1",
                     r#"{"alias":"ok","emoji":"nope"}"#,
+                ),
+                // option-injection remote ref — `remote_ref` reaches git as a
+                // start point AND as the argument `git fetch` would treat as a
+                // URL, so it must be rejected on the same terms as `branch`.
+                (
+                    "POST",
+                    "/api/worktrees",
+                    r#"{"repo_root":"/tmp","branch":"ok","source":{"kind":"remote_branch","remote_ref":"-oops"}}"#,
                 ),
                 // empty patch
                 ("PATCH", "/api/worktrees/1", "{}"),

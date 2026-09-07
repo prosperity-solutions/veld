@@ -394,6 +394,119 @@ export function RemoveRepoDialog(props: {
  * lists resolve. Picking nothing is still a valid way to use this — it just means
  * accepting the draw rather than reaching a different code path.
  */
+/** Which of the four sources a create is using. */
+export type SourceMode = CreateWorktreeSource["kind"];
+
+/**
+ * The branch a create will use — the one derivation in this dialog that is
+ * genuinely mode-dependent, and therefore the one worth a test.
+ *
+ * - `local_branch` — the picker *is* the branch. Nothing is derived, because
+ *   `deriveBranch` would slug `feature/JIRA-12` into a different ref that does
+ *   not exist.
+ * - `remote_branch` — a **new** local branch, defaulting to the picked remote's
+ *   own short name (`origin/feat/x` → `feat/x`) and editable from there.
+ * - `new_branch` / `worktree` — derived from the Name, as it always was.
+ *
+ * `branchEdit` is `null` while the field still follows its derivation, and a
+ * string once the user has typed — including `""`, which is why it is a
+ * nullable string and not an empty-means-untouched one.
+ */
+export function branchForMode(input: {
+  mode: SourceMode;
+  derivedBranch: string;
+  branchEdit: string | null;
+  localBranch: string;
+  remoteLocalName: string | null;
+}): string {
+  if (input.mode === "local_branch") return input.localBranch;
+  if (input.mode === "remote_branch") {
+    return input.branchEdit ?? input.remoteLocalName ?? "";
+  }
+  return input.branchEdit ?? input.derivedBranch;
+}
+
+/**
+ * The `source` value sent on the wire, built from the mode in **one** place so
+ * the union's shape is decided once.
+ *
+ * `fromWorktreeId` is `null` when nothing is picked yet; the union still needs
+ * a number, and `0` is the sentinel the daemon 404s on — which is right,
+ * because `ready` already blocks the submit in that state and a request that
+ * somehow escapes it must fail rather than target worktree 1.
+ */
+export function sourceForMode(input: {
+  mode: SourceMode;
+  remoteRef: string;
+  fromWorktreeId: number | null;
+  carryOver: boolean;
+}): CreateWorktreeSource {
+  switch (input.mode) {
+    case "local_branch":
+      return { kind: "local_branch" };
+    case "remote_branch":
+      return { kind: "remote_branch", remote_ref: input.remoteRef };
+    case "worktree":
+      return {
+        kind: "worktree",
+        from_worktree: input.fromWorktreeId ?? 0,
+        carry_over: input.carryOver,
+      };
+    default:
+      return { kind: "new_branch" };
+  }
+}
+
+/**
+ * Everything standing between the dialog and a create that would succeed.
+ *
+ * One function rather than a chain of inline `&&`s because the two branch
+ * clashes each need to be *rendered* next to the field they belong to as well
+ * as counted here — and because the second of them shipped wrong once already
+ * (it only fired while the branch field still held the picked remote's own
+ * name, so typing over it with another existing branch name went quiet and
+ * reached git).
+ *
+ * Both clash checks are silent while `branches` is `null`: an unknown answer
+ * must never block a create, least of all the default one.
+ */
+export function createBlockers(input: {
+  mode: SourceMode;
+  alias: string;
+  branch: string;
+  aliasCollides: boolean;
+  localBranch: string;
+  remoteRef: string;
+  fromWorktreeId: number | null;
+  branches: RepoBranches | null;
+}): {
+  /** The checkout already holding the picked local branch, or `null`. */
+  localTaken: string | null;
+  /** The picked/typed new branch name already exists locally. */
+  branchExistsLocally: boolean;
+  ready: boolean;
+} {
+  const localTaken =
+    input.mode === "local_branch"
+      ? (input.branches?.local.find((b) => b.name === input.localBranch)
+          ?.checked_out_in ?? null)
+      : null;
+  const branchExistsLocally =
+    input.mode !== "local_branch" &&
+    input.branch !== "" &&
+    (input.branches?.local.some((b) => b.name === input.branch) ?? false);
+  const ready =
+    input.alias !== "" &&
+    input.branch !== "" &&
+    !input.aliasCollides &&
+    localTaken === null &&
+    !branchExistsLocally &&
+    (input.mode !== "local_branch" || input.localBranch !== "") &&
+    (input.mode !== "remote_branch" || input.remoteRef !== "") &&
+    (input.mode !== "worktree" || input.fromWorktreeId !== null);
+  return { localTaken, branchExistsLocally, ready };
+}
+
 export function NewWorktreeDialog(props: {
   onCreate: (body: {
     branch: string;
@@ -449,7 +562,7 @@ export function NewWorktreeDialog(props: {
    * The one exception is arriving from "Spin off…", which has already named
    * its source.
    */
-  const [mode, setMode] = useState<CreateWorktreeSource["kind"]>(
+  const [mode, setMode] = useState<SourceMode>(
     props.spinOffFrom ? "worktree" : "new_branch",
   );
   /** The chosen local branch (`local_branch`), exactly as git has it. */
@@ -505,22 +618,14 @@ export function NewWorktreeDialog(props: {
   const derivedBranch = deriveBranch(name);
   /** The remote-tracking ref currently selected, resolved to its row. */
   const remote = branches?.remote.find((r) => r.name === remoteRef) ?? null;
-  /**
-   * The branch the create will use, and where it comes from differs by mode.
-   *
-   * - `local_branch` — the picker *is* the branch; nothing is derived, because
-   *   `deriveBranch` would slug `feature/JIRA-12` into a different ref that
-   *   does not exist.
-   * - `remote_branch` — a **new** local branch, defaulting to the remote's own
-   *   short name (`origin/feat/x` → `feat/x`) and editable from there.
-   * - `new_branch` / `worktree` — derived from the Name, as it always was.
-   */
-  const branch =
-    mode === "local_branch"
-      ? localBranch
-      : mode === "remote_branch"
-        ? (branchEdit ?? remote?.local_name ?? "")
-        : (branchEdit ?? derivedBranch);
+  /** See [`branchForMode`], which owns the rule. */
+  const branch = branchForMode({
+    mode,
+    derivedBranch,
+    branchEdit,
+    localBranch,
+    remoteLocalName: remote?.local_name ?? null,
+  });
   /** The alias this dialog has submitted and is waiting on. While a create is
    *  in flight the 5s `refresh()` poll can already surface the checkout it is
    *  creating (the daemon registers the row before its response returns), so
@@ -549,48 +654,24 @@ export function NewWorktreeDialog(props: {
     const w = props.sources.find((s) => s.path === path);
     return w ? worktreeLabel(w) : (path.split("/").pop() || path);
   };
-  /**
-   * Whether the picked local branch is already checked out somewhere. git
-   * refuses a second checkout of one branch, so this blocks Create rather than
-   * letting the daemon return git's message after the fact.
-   */
-  const localTaken =
-    mode === "local_branch"
-      ? (branches?.local.find((b) => b.name === localBranch)?.checked_out_in ??
-        null)
-      : null;
-  /**
-   * `remote_branch` creates the local branch, so an existing one of that name
-   * cannot be the target. Said here, with the fix named, rather than surfacing
-   * git's "branch already exists".
-   */
-  const remoteNeedsLocal = mode === "remote_branch" && branch === remote?.local_name && remote?.has_local;
-  const ready =
-    alias !== "" &&
-    branch !== "" &&
-    !collides &&
-    localTaken === null &&
-    !remoteNeedsLocal &&
-    (mode !== "local_branch" || localBranch !== "") &&
-    (mode !== "remote_branch" || remoteRef !== "") &&
-    (mode !== "worktree" || from !== null);
-  /**
-   * The wire value, built from the mode so the union's shape is decided in one
-   * place. `create_branch` rides along for a daemon that predates `source`;
-   * `local_branch` is the only mode that checks one out rather than making one.
-   */
-  const source: CreateWorktreeSource =
-    mode === "local_branch"
-      ? { kind: "local_branch" }
-      : mode === "remote_branch"
-        ? { kind: "remote_branch", remote_ref: remoteRef }
-        : mode === "worktree"
-          ? {
-              kind: "worktree",
-              from_worktree: from?.id ?? 0,
-              carry_over: carryOver,
-            }
-          : { kind: "new_branch" };
+  /** See [`createBlockers`], which owns the rules and their reasons. */
+  const { localTaken, branchExistsLocally, ready } = createBlockers({
+    mode,
+    alias,
+    branch,
+    aliasCollides: collides,
+    localBranch,
+    remoteRef,
+    fromWorktreeId: from?.id ?? null,
+    branches,
+  });
+  /** See [`sourceForMode`]. */
+  const source = sourceForMode({
+    mode,
+    remoteRef,
+    fromWorktreeId: from?.id ?? null,
+    carryOver,
+  });
 
   const { busy, error, submit } = useSubmit(() => {
     // Captured at submit, before the daemon's response: this is the alias the
@@ -715,7 +796,7 @@ export function NewWorktreeDialog(props: {
             allowDeselect={false}
             onChange={(v) => {
               if (!v) return;
-              setMode(v as CreateWorktreeSource["kind"]);
+              setMode(v as SourceMode);
               // The branch override was a guess against the *previous* mode's
               // rules — a derived new-ref name means nothing once the branch
               // comes from a picker, and vice versa. Hand it back to the mode's
@@ -768,13 +849,39 @@ export function NewWorktreeDialog(props: {
               Could not read this repo's branches: {branchesError}
             </Text>
           )}
-          {mode === "local_branch" && (
+          {/* **The escape hatch, and it is not a nicety.** Before this dialog had
+              a source picker, an existing branch was checked out by typing its
+              name into a plain text box — no daemon call, nothing to fail. A
+              `Select` fed by `GET /api/repos/branches` turns any `for-each-ref`
+              failure into "you cannot check out an existing branch at all",
+              which is a capability this change would have removed rather than
+              improved. So a failed fetch falls back to exactly the old
+              control. */}
+          {mode === "local_branch" && branchesError !== null && (
+            <TextInput
+              label="Local branch"
+              placeholder="feat/checkout-v2"
+              description="The branch list could not be read, so type the name exactly as git has it. Whether it is already checked out somewhere cannot be known here — git will refuse if it is."
+              value={localBranch}
+              onChange={(e) => {
+                setLocalBranch(e.currentTarget.value);
+                if (name.trim() === "") setName(e.currentTarget.value);
+              }}
+              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+            />
+          )}
+          {mode === "local_branch" && branchesError === null && (
             <Select
               label="Local branch"
               placeholder={branches ? "Pick a branch" : "Loading…"}
               searchable
               nothingFoundMessage="No branch of that name"
               disabled={!branches}
+              // A repo can have thousands of branches and Mantine's Combobox
+              // does not virtualise, so cap what is *rendered*. Filtering runs
+              // over the whole list first, so search still reaches every
+              // branch — this bounds the DOM, not the choice.
+              limit={200}
               data={(branches?.local ?? []).map((b) => ({
                 value: b.name,
                 // The holder is named, not just flagged: "in use" with no
@@ -803,14 +910,20 @@ export function NewWorktreeDialog(props: {
               }
             />
           )}
-          {mode === "remote_branch" && (
+          {/* No text-box fallback for the remote picker, deliberately: a
+              remote ref has no pre-existing typed-entry behaviour to preserve,
+              and `new_branch` already covers "cut a branch" when the list is
+              unreadable. The error line above says why the picker is empty. */}
+          {mode === "remote_branch" && branchesError === null && (
             <Select
               label="Remote branch"
               placeholder={branches ? "Pick a branch" : "Loading…"}
               searchable
               nothingFoundMessage="No branch of that name"
               disabled={!branches}
-              description="As of the last fetch — the repo poll refreshes these about once a minute."
+              // Rendered-count cap, as above.
+              limit={200}
+              description="As of the last fetch. origin refreshes about once a minute; another remote's branches appear once you have fetched it. The checkout itself always fetches first."
               data={(branches?.remote ?? []).map((b) => ({
                 value: b.name,
                 label: b.has_local ? `${b.name} — local branch exists` : b.name,
@@ -883,7 +996,7 @@ export function NewWorktreeDialog(props: {
                 }
               }}
               error={
-                remoteNeedsLocal
+                branchExistsLocally
                   ? "A local branch of that name already exists — pick another name, or start from that local branch instead"
                   : null
               }
@@ -955,23 +1068,19 @@ export function NewWorktreeDialog(props: {
  * visible before it is created.
  */
 /**
- * The marker choices the daemon offers: the glyph allowlist and the colour palette.
- *
- * A hook rather than state inside `MarkerGrids`, because the create dialog needs the
- * lists *before* it renders them — it preselects a free colour and glyph, and a
- * preselection cannot be computed from lists only the grid can see.
- *
- * Fetched once per open, not on the 5s poll: both lists are compile-time constants
- * on the daemon side.
- */
-/**
  * The repo's local and remote-tracking branches, fetched once per dialog open.
  *
  * A hook here rather than state in App, for the same reason
  * [`useMarkerChoices`] is one: the lists are only needed while a create dialog
- * is open. Not on the 5s poll either — the repo poll already keeps the
- * remote-tracking refs fresh (it fetches at most once a minute per repo), so
- * re-reading them every five seconds would spawn git for nothing.
+ * is open. Not on the 5s poll either — re-reading them every five seconds would
+ * spawn git for nothing.
+ *
+ * **Freshness is `origin`'s only.** The repo poll's throttled fetch
+ * (`maybe_fetch`, once a minute per repo) runs `git fetch origin` and nothing
+ * else, while the endpoint lists every remote — so a second remote's branches
+ * are as fresh as the last time somebody fetched it by hand. The *create* path
+ * fetches whichever remote the chosen ref belongs to, so the checkout is
+ * current even when this list was not.
  */
 export function useRepoBranches(root: string): {
   branches: RepoBranches | null;
@@ -1005,6 +1114,16 @@ export function useRepoBranches(root: string): {
   return { branches, loadError };
 }
 
+/**
+ * The marker choices the daemon offers: the glyph allowlist and the colour palette.
+ *
+ * A hook rather than state inside `MarkerGrids`, because the create dialog needs the
+ * lists *before* it renders them — it preselects a free colour and glyph, and a
+ * preselection cannot be computed from lists only the grid can see.
+ *
+ * Fetched once per open, not on the 5s poll: both lists are compile-time constants
+ * on the daemon side.
+ */
 export function useMarkerChoices(): {
   choices: string[] | null;
   colors: string[] | null;
