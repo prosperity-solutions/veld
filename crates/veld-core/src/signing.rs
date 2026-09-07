@@ -1068,9 +1068,15 @@ const VERSION_FIELD_LEN: usize = 32;
 /// Total size of an embedded version record: 16 magic + 32 version.
 pub const VERSION_RECORD_LEN: usize = 16 + VERSION_FIELD_LEN;
 
-/// The plaintext magic. `const` so [`version_record`] can build it at compile
-/// time, and used at runtime by [`version_in_signed_bytes`] — one definition,
-/// both directions.
+/// The plaintext magic, at compile time. `const` so [`version_record`] can build
+/// a record into a `#[used] static` — the one place the plaintext is *supposed*
+/// to end up in the file.
+///
+/// **Nothing that runs at run time may call this.** The scanner has its own
+/// half, [`version_record_magic_at_runtime`], and the two being separate
+/// functions is the fix for a shipped bug rather than duplication somebody
+/// forgot to fold together. `the_runtime_magic_matches_the_record_magic` in this
+/// module's tests is what holds them to the same 16 bytes.
 const fn version_record_magic() -> [u8; 16] {
     let mut magic = [0u8; 16];
     let mut i = 0;
@@ -1111,7 +1117,8 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
     out
 }
 
-/// The plaintext magic, recovered at run time behind an optimisation barrier.
+/// The plaintext magic, recovered at run time behind a barrier the optimiser is
+/// not allowed to see through.
 ///
 /// [`version_record_magic`] is a `const fn`, and calling it from a *non*-const
 /// context is not enough to keep it out of the binary: on some targets LLVM
@@ -1129,23 +1136,40 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
 /// source built for `aarch64-apple-darwin` carried exactly one. Nothing about
 /// the source changed; the optimiser's mind did.
 ///
-/// [`std::hint::black_box`] on the key is what stops the fold. The key stops
-/// being a value the optimiser may assume, so the XOR cannot be performed before
-/// the program runs, and the plaintext exists only in this function's stack
-/// frame — never in the file.
+/// A **volatile read of the key** is what stops the fold. A volatile load may not
+/// be elided, reordered away or constant-folded, so the XOR cannot be performed
+/// before the program runs and the plaintext is built in this function's stack
+/// frame every call. The only plaintext magic left in a shipped file is the one
+/// inside `VELD_HELPER_VERSION_RECORD`, which is the whole point of the record.
 ///
-/// `black_box` is documented as best-effort, so this is a barrier and not a
-/// proof, and no test here can speak for it: the tests in this crate and in
+/// **The barrier has to sit on the key, before the XOR.** Wrapping the *result*
+/// instead — `black_box(version_record_magic())`, the obvious simplification —
+/// does not work: the constant is folded first and the barrier then guards a
+/// value that is already in `.rodata`. Measured at `-O` on
+/// `aarch64-apple-darwin`: barrier-on-result still leaves one plaintext hit in
+/// the binary, barrier-on-key leaves none. `std::hint::black_box` on the key
+/// measures the same as the volatile read, and is the more idiomatic spelling,
+/// but it is documented as best-effort with no guarantee — for an invariant
+/// whose only other detector is a failed release, the guaranteed load is worth
+/// three lines of `unsafe`.
+///
+/// No test in this repo can catch a recurrence, which is why the guarantee
+/// matters rather than the barrier merely working today: the tests here and in
 /// `crates/veld-helper/tests/version_record.rs` build the **host** arch in the
-/// **debug** profile, and the fold happened in release on another target. What
-/// makes that acceptable is the direction of the failure. If a future toolchain
-/// folds through the barrier anyway, `release.yml`'s `Package client binaries`
-/// step counts the records in the cross-compiled artifact and fails the release
-/// — before publishing, not after installing. Fail-closed, and the only check
-/// that can see it, which is why that step's tolerance must never be widened to
-/// silence a second record.
+/// **debug** profile, where nothing folds, and the host *release* build did not
+/// fold either. The backstop is `release.yml`'s `Package client binaries` step,
+/// which counts records in the cross-compiled artifact and fails the `build` job
+/// — so a fold that ever gets through fails closed, before publishing rather
+/// than after installing. That is also why that step's tolerance must never be
+/// widened to silence a second record.
 fn version_record_magic_at_runtime() -> [u8; 16] {
-    let key = std::hint::black_box(VERSION_MAGIC_KEY);
+    // Derived from the same constant `version_record_magic` uses, so the two
+    // halves cannot drift; `static` only so there is an address to read from.
+    static KEY_CELL: u8 = VERSION_MAGIC_KEY;
+    // SAFETY: `KEY_CELL` is a live, initialised, correctly-aligned `u8` in this
+    // binary's static data. The read is volatile purely to deny the optimiser
+    // the constant, not because the location is special.
+    let key = unsafe { std::ptr::read_volatile(&KEY_CELL) };
     let mut magic = [0u8; 16];
     for (out, obfuscated) in magic.iter_mut().zip(VERSION_MAGIC_OBFUSCATED) {
         *out = obfuscated ^ key;
@@ -1436,6 +1460,12 @@ mod tests {
     /// other must be — see [`version_record_magic_at_runtime`]. Nothing in the
     /// compiler ties them together, and if they ever drift the helper stops
     /// finding its own record: no test of either half alone would notice.
+    ///
+    /// This asserts the values agree. It does **not** assert the property that
+    /// actually broke v16.66.0 — that the plaintext is absent from the built
+    /// binary — and no test in this repo can: this one runs at `opt-level = 0`,
+    /// and the host release build did not fold either. `release.yml`'s
+    /// `Package client binaries` step is the only gate that sees it.
     #[test]
     fn the_runtime_magic_matches_the_record_magic() {
         assert_eq!(version_record_magic_at_runtime(), version_record_magic());
