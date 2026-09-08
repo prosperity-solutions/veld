@@ -172,6 +172,49 @@ describe("gitTooltipLines", () => {
   });
 });
 
+/**
+ * The drift guard. `gitTooltipLines` and `gitDescription` are projections of one
+ * fact list, and this asserts they stay projections — that they report the same
+ * *number* of facts for every combination the daemon can emit.
+ *
+ * Worth a property test rather than more examples because the hand-maintained
+ * versions drifted three times in review, each time by one clause, each time under
+ * a comment claiming the sets matched. An example test only catches the omission
+ * somebody thought of.
+ */
+describe("the tooltip and the description cannot drift apart", () => {
+  const dirties: (boolean | null)[] = [null, false, true];
+  // The five upstream shapes `parse_upstream_track` can produce — see its tests.
+  const upstreams: Partial<WorktreeGitSignals>[] = [
+    { upstream: null, ahead: null, behind: null }, // never pushed
+    { upstream: "origin/x", ahead: null, behind: null, upstream_gone: true }, // gone
+    { upstream: "origin/x", ahead: 0, behind: 0 }, // in sync
+    { upstream: "origin/x", ahead: 3, behind: 2 }, // diverged
+    { upstream: "origin/x", ahead: null, behind: null }, // unrecognised track token
+  ];
+
+  it("reports the same facts in both registers, for every emittable shape", () => {
+    for (const dirty of dirties) {
+      for (const up of upstreams) {
+        const git = signals({ dirty, ...up });
+        const lines = gitTooltipLines(git);
+        const description = gitDescription(git);
+        // The description is additionally gated on a glyph rendering; past that
+        // gate it must account for every line the tooltip has.
+        if (description === undefined) continue;
+        expect(description.split(", ")).toHaveLength(lines.length);
+      }
+    }
+  });
+
+  /** The specific shape that slipped through two fix rounds. */
+  it("includes the no-upstream fact in both", () => {
+    const git = signals({ dirty: true, upstream: null, ahead: null, behind: null });
+    expect(gitTooltipLines(git)).toHaveLength(2);
+    expect(gitDescription(git)).toBe("uncommitted changes, no upstream");
+  });
+});
+
 describe("gitDescription", () => {
   it("is undefined when no glyph renders, so the row adds no clause", () => {
     expect(gitDescription(undefined)).toBeUndefined();

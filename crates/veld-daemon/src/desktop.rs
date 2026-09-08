@@ -1027,8 +1027,8 @@ const DIRTY_CONCURRENCY: usize = 4;
 /// An earlier revision skipped it, on the argument that [`refresh_upstreams`]
 /// re-derives this map from `%(worktreepath)` on every poll. That is true of the
 /// *polled* path and false as an invariant: `worktree_view` is also reached from
-/// `list_repos`, `create_worktree`, `patch_worktree`, `restore_worktree` and
-/// `start_worktree_run`, none of which refresh anything. In the reused-rowid window
+/// `list_repos` (via `repo_view`), `create_worktree`, `patch_worktree` and
+/// `restore_worktree`, none of which refresh anything. In the reused-rowid window
 /// (see [`DIRTY`]) those responses would carry the dead worktree's branch, an ↑
 /// glyph and a tooltip naming somebody else's upstream. Nothing renders those
 /// bodies today, so it was latent — but the comment claiming safety is exactly what
@@ -1053,8 +1053,9 @@ static UPSTREAMS: std::sync::LazyLock<
 /// and create another before the next poll prunes, and the new checkout inherits
 /// the old one's id — and would have inherited its dirty bit, painting a pencil on
 /// a brand-new clean row until the sweep got round to it. [`git_signals_for`]
-/// compares the path and withholds a mismatch. `UPSTREAMS` needs no such guard only
-/// because [`refresh_upstreams`] re-derives it from `%(worktreepath)` every poll.
+/// compares the path and withholds a mismatch. [`UPSTREAMS`] carries the same guard,
+/// for the same reason — an earlier revision of this line claimed it did not need
+/// one, which is the argument its own doc now records as false.
 static DIRTY: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<i64, (bool, String, std::time::Instant)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));

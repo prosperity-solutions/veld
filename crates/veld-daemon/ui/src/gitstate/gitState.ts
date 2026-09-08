@@ -73,47 +73,89 @@ function commits(n: number): string {
 }
 
 /**
+ * One fact, in the two registers the row needs it: a tooltip line and a short
+ * clause for a screen reader.
+ *
+ * **The pairing is the point.** These two lists were maintained separately and
+ * drifted three times in review — `ahead` was added to the description but not
+ * `behind`, then `behind` and a deleted upstream but not "no upstream" — each time
+ * leaving a screen-reader user with strictly less than a sighted user gets on
+ * hover, and each time under a comment claiming the sets matched. Producing both
+ * from one place makes that class of drift unrepresentable rather than merely
+ * discouraged, which is why it is worth a type for.
+ */
+interface GitFact {
+  /** A full sentence for the tooltip, where there is room to be explicit. */
+  tooltip: string;
+  /** A short clause for `aria-description`, where several are read in a row. */
+  short: string;
+}
+
+/**
+ * Every fact the daemon sent about this checkout, in reading order.
+ *
+ * The order is deliberate: what you are *holding* first (uncommitted work), then
+ * how you stand against the remote. `gitTooltipLines` and `gitDescription` are both
+ * thin projections of this, so they cannot disagree about which facts exist.
+ */
+function gitFacts(git: WorktreeGitSignals | undefined): GitFact[] {
+  if (!git) return [];
+  const facts: GitFact[] = [];
+  if (git.dirty) {
+    facts.push({ tooltip: "Uncommitted changes", short: "uncommitted changes" });
+  }
+  const upstream = git.upstream ?? "its upstream";
+  if (git.upstream_gone) {
+    // **Kept even though no glyph renders `[gone]`.** Reachable only alongside
+    // another fact — a dirty tree, or an activity glyph holding the slot — which is
+    // the same position the no-upstream fact below is in. Worth keeping: "the
+    // branch you pushed to is gone" is the single most useful sentence about such a
+    // checkout, and dropping it would mean a reader learns less than the daemon
+    // knows. It still never asserts the merge outright.
+    facts.push({
+      tooltip: `${upstream} is gone — the remote branch was deleted, which usually means its pull request was merged`,
+      short: "upstream branch deleted",
+    });
+    return facts;
+  }
+  if (git.ahead !== null && git.ahead > 0) {
+    facts.push({
+      tooltip: `${commits(git.ahead)} not pushed to ${upstream}`,
+      short: `${commits(git.ahead)} not pushed`,
+    });
+  }
+  if (git.behind !== null && git.behind > 0) {
+    facts.push({
+      tooltip: `${commits(git.behind)} behind ${upstream}`,
+      short: `${commits(git.behind)} behind`,
+    });
+  }
+  if (git.upstream === null && git.dirty !== null) {
+    // Said only alongside another fact: on its own it is not a state worth a glyph
+    // (see the type doc), and a tooltip with nothing but this would open on a row
+    // that shows no mark.
+    facts.push({
+      tooltip: "This branch has no upstream — nothing has been pushed",
+      short: "no upstream",
+    });
+  }
+  return facts;
+}
+
+/**
  * Every fact the daemon sent, one line each — no label, no joining.
  *
  * **The glyph shows the winner; the tooltip shows all of them.** That is the whole
- * reason the wire carries facts rather than a state: a row can be dirty *and*
- * three commits ahead *and* two behind, and the reader deciding what to do next
- * wants the three of them.
+ * reason the wire carries facts rather than a state: a row can be dirty *and* three
+ * commits ahead *and* two behind, and the reader deciding what to do next wants the
+ * three of them.
  *
  * Lines rather than a finished string because these are the *second* half of the
- * row's tooltip — the activity lines come first (see `rowstate/rowState.ts`), and
- * a builder that had already prefixed a label could not be composed with them.
+ * row's tooltip — the activity lines come first (see `rowstate/rowState.ts`), and a
+ * builder that had already prefixed a label could not be composed with them.
  */
 export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
-  if (!git) return [];
-  const lines: string[] = [];
-  if (git.dirty) lines.push("Uncommitted changes");
-  const upstream = git.upstream ?? "its upstream";
-  if (git.upstream_gone) {
-    // **Kept even though no glyph renders `[gone]`.** This line is now reachable
-    // only alongside another fact — a dirty tree, or an activity glyph holding the
-    // slot — which is exactly the position the no-upstream line below is in. Worth
-    // keeping for those cases: "the branch you pushed to is gone" is the single
-    // most useful sentence about such a checkout, and dropping it would mean a
-    // hovering reader learns less than the daemon knows.
-    lines.push(
-      `${upstream} is gone — the remote branch was deleted, which usually means its pull request was merged`,
-    );
-  } else {
-    if (git.ahead !== null && git.ahead > 0) {
-      lines.push(`${commits(git.ahead)} not pushed to ${upstream}`);
-    }
-    if (git.behind !== null && git.behind > 0) {
-      lines.push(`${commits(git.behind)} behind ${upstream}`);
-    }
-    if (git.upstream === null && git.dirty !== null) {
-      // Said only alongside another fact: on its own it is not a state worth a
-      // glyph (see the type doc), and a tooltip with nothing but this would open
-      // on a row that shows no mark.
-      lines.push("This branch has no upstream — nothing has been pushed");
-    }
-  }
-  return lines;
+  return gitFacts(git).map((fact) => fact.tooltip);
 }
 
 /**
@@ -125,22 +167,12 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
  * puts this in `aria-description` instead, after the alias.
  */
 export function gitDescription(git: WorktreeGitSignals | undefined): string | undefined {
+  // **Gated on a glyph rendering, unlike the tooltip.** No glyph means no element
+  // to hang a tooltip on, so there is nothing for this to annotate either — a row
+  // that is merely `behind`, or merely has a deleted upstream, says nothing to
+  // anybody. Past that gate it reports every fact, because this is the only
+  // non-visual account of a row whose glyph is `aria-hidden`.
   if (git === undefined || rowGitState(git) === null) return undefined;
-  // **Every fact the tooltip has, not just the winning glyph's.** The glyph shows
-  // one state and the tooltip shows all of them; this is the tooltip's equivalent
-  // for a reader who cannot see either, so any fact it omits is one a screen-reader
-  // user does not get and a hoverer does. Two review rounds landed here: the first
-  // caught it emitting only "uncommitted changes" for a row also commits ahead, and
-  // the second caught the fix closing it for `ahead` alone while `behind` and a
-  // deleted upstream were still dropped — both of which the daemon emits alongside
-  // `dirty` routinely.
-  const parts: string[] = [];
-  if (git.dirty) parts.push("uncommitted changes");
-  if (git.upstream_gone) {
-    parts.push("upstream branch deleted");
-  } else {
-    if (git.ahead !== null && git.ahead > 0) parts.push(`${commits(git.ahead)} not pushed`);
-    if (git.behind !== null && git.behind > 0) parts.push(`${commits(git.behind)} behind`);
-  }
-  return parts.join(", ");
+  const parts = gitFacts(git).map((fact) => fact.short);
+  return parts.length === 0 ? undefined : parts.join(", ");
 }
