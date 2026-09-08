@@ -1890,6 +1890,19 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-git.unpushed {
   color: var(--fg);
 }
+/* Everything this checkout has is on the remote. **The quietest mark on the row**,
+   and the only one that is not a call to action — it exists because it is the first
+   step of a progression somebody tracks (pushed, then merged away), not because
+   "clean" is interesting. Dimmer than `.dirty` on purpose: it appears on more rows
+   than anything else here, and a resting state that competes with the states that
+   want something would cost the row its whole vocabulary.
+
+   Note what it does NOT claim: nothing about a pull request. Core never asks a
+   forge, so a pushed branch with an open pull request renders exactly this. */
+.wt-git.synced {
+  color: var(--muted);
+  opacity: 0.55;
+}
 /* The upstream branch is gone — usually a merged pull request. The brand green, the
    same "this ended well" the activity glyph's `finished` uses, and the same reason
    it has no animation: it is a conclusion, not a request. The overlap with

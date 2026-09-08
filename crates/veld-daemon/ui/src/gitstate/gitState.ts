@@ -17,14 +17,24 @@ import type { WorktreeGitSignals } from "../api";
  * - **`gone`** — the upstream branch has been deleted. Usually a merged pull
  *   request; see {@link WorktreeGitSignals.upstream_gone} for why the name is what
  *   was measured rather than "merged".
+ * - **`synced`** — everything this checkout has is on the remote. The quietest
+ *   state, and the only one that is *not* a call to action: it is here because it
+ *   is the first step of a progression a reader tracks (pushed → reviewed →
+ *   merged), not because "clean" is interesting on its own.
+ *
+ * **`synced` does not mean "no pull request exists".** Core cannot know that — a
+ * pull request is a forge object, and nothing in the git CLI can be asked about
+ * one. A branch that is pushed, in sync, and has an open pull request renders
+ * exactly this. Saying otherwise in a tooltip would be veld asserting something it
+ * never looked at.
  *
  * Two states git can also report are deliberately absent. **`behind`** is on the
  * wire but unrendered — the top bar's staleness pill already answers it for the
  * main checkout, and a second amber mark per row was not asked for. **"no upstream
- * at all"** is not a state either: it is genuinely rare in practice, because a
- * worktree veld creates branches from `origin/<default>` and so gets an upstream
- * automatically, and the counts it would need are exactly what git cannot give for
- * a branch with nothing to compare against.
+ * at all"** is not a state either: a branch that has never been pushed renders
+ * nothing, which is what keeps it from ever being confused with `gone`. It is also
+ * rare in practice, because a worktree veld creates branches from
+ * `origin/<default>` and gets an upstream automatically.
  *
  * # Worst-state-wins, and `dirty` is the worst
  *
@@ -37,7 +47,7 @@ import type { WorktreeGitSignals } from "../api";
  * branch whose upstream is `[gone]`, so `ahead` is `null` in exactly that case.
  * The ordering between them is therefore only a tie-break on paper.
  */
-export type GitRowState = "dirty" | "unpushed" | "gone";
+export type GitRowState = "dirty" | "unpushed" | "gone" | "synced";
 
 /** The one state a row's glyph shows, or `null` for no glyph at all. */
 export function rowGitState(git: WorktreeGitSignals | undefined): GitRowState | null {
@@ -45,6 +55,10 @@ export function rowGitState(git: WorktreeGitSignals | undefined): GitRowState | 
   if (git.dirty) return "dirty";
   if (git.ahead !== null && git.ahead > 0) return "unpushed";
   if (git.upstream_gone) return "gone";
+  // Last, because it is the absence of anything to do. `dirty === false` and not
+  // merely falsy: `null` is "the sweep has not looked", and a row must not claim
+  // everything is pushed on the strength of a reading that never happened.
+  if (git.upstream !== null && git.dirty === false) return "synced";
   return null;
 }
 
@@ -81,6 +95,11 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
     if (git.behind !== null && git.behind > 0) {
       lines.push(`${commits(git.behind)} behind ${upstream}`);
     }
+    if (git.upstream !== null && git.ahead === 0 && !git.dirty && git.behind === 0) {
+      // The `synced` line. Deliberately says only what was measured: veld never
+      // asked a forge anything, so it cannot add "and no pull request exists".
+      lines.push(`Everything is pushed to ${upstream}`);
+    }
     if (git.upstream === null && git.dirty !== null) {
       // Said only alongside another fact: on its own it is not a state worth a
       // glyph (see the type doc), and a tooltip with nothing but this would open
@@ -106,5 +125,6 @@ export function gitDescription(git: WorktreeGitSignals | undefined): string | un
   if (state === "unpushed") {
     return `${commits(git?.ahead ?? 0)} not pushed`;
   }
+  if (state === "synced") return "everything pushed";
   return "upstream branch deleted";
 }

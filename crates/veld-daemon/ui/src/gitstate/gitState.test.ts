@@ -21,8 +21,28 @@ describe("rowGitState", () => {
     expect(rowGitState(undefined)).toBeNull();
   });
 
-  it("shows nothing for a clean, pushed, live branch", () => {
-    expect(rowGitState(signals())).toBeNull();
+  it("shows synced for a clean, fully pushed branch", () => {
+    // The quiet resting state, and the first step of the progression a reader
+    // follows. It asserts nothing about a pull request — core never asked a forge.
+    expect(rowGitState(signals())).toBe("synced");
+  });
+
+  /**
+   * **`dirty === false`, never merely falsy.** `null` is "the sweep has not looked
+   * yet", and a row must not claim everything is pushed on the strength of a
+   * reading that never happened — which is the whole reason the two are separate
+   * values on the wire.
+   */
+  it("will not claim synced before the dirty sweep has answered", () => {
+    expect(rowGitState(signals({ dirty: null }))).toBeNull();
+  });
+
+  it("shows nothing at all for a branch that was never pushed", () => {
+    // No upstream means nothing to be in sync *with*. This is also what keeps a
+    // never-pushed branch from ever being confused with a merged-and-deleted one.
+    expect(
+      rowGitState(signals({ upstream: null, ahead: null, behind: null })),
+    ).toBeNull();
   });
 
   it("shows dirty for uncommitted work", () => {
@@ -66,14 +86,30 @@ describe("rowGitState", () => {
 
   it("does not treat being behind as a state of its own", () => {
     // On the wire, unrendered — the top bar's staleness pill already answers it.
-    expect(rowGitState(signals({ behind: 4 }))).toBeNull();
+    // Such a row is still `synced`: nothing of *yours* is unpushed.
+    expect(rowGitState(signals({ behind: 4 }))).toBe("synced");
+  });
+
+  it("ranks synced last — it is the absence of anything to do", () => {
+    expect(rowGitState(signals({ dirty: true }))).toBe("dirty");
+    expect(rowGitState(signals({ ahead: 1 }))).toBe("unpushed");
+    expect(
+      rowGitState(signals({ ahead: null, behind: null, upstream_gone: true })),
+    ).toBe("gone");
   });
 });
 
 describe("gitTooltipLines", () => {
-  it("is empty when there is nothing to say", () => {
-    expect(gitTooltipLines(signals())).toEqual([]);
+  it("is empty when the daemon has said nothing", () => {
     expect(gitTooltipLines(undefined)).toEqual([]);
+    expect(gitTooltipLines(signals({ dirty: null, upstream: null }))).toEqual([]);
+  });
+
+  it("says what was measured for a synced branch, and nothing more", () => {
+    const lines = gitTooltipLines(signals());
+    expect(lines).toEqual(["Everything is pushed to origin/feat-x"]);
+    // Never "and no pull request exists" — veld did not ask a forge.
+    expect(lines.join("")).not.toMatch(/pull request|PR/i);
   });
 
   /**
@@ -122,8 +158,9 @@ describe("gitTooltipLines", () => {
 
 describe("gitDescription", () => {
   it("is undefined when no glyph renders, so the row adds no clause", () => {
-    expect(gitDescription(signals())).toBeUndefined();
     expect(gitDescription(undefined)).toBeUndefined();
+    expect(gitDescription(signals({ dirty: null }))).toBeUndefined();
+    expect(gitDescription(signals({ upstream: null, ahead: null }))).toBeUndefined();
   });
 
   it("describes each state in words for a screen reader", () => {
@@ -133,5 +170,6 @@ describe("gitDescription", () => {
     expect(
       gitDescription(signals({ ahead: null, behind: null, upstream_gone: true })),
     ).toBe("upstream branch deleted");
+    expect(gitDescription(signals())).toBe("everything pushed");
   });
 });

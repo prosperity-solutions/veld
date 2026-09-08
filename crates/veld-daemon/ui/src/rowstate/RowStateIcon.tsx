@@ -1,4 +1,4 @@
-import { IconArrowUp, IconGitMerge, IconPencil } from "@tabler/icons-react";
+import { IconArrowUp, IconGitBranch, IconGitMerge, IconPencil } from "@tabler/icons-react";
 
 import type { WorktreeGitSignals } from "../api";
 import type { GitRowState } from "../gitstate/gitState";
@@ -15,9 +15,15 @@ import { rowGlyph, rowTooltip } from "./rowState";
  * warning, which is right: having edits is the normal state of a checkout you are
  * working in, not something to escalate. `arrow-up` for commits not pushed, the
  * convention every git UI already uses (`↑2`), so it needs no tooltip to be
- * understood. `git-merge` for an upstream that is gone, because that is the
- * conclusion a reader draws and is right about most of the time; the tooltip
- * carries the honest wording.
+ * understood. `git-branch` for everything-pushed, the quiet resting state.
+ * `git-merge` for an upstream that is gone, because that is the conclusion a
+ * reader draws and is right about most of the time; the tooltip carries the honest
+ * wording.
+ *
+ * The last two are a deliberate near-pair: `git-branch` and `git-merge` are the
+ * same visual family, which is the point — they are two ends of one progression a
+ * reader follows (pushed, then merged away), and reading as related is what makes
+ * the second recognisable as the end of the first.
  *
  * Three shapes this row has no room for, and why: no triangle (`wt-alert` is node
  * health, and the activity vocabulary's `failed` is the outline twin of it), no
@@ -28,6 +34,7 @@ const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
   dirty: IconPencil,
   unpushed: IconArrowUp,
   gone: IconGitMerge,
+  synced: IconGitBranch,
 };
 
 /**

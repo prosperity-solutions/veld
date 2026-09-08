@@ -28,8 +28,9 @@ function summary(state: RowState | null, entries = 0, running = 0): RowSummary {
 
 describe("rowGlyph", () => {
   it("shows nothing when neither half has anything", () => {
-    expect(rowGlyph(summary(null), signals())).toBeNull();
     expect(rowGlyph(summary(null), undefined)).toBeNull();
+    // Nothing measured yet, and never pushed: no git state either.
+    expect(rowGlyph(summary(null), signals({ dirty: null, upstream: null }))).toBeNull();
   });
 
   it("shows git state when there is no activity", () => {
@@ -40,9 +41,16 @@ describe("rowGlyph", () => {
   });
 
   it("shows activity when there is no git state", () => {
-    expect(rowGlyph(summary("attention", 1), signals())).toEqual({
+    expect(
+      rowGlyph(summary("attention", 1), signals({ dirty: null, upstream: null })),
+    ).toEqual({ kind: "activity", state: "attention" });
+  });
+
+  /** Activity outranks the quiet resting state too, not only the loud ones. */
+  it("lets activity outrank a synced checkout", () => {
+    expect(rowGlyph(summary("finished", 1), signals())).toEqual({
       kind: "activity",
-      state: "attention",
+      state: "finished",
     });
   });
 
@@ -64,6 +72,7 @@ describe("rowGlyph", () => {
       signals({ dirty: true }),
       signals({ ahead: 4 }),
       signals({ ahead: null, behind: null, upstream_gone: true }),
+      signals(),
     ];
     for (const state of states) {
       for (const git of gits) {
@@ -87,8 +96,8 @@ describe("rowGlyph", () => {
 
 describe("rowTooltip", () => {
   it("is the bare label when there is nothing to say", () => {
-    expect(rowTooltip("api", [], signals())).toBe("api");
     expect(rowTooltip("api", [], undefined)).toBe("api");
+    expect(rowTooltip("api", [], signals({ dirty: null, upstream: null }))).toBe("api");
   });
 
   /**
@@ -108,15 +117,19 @@ describe("rowTooltip", () => {
   });
 
   it("reads exactly as before when only one half has facts", () => {
-    expect(rowTooltip("api", ["waiting for you"], signals())).toBe("api — waiting for you");
+    expect(
+      rowTooltip("api", ["waiting for you"], signals({ dirty: null, upstream: null })),
+    ).toBe("api — waiting for you");
     expect(rowTooltip("api", [], signals({ dirty: true }))).toBe("api — Uncommitted changes");
   });
 });
 
 describe("rowDescription", () => {
   it("is undefined when the row has no state at all", () => {
-    expect(rowDescription(undefined, signals())).toBeUndefined();
     expect(rowDescription(undefined, undefined)).toBeUndefined();
+    expect(
+      rowDescription(undefined, signals({ dirty: null, upstream: null })),
+    ).toBeUndefined();
   });
 
   /**
@@ -131,7 +144,7 @@ describe("rowDescription", () => {
   });
 
   it("announces whichever half exists on its own", () => {
-    expect(rowDescription("working", signals())).toBe("working");
+    expect(rowDescription("working", signals({ dirty: null, upstream: null }))).toBe("working");
     expect(rowDescription(undefined, signals({ dirty: true }))).toBe("uncommitted changes");
   });
 });
