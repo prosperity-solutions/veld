@@ -1990,8 +1990,9 @@ fn check_url_variables(url: &str, location: &str, out: &mut IdeSection) -> Optio
 /// for one, so no index here can land inside a UTF-8 sequence.
 ///
 /// Callers reach this only after `parse_quicklinks` has confirmed an `http://` or
-/// `https://` prefix, so `://` is always present; the `map_or(0, …)` is for the
-/// unit tests that call it directly rather than a case the parser can produce.
+/// `https://` prefix, so `://` is always present in production; the `map_or(0, …)`
+/// fallback exists for a caller that has not checked, and is covered by
+/// `an_authority_ends_at_the_first_path_query_or_fragment` below.
 fn authority_end(url: &str) -> usize {
     let after_scheme = url.find("://").map_or(0, |i| i + 3);
     url[after_scheme..]
@@ -3401,6 +3402,29 @@ mod tests {
             "the finding must list the names a quicklink may use: {}",
             parsed.problems[2].message
         );
+    }
+
+    /// `authority_end`'s own contract, including the no-scheme fallback that the
+    /// parser cannot reach but a future caller could.
+    #[test]
+    fn an_authority_ends_at_the_first_path_query_or_fragment() {
+        // The three delimiters that end an authority. All 12: the delimiter's own
+        // index, `https://` being 8 bytes and `host` four.
+        assert_eq!(authority_end("https://host/path"), 12);
+        assert_eq!(authority_end("https://host?q=1"), 12);
+        assert_eq!(authority_end("https://host#f"), 12);
+        // Whichever comes first wins — a `/` inside a query does not extend it.
+        assert_eq!(authority_end("https://host?q=/x"), 12);
+        // No delimiter at all: the whole string is authority, so any reference in
+        // it is refused. `https://${veld.branch}` is the case that matters.
+        assert_eq!(authority_end("https://host"), 12);
+        // Userinfo and port are inside the authority, which is the point.
+        assert_eq!(authority_end("https://u@host:8443/p"), 19);
+        // The fallback: no `://` at all. `parse_quicklinks` rejects such a string
+        // before this runs, so this only pins that the function cannot panic or
+        // return something absurd for a caller that forgot.
+        assert_eq!(authority_end("host/path"), 4);
+        assert_eq!(authority_end(""), 0);
     }
 
     /// **A reference may not land in a URL's host.** The finding that made

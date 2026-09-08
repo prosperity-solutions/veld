@@ -1020,13 +1020,25 @@ const DIRTY_REFRESH_AGE: std::time::Duration = std::time::Duration::from_secs(15
 /// worktrees.
 const DIRTY_CONCURRENCY: usize = 4;
 
-/// `ahead`/`behind`/`gone` per worktree, keyed by worktree id.
+/// `ahead`/`behind`/`gone` per worktree, keyed by worktree id, with the path the
+/// answer was measured in — the same guard [`DIRTY`] carries, and for the same
+/// reason.
+///
+/// An earlier revision skipped it, on the argument that [`refresh_upstreams`]
+/// re-derives this map from `%(worktreepath)` on every poll. That is true of the
+/// *polled* path and false as an invariant: `worktree_view` is also reached from
+/// `list_repos`, `create_worktree`, `patch_worktree`, `restore_worktree` and
+/// `start_worktree_run`, none of which refresh anything. In the reused-rowid window
+/// (see [`DIRTY`]) those responses would carry the dead worktree's branch, an ↑
+/// glyph and a tooltip naming somebody else's upstream. Nothing renders those
+/// bodies today, so it was latent — but the comment claiming safety is exactly what
+/// would have stopped the next person adding the guard.
 ///
 /// Refreshed **synchronously** on each [`refresh_repos`] poll, because it costs one
 /// `for-each-ref` per *repo* — 21ms measured, whatever the worktree count — and a
 /// glyph that appears a poll late for no reason is worse than one that costs 21ms.
 static UPSTREAMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<i64, WorktreeGitSignals>>,
+    std::sync::Mutex<std::collections::HashMap<i64, (WorktreeGitSignals, String)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// `dirty` per worktree, keyed by worktree id: the answer, **the path it was
@@ -1187,12 +1199,15 @@ fn parse_upstream_track(upstream: &str, track: &str) -> WorktreeGitSignals {
 /// [`spawn_dirty_sweep`] is the one that does touch them — it prunes this map to
 /// the ids it is handed — which is why it must be called once with every repo's
 /// targets rather than once per repo. See its precondition.
+///
+/// The path stored beside each value is what makes a stale entry inert rather than
+/// wrong on the paths that never call this — see [`UPSTREAMS`].
 async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
     let by_path = repo_upstreams(repo_root).await;
     let mut cache = UPSTREAMS.lock().expect("upstream cache mutex poisoned");
     for wt in worktrees {
         match by_path.get(&wt.path) {
-            Some(signals) => cache.insert(wt.id, signals.clone()),
+            Some(signals) => cache.insert(wt.id, (signals.clone(), wt.path.clone())),
             None => cache.remove(&wt.id),
         };
     }
@@ -1373,7 +1388,10 @@ fn git_signals_for(id: i64, path: &str) -> Option<WorktreeGitSignals> {
         .lock()
         .expect("upstream cache mutex poisoned")
         .get(&id)
-        .cloned()
+        // Same path guard as `DIRTY` below: a reused rowid must not inherit another
+        // checkout's branch, counts or upstream name.
+        .filter(|(_, measured_in)| measured_in == path)
+        .map(|(signals, _)| signals.clone())
         .unwrap_or_default();
     if let Some((dirty, measured_in, at)) =
         DIRTY.lock().expect("dirty cache mutex poisoned").get(&id)
@@ -7275,9 +7293,16 @@ mod tests {
         );
     }
 
-    /// `git_is_dirty` against real git, over the three kinds of change that all
-    /// mean "work exists only here" — and the flag that stops the daemon's own
-    /// reading of it from writing to the repo.
+    /// `git_is_dirty` against real git, over all three kinds of change that mean
+    /// "work exists only here" — unstaged, untracked and **staged**, the same three
+    /// [`WorktreeGitSignals::dirty`] names — plus the two flags that stop a user's
+    /// git config redefining the question and stop the daemon's own reading from
+    /// writing to the repo.
+    ///
+    /// The staged case was added after a review angle noticed this doc said "three"
+    /// while the body exercised two. It is also the one a naive porcelain read gets
+    /// wrong: a staged edit puts its marker in column 0, where a `.trim()` eats it —
+    /// which is `git_raw`'s whole reason for existing.
     #[tokio::test]
     async fn git_is_dirty_sees_every_kind_of_change_without_touching_the_index() {
         use std::process::Command;
@@ -7326,9 +7351,20 @@ mod tests {
             "reading dirtiness must not rewrite .git/index"
         );
 
-        // An untracked file, alone: it is what `git worktree remove` refuses on, so
-        // the glyph has to agree with the dialog that blocks the delete.
+        // A *staged* change, alone. The third of the three kinds `dirty`'s doc
+        // names, and the one an earlier revision of this test claimed to cover and
+        // did not — it is also the case a naive `status --porcelain` reading gets
+        // wrong, since a staged edit sits in column 0 where a `.trim()` would eat
+        // the leading space (`git_raw`'s whole reason for existing).
         git(&work, &["checkout", "--", "a.txt"]);
+        std::fs::write(work.join("a.txt"), "staged").unwrap();
+        git(&work, &["add", "a.txt"]);
+        assert_eq!(
+            git_is_dirty(FsPath::new(&work)).await,
+            Some(true),
+            "a staged change is work that exists only in this checkout"
+        );
+        git(&work, &["reset", "--hard", "HEAD"]);
         assert_eq!(git_is_dirty(FsPath::new(&work)).await, Some(false));
         std::fs::write(work.join("scratch.md"), "notes").unwrap();
         assert_eq!(

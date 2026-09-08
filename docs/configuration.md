@@ -2127,7 +2127,7 @@ Anything else is a `veld lint` finding, including a run's own values
 anything is running, so there is no run to resolve them against. That restriction
 is the whole of what "literal only" used to mean here.
 
-Three things worth knowing before you write one:
+Four things worth knowing before you write one:
 
 - **Use `${veld.branch_raw}`, not `${veld.branch}`.** `branch` is slugified
   everywhere in veld, so a `feat/foo` checkout would address a branch named

@@ -125,17 +125,22 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
  * puts this in `aria-description` instead, after the alias.
  */
 export function gitDescription(git: WorktreeGitSignals | undefined): string | undefined {
-  if (rowGitState(git) === null) return undefined;
-  // **Both clauses, not just the winning glyph's.** The glyph shows one state and
-  // the tooltip shows every fact; this is the tooltip's equivalent for a reader who
-  // cannot see either, so returning only "uncommitted changes" for a row that is
-  // also three commits ahead gave them strictly less than a sighted reader gets on
-  // hover — the very asymmetry `rowstate/rowState.ts` argues against, broken inside
-  // the git half. A review angle caught it.
+  if (git === undefined || rowGitState(git) === null) return undefined;
+  // **Every fact the tooltip has, not just the winning glyph's.** The glyph shows
+  // one state and the tooltip shows all of them; this is the tooltip's equivalent
+  // for a reader who cannot see either, so any fact it omits is one a screen-reader
+  // user does not get and a hoverer does. Two review rounds landed here: the first
+  // caught it emitting only "uncommitted changes" for a row also commits ahead, and
+  // the second caught the fix closing it for `ahead` alone while `behind` and a
+  // deleted upstream were still dropped — both of which the daemon emits alongside
+  // `dirty` routinely.
   const parts: string[] = [];
-  if (git?.dirty) parts.push("uncommitted changes");
-  if (git?.ahead !== null && git !== undefined && git.ahead > 0) {
-    parts.push(`${commits(git.ahead)} not pushed`);
+  if (git.dirty) parts.push("uncommitted changes");
+  if (git.upstream_gone) {
+    parts.push("upstream branch deleted");
+  } else {
+    if (git.ahead !== null && git.ahead > 0) parts.push(`${commits(git.ahead)} not pushed`);
+    if (git.behind !== null && git.behind > 0) parts.push(`${commits(git.behind)} behind`);
   }
   return parts.join(", ");
 }

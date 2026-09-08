@@ -55,9 +55,10 @@ describe("rowGitState", () => {
    * upstream renders nothing rather than something confidently wrong — git cannot
    * tell a merged pull request from one closed without merging and then deleted.
    *
-   * The trap it guards is the fall-through: with `gone` out of the precedence
-   * chain, such a checkout would otherwise reach `synced` and claim everything is
-   * pushed to a remote branch that no longer exists.
+   * Worth an explicit assertion rather than being implied by the two-state union:
+   * a deleted upstream is the state somebody will reach for a glyph for, and this
+   * is the line that says the answer is no. (An earlier revision of this comment
+   * described a fall-through into a `synced` state that no longer exists.)
    */
   it("shows nothing for a deleted upstream", () => {
     expect(
@@ -158,6 +159,12 @@ describe("gitTooltipLines", () => {
     expect(gitTooltipLines(signals({ ...none, dirty: null }))).toEqual([]);
   });
 
+  /**
+   * Guards a shape the daemon does not produce — `upstream_gone` is only ever set
+   * after the upstream name is known non-empty — so this pins the fallback rather
+   * than a reachable case. Kept because the fallback is one `??` and the cost of
+   * it being wrong is the word "null" in a tooltip.
+   */
   it("never leaves an upstream name as the literal null", () => {
     expect(
       gitTooltipLines(signals({ upstream: null, upstream_gone: true })).join(""),
@@ -170,6 +177,19 @@ describe("gitDescription", () => {
     expect(gitDescription(undefined)).toBeUndefined();
     expect(gitDescription(signals({ dirty: null }))).toBeUndefined();
     expect(gitDescription(signals())).toBeUndefined();
+  });
+
+  /** The combinations two review rounds found uncovered, and the daemon emits. */
+  it("describes every fact, not only the one the glyph shows", () => {
+    expect(gitDescription(signals({ dirty: true, ahead: 3, behind: 2 }))).toBe(
+      "uncommitted changes, 3 commits not pushed, 2 commits behind",
+    );
+    expect(
+      gitDescription(signals({ dirty: true, ahead: null, behind: null, upstream_gone: true })),
+    ).toBe("uncommitted changes, upstream branch deleted");
+    expect(gitDescription(signals({ dirty: true, behind: 4 }))).toBe(
+      "uncommitted changes, 4 commits behind",
+    );
   });
 
   it("describes each state in words for a screen reader", () => {
