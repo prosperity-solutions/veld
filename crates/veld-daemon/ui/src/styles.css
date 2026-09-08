@@ -1209,18 +1209,30 @@ button.lane-empty {
  * working. Deleting scrolls inside itself instead (`min-height: 0` is what lets a
  * flex item shrink below its content at all), and the trash keeps its size. */
 .rail-dock-scroll .rail-group.deleting {
-  /* Floored at a header plus one row (17px + the 2px gap + `.wt-row`'s 28px).
-     All content, no padding to add back: `.rail-dock .rail-group` above zeroes
-     `.rail-group`'s own 9px, and the `+ .rail-group` inset lands on the trash
-     rather than here — Deleting is always the dock's first section.
-     `min-height: 0` alone let it yield *everything*: the trash does not shrink,
+  /* `min-height: 0` alone let it yield *everything*: the trash does not shrink,
      so an expanded trash taller than the cap took the whole dock and Deleting
      went to 0px — no header, no rows, and no height to scroll inside. Deleting a
      stale worktree is the main reason to open the trash in the first place, so
-     that erased the section exactly when it had something to say. Past the floor
-     the dock's own scrollbar takes over. */
-  min-height: 47px;
+     that erased the section exactly when it had something to say. The floor is
+     set per rail width below; past it the dock's own scrollbar takes over. */
+  min-height: 0;
   overflow-y: auto;
+}
+/* One row, and in the wide rail the header above it. All content, no padding to
+   add back: `.rail-dock .rail-group` above zeroes `.rail-group`'s own 9px, and
+   the `+ .rail-group` inset lands on the trash rather than here — Deleting is
+   always the dock's first section. The header is `.lane-fold`'s 14px plus
+   `.lane-head`'s 2px/3px, then `.rail-group`'s 2px gap, then `.wt-row`'s 28px.
+
+   Split by width because the collapsed rail draws no headers at all
+   (`hasHeader` is `label !== null && props.wide`), so one floor for both left
+   19px of dead air above the trash divider in the mode with the least room for
+   it. */
+.rail.wide .rail-dock-scroll .rail-group.deleting {
+  min-height: 49px;
+}
+.rail:not(.wide) .rail-dock-scroll .rail-group.deleting {
+  min-height: 28px;
 }
 .rail-dock-scroll .rail-group.trash {
   flex: none;

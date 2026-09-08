@@ -8358,6 +8358,14 @@ function Rail(props: {
   // project A's trash and then merely looking at project B — whose trash almost
   // always holds nothing — cleared A's flag, so coming back collapsed a pile
   // nothing had happened to.
+  //
+  // The cost of that guard, stated rather than fixed: a flag is only reclaimable
+  // while its own repo is on screen. The rail can see one project's worktrees
+  // (`repo?.worktrees`), so if A's trash drains below the preview and refills
+  // past it while B is selected — retention expiry, or a bin from another window
+  // — coming back to A draws a pile the reader did not open. Clearing on the
+  // switch instead would trade a rare wrong-open for a common wrong-close, which
+  // is the trade this guard was added to stop making.
   useEffect(() => {
     if (trashOpenFor === railRepo && trashCount <= TRASH_PREVIEW) {
       setTrashOpenFor(null);
@@ -8722,7 +8730,18 @@ function Rail(props: {
     // header's one focusable control carries what they mean. Without it, folding a
     // section would make its news inaudible rather than merely smaller.
     const hiddenNotes: string[] = [];
-    if (holdsActive) hiddenNotes.push("the selected worktree is in here");
+    // Worded for whichever thing is hiding the row, because the note is attached
+    // to the fold button and the fold is not always the answer: past
+    // `TRASH_PREVIEW` the section is open and the "+N" is what reveals it, so
+    // "in here" on a control already announcing itself expanded would point at
+    // the wrong gesture.
+    if (holdsActive) {
+      hiddenNotes.push(
+        folded
+          ? "the selected worktree is in here"
+          : "the selected worktree is behind the +N",
+      );
+    }
     if (hiddenAlert !== null) {
       hiddenNotes.push(
         hiddenAlert === "recovering" ? "a node is being restarted" : "a run failed",
