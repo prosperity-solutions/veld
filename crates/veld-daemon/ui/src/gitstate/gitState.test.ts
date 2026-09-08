@@ -193,6 +193,25 @@ describe("the tooltip and the description cannot drift apart", () => {
     { upstream: "origin/x", ahead: null, behind: null }, // unrecognised track token
   ];
 
+  /**
+   * The length comparison below counts by splitting on `", "`, so it is only sound
+   * while no short form contains that sequence. Asserted rather than assumed —
+   * otherwise a future fact worded "ahead, behind" would silently inflate the count
+   * and make the drift guard pass while the sets diverged, which is the exact
+   * failure this whole block exists to catch.
+   */
+  it("keeps short forms free of the separator the guard counts by", () => {
+    for (const dirty of dirties) {
+      for (const up of upstreams) {
+        const description = gitDescription(signals({ dirty, ...up }));
+        if (description === undefined) continue;
+        for (const clause of description.split(", ")) {
+          expect(clause).not.toContain(", ");
+        }
+      }
+    }
+  });
+
   it("reports the same facts in both registers, for every emittable shape", () => {
     for (const dirty of dirties) {
       for (const up of upstreams) {
