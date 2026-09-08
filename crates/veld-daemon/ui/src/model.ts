@@ -797,8 +797,11 @@ export const TRASH_PREVIEW = 2;
  * left but "Empty the trash", which deletes all of them. Hiding a row must never
  * be the same thing as removing what you can do to it.
  *
- * `hidden` is 0 whenever nothing is folded away, so the caller renders the
- * control on `hidden > 0` and can never draw a "+0".
+ * `hidden` is 0 whenever nothing is folded away — including while `expanded`, so
+ * it is the count to *print* and not the test for whether to print anything. The
+ * rail asks `worktrees.length > TRASH_PREVIEW` instead, because a control that
+ * appeared on `hidden > 0` would vanish on the click that opened it, taking the
+ * way back with it.
  *
  * Pure, and here rather than inline in the rail, because this package has no
  * component tests: a slice written into JSX is a slice nothing can pin.

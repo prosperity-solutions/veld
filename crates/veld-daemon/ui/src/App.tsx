@@ -8644,12 +8644,13 @@ function Rail(props: {
     const hasHeader = group.label !== null && props.wide;
     const folded = hasHeader && props.folded.has(group.key);
     // What the section draws, which is everything it holds except in an
-    // unexpanded trash. `hidden` is 0 for every other section, so the "+N"
-    // control below needs no key test of its own — and the header's own count,
-    // the empty-lane placeholder and the reductions below still read
-    // `group.worktrees`, because those speak for the section, not for what is on
-    // screen. Computed here, ahead of them, because `holdsActive` asks whether
-    // the selected row was actually drawn.
+    // unexpanded trash. `hidden` is 0 for every other section — it is what the
+    // control prints, not what decides whether to draw one, which is why the
+    // control below tests the key and the count instead (see `trashPreview`).
+    // The header's own count, the empty-lane placeholder and the reductions
+    // below still read `group.worktrees`, because those speak for the section,
+    // not for what is on screen. Computed here, ahead of them, because
+    // `holdsActive` asks whether the selected row was actually drawn.
     const { rows, hidden } =
       group.key === TRASH_LANE
         ? trashPreview(group.worktrees, trashExpanded)

@@ -1210,6 +1210,9 @@ button.lane-empty {
  * flex item shrink below its content at all), and the trash keeps its size. */
 .rail-dock-scroll .rail-group.deleting {
   /* Floored at a header plus one row (17px + the 2px gap + `.wt-row`'s 28px).
+     All content, no padding to add back: `.rail-dock .rail-group` above zeroes
+     `.rail-group`'s own 9px, and the `+ .rail-group` inset lands on the trash
+     rather than here — Deleting is always the dock's first section.
      `min-height: 0` alone let it yield *everything*: the trash does not shrink,
      so an expanded trash taller than the cap took the whole dock and Deleting
      went to 0px — no header, no rows, and no height to scroll inside. Deleting a
