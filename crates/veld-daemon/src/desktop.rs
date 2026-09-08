@@ -2593,53 +2593,6 @@ fn extensions_view_for(
     }
 }
 
-/// This worktree's `ide.quicklinks`, with any `${veld.*}` reference resolved.
-///
-/// A quicklink is the one *rendered* string a project templates, so the two rules
-/// that govern it are different from a command's.
-///
-/// **Every value is percent-encoded** ([`veld_core::percent::encode_in_url`]), which
-/// is the URL analogue of what slugifying `${veld.branch}` does for a shell. The
-/// characters that matter are the ones `git check-ref-format` permits and a URL
-/// reads as structure: a branch called `feat#2` interpolated raw would truncate the
-/// link at a fragment and open the repo's front page instead of the branch, silently
-/// and for the one person unlucky enough to have named a branch that way. `/` is
-/// deliberately preserved, because a branch's slashes are *path* — `…/tree/feat/foo`
-/// is the address, `…/tree/feat%2Ffoo` is a 404 on every host.
-///
-/// **A reference that will not resolve drops the link** rather than emitting a
-/// half-substituted URL. The only way to reach that from a config `veld lint`
-/// accepts is a branch whose name starts with `-`, for which `worktree_builtins`
-/// omits `branch_raw` on purpose (see there — it is an argument-injection guard for
-/// `argv`, and this inherits it because the meanings have one owner). Vanishingly
-/// rare, and a missing bookmark is a better failure than a bookmark pointing at
-/// somewhere real and wrong.
-///
-/// Interpolation is skipped entirely when no URL mentions `${`, so a project that
-/// templates nothing — which is every project until it opts in — gets the same
-/// strings it always did without a `HashMap` being built per worktree per poll.
-fn resolved_quicklinks(
-    links: Vec<veld_core::ide::Quicklink>,
-    worktree_path: &str,
-    branch: &str,
-    config: &veld_core::config::VeldConfig,
-) -> Vec<veld_core::ide::Quicklink> {
-    if !links.iter().any(|link| link.url.contains("${")) {
-        return links;
-    }
-    let mut ctx = veld_core::variables::VariableContext::new();
-    for (name, value) in super::pty::worktree_builtins(FsPath::new(worktree_path), branch, config) {
-        ctx.set_builtin(&name, veld_core::percent::encode_in_url(&value));
-    }
-    links
-        .into_iter()
-        .filter_map(|link| {
-            let url = veld_core::variables::interpolate(&link.url, &ctx).ok()?;
-            Some(veld_core::ide::Quicklink { url, ..link })
-        })
-        .collect()
-}
-
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
@@ -2743,7 +2696,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
             // the partial moves do not leave `section` half-borrowed.
             let staleness_sensitivity = section.staleness_sensitivity_safe();
             IdeView {
-                quicklinks: resolved_quicklinks(section.quicklinks, &wt.path, &wt.branch, c),
+                quicklinks: section.quicklinks,
                 permissions: section.permissions,
                 panes,
                 // Set below, from `declare_root` rather than this worktree's own
@@ -7390,99 +7343,6 @@ mod tests {
         // from `Some(false)`, which would claim the checkout is clean.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(git_is_dirty(FsPath::new(empty.path())).await, None);
-    }
-
-    /// A templated quicklink resolves per worktree, and the resolution is
-    /// URL-encoded rather than pasted in raw.
-    #[test]
-    fn a_templated_quicklink_resolves_against_the_worktree() {
-        // The same minimal config `pty`'s own builtins tests use, deserialized
-        // rather than built field-by-field: `VeldConfig` has no `Default`, and a
-        // hand-built one would drift from what a real `veld.json` produces.
-        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
-            "schemaVersion": "3",
-            "name": "veld",
-            "nodes": {},
-        }))
-        .expect("minimal config");
-        let resolve = |url: &str, branch: &str| {
-            resolved_quicklinks(
-                vec![veld_core::ide::Quicklink {
-                    label: "GitHub".to_owned(),
-                    url: url.to_owned(),
-                }],
-                "/repo/wt",
-                branch,
-                &cfg,
-            )
-        };
-
-        let out = resolve(
-            "https://github.com/o/r/tree/${veld.branch_raw}",
-            "git-status-visual",
-        );
-        assert_eq!(out[0].url, "https://github.com/o/r/tree/git-status-visual");
-
-        // **A branch's slashes are path, not a segment to escape.** `feat%2Ffoo` is
-        // a 404 on every code host, which is the whole reason `encode_in_url` exists
-        // beside `encode_component` rather than reusing it.
-        let out = resolve("https://github.com/o/r/tree/${veld.branch_raw}", "feat/foo");
-        assert_eq!(out[0].url, "https://github.com/o/r/tree/feat/foo");
-
-        // ...and the character that made encoding necessary at all: git permits `#`
-        // in a refname, and a raw one truncates the URL at a fragment, so the link
-        // would silently open the repo's front page instead of the branch.
-        let out = resolve("https://github.com/o/r/tree/${veld.branch_raw}", "feat#2");
-        assert_eq!(out[0].url, "https://github.com/o/r/tree/feat%232");
-
-        // `${veld.branch}` is the slugified name, as everywhere else — which is why
-        // a URL wants `branch_raw`: this addresses a branch that does not exist.
-        let out = resolve("https://x/t/${veld.branch}", "feat/foo");
-        assert_eq!(out[0].url, "https://x/t/feat-foo");
-    }
-
-    /// An unresolvable reference **drops the link** rather than shipping a
-    /// half-substituted URL, and an untemplated list is returned untouched.
-    #[test]
-    fn a_quicklink_that_cannot_resolve_is_omitted_not_mangled() {
-        // The same minimal config `pty`'s own builtins tests use, deserialized
-        // rather than built field-by-field: `VeldConfig` has no `Default`, and a
-        // hand-built one would drift from what a real `veld.json` produces.
-        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
-            "schemaVersion": "3",
-            "name": "veld",
-            "nodes": {},
-        }))
-        .expect("minimal config");
-        let links = vec![
-            veld_core::ide::Quicklink {
-                label: "Plain".to_owned(),
-                url: "https://staging.example.com".to_owned(),
-            },
-            veld_core::ide::Quicklink {
-                label: "Branch".to_owned(),
-                url: "https://x/t/${veld.branch_raw}".to_owned(),
-            },
-        ];
-
-        // A branch starting with `-`: `worktree_builtins` omits `branch_raw` for it
-        // on purpose (an argument-injection guard for `argv`), and this inherits the
-        // omission because the meanings have one owner. A missing bookmark beats one
-        // pointing somewhere real and wrong.
-        let out = resolved_quicklinks(links.clone(), "/repo/wt", "-foo", &cfg);
-        assert_eq!(
-            out.iter().map(|l| l.label.as_str()).collect::<Vec<_>>(),
-            vec!["Plain"],
-            "the templated link is dropped; its untemplated neighbour is not"
-        );
-
-        // No `${` anywhere: the same values back, without a context being built per
-        // worktree per poll for every project that templates nothing.
-        let untemplated = vec![links[0].clone()];
-        assert_eq!(
-            resolved_quicklinks(untemplated.clone(), "/repo/wt", "-foo", &cfg),
-            untemplated
-        );
     }
 
     /// The staleness computation, against a real git repo: the direction of

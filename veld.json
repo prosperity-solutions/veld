@@ -12,18 +12,7 @@
     },
     "quicklinks": [
       { "label": "veld.oss.life.li", "url": "https://veld.oss.life.li" },
-      // Templated, and `branch_raw` rather than `branch`: veld slugifies
-      // `${veld.branch}`, so a `feat/foo` checkout would address a branch called
-      // `feat-foo` that does not exist. The value is percent-encoded on the way
-      // in — with `/` preserved, because a branch's slashes are the path here.
-      //
-      // Note where the provider-specific part lives: `/tree/<branch>` is GitHub's
-      // (and GitLab's is `/-/tree/`), so it sits in this file rather than in veld.
-      // Same boundary the `pr` badge below draws with a script.
-      {
-        "label": "This branch on GitHub",
-        "url": "https://github.com/prosperity-solutions/veld/tree/${veld.branch_raw}"
-      },
+      { "label": "GitHub", "url": "https://github.com/prosperity-solutions/veld" },
       { "label": "Google", "url": "https://www.google.com" }
     ],
     "permissions": [

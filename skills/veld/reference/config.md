@@ -748,27 +748,8 @@ behind a **Bookmarks** button on a browser pane's start page and on the new-pane
 chooser, where the list itself is the run's own URLs. Typing in the address bar
 still matches them inline. `label` and `url` are both required; `url` must be
 `http://` or `https://` (other schemes are refused, because a click hands the
-string to the OS).
-
-**`url` interpolates the worktree scope** — the same closed set an
-`ide.extensions` command gets (`${veld.root}`, `${veld.branch}`,
-`${veld.branch_raw}`, `${veld.worktree}`, `${veld.project}`,
-`${veld.username}`), so a bookmark can open *this* checkout's branch:
-`https://github.com/o/r/tree/${veld.branch_raw}`. A run's own values
-(`${output.*}`, `${nodes.*}`) are a `veld lint` finding — the bookmark list
-renders whether or not anything is running.
-
-Four gotchas. A reference may **not appear in the URL's host** — path, query or
-fragment only, and `veld lint` refuses the rest: `git check-ref-format` accepts a
-branch called `evil.com/x` and whoever opens a pull request picks the name, so
-`https://${veld.branch_raw}.preview.example.com/` would resolve to somebody
-else's origin. Use **`branch_raw`**, since `branch` is slugified and `feat/foo`
-would address a branch named `feat-foo`; values are **percent-encoded with `/`
-preserved** (a branch's slashes are path, but a `#` in a branch name is escaped
-so it cannot truncate the URL at a fragment); and the **provider-specific path is
-yours** — `/tree/` is GitHub's, `/-/tree/` GitLab's — because veld never learns
-your code host. A reference that cannot resolve for a checkout omits the link for
-that checkout rather than shipping a half-substituted URL.
+string to the OS). **Literal only** — `${...}` is not interpolated here, since
+the start page renders with no run to resolve against.
 
 ### `ide.permissions`
 

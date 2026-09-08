@@ -2104,12 +2104,7 @@ a filter lying about its scope.
 "ide": {
   "quicklinks": [
     { "label": "Staging", "url": "https://staging.example.com" },
-    { "label": "Grafana", "url": "https://grafana.internal" },
-    // Resolved per checkout — the link opens *this* worktree's branch.
-    {
-      "label": "This branch on GitHub",
-      "url": "https://github.com/o/r/tree/${veld.branch_raw}"
-    }
+    { "label": "Grafana", "url": "https://grafana.internal" }
   ]
 }
 ```
@@ -2117,44 +2112,8 @@ a filter lying about its scope.
 `url` must be `http://` or `https://`. Other schemes are refused: a quicklink is
 a repo-controlled string that a click hands to the OS, and `vscode://` or
 `file://` would make a config file a launcher for whatever the machine has
-registered.
-
-**`url` interpolates the worktree scope** — the same closed set an
-`ide.extensions` command gets: `${veld.root}`, `${veld.branch}`,
-`${veld.branch_raw}`, `${veld.worktree}`, `${veld.project}`, `${veld.username}`.
-Anything else is a `veld lint` finding, including a run's own values
-(`${output.*}`, `${nodes.*}`): a bookmark list is rendered whether or not
-anything is running, so there is no run to resolve them against. That restriction
-is the whole of what "literal only" used to mean here.
-
-Four things worth knowing before you write one:
-
-- **Use `${veld.branch_raw}`, not `${veld.branch}`.** `branch` is slugified
-  everywhere in veld, so a `feat/foo` checkout would address a branch named
-  `feat-foo` that does not exist.
-- **A reference may not appear in the URL's host** — only in its path, query or
-  fragment, and `veld lint` refuses the rest. `git check-ref-format` accepts a
-  branch called `evil.com/x`, and whoever opens a pull request against the repo
-  chooses the branch name, so `https://${veld.branch_raw}.preview.example.com/`
-  would resolve to `https://evil.com/x.preview.example.com/` — a host the project
-  never named, loaded into a browser pane under the label the project wrote. Put
-  the reference after the first `/`.
-- **Values are percent-encoded, with `/` preserved.** A branch's slashes are path
-  — `…/tree/feat/foo` is the address on every code host and `…/tree/feat%2Ffoo` is
-  a 404 on all of them — while `#`, which git permits in a branch name, is escaped
-  because a raw one would truncate the URL at a fragment and quietly open the
-  repo's front page instead of the branch.
-- **The provider-specific part is yours.** `/tree/<branch>` is GitHub's spelling;
-  GitLab's is `/-/tree/` and Bitbucket's is `/src/`. veld interpolates and encodes;
-  it does not know your code host, which is the same boundary
-  [`ide.extensions`](#ideextensions) draws with a command.
-
-A link whose reference cannot be resolved for a given checkout is **omitted from
-that checkout's list** rather than rendered half-substituted. The only way to
-reach that from a config `veld lint` accepts is a branch whose name begins with
-`-`, for which `${veld.branch_raw}` is deliberately unavailable (see
-[`ide.extensions`](#ideextensions) — it is an argument-injection guard, and
-quicklinks inherit it because those meanings have one owner).
+registered. Literal only — `${...}` is **not** interpolated here, because the
+start page is rendered with no run to resolve against.
 
 ### `ide.externalOrigins`
 
