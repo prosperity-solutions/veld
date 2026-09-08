@@ -97,8 +97,16 @@ interface GitFact {
  * The order is deliberate: what you are *holding* first (uncommitted work), then
  * how you stand against the remote. `gitTooltipLines` and `gitDescription` are both
  * thin projections of this, so they cannot disagree about which facts exist.
+ *
+ * **Exported only so the drift guard can count facts directly.** Nothing outside
+ * this module and its test should call it — the two projections are the API. The
+ * first version of that guard counted by splitting the rendered description on
+ * `", "`, which is a delimiter collision rather than a count, and the assertion
+ * written to make the split safe was tautological (splitting on a separator cannot
+ * leave a piece containing it). Counting the facts themselves is the only version
+ * of that test that can fail for the right reason.
  */
-function gitFacts(git: WorktreeGitSignals | undefined): GitFact[] {
+export function gitFacts(git: WorktreeGitSignals | undefined): GitFact[] {
   if (!git) return [];
   const facts: GitFact[] = [];
   if (git.dirty) {

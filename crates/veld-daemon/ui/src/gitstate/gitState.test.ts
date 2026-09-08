@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorktreeGitSignals } from "../api";
-import { gitDescription, gitTooltipLines, rowGitState } from "./gitState";
+import { gitDescription, gitFacts, gitTooltipLines, rowGitState } from "./gitState";
 
 function signals(over: Partial<WorktreeGitSignals> = {}): WorktreeGitSignals {
   return {
@@ -194,19 +194,20 @@ describe("the tooltip and the description cannot drift apart", () => {
   ];
 
   /**
-   * The length comparison below counts by splitting on `", "`, so it is only sound
-   * while no short form contains that sequence. Asserted rather than assumed —
-   * otherwise a future fact worded "ahead, behind" would silently inflate the count
-   * and make the drift guard pass while the sets diverged, which is the exact
-   * failure this whole block exists to catch.
+   * The description is a `", "`-joined list, so a short form containing that
+   * sequence would make the rendered string un-splittable back into facts.
+   *
+   * Checked against `gitFacts` itself, not against the rendered string: the first
+   * version of this test split the description and then asserted no piece contained
+   * the separator, which is tautological and asserted nothing. A review angle
+   * flagged the counting as a delimiter collision and re-reading it found the
+   * vacuous assertion.
    */
-  it("keeps short forms free of the separator the guard counts by", () => {
+  it("keeps short forms free of the separator the description joins with", () => {
     for (const dirty of dirties) {
       for (const up of upstreams) {
-        const description = gitDescription(signals({ dirty, ...up }));
-        if (description === undefined) continue;
-        for (const clause of description.split(", ")) {
-          expect(clause).not.toContain(", ");
+        for (const fact of gitFacts(signals({ dirty, ...up }))) {
+          expect(fact.short).not.toContain(", ");
         }
       }
     }
@@ -216,12 +217,15 @@ describe("the tooltip and the description cannot drift apart", () => {
     for (const dirty of dirties) {
       for (const up of upstreams) {
         const git = signals({ dirty, ...up });
-        const lines = gitTooltipLines(git);
+        const facts = gitFacts(git);
+        // Both projections must account for every fact, counted at the source
+        // rather than by parsing a rendered string.
+        expect(gitTooltipLines(git)).toHaveLength(facts.length);
         const description = gitDescription(git);
         // The description is additionally gated on a glyph rendering; past that
-        // gate it must account for every line the tooltip has.
+        // gate it must carry every fact.
         if (description === undefined) continue;
-        expect(description.split(", ")).toHaveLength(lines.length);
+        expect(description.split(", ")).toHaveLength(facts.length);
       }
     }
   });
