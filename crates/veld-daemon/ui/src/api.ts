@@ -153,6 +153,70 @@ export interface WorktreeGitStatus {
 }
 
 /**
+ * What git says about one checkout, carried on every {@link Worktree} row.
+ *
+ * **Independent facts, deliberately not a state enum.** The daemon sends what it
+ * measured and the rail folds it into one glyph in `rowstate/rowState.ts` — so
+ * adding a
+ * conflicted, mid-rebase or behind state later is a UI change rather than a
+ * protocol change, and the two surfaces can disagree about presentation without
+ * disagreeing about facts.
+ *
+ * Every field is nullable and `null` means **not known**, which is a different
+ * fact from `0` or `false`: an unmounted volume, a repo with no remote, and a
+ * worktree the dirty sweep has not reached yet are all *unknown*, not clean. Same
+ * distinction `CarryOverReport.files` makes, for the same reason.
+ *
+ * Today that distinction has no visual consequence — a clean row renders no glyph
+ * either, because absence is the rail's word for "nothing to see" (the maintainer
+ * declined an untouched-worktree glyph on exactly those grounds). It is kept
+ * because it stops anything here *asserting* clean off a reading that never
+ * happened, which is the bug the moment a future surface does render that state.
+ *
+ * Not to be confused with {@link WorktreeGitStatus}, which is the on-demand
+ * *file list* the delete and trash flows fetch for one worktree. This is the
+ * cheap always-there summary; that is the expensive detail.
+ */
+export interface WorktreeGitSignals {
+  /**
+   * Uncommitted work — staged, unstaged or untracked — that exists in this
+   * checkout and nowhere else. The same question `git worktree remove` asks
+   * before it refuses.
+   *
+   * `null` while the daemon's sweep has not reached this worktree, which is what
+   * a freshly opened window sees for about one poll.
+   */
+  dirty: boolean | null;
+  /** The branch's upstream as git spells it (`origin/feat-x`), or `null`. */
+  upstream: string | null;
+  /**
+   * Commits this branch has that its upstream does not — the "not pushed yet"
+   * half. `null` when there is no upstream to compare against.
+   */
+  ahead: number | null;
+  /** The mirror image. Carried because it is free; no glyph renders it today. */
+  behind: number | null;
+  /**
+   * The branch has an upstream whose remote-tracking ref is **gone** — git's own
+   * `[gone]`, which appears once a `fetch --prune` has seen the remote branch
+   * disappear.
+   *
+   * **Nothing renders this, and it is still load-bearing.** A merged glyph was
+   * built for it and then removed on maintainer instruction: a squash-merge and
+   * branch delete leaves exactly this state, and so does a pull request closed
+   * without merging and then deleted, so a mark would be confidently wrong for a
+   * reader whose whole use for it is confidence. Real pull-request state holds a PR
+   * number and belongs to an `ide.extensions` badge.
+   *
+   * Its one consumer is the **tooltip**, where "the branch you pushed to is gone"
+   * is the most useful sentence about such a checkout — reachable when a dirty
+   * tree or an activity glyph holds the row's slot. A tooltip may be probabilistic
+   * where a glyph may not, which is the whole distinction here.
+   */
+  upstream_gone: boolean;
+}
+
+/**
  * One local branch of a repo, from {@link api.repoBranches}.
  *
  * `checked_out_in` is the field the picker cannot do without: git refuses
@@ -374,6 +438,15 @@ export interface Worktree {
    * reader why their config is broken.
    */
   machine_vars: number | null;
+  /**
+   * Git's view of this checkout — see {@link WorktreeGitSignals}.
+   *
+   * **Optional on the wire**, not merely nullable: the daemon omits the key
+   * entirely when it knows nothing, so an older bundle and a newer daemon (and the
+   * reverse) both read `undefined` here rather than a struct of nulls that has to
+   * be told apart from a real answer.
+   */
+  git?: WorktreeGitSignals;
   /**
    * The interpreted `ide` section of the checkout's config. Always sent, with
    * arrays that may be empty — a worktree with no config gets empty ones rather

@@ -1,4 +1,3 @@
-import { Tooltip } from "@mantine/core";
 import {
   IconAlertTriangle,
   IconCircleCheck,
@@ -6,6 +5,7 @@ import {
   IconMessageQuestion,
 } from "@tabler/icons-react";
 
+import { RailGlyphTooltip } from "../shared/RailGlyphTooltip";
 import type { RowState, RowSummary } from "./inbox";
 
 /**
@@ -55,35 +55,6 @@ export const HEADLINE: Record<RowState, string> = {
 };
 
 /**
- * A tooltip for an activity glyph.
- *
- * Mantine's, not the native `title`: it is what the run control beside it uses, it
- * honours the theme's 400ms `openDelay` instead of the browser's second-and-a-bit, and
- * it can be styled. `pre-line` because the body is one line per pane — the whole point
- * of the tooltip is that a single glyph cannot say *which* pane, so enumerating them is
- * the job.
- */
-function ActivityTooltip(props: {
-  label: string;
-  children: React.ReactNode;
-}): React.JSX.Element {
-  return (
-    <Tooltip
-      label={props.label}
-      multiline
-      w={260}
-      withArrow
-      // The row is draggable and scrolls; a tooltip that followed the pointer would
-      // fight both. Anchored, like the run control's.
-      position="left"
-      style={{ whiteSpace: "pre-line" }}
-    >
-      {props.children}
-    </Tooltip>
-  );
-}
-
-/**
  * The whole tooltip for a worktree's glyph.
  *
  * **One event says what happened; several say how many and then list them.** The first
@@ -99,20 +70,34 @@ function ActivityTooltip(props: {
  * necessarily the same fact. So a single entry uses its own detail and nothing else.
  */
 function tooltipFor(summary: RowSummary, label: string): string {
+  const lines = activityLines(summary);
+  return lines.length === 0 ? label : `${label} — ${lines.join("\n")}`;
+}
+
+/**
+ * The activity half of a tooltip, as lines, without the label.
+ *
+ * Split out from [`tooltipFor`] so the **worktree row** can put these above the
+ * git-state lines in one tooltip (see `rowstate/rowState.ts`) while the project
+ * column and a folded group header — which have no git state to speak of — keep
+ * using `tooltipFor` unchanged. One builder either way, so the two surfaces
+ * cannot drift in how they describe the same events.
+ */
+export function activityLines(summary: RowSummary): string[] {
   const { state, entries, running } = summary;
-  if (state === null) return label;
-  if (entries.length === 1) return `${label} — ${entries[0].unseen.detail}`;
+  if (state === null) return [];
+  if (entries.length === 1) return [entries[0].unseen.detail];
   if (entries.length === 0) {
     // `working` is the only state with no entries behind it.
-    return `${label} — ${
-      running === 1 ? "1 pane is running something" : `${running} panes are running something`
-    }`;
+    return [
+      running === 1 ? "1 pane is running something" : `${running} panes are running something`,
+    ];
   }
-  const lines = entries.slice(0, 4).map((e) => e.unseen.detail);
-  if (entries.length > lines.length) {
-    lines.push(`…and ${entries.length - lines.length} more`);
+  const detail = entries.slice(0, 4).map((e) => e.unseen.detail);
+  if (entries.length > detail.length) {
+    detail.push(`…and ${entries.length - detail.length} more`);
   }
-  return `${label} — ${entries.length} unseen\n${lines.join("\n")}`;
+  return [`${entries.length} unseen`, ...detail];
 }
 
 /**
@@ -138,7 +123,7 @@ export function InboxIcon(props: {
   if (state === null) return null;
   const Icon = ICONS[state];
   return (
-    <ActivityTooltip label={tooltipFor(props.summary, props.label)}>
+    <RailGlyphTooltip label={tooltipFor(props.summary, props.label)}>
       <span
         className={`wt-inbox ${state}`}
         // Decorative for the screen reader: the row is a `role=button` whose accessible
@@ -149,7 +134,7 @@ export function InboxIcon(props: {
       >
         <Icon size={12} />
       </span>
-    </ActivityTooltip>
+    </RailGlyphTooltip>
   );
 }
 
@@ -168,13 +153,13 @@ export function PaneActivityIcon(props: {
 }): React.JSX.Element {
   const Icon = ICONS[props.state];
   return (
-    <ActivityTooltip
+    <RailGlyphTooltip
       label={props.detail ?? HEADLINE[props.state]}
     >
       <span className={`pane-tab-activity ${props.state}`} aria-hidden="true">
         <Icon size={11} />
       </span>
-    </ActivityTooltip>
+    </RailGlyphTooltip>
   );
 }
 
