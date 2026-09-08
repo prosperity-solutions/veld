@@ -70,20 +70,34 @@ export const HEADLINE: Record<RowState, string> = {
  * necessarily the same fact. So a single entry uses its own detail and nothing else.
  */
 function tooltipFor(summary: RowSummary, label: string): string {
+  const lines = activityLines(summary);
+  return lines.length === 0 ? label : `${label} — ${lines.join("\n")}`;
+}
+
+/**
+ * The activity half of a tooltip, as lines, without the label.
+ *
+ * Split out from [`tooltipFor`] so the **worktree row** can put these above the
+ * git-state lines in one tooltip (see `rowstate/rowState.ts`) while the project
+ * column and a folded group header — which have no git state to speak of — keep
+ * using `tooltipFor` unchanged. One builder either way, so the two surfaces
+ * cannot drift in how they describe the same events.
+ */
+export function activityLines(summary: RowSummary): string[] {
   const { state, entries, running } = summary;
-  if (state === null) return label;
-  if (entries.length === 1) return `${label} — ${entries[0].unseen.detail}`;
+  if (state === null) return [];
+  if (entries.length === 1) return [entries[0].unseen.detail];
   if (entries.length === 0) {
     // `working` is the only state with no entries behind it.
-    return `${label} — ${
-      running === 1 ? "1 pane is running something" : `${running} panes are running something`
-    }`;
+    return [
+      running === 1 ? "1 pane is running something" : `${running} panes are running something`,
+    ];
   }
-  const lines = entries.slice(0, 4).map((e) => e.unseen.detail);
-  if (entries.length > lines.length) {
-    lines.push(`…and ${entries.length - lines.length} more`);
+  const detail = entries.slice(0, 4).map((e) => e.unseen.detail);
+  if (entries.length > detail.length) {
+    detail.push(`…and ${entries.length - detail.length} more`);
   }
-  return `${label} — ${entries.length} unseen\n${lines.join("\n")}`;
+  return [`${entries.length} unseen`, ...detail];
 }
 
 /**

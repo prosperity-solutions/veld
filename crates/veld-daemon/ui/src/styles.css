@@ -1856,11 +1856,19 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 }
 
 /* Whether this checkout is *used*: uncommitted work, commits that have not been
-   pushed, or an upstream branch that has been deleted. ONE glyph, worst-state-wins,
-   for the same reason `.wt-inbox` is — the row has space for a kind, not a count,
-   and the numbers are in the tooltip. Not a button either: the click falls through
-   and selects the worktree, because none of the actions this state implies (commit,
-   push, trash the worktree) is a one-click decision. */
+   pushed, or an upstream branch that has been deleted.
+
+   **This and `.wt-inbox` are the same slot, never two glyphs.** One element, and
+   `rowstate/rowState.ts` picks which class it carries: activity wins whenever
+   there is any, because while an agent is running the tree is EXPECTED to be
+   dirty and a pencil beside a spinner reports what the spinner already implies.
+   The tooltip still carries both halves, so this is a presentation choice and not
+   a loss of information.
+
+   One glyph and not a count, for the same reason `.wt-inbox` is: the row has space
+   for a kind, and the numbers are in the tooltip. Not a button either — the click
+   falls through and selects the worktree, because none of the actions this state
+   implies (commit, push, trash the checkout) is a one-click decision. */
 .wt-git {
   flex: none;
   display: flex;
@@ -1899,8 +1907,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   margin-left: 2px;
 }
 
-/* The row's trailing controls — the run count, the node-health alert, the git
-   state glyph, the activity glyph, the run control, the three-dot menu, and in the
+/* The row's trailing controls — the run count, the node-health alert, the row-state
+   glyph (`.wt-git` or `.wt-inbox`, whichever won the slot), the run control, the
+   three-dot menu, and in the
    trash the restore button or the deleting spinner — sit against the RIGHT EDGE of the
    row, not after the alias. The rail's width is whatever the user dragged it to,
    and a control that drifts into the middle of a wide row reads as a layout bug.
@@ -1920,10 +1929,12 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    end.
 
    **Expanded rows only.** A collapsed row is a 64px centred column with no
-   trailing cluster to form: the alert, the git state and the activity glyph are the
-   only three that render there, and they belong beside the marker (see
-   `.wt-row.slim .wt-alert`, `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`)
-   rather than pushed to an edge the row has no width to spare for. */
+   trailing cluster to form: the alert and the row-state glyph are the only two that
+   render there, and they belong beside the marker (see `.wt-row.slim .wt-alert`,
+   `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`) rather than pushed to an
+   edge the row has no width to spare for. `.wt-git` and `.wt-inbox` are two style
+   families on ONE element — never both at once — so listing both here costs
+   nothing and keeps whichever one wins correct. */
 .wt-row:not(.slim) > .run-count,
 .wt-row:not(.slim) > .wt-alert,
 .wt-row:not(.slim) > .wt-git,

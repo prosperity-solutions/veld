@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorktreeGitSignals } from "../api";
-import { gitDescription, gitTooltip, rowGitState } from "./gitState";
+import { gitDescription, gitTooltipLines, rowGitState } from "./gitState";
 
 function signals(over: Partial<WorktreeGitSignals> = {}): WorktreeGitSignals {
   return {
@@ -70,10 +70,10 @@ describe("rowGitState", () => {
   });
 });
 
-describe("gitTooltip", () => {
-  it("is the bare label when there is nothing to add", () => {
-    expect(gitTooltip(signals(), "api")).toBe("api");
-    expect(gitTooltip(undefined, "api")).toBe("api");
+describe("gitTooltipLines", () => {
+  it("is empty when there is nothing to say", () => {
+    expect(gitTooltipLines(signals())).toEqual([]);
+    expect(gitTooltipLines(undefined)).toEqual([]);
   });
 
   /**
@@ -81,42 +81,42 @@ describe("gitTooltip", () => {
    * the winner, the tooltip shows all of them.
    */
   it("lists every fact, not just the one the glyph shows", () => {
-    expect(gitTooltip(signals({ dirty: true, ahead: 3, behind: 2 }), "api")).toBe(
-      "api — Uncommitted changes\n" +
-        "3 commits not pushed to origin/feat-x\n" +
-        "2 commits behind origin/feat-x",
-    );
+    expect(gitTooltipLines(signals({ dirty: true, ahead: 3, behind: 2 }))).toEqual([
+      "Uncommitted changes",
+      "3 commits not pushed to origin/feat-x",
+      "2 commits behind origin/feat-x",
+    ]);
   });
 
   it("pluralises a single commit", () => {
-    expect(gitTooltip(signals({ ahead: 1 }), "api")).toBe(
-      "api — 1 commit not pushed to origin/feat-x",
-    );
+    expect(gitTooltipLines(signals({ ahead: 1 }))).toEqual([
+      "1 commit not pushed to origin/feat-x",
+    ]);
   });
 
   /** Core measured a deleted ref; it does not claim to know a PR was merged. */
   it("glosses a gone upstream without asserting the merge", () => {
-    const label = gitTooltip(
+    const [line] = gitTooltipLines(
       signals({ ahead: null, behind: null, upstream_gone: true }),
-      "api",
     );
-    expect(label).toContain("origin/feat-x is gone");
-    expect(label).toContain("usually means its pull request was merged");
+    expect(line).toContain("origin/feat-x is gone");
+    expect(line).toContain("usually means its pull request was merged");
   });
 
   it("says a branch has no upstream only alongside another fact", () => {
     const none = { upstream: null, ahead: null, behind: null };
-    expect(gitTooltip(signals({ ...none, dirty: true }), "api")).toBe(
-      "api — Uncommitted changes\nThis branch has no upstream — nothing has been pushed",
-    );
+    expect(gitTooltipLines(signals({ ...none, dirty: true }))).toEqual([
+      "Uncommitted changes",
+      "This branch has no upstream — nothing has been pushed",
+    ]);
     // Nothing else to say, and no glyph to hang it on.
-    expect(gitTooltip(signals({ ...none, dirty: null }), "api")).toBe("api");
+    expect(gitTooltipLines(signals({ ...none, dirty: null }))).toEqual([]);
   });
 
   it("never leaves an upstream name as the literal null", () => {
-    expect(gitTooltip(signals({ upstream: null, upstream_gone: true }), "api")).toContain(
-      "its upstream is gone",
-    );
+    expect(
+      gitTooltipLines(signals({ upstream: null, upstream_gone: true })).join(""),
+    ).toContain("its upstream is gone");
   });
 });
 

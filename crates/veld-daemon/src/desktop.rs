@@ -902,7 +902,8 @@ async fn git_status(dir: &FsPath) -> Result<Vec<DirtyFile>, String> {
 /// `state: "dirty" | "unpushed" | "clean"` because the fourth and fifth states
 /// (conflicted, mid-rebase, detached, behind) will arrive, and an enum users have
 /// built habits on is the expensive thing to change. Folding these into one glyph
-/// is the client's job — see `railGitState` in the UI.
+/// is the client's job — see `rowstate/rowState.ts` in the UI, which also decides
+/// when the activity glyph outranks any of this and takes the row's one slot.
 ///
 /// Every field is optional and `None` means *not known*, which is deliberately a
 /// different fact from a zero or a `false`: a checkout whose volume is unmounted, a

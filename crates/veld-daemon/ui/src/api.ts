@@ -156,7 +156,8 @@ export interface WorktreeGitStatus {
  * What git says about one checkout, carried on every {@link Worktree} row.
  *
  * **Independent facts, deliberately not a state enum.** The daemon sends what it
- * measured and the rail folds it into one glyph in `railGitState` — so adding a
+ * measured and the rail folds it into one glyph in `rowstate/rowState.ts` — so
+ * adding a
  * conflicted, mid-rebase or behind state later is a UI change rather than a
  * protocol change, and the two surfaces can disagree about presentation without
  * disagreeing about facts.

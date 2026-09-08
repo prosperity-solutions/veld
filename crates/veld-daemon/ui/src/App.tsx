@@ -53,11 +53,10 @@ import { WhatsNewDialog } from "./promotions/WhatsNew";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog } from "./shortcuts/ShortcutsDialog";
 import { nextIndex } from "./shortcuts/registry";
-import { GitStateIcon } from "./gitstate/GitStateIcon";
-import { gitDescription } from "./gitstate/gitState";
 import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
-import type { RowSummary } from "./inbox/inbox";
 import { inbox, notifyKey } from "./inbox/inbox";
+import { RowStateIcon } from "./rowstate/RowStateIcon";
+import { rowDescription } from "./rowstate/rowState";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
 import { TopBarControls } from "./components/TopBarControls";
@@ -8226,25 +8225,6 @@ function ProjectColumn(props: {
   );
 }
 
-/**
- * A rail row's `aria-description`: both status glyphs, in words, in row order.
- *
- * The two glyphs are `aria-hidden` and this is the only thing that says what they
- * mean, so a reader who cannot see them must get both — an earlier version passed
- * `inboxDescription` alone and the git state was announced by nothing at all.
- * Joined with `. ` because a screen reader reads the attribute as one string and
- * two clauses run together otherwise.
- */
-function rowDescription(
-  summary: RowSummary,
-  git: Worktree["git"],
-): string | undefined {
-  const parts = [gitDescription(git), inboxDescription(summary)].filter(
-    (part): part is string => part !== undefined,
-  );
-  return parts.length === 0 ? undefined : parts.join(". ");
-}
-
 function Rail(props: {
   worktrees: Worktree[];
   lanes: Lane[];
@@ -9253,7 +9233,7 @@ function Rail(props: {
                      accessible NAME is built from its content, so a status sentence
                      inside it would be announced ahead of the alias it describes —
                      the same reason the away icon is `aria-hidden`. */
-                  aria-description={rowDescription(inboxSummary, w.git)}
+                  aria-description={rowDescription(inboxDescription(inboxSummary), w.git)}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
                     deletingRow
@@ -9393,19 +9373,25 @@ function Rail(props: {
                       the one indicator whose whole purpose is to be seen while you are
                       looking somewhere else. Trashed rows are excluded — their panes are
                       gone, so an event there could never be read by looking. */}
-                  {/* Git state, LEFT of the activity glyph and by the same rules: one
-                      mark, worst-state-wins, a `<span>` that lets the click through.
-                      Ordered before it because activity is news that arrives and is
-                      read, while this is a standing property of the checkout — so the
-                      thing that changes moment to moment sits nearest the controls that
-                      act on it. Excluded in the trash for the same reason the activity
-                      glyph is: those rows offer restore and delete, and a state nobody
-                      can act on there is noise beside them. */}
+                  {/* **One glyph for both vocabularies**, not two side by side — see
+                      `rowstate/rowState.ts` for why. Activity wins whenever there is
+                      any, because while an agent is running the tree is *expected* to
+                      be dirty and a pencil beside a spinner says nothing the spinner
+                      did not. The tooltip still carries both halves.
+
+                      AFTER the node-health alert: that one is about a *run* failing
+                      its probe and is clickable, this one is about you and the
+                      checkout, and is not. Rendered in the slim rail too, which the
+                      run control is not: it is the indicator whose whole purpose is
+                      to be seen while you are looking somewhere else. Trashed rows
+                      are excluded — their panes are gone, and a state nobody can act
+                      on is noise beside restore and delete. */}
                   {!trashed && (
-                    <GitStateIcon git={w.git} label={worktreeLabel(w)} />
-                  )}
-                  {!trashed && (
-                    <InboxIcon summary={inboxSummary} label={worktreeLabel(w)} />
+                    <RowStateIcon
+                      summary={inboxSummary}
+                      git={w.git}
+                      label={worktreeLabel(w)}
+                    />
                   )}
                   {showRunControl && (
                     <Tooltip

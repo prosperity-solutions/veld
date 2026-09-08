@@ -3,10 +3,10 @@ import type { WorktreeGitSignals } from "../api";
 /**
  * Whether a worktree is *used*, folded from what git measured into one glyph.
  *
- * The daemon sends independent facts ({@link WorktreeGitSignals}); this is where
- * they become a single visual state, for the same reason the activity glyph does
- * it: a rail row has space for one small mark, and which *kind* of state it is
- * matters more than how much of it there is.
+ * The daemon sends independent facts ({@link WorktreeGitSignals}); this reduces
+ * them to the one git state worth a mark. It is not the last word on what the row
+ * shows — `rowstate/rowState.ts` decides whether the *activity* vocabulary takes
+ * the slot instead, which it does whenever there is any activity at all.
  *
  * # The three states, and why there are only three
  *
@@ -54,18 +54,19 @@ function commits(n: number): string {
 }
 
 /**
- * Every fact the daemon sent, as one line each, headed by the worktree's label.
+ * Every fact the daemon sent, one line each — no label, no joining.
  *
- * **The glyph shows the top state; the tooltip shows all of them.** That is the
- * whole reason the wire carries facts rather than a state — a row can be dirty
- * *and* three commits ahead *and* two behind, and the reader deciding what to do
- * next wants the three of them, not the winner.
+ * **The glyph shows the winner; the tooltip shows all of them.** That is the whole
+ * reason the wire carries facts rather than a state: a row can be dirty *and*
+ * three commits ahead *and* two behind, and the reader deciding what to do next
+ * wants the three of them.
  *
- * Returns the bare label when there is nothing to add, so a caller can hand it
- * straight to a tooltip without checking.
+ * Lines rather than a finished string because these are the *second* half of the
+ * row's tooltip — the activity lines come first (see `rowstate/rowState.ts`), and
+ * a builder that had already prefixed a label could not be composed with them.
  */
-export function gitTooltip(git: WorktreeGitSignals | undefined, label: string): string {
-  if (!git) return label;
+export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
+  if (!git) return [];
   const lines: string[] = [];
   if (git.dirty) lines.push("Uncommitted changes");
   const upstream = git.upstream ?? "its upstream";
@@ -87,8 +88,7 @@ export function gitTooltip(git: WorktreeGitSignals | undefined, label: string): 
       lines.push("This branch has no upstream — nothing has been pushed");
     }
   }
-  if (lines.length === 0) return label;
-  return `${label} — ${lines.join("\n")}`;
+  return lines;
 }
 
 /**
