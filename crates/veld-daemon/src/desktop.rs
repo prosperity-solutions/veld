@@ -1020,6 +1020,20 @@ const DIRTY_REFRESH_AGE: std::time::Duration = std::time::Duration::from_secs(15
 /// worktrees.
 const DIRTY_CONCURRENCY: usize = 4;
 
+/// The upstream half of the cache: signals, plus the path they were measured in.
+///
+/// A named type because `clippy::type_complexity` refuses the nested form inline —
+/// and because naming the second element is the only thing that says why it is
+/// there. See [`UPSTREAMS`].
+type UpstreamCache = std::collections::HashMap<i64, (WorktreeGitSignals, String)>;
+
+/// The dirty half: the answer, the path it was measured in, and when.
+///
+/// Same reasoning as [`UpstreamCache`]. This is the one that actually tripped the
+/// lint when the path was added — a three-element tuple inside a `HashMap` inside a
+/// `Mutex` inside a `LazyLock`. See [`DIRTY`].
+type DirtyCache = std::collections::HashMap<i64, (bool, String, std::time::Instant)>;
+
 /// `ahead`/`behind`/`gone` per worktree, keyed by worktree id, with the path the
 /// answer was measured in — the same guard [`DIRTY`] carries, and for the same
 /// reason.
@@ -1037,9 +1051,8 @@ const DIRTY_CONCURRENCY: usize = 4;
 /// Refreshed **synchronously** on each [`refresh_repos`] poll, because it costs one
 /// `for-each-ref` per *repo* — 21ms measured, whatever the worktree count — and a
 /// glyph that appears a poll late for no reason is worse than one that costs 21ms.
-static UPSTREAMS: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<i64, (WorktreeGitSignals, String)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static UPSTREAMS: std::sync::LazyLock<std::sync::Mutex<UpstreamCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// `dirty` per worktree, keyed by worktree id: the answer, **the path it was
 /// measured in**, and the instant it was measured.
@@ -1056,9 +1069,8 @@ static UPSTREAMS: std::sync::LazyLock<
 /// compares the path and withholds a mismatch. [`UPSTREAMS`] carries the same guard,
 /// for the same reason — an earlier revision of this line claimed it did not need
 /// one, which is the argument its own doc now records as false.
-static DIRTY: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<i64, (bool, String, std::time::Instant)>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+static DIRTY: std::sync::LazyLock<std::sync::Mutex<DirtyCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// One `for-each-ref` per repo: every local branch's upstream and how it tracks.
 ///
