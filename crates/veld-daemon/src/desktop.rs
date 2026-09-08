@@ -992,9 +992,15 @@ impl WorktreeGitSignals {
 /// [`DIRTY_REFRESH_AGE`] plus one sweep old. This is the backstop for the abnormal
 /// case — a checkout on a network filesystem that takes a minute to answer, a
 /// spawn that never returns — where the failure mode worth avoiding is a confident
-/// glyph nobody is refreshing. Six times the refresh age, so an ordinary slow
-/// sweep does not make rows blink.
-const DIRTY_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(90);
+/// glyph nobody is refreshing.
+///
+/// **Derived from [`DIRTY_REFRESH_AGE`] rather than written down**, so the ratio
+/// cannot drift: six times the refresh age leaves an ordinary slow sweep plenty of
+/// room before rows start blinking. Raising the refresh age alone used to shorten
+/// nothing and lengthen nothing visible — it silently opened a window in which
+/// every glyph blanked, because this constant did not follow.
+const DIRTY_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(DIRTY_REFRESH_AGE.as_secs() * 6);
 
 /// How old an entry must be before the sweep recomputes it.
 ///
@@ -1023,12 +1029,22 @@ static UPSTREAMS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<i64, WorktreeGitSignals>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-/// `dirty` per worktree, keyed by worktree id, with the instant it was measured.
+/// `dirty` per worktree, keyed by worktree id: the answer, **the path it was
+/// measured in**, and the instant it was measured.
 ///
 /// Refreshed **asynchronously** by [`spawn_dirty_sweep`], because it costs a
 /// `git status` per *worktree* and the poll must not wait for eighteen of them.
+///
+/// **The path is not decoration — it is what makes the id safe to key on.**
+/// `worktrees.id` is `INTEGER PRIMARY KEY` with no `AUTOINCREMENT`, so SQLite hands
+/// a deleted row's rowid to the next insert (verified). Delete the newest worktree
+/// and create another before the next poll prunes, and the new checkout inherits
+/// the old one's id — and would have inherited its dirty bit, painting a pencil on
+/// a brand-new clean row until the sweep got round to it. [`git_signals_for`]
+/// compares the path and withholds a mismatch. `UPSTREAMS` needs no such guard only
+/// because [`refresh_upstreams`] re-derives it from `%(worktreepath)` every poll.
 static DIRTY: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<i64, (bool, std::time::Instant)>>,
+    std::sync::Mutex<std::collections::HashMap<i64, (bool, String, std::time::Instant)>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// One `for-each-ref` per repo: every local branch's upstream and how it tracks.
@@ -1121,16 +1137,43 @@ fn parse_upstream_track(upstream: &str, track: &str) -> WorktreeGitSignals {
     // An upstream that exists is comparable, so the counts are `Some` even when
     // they are zero — the empty `track` of a branch in sync means "0 and 0", which
     // is a real answer and not a missing one.
-    signals.ahead = Some(0);
-    signals.behind = Some(0);
+    if track.is_empty() {
+        signals.ahead = Some(0);
+        signals.behind = Some(0);
+        return signals;
+    }
+    let (mut ahead, mut behind) = (0i64, 0i64);
     for part in track.split(',') {
         let part = part.trim();
-        if let Some(n) = part.strip_prefix("ahead ") {
-            signals.ahead = n.parse().ok();
-        } else if let Some(n) = part.strip_prefix("behind ") {
-            signals.behind = n.parse().ok();
+        let parsed = part
+            .strip_prefix("ahead ")
+            .map(|n| n.parse::<i64>().map(|v| (v, 0)))
+            .or_else(|| {
+                part.strip_prefix("behind ")
+                    .map(|n| n.parse::<i64>().map(|v| (0, v)))
+            });
+        match parsed {
+            Some(Ok((a, b))) => {
+                ahead += a;
+                behind += b;
+            }
+            // **Anything unrecognised means we know nothing, not zero.** Defaulting
+            // both counts to `Some(0)` and overwriting only what parsed made every
+            // token this build does not understand read as *in sync* — so a git
+            // that reordered, respaced or added a field, or one built with
+            // translations, would silently delete the unpushed glyph instead of
+            // falling back to no glyph. Failing closed costs a mark; failing open
+            // hides unpushed work.
+            _ => {
+                return WorktreeGitSignals {
+                    upstream: signals.upstream,
+                    ..WorktreeGitSignals::default()
+                };
+            }
         }
     }
+    signals.ahead = Some(ahead);
+    signals.behind = Some(behind);
     signals
 }
 
@@ -1138,8 +1181,12 @@ fn parse_upstream_track(upstream: &str, track: &str) -> WorktreeGitSignals {
 ///
 /// Entries for this repo's worktrees are replaced wholesale rather than merged, so
 /// a branch that lost its upstream, or a worktree that went away, does not leave a
-/// stale answer behind. Other repos' entries are untouched: the map is global and
-/// this runs once per repo per poll.
+/// stale answer behind. Other repos' entries are untouched *by this function*: the
+/// map is global and this runs once per repo per poll.
+///
+/// [`spawn_dirty_sweep`] is the one that does touch them — it prunes this map to
+/// the ids it is handed — which is why it must be called once with every repo's
+/// targets rather than once per repo. See its precondition.
 async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
     let by_path = repo_upstreams(repo_root).await;
     let mut cache = UPSTREAMS.lock().expect("upstream cache mutex poisoned");
@@ -1167,6 +1214,16 @@ async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
 /// Trashed worktrees are skipped: their row shows restore/delete controls, not
 /// state, and a checkout mid-`git worktree remove` is the one place a `git status`
 /// races something destructive.
+///
+/// # Precondition: hand it *every* repo's targets, in one call
+///
+/// This prunes both [`DIRTY`] and [`UPSTREAMS`] down to the ids it is given, and
+/// those maps are global across repos. So calling it once per repo — the natural
+/// "start sweeping earlier" tidy-up, since [`refresh_repos`] already has each
+/// repo's rows inside its loop — would have every call wipe every *other* repo's
+/// cached signals, while the single-flight flag let only the first one actually
+/// sweep. Every glyph outside that repo would vanish, per poll, with nothing
+/// logged. The one call after the loop is not stylistic.
 fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
     /// One sweep at a time, however many windows are polling. Concurrent windows
     /// collapse onto the running sweep instead of multiplying its git spawns —
@@ -1178,16 +1235,25 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
         let cache = DIRTY.lock().expect("dirty cache mutex poisoned");
         targets
             .iter()
-            .filter(|(id, _)| {
+            .filter(|(id, path)| {
                 cache
                     .get(id)
-                    .is_none_or(|(_, at)| at.elapsed() >= DIRTY_REFRESH_AGE)
+                    // A row whose cached answer was measured in a *different* path
+                    // is due too: that is a reused rowid, and its entry is being
+                    // withheld by `git_signals_for` until this replaces it.
+                    .is_none_or(|(_, measured_in, at)| {
+                        measured_in != path || at.elapsed() >= DIRTY_REFRESH_AGE
+                    })
             })
             .cloned()
             .collect()
     };
-    // Prune ids that are no longer registered anywhere in this poll's targets, so
-    // a long-lived daemon does not accumulate a row per worktree ever seen.
+    // Prune ids absent from *this call's* targets, so a long-lived daemon does not
+    // accumulate a row per worktree it ever saw. Not registry-wide: nothing
+    // serialises two `refresh_repos` bodies (`LAST_SYNC` debounces only the
+    // reconcile), so a call that read its rows before a worktree was created can
+    // drop the entry a concurrent later call just wrote. Self-healing on the next
+    // poll and in the safe direction — a missing glyph, never a wrong one.
     {
         let live: std::collections::HashSet<i64> = targets.iter().map(|(id, _)| *id).collect();
         DIRTY
@@ -1233,16 +1299,15 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
     tokio::spawn(async move {
         let _guard = Sweeping;
         for chunk in due.chunks(DIRTY_CONCURRENCY) {
-            let measured = futures_util::future::join_all(
-                chunk
-                    .iter()
-                    .map(|(id, path)| async move { (*id, git_is_dirty(FsPath::new(path)).await) }),
-            )
-            .await;
+            let measured =
+                futures_util::future::join_all(chunk.iter().map(|(id, path)| async move {
+                    (*id, path.clone(), git_is_dirty(FsPath::new(path)).await)
+                }))
+                .await;
             let mut cache = DIRTY.lock().expect("dirty cache mutex poisoned");
-            for (id, dirty) in measured {
+            for (id, path, dirty) in measured {
                 match dirty {
-                    Some(dirty) => cache.insert(id, (dirty, std::time::Instant::now())),
+                    Some(dirty) => cache.insert(id, (dirty, path, std::time::Instant::now())),
                     // A checkout that could not be read at all — an unmounted
                     // volume, a `.git` mid-surgery — loses its entry rather than
                     // keeping the last answer. The row then shows no glyph, which
@@ -1265,17 +1330,33 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
 ///
 /// Not [`git_status`], which parses the same porcelain into a file list for the
 /// delete dialog. This wants one bit, so it never parses records — but it asks the
-/// same question, at git's default `-unormal`, because an untracked file *is* work
-/// that exists only in this checkout and is exactly what `git worktree remove`
-/// refuses on. Any answer narrower than that would have the glyph disagree with the
-/// dialog that blocks the delete.
+/// same question, because an untracked file *is* work that exists only in this
+/// checkout and is exactly what `git worktree remove` refuses on. Any answer
+/// narrower than that would have the glyph disagree with the dialog that blocks the
+/// delete.
+///
+/// **`-unormal` is passed explicitly, and that is not redundant.** It is git's
+/// default, but `status.showUntrackedFiles` is a config a developer can set — and
+/// with `no`, this command emits **zero bytes** for a checkout holding an untracked
+/// file (verified, git 2.50.1), so without the flag it would answer `Some(false)`:
+/// a confident "nothing held" off a reading that was configured not to look, which
+/// is the exact collapse [`WorktreeGitSignals`] exists to prevent. Modified files
+/// still show, so the failure would be silent and limited to untracked-only
+/// checkouts — the ones a fresh worktree is most likely to be. It would also have
+/// made the test below pass or fail depending on the machine's git config.
 async fn git_is_dirty(dir: &FsPath) -> Option<bool> {
     // `git_raw`, not `git`, for the reason `git_status` uses it: a porcelain code
     // carries a significant leading space and this asks only whether there is a
     // record at all, so trimming would answer `false` for an unstaged edit.
     let out = git_raw(
         dir,
-        &["--no-optional-locks", "status", "--porcelain=v1", "-z"],
+        &[
+            "--no-optional-locks",
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "-unormal",
+        ],
     )
     .await
     .ok()?;
@@ -1287,15 +1368,20 @@ async fn git_is_dirty(dir: &FsPath) -> Option<bool> {
 /// Read from [`worktree_view`], which is why this takes an id and not a path: the
 /// listing is built from database rows and must not spawn git — the halves that do
 /// are [`refresh_upstreams`] (on the poll) and [`spawn_dirty_sweep`] (behind it).
-fn git_signals_for(id: i64) -> Option<WorktreeGitSignals> {
+fn git_signals_for(id: i64, path: &str) -> Option<WorktreeGitSignals> {
     let mut signals = UPSTREAMS
         .lock()
         .expect("upstream cache mutex poisoned")
         .get(&id)
         .cloned()
         .unwrap_or_default();
-    if let Some((dirty, at)) = DIRTY.lock().expect("dirty cache mutex poisoned").get(&id) {
-        if at.elapsed() < DIRTY_MAX_AGE {
+    if let Some((dirty, measured_in, at)) =
+        DIRTY.lock().expect("dirty cache mutex poisoned").get(&id)
+    {
+        // Both guards withhold rather than substitute, because `None` renders no
+        // glyph while `Some(false)` claims the checkout is clean. `measured_in`
+        // catches a reused rowid (see [`DIRTY`]); `elapsed` catches a wedged sweep.
+        if measured_in == path && at.elapsed() < DIRTY_MAX_AGE {
             signals.dirty = Some(*dirty);
         }
     }
@@ -2646,7 +2732,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
     // Read before `wt` is moved into the view below, the same reason `deleting` is.
-    let git = git_signals_for(wt.id);
+    let git = git_signals_for(wt.id, &wt.path);
     let machine_vars = cfg.as_ref().map(|c| {
         c.vars
             .iter()
@@ -6809,6 +6895,33 @@ mod tests {
         assert_eq!(both.behind, Some(2));
     }
 
+    /// An unrecognised `%(upstream:track)` token means **unknown**, never in sync.
+    ///
+    /// The first version defaulted both counts to `Some(0)` and overwrote only the
+    /// parts it recognised, so any token this build does not understand — a future
+    /// git that reorders or respaces the field, or one built with translations —
+    /// read as a branch with nothing to push, silently deleting the unpushed glyph.
+    /// Failing closed costs a mark; failing open hides work that is only local.
+    #[test]
+    fn an_unrecognised_track_token_is_unknown_rather_than_in_sync() {
+        for track in ["voraus 3", "ahead", "ahead x", "ahead 3, sideways 1", "??"] {
+            let s = parse_upstream_track("origin/main", track);
+            assert_eq!(s.ahead, None, "ahead must be unknown for {track:?}");
+            assert_eq!(s.behind, None, "behind must be unknown for {track:?}");
+            assert_eq!(
+                s.upstream.as_deref(),
+                Some("origin/main"),
+                "the upstream itself is still known for {track:?}"
+            );
+            assert!(!s.upstream_gone);
+        }
+        // Order-independent, and either half alone still implies zero for the other.
+        let both = parse_upstream_track("origin/main", "behind 2, ahead 3");
+        assert_eq!((both.ahead, both.behind), (Some(3), Some(2)));
+        let ahead_only = parse_upstream_track("origin/main", "ahead 3");
+        assert_eq!((ahead_only.ahead, ahead_only.behind), (Some(3), Some(0)));
+    }
+
     /// `repo_upstreams` against real git, through the exact sequence this repo's own
     /// workflow produces: branch, push, squash-merge into main, delete the remote
     /// branch, `fetch --prune`.
@@ -7006,18 +7119,29 @@ mod tests {
     /// a worktree id far outside anything the other tests register, because these
     /// caches are process-wide and the suite runs in parallel.
     #[test]
-    fn a_stale_dirty_answer_is_served_as_unknown_rather_than_as_clean() {
+    fn a_stale_or_wrong_path_dirty_answer_is_served_as_unknown_rather_than_as_clean() {
         let id = i64::MAX - 4242;
 
-        // Fresh: served.
+        // Fresh, same path: served.
         DIRTY
             .lock()
             .expect("dirty cache mutex poisoned")
-            .insert(id, (true, std::time::Instant::now()));
+            .insert(id, (true, "/repo/wt".to_owned(), std::time::Instant::now()));
         assert_eq!(
-            git_signals_for(id).and_then(|s| s.dirty),
+            git_signals_for(id, "/repo/wt").and_then(|s| s.dirty),
             Some(true),
             "a just-measured answer must be served"
+        );
+
+        // **Fresh, different path: withheld.** `worktrees.id` is `INTEGER PRIMARY
+        // KEY` with no `AUTOINCREMENT`, so SQLite reuses a deleted row's rowid — a
+        // worktree created right after the newest one was removed inherits its id,
+        // and without this guard it would inherit its dirty bit and show a pencil
+        // on a brand-new clean row.
+        assert_eq!(
+            git_signals_for(id, "/repo/a-different-wt").and_then(|s| s.dirty),
+            None,
+            "an answer measured in another checkout must not be served for this one"
         );
 
         // Older than the backstop: withheld. `None`, never `Some(false)` — an
@@ -7028,9 +7152,9 @@ mod tests {
         DIRTY
             .lock()
             .expect("dirty cache mutex poisoned")
-            .insert(id, (true, stale));
+            .insert(id, (true, "/repo/wt".to_owned(), stale));
         assert_eq!(
-            git_signals_for(id).and_then(|s| s.dirty),
+            git_signals_for(id, "/repo/wt").and_then(|s| s.dirty),
             None,
             "an answer older than DIRTY_MAX_AGE must be withheld, not served"
         );

@@ -990,13 +990,14 @@ script, which is every project but this one. Declining to render `[gone]` on tho
 grounds would be purity rather than discipline: it costs one extra column on a
 `for-each-ref` this daemon now runs anyway.
 
-**One behaviour change fell out of it.** `maybe_fetch` now runs
-`git fetch --prune origin`. Without pruning, a merged-and-deleted branch keeps its
-`origin/<branch>` ref locally and `%(upstream:track)` reports it as merely in
-sync, so the glyph could never appear. Pruning deletes only remote-tracking refs
-the remote no longer has — no local branch, no working tree, no worktree — which
-keeps it on the safe side of the same line the deliberately-non-fast-forward fetch
-is on.
+**One behaviour change fell out of it — and was ~~reverted~~ on 2026-09-08; see
+the addendum below.** `maybe_fetch` was changed to run `git fetch --prune origin`,
+because without pruning a merged-and-deleted branch keeps its `origin/<branch>`
+ref locally and `%(upstream:track)` reports it as merely in sync, so the glyph
+could never appear. **`maybe_fetch` runs a plain `git fetch origin` again**: the
+glyph that needed pruning no longer exists, and an unattended repo-wide change
+should not outlive the thing it was for. Do not re-add it from this paragraph —
+the argument here was sound for a feature that was then cut.
 
 **And a note for whoever builds the `rail` slot.** The per-worktree evaluation
 this change needed is *not* the push model that section defers; it is the cheap
@@ -1027,12 +1028,12 @@ whole value is confidence must not be the one that is sometimes wrong.
 
 Two things fell out of it that are worth not rediscovering:
 
-- **`upstream_gone` stays on the wire with nothing rendering it.** Its consumer is
-  the tooltip (below). It was briefly also a *guard* — while `synced` existed, it
-  was what stopped such a checkout being reported as fully pushed — and that role
-  disappeared with `synced`. Kept because it costs nothing (same
-  `%(upstream:track)` field as `ahead` and `behind`) and is what a `rail`-slot
-  pull-request badge would want first.
+- **No glyph renders `upstream_gone`; the tooltip does.** It was briefly also a
+  *guard* — while `synced` existed, it was what stopped such a checkout being
+  reported as fully pushed — and that role disappeared with `synced`. Kept because
+  it costs nothing (same `%(upstream:track)` field as `ahead` and `behind`), because
+  "the branch you pushed to is gone" is the most useful sentence about such a row,
+  and because it is the first thing a `rail`-slot pull-request badge would want.
 - **The tooltip keeps the sentence.** "`origin/x` is gone — the remote branch was
   deleted, which usually means its pull request was merged" is still emitted, now
   reachable only when another fact holds the row's glyph slot. A tooltip is allowed
@@ -1123,12 +1124,13 @@ idea.
 >
 > As of 2026-09-07 the *per-worktree* half of that data is core too and already on
 > the wire: `WorktreeView.git` carries `ahead`, `behind`, `upstream`,
-> `upstream_gone` and `dirty` for every checkout. **Two of those five are
-> deliberately unrendered**: `behind`, because the top bar's pill already answers
-> it for the main checkout, and `upstream_gone`, which exists to stop a
-> merged-and-tidied checkout being reported as fully pushed (decision log,
-> 2026-09-08). So a project wanting a per-worktree staleness badge needs no new
-> daemon work, only the `rail` slot.
+> `upstream_gone` and `dirty` for every checkout. **No glyph renders `behind` or
+> `upstream_gone`** — the top bar's pill already answers "behind" for the main
+> checkout, and core deliberately draws no mark on a deleted upstream (decision
+> log, 2026-09-08) — but both reach the row's *tooltip*, which is their consumer.
+> `upstream_gone` is also the first thing a `rail`-slot pull-request badge would
+> want. So a project wanting a per-worktree staleness badge needs no new daemon
+> work, only the `rail` slot.
 
 ## Rules for agents
 

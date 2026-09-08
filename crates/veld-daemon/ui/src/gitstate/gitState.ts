@@ -38,9 +38,10 @@ import type { WorktreeGitSignals } from "../api";
  * report. Rare in practice, because a worktree veld creates branches from
  * `origin/<default>` and gets an upstream automatically.
  *
- * **`behind`** is on the wire and unrendered for the same reason: being behind is
- * not work you are holding, and the top bar's staleness pill already answers it
- * for the main checkout.
+ * **`behind`** gets no glyph for the same reason — being behind is not work you are
+ * holding, and the top bar's staleness pill already answers it for the main
+ * checkout — but, like `upstream_gone`, it does reach the tooltip. "No glyph" and
+ * "not on the wire" are different things throughout this module.
  *
  * # Worst-state-wins, and `dirty` is the worst
  *

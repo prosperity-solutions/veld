@@ -11,9 +11,12 @@ import { Tooltip } from "@mantine/core";
  * primitive*, which that badge shipped wrong twice before landing on.)
  *
  * The props are the load-bearing part, which is why they live in one place rather
- * than being written out per glyph: the activity glyph and the git glyph sit
- * side by side in the same row, so a difference in delay, placement or wrapping
- * between them reads as a bug in whichever one the user notices second.
+ * than being written out per glyph. **The activity glyph and the git glyph share a
+ * single slot** — `rowstate/rowState.ts` picks which one renders, never both — so
+ * they alternate in the same position as a worktree's state changes. A difference
+ * in delay, placement or wrapping between them would read as the row glitching
+ * rather than as two components, which is exactly the bug nobody would think to
+ * look for. (The pane tab's glyph uses this too, where it is the only one.)
  *
  * - `multiline` + `w={260}` + `pre-line` — the body is one line per fact, and
  *   enumerating them is the whole job of a tooltip on a glyph that can only show
