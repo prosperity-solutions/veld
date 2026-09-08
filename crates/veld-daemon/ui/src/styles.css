@@ -1878,7 +1878,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   align-items: center;
   color: var(--muted);
 }
-/* Uncommitted changes. Deliberately the QUIETEST of the three: having edits is the
+/* Uncommitted changes. Deliberately the quieter of the two: having edits is the
    normal condition of a worktree you are working in, and a row that shouts about it
    would shout on every row that matters, every day. It is `--muted` at full opacity
    — one step up from `.wt-inbox.working`, which is the only thing on the row that

@@ -758,7 +758,11 @@ string to the OS).
 (`${output.*}`, `${nodes.*}`) are a `veld lint` finding — the bookmark list
 renders whether or not anything is running.
 
-Three gotchas: use **`branch_raw`**, since `branch` is slugified and `feat/foo`
+Four gotchas. A reference may **not appear in the URL's host** — path, query or
+fragment only, and `veld lint` refuses the rest: `git check-ref-format` accepts a
+branch called `evil.com/x` and whoever opens a pull request picks the name, so
+`https://${veld.branch_raw}.preview.example.com/` would resolve to somebody
+else's origin. Use **`branch_raw`**, since `branch` is slugified and `feat/foo`
 would address a branch named `feat-foo`; values are **percent-encoded with `/`
 preserved** (a branch's slashes are path, but a `#` in a branch name is escaped
 so it cannot truncate the URL at a fragment); and the **provider-specific path is

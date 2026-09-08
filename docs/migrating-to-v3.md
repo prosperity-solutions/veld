@@ -163,6 +163,16 @@ position named — which is a useful final check in its own right.
 - **Comments, formatting, key order.** Nothing about v3 requires changing them.
 - **Anything already in v3 form.**
 
+**`ide.quicklinks[].url` interpolates the worktree scope** as of the release that
+adds it, on **every** schema version that reaches the `ide` block — a v1 or v2
+config's quicklinks are read by the same parser. A `url` containing `${...}` was
+previously passed to the browser verbatim; it now resolves against
+`${veld.root}`, `${veld.branch}`, `${veld.branch_raw}`, `${veld.worktree}`,
+`${veld.project}` and `${veld.username}`, or becomes a `veld lint` finding. A
+reference is refused in the URL's **host** — path, query and fragment only. If
+you were relying on a literal `${` reaching a browser, escape it out of the
+config or move the value into the path.
+
 ---
 
 ## What you can adopt afterwards, at your own pace

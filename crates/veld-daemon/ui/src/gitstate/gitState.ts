@@ -8,7 +8,7 @@ import type { WorktreeGitSignals } from "../api";
  * shows — `rowstate/rowState.ts` decides whether the *activity* vocabulary takes
  * the slot instead, which it does whenever there is any activity at all.
  *
- * # The three states, and why there are only three
+ * # The two states, and why there are only two
  *
  * - **`dirty`** — uncommitted work. It exists in this checkout and nowhere else,
  *   and it is what `git worktree remove` refuses on.
@@ -124,8 +124,17 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
  * puts this in `aria-description` instead, after the alias.
  */
 export function gitDescription(git: WorktreeGitSignals | undefined): string | undefined {
-  const state = rowGitState(git);
-  if (state === null) return undefined;
-  if (state === "dirty") return "uncommitted changes";
-  return `${commits(git?.ahead ?? 0)} not pushed`;
+  if (rowGitState(git) === null) return undefined;
+  // **Both clauses, not just the winning glyph's.** The glyph shows one state and
+  // the tooltip shows every fact; this is the tooltip's equivalent for a reader who
+  // cannot see either, so returning only "uncommitted changes" for a row that is
+  // also three commits ahead gave them strictly less than a sighted reader gets on
+  // hover — the very asymmetry `rowstate/rowState.ts` argues against, broken inside
+  // the git half. A review angle caught it.
+  const parts: string[] = [];
+  if (git?.dirty) parts.push("uncommitted changes");
+  if (git?.ahead !== null && git !== undefined && git.ahead > 0) {
+    parts.push(`${commits(git.ahead)} not pushed`);
+  }
+  return parts.join(", ");
 }

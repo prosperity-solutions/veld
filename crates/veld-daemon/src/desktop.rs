@@ -1209,7 +1209,29 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
         }
         *sweeping = true;
     }
+    /// Clears the single-flight flag on the way out, **including on a panic.**
+    ///
+    /// Setting it back on the task's last line is what the first version did, and a
+    /// panic anywhere in between — every `.expect("… mutex poisoned")` in the loop
+    /// is one — left it `true` for the daemon's lifetime. The sweep would then never
+    /// run again, `DIRTY_MAX_AGE` would expire every entry within 90 seconds, and
+    /// every dirty glyph in the app would vanish for good with nothing logged.
+    /// `DIRTY_MAX_AGE` hides a stale answer; it cannot restart a dead sweep.
+    struct Sweeping;
+    impl Drop for Sweeping {
+        fn drop(&mut self) {
+            // A poisoned lock here would mean a panic while some other holder was
+            // mid-write. Clear the flag anyway: leaving it set is the failure this
+            // guard exists to prevent, and a stuck sweep is worse than a torn map
+            // that the next poll overwrites wholesale.
+            match SWEEPING.lock() {
+                Ok(mut sweeping) => *sweeping = false,
+                Err(poisoned) => *poisoned.into_inner() = false,
+            }
+        }
+    }
     tokio::spawn(async move {
+        let _guard = Sweeping;
         for chunk in due.chunks(DIRTY_CONCURRENCY) {
             let measured = futures_util::future::join_all(
                 chunk
@@ -1229,7 +1251,6 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
                 };
             }
         }
-        *SWEEPING.lock().expect("dirty sweep mutex poisoned") = false;
     });
 }
 
@@ -2804,14 +2825,7 @@ async fn maybe_fetch(repo_root: &FsPath) {
             .unwrap_or(true)
     };
     if due {
-        // **`--prune`, which is what makes `[gone]` a thing that can be observed.**
-        // A merge-and-delete leaves `origin/<branch>` behind locally until something
-        // prunes it, and until then `%(upstream:track)` reports the branch as merely
-        // in sync — so the rail's "this one is finished" glyph would never appear.
-        // Pruning only deletes remote-tracking refs the remote no longer has; it
-        // touches no local branch, no working tree and no worktree, which keeps it
-        // on the safe side of the same line the non-fast-forward fetch is on.
-        let _ = git(repo_root, &["fetch", "--prune", "origin"]).await;
+        let _ = git(repo_root, &["fetch", "origin"]).await;
         LAST_FETCH
             .lock()
             .expect("last-fetch mutex poisoned")
@@ -3358,7 +3372,19 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
         // dirty sweep needs their paths. `repo_view` reads them again from SQLite
         // below; a second local read is cheaper than threading a borrow through it,
         // and this way `list_repos` — which must not spawn git — needs no change.
-        let rows = db.list_worktrees(root.as_path()).unwrap_or_default();
+        // **Logged, not discarded.** `sync_worktrees`' failure twenty lines above is
+        // deliberately reported for the same reason, and dropping this one is worse
+        // than it looks: `spawn_dirty_sweep` prunes both caches to the ids it is
+        // handed, so an empty vec here blanks every glyph in this repo for a poll
+        // with no breadcrumb explaining why.
+        let rows = match db.list_worktrees(root.as_path()) {
+            Ok(rows) => rows,
+            Err(e) => {
+                crate::dbhealth::note_error(&e);
+                warn!("worktree rows unreadable for {}: {e}", repo.root);
+                Vec::new()
+            }
+        };
         // Synchronous: one `for-each-ref` for the whole repo, so the "not pushed"
         // and "upstream gone" halves of the glyph are as fresh as the poll itself.
         refresh_upstreams(root.as_path(), &rows).await;
@@ -6787,11 +6813,19 @@ mod tests {
     /// workflow produces: branch, push, squash-merge into main, delete the remote
     /// branch, `fetch --prune`.
     ///
-    /// This is the test that pins the *premise* of the whole "already merged" glyph.
     /// `git merge-base --is-ancestor` returns false after a squash merge and the
     /// branch's own commits still exist, so `ahead` stays non-zero — `[gone]` is the
-    /// only thing git says that changes, and it only says it because the fetch
-    /// pruned. Drop `--prune` from `maybe_fetch` and this test is what fails.
+    /// only thing git says that changes about such a branch.
+    ///
+    /// **The fixture prunes explicitly, and that is the point rather than a
+    /// shortcut.** veld's own `maybe_fetch` runs a plain `git fetch origin`, so the
+    /// `origin/<branch>` ref survives locally until the *developer's* git removes it
+    /// — `git fetch --prune`, `git remote prune`, or `remote.origin.prune = true`.
+    /// The `git fetch --prune` below stands in for that, so what this pins is the
+    /// parser and `%(upstream:track)`'s contract, not a veld behaviour. An earlier
+    /// revision of this comment claimed it would fail if `--prune` were dropped from
+    /// `maybe_fetch`; it never called `maybe_fetch` at all, and a review angle caught
+    /// the claim.
     #[tokio::test]
     async fn repo_upstreams_reports_gone_after_a_squash_merge_and_branch_delete() {
         use std::process::Command;
@@ -6921,6 +6955,90 @@ mod tests {
             after.contains_key(main_path),
             "every checked-out branch must be keyed by its worktree path"
         );
+    }
+
+    /// The single-flight flag is cleared even when the sweep panics.
+    ///
+    /// Set-true-then-clear-on-the-last-line was the first shape, and a panic
+    /// anywhere between left it `true` for the daemon's lifetime: the sweep never
+    /// runs again, `DIRTY_MAX_AGE` expires every entry inside 90 seconds, and every
+    /// dirty glyph in the app disappears for good with nothing logged. Exercised
+    /// through a real panicking task rather than by reading the guard, because what
+    /// is being asserted is unwind behaviour.
+    #[tokio::test]
+    async fn a_panicking_sweep_still_clears_its_single_flight_flag() {
+        static FLAG: std::sync::LazyLock<std::sync::Mutex<bool>> =
+            std::sync::LazyLock::new(|| std::sync::Mutex::new(false));
+
+        // The same guard shape `spawn_dirty_sweep` uses, over a local flag so the
+        // test cannot disturb the real sweep of a concurrently running test.
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                match FLAG.lock() {
+                    Ok(mut f) => *f = false,
+                    Err(p) => *p.into_inner() = false,
+                }
+            }
+        }
+
+        *FLAG.lock().unwrap() = true;
+        let handle = tokio::spawn(async {
+            let _guard = Guard;
+            panic!("the sweep died mid-run");
+        });
+        assert!(
+            handle.await.is_err(),
+            "the task must actually have panicked"
+        );
+        assert!(
+            !*FLAG
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            "a panicking sweep must leave the flag clear, or no sweep ever runs again"
+        );
+    }
+
+    /// `git_signals_for` serves a fresh `dirty` and drops an expired one.
+    ///
+    /// The `DIRTY_MAX_AGE` backstop is the whole "a wedged sweep shows nothing
+    /// rather than an answer from five minutes ago" claim, and it had no test. Uses
+    /// a worktree id far outside anything the other tests register, because these
+    /// caches are process-wide and the suite runs in parallel.
+    #[test]
+    fn a_stale_dirty_answer_is_served_as_unknown_rather_than_as_clean() {
+        let id = i64::MAX - 4242;
+
+        // Fresh: served.
+        DIRTY
+            .lock()
+            .expect("dirty cache mutex poisoned")
+            .insert(id, (true, std::time::Instant::now()));
+        assert_eq!(
+            git_signals_for(id).and_then(|s| s.dirty),
+            Some(true),
+            "a just-measured answer must be served"
+        );
+
+        // Older than the backstop: withheld. `None`, never `Some(false)` — an
+        // unmounted volume must not read as a tidy checkout.
+        let stale = std::time::Instant::now()
+            .checked_sub(DIRTY_MAX_AGE + std::time::Duration::from_secs(1))
+            .expect("the test clock must be able to go back 91 seconds");
+        DIRTY
+            .lock()
+            .expect("dirty cache mutex poisoned")
+            .insert(id, (true, stale));
+        assert_eq!(
+            git_signals_for(id).and_then(|s| s.dirty),
+            None,
+            "an answer older than DIRTY_MAX_AGE must be withheld, not served"
+        );
+
+        DIRTY
+            .lock()
+            .expect("dirty cache mutex poisoned")
+            .remove(&id);
     }
 
     /// The one wrong answer `ahead` gives, pinned so it stays deliberate.

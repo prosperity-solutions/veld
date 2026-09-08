@@ -1909,6 +1909,55 @@ fn check_command_variables(
 /// the whole point, since `${veld.branch}` is slugified and `feat/foo` would
 /// address a branch called `feat-foo` that does not exist.
 fn check_url_variables(url: &str, location: &str, out: &mut IdeSection) -> Option<()> {
+    // **Position first: a reference may not land in the authority.** This is what
+    // makes `percent::encode_in_url`'s premise true rather than assumed — that
+    // encoder preserves `/` (a branch's slashes are path), and `git
+    // check-ref-format` *accepts* a branch called `evil.com/x`, so a template like
+    // `https://${veld.branch_raw}.preview.example.com/` — the shape a per-branch
+    // preview host reaches for — resolves to `https://evil.com/x.preview…`, whose
+    // host is `evil.com`. Whoever named that branch is an outsider: opening a pull
+    // request against the repo is enough, and a click then loads their page into a
+    // Veld browser pane under the label the project wrote.
+    //
+    // Caught here rather than at interpolation time on purpose. It is a config
+    // authoring mistake, so the author should hear about it from `veld lint` once,
+    // not have every checkout silently drop a bookmark. The http(s) prefix check
+    // in `parse_quicklinks` runs before this and validates the *template*, which is
+    // exactly why it cannot catch a substitution that happens afterwards.
+    if let Some(at) = url.find("${") {
+        if at < authority_end(url) {
+            out.problems.push(IdeProblem {
+                location: location.to_owned(),
+                message: format!(
+                    "`${{…}}` may not appear in the host of a URL, only in its path, query \
+                     or fragment (got {url:?}). A branch name is allowed to contain `/` — \
+                     `git check-ref-format` accepts `evil.com/x` — and whoever opens a pull \
+                     request chooses it, so a reference before the path could move this link \
+                     to somebody else's origin. Put it after the first `/`: \
+                     `https://host/tree/${{veld.branch_raw}}`"
+                ),
+            });
+            return None;
+        }
+    }
+    // **An unclosed `${` is reported here, because nothing else reports it.**
+    // `all_references` stops at one (`None => break`) so the loop below sees no
+    // reference at all, while `variables::interpolate` *errors* on it — and
+    // `resolved_quicklinks` turns that error into a dropped link. Without this the
+    // bookmark vanishes from every checkout with no lint finding and no log, which
+    // is the one silent-vanish path the resolver's doc claimed was unreachable. A
+    // review angle caught the claim.
+    if url.matches("${").count() != all_references(url).len() {
+        out.problems.push(IdeProblem {
+            location: location.to_owned(),
+            message: format!(
+                "unclosed `${{` in {url:?} — every reference needs its closing `}}`. \
+                 Left as-is this link would be dropped from every checkout rather \
+                 than rendered, with nothing to say why"
+            ),
+        });
+        return None;
+    }
     for reference in all_references(url) {
         let name = reference.strip_prefix("veld.").filter(|name| {
             // `${veld.url.host}` and friends are a node's, resolved against a run.
@@ -1931,6 +1980,23 @@ fn check_url_variables(url: &str, location: &str, out: &mut IdeSection) -> Optio
         }
     }
     Some(())
+}
+
+/// Where a URL's authority ends: the first `/`, `?` or `#` after `scheme://`, or
+/// the end of the string when it has none.
+///
+/// Byte offsets, and safe to compare against a `find` result because every
+/// delimiter it looks for is ASCII — a multi-byte character can never be mistaken
+/// for one, so no index here can land inside a UTF-8 sequence.
+///
+/// Callers reach this only after `parse_quicklinks` has confirmed an `http://` or
+/// `https://` prefix, so `://` is always present; the `map_or(0, …)` is for the
+/// unit tests that call it directly rather than a case the parser can produce.
+fn authority_end(url: &str) -> usize {
+    let after_scheme = url.find("://").map_or(0, |i| i + 3);
+    url[after_scheme..]
+        .find(['/', '?', '#'])
+        .map_or(url.len(), |i| after_scheme + i)
 }
 
 fn variable_list(allowed: &[&str]) -> String {
@@ -3335,6 +3401,89 @@ mod tests {
             "the finding must list the names a quicklink may use: {}",
             parsed.problems[2].message
         );
+    }
+
+    /// **A reference may not land in a URL's host.** The finding that made
+    /// `percent::encode_in_url`'s premise true rather than assumed.
+    ///
+    /// That encoder preserves `/`, because a branch's slashes are path in
+    /// `…/tree/feat/foo`. But `git check-ref-format` *accepts* a branch called
+    /// `evil.com/x`, and whoever opens a pull request against the repo chooses the
+    /// branch name — so `https://${veld.branch_raw}.preview.example.com/`, the shape
+    /// a per-branch preview host reaches for, would resolve to
+    /// `https://evil.com/x.preview.example.com/` and load somebody else's origin
+    /// into a Veld browser pane under the label the project wrote.
+    #[test]
+    fn a_quicklink_may_not_interpolate_into_the_host() {
+        let parsed = section(json!({
+            "quicklinks": [
+                // Refused: before the path, so it can move the origin.
+                { "label": "Host", "url": "https://${veld.branch_raw}.preview.example.com/" },
+                { "label": "NoPath", "url": "https://${veld.branch}" },
+                { "label": "Port", "url": "https://x.example.com:${veld.branch}/p" },
+                { "label": "Userinfo", "url": "https://${veld.username}@x.example.com/p" },
+                // Accepted: at or after the first `/`, `?` or `#`, where the worst a
+                // hostile value can reach is another path on a host the config named.
+                { "label": "Path", "url": "https://github.com/o/r/tree/${veld.branch_raw}" },
+                { "label": "Query", "url": "https://x.example.com?b=${veld.branch_raw}" },
+                { "label": "Frag", "url": "https://x.example.com/p#${veld.branch}" },
+            ]
+        }));
+        assert_eq!(
+            parsed
+                .quicklinks
+                .iter()
+                .map(|q| q.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Path", "Query", "Frag"],
+            "a reference in the authority must be refused; one in the path, query or \
+             fragment must be kept"
+        );
+        assert_eq!(
+            parsed
+                .problems
+                .iter()
+                .map(|p| p.location.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "ide.quicklinks[0].url",
+                "ide.quicklinks[1].url",
+                "ide.quicklinks[2].url",
+                "ide.quicklinks[3].url",
+            ]
+        );
+        // The finding has to teach, because the author's template looks reasonable.
+        assert!(
+            parsed.problems[0].message.contains("evil.com/x"),
+            "the finding must show why a branch name can do this: {}",
+            parsed.problems[0].message
+        );
+    }
+
+    /// An unclosed `${` is a lint finding, not a bookmark that silently vanishes.
+    ///
+    /// `all_references` stops at one, so the name check below it sees nothing, while
+    /// `variables::interpolate` errors and `resolved_quicklinks` drops the link. This
+    /// is the only other way to reach that silent drop, and it was unreported.
+    #[test]
+    fn an_unclosed_reference_is_reported_rather_than_silently_dropping_the_link() {
+        let parsed = section(json!({
+            "quicklinks": [
+                { "label": "Broken", "url": "https://x.example.com/t/${veld.branch" },
+                { "label": "Fine", "url": "https://x.example.com/t/${veld.branch}" },
+            ]
+        }));
+        assert_eq!(
+            parsed
+                .quicklinks
+                .iter()
+                .map(|q| q.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Fine"]
+        );
+        assert_eq!(parsed.problems.len(), 1);
+        assert_eq!(parsed.problems[0].location, "ide.quicklinks[0].url");
+        assert!(parsed.problems[0].message.contains("unclosed"));
     }
 
     #[test]

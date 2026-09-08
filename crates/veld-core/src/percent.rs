@@ -174,16 +174,28 @@ mod tests {
     /// "fix" is to start escaping `.` — which would break every `feat/foo` branch
     /// link this function exists to produce.
     ///
-    /// Two things carry the safety instead. First, `git check-ref-format` refuses
-    /// the two-character sequence `..` anywhere in a refname, refuses `//`, and
-    /// refuses `?` and space (verified against git 2.50.1; it *accepts* `#` and `/`,
-    /// which is why `#` is escaped above and `/` is not) — so the one value here an
-    /// outsider chooses, a branch name on somebody else's pull request, cannot
-    /// contain a traversal to begin with. Second, traversal cannot cross an origin:
-    /// `https://host/o/r/tree/../../x` normalises to `https://host/x`, the same
-    /// host, and the scheme and host of the template are not interpolated. So the
-    /// worst a hostile value could reach is another path on a host the repo's own
-    /// config already named.
+    /// Three things carry the safety instead, and the third is the one this comment
+    /// used to get wrong.
+    ///
+    /// First, `git check-ref-format` refuses the two-character sequence `..`
+    /// anywhere in a refname, refuses `//`, and refuses `?` and space (verified
+    /// against git 2.50.1; it *accepts* `#` and `/`, which is why `#` is escaped
+    /// above and `/` is not) — so the one value here an outsider chooses, a branch
+    /// name on somebody else's pull request, cannot contain a traversal.
+    ///
+    /// Second, traversal cannot cross an origin: `https://host/o/r/tree/../../x`
+    /// normalises to `https://host/x`, the same host.
+    ///
+    /// Third — **and this is enforced, not assumed** — a `${...}` reference may not
+    /// appear in a URL's authority. `ide::check_url_variables` refuses one before
+    /// the first `/`, `?` or `#` that ends the host, so the scheme and host of a
+    /// template really are literal. An earlier revision of this comment asserted
+    /// that as a premise with nothing behind it, and three independent review
+    /// angles found the hole: `git check-ref-format` *accepts* a branch called
+    /// `evil.com/x`, so `https://${veld.branch_raw}.preview.example.com/` resolved
+    /// to `https://evil.com/x.preview.example.com/`, whose host is `evil.com`, and
+    /// a click loaded it into a Veld browser pane under the label the project
+    /// wrote. Do not restore the premise without the check.
     #[test]
     fn dot_segments_pass_through_and_git_is_what_refuses_them() {
         assert_eq!(encode_in_url("../../evil"), "../../evil");

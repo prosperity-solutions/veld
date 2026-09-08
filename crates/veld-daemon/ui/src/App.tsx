@@ -9228,12 +9228,21 @@ function Rail(props: {
                   /* Selection is "which one am I looking at", not a toggle that
                      can be un-pressed — aria-current, not aria-pressed. */
                   aria-current={props.active?.id === w.id ? true : undefined}
-                  /* The activity state, for a screen reader. `aria-description` and
+                  /* Both status vocabularies, for a screen reader. `aria-description` and
                      not the glyph's own label: the row is a `role=button` whose
                      accessible NAME is built from its content, so a status sentence
                      inside it would be announced ahead of the alias it describes —
                      the same reason the away icon is `aria-hidden`. */
-                  aria-description={rowDescription(inboxDescription(inboxSummary), w.git)}
+                  aria-description={rowDescription(
+                    inboxDescription(inboxSummary),
+                    // **Gated on `trashed`, exactly as the glyph is.** The daemon
+                    // sends `git` for a trashed row too — `refresh_upstreams` walks
+                    // every row — so passing it here announced "3 commits not
+                    // pushed" to a screen reader about a checkout whose glyph is
+                    // deliberately hidden, i.e. a state no sighted reader could see
+                    // and nobody can act on from a trash row.
+                    trashed ? undefined : w.git,
+                  )}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
                     deletingRow
@@ -9365,14 +9374,6 @@ function Rail(props: {
                       <IconAlertTriangleFilled size={11} />
                     </button>
                   )}
-                  {/* This worktree's terminal activity, immediately left of the run
-                      control — the far right of the row, where the eye lands last.
-                      AFTER the node-health alert: that one is about a *run* failing its
-                      probe and is clickable, this one is about *you* and is not.
-                      Rendered in the slim rail too, which the run control is not: it is
-                      the one indicator whose whole purpose is to be seen while you are
-                      looking somewhere else. Trashed rows are excluded — their panes are
-                      gone, so an event there could never be read by looking. */}
                   {/* **One glyph for both vocabularies**, not two side by side — see
                       `rowstate/rowState.ts` for why. Activity wins whenever there is
                       any, because while an agent is running the tree is *expected* to

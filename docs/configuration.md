@@ -2132,6 +2132,13 @@ Three things worth knowing before you write one:
 - **Use `${veld.branch_raw}`, not `${veld.branch}`.** `branch` is slugified
   everywhere in veld, so a `feat/foo` checkout would address a branch named
   `feat-foo` that does not exist.
+- **A reference may not appear in the URL's host** — only in its path, query or
+  fragment, and `veld lint` refuses the rest. `git check-ref-format` accepts a
+  branch called `evil.com/x`, and whoever opens a pull request against the repo
+  chooses the branch name, so `https://${veld.branch_raw}.preview.example.com/`
+  would resolve to `https://evil.com/x.preview.example.com/` — a host the project
+  never named, loaded into a browser pane under the label the project wrote. Put
+  the reference after the first `/`.
 - **Values are percent-encoded, with `/` preserved.** A branch's slashes are path
   — `…/tree/feat/foo` is the address on every code host and `…/tree/feat%2Ffoo` is
   a 404 on all of them — while `#`, which git permits in a branch name, is escaped

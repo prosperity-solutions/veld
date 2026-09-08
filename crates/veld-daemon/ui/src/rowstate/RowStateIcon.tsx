@@ -55,8 +55,8 @@ const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
  * row's ⋯ menu and in the pane itself.
  *
  * The class name still comes from the vocabulary that won, so `.wt-inbox` keeps
- * its four colours and pulses and `.wt-git` keeps its three. One element, two
- * style families, because the *meaning* is what the colour tracks.
+ * its four colours and pulses and `.wt-git` keeps its two. One element, two style
+ * families, because the *meaning* is what the colour tracks.
  */
 export function RowStateIcon(props: {
   summary: RowSummary;
