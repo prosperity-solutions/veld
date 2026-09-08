@@ -331,35 +331,4 @@ export const PROMOTIONS: Promotion[] = [
       "A second checkout starts exactly where one you are working in is — staged, unstaged and untracked files and all. Spin off…, in a worktree's ⋯ menu.",
     glyph: "panes",
   },
-  {
-    // **Promoted because the third state is not guessable.** Two of the three
-    // glyphs explain themselves the first time you see them — a pencil is edits,
-    // an arrow up is "not pushed" and every git UI already spells it that way.
-    // The merge glyph does not: it means *the branch's upstream has been
-    // deleted*, and what it is actually good for is telling you a checkout is
-    // finished with. Nobody derives "I can bin this one" from a new glyph on a
-    // row, and binning worktrees you are done with is the habit this changes.
-    //
-    // The headline went through the two failures the doc names. "Every worktree
-    // shows what git says about it" was the first draft and opens on the product
-    // with the mechanism in it. "Stop opening checkouts to find out if they're
-    // done" was the second and is the struggle-then-relief shape — a scene where
-    // a plain statement of the capability reads better and costs less attention.
-    //
-    // The **body** says what changes about the day (which checkouts hold work,
-    // which are finished) before where to look (hover), per the doc's order. It
-    // deliberately does not enumerate the glyphs: that is documentation, and the
-    // README has it.
-    //
-    // `inbox` because this is the rail telling you something, which is what that
-    // glyph illustrates in a deliberately closed four-glyph set — `panes` is the
-    // checkout-shaped one and would read as a pane operation.
-    id: "worktree-git-state",
-    since: "2026-09-07",
-    eyebrow: "New",
-    headline: "See what's in a checkout without opening it",
-    body:
-      "Each row in the rail says whether a checkout holds uncommitted work, commits that never got pushed, or a branch already merged away. Hover for the counts.",
-    glyph: "inbox",
-  },
 ];

@@ -940,12 +940,19 @@ struct WorktreeGitSignals {
     /// git's own `[gone]`, which appears once `fetch --prune` has seen the remote
     /// branch disappear.
     ///
-    /// **This is as close to "merged" as core gets, and it is not the same claim.**
-    /// A squash-merge-and-delete leaves exactly this behind, and so does a pull
-    /// request closed without merging and then deleted. Only a forge can separate
-    /// those, which is what `ide.extensions` is for and what this repo's own
-    /// top-bar PR badge already does with `gh`. So the field is named after what was
-    /// measured, the UI's tooltip glosses it, and neither says "merged" outright.
+    /// **No glyph renders this, and it is still worth sending.** A merged mark was
+    /// built for it and removed on maintainer instruction: a squash-merge-and-delete
+    /// leaves exactly this state, and so does a pull request closed without merging
+    /// and then deleted, so the mark would be confidently wrong about the one thing
+    /// a reader wants it for. Real pull-request state holds a PR number and belongs
+    /// to an `ide.extensions` badge — this repo's own top-bar one already does it
+    /// with `gh`.
+    ///
+    /// The UI reads it as a **guard** instead: without it a merged-and-tidied
+    /// checkout looks clean with an upstream and is reported as "everything is
+    /// pushed" to a remote branch that no longer exists. It also still reaches the
+    /// tooltip, which is where a sentence may be probabilistic where a glyph may
+    /// not.
     upstream_gone: bool,
 }
 

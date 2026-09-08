@@ -1,4 +1,4 @@
-import { IconArrowUp, IconGitBranch, IconGitMerge, IconPencil } from "@tabler/icons-react";
+import { IconArrowUp, IconGitBranch, IconPencil } from "@tabler/icons-react";
 
 import type { WorktreeGitSignals } from "../api";
 import type { GitRowState } from "../gitstate/gitState";
@@ -16,14 +16,13 @@ import { rowGlyph, rowTooltip } from "./rowState";
  * working in, not something to escalate. `arrow-up` for commits not pushed, the
  * convention every git UI already uses (`↑2`), so it needs no tooltip to be
  * understood. `git-branch` for everything-pushed, the quiet resting state.
- * `git-merge` for an upstream that is gone, because that is the conclusion a
- * reader draws and is right about most of the time; the tooltip carries the honest
- * wording.
  *
- * The last two are a deliberate near-pair: `git-branch` and `git-merge` are the
- * same visual family, which is the point — they are two ends of one progression a
- * reader follows (pushed, then merged away), and reading as related is what makes
- * the second recognisable as the end of the first.
+ * **There is deliberately no merged glyph.** A `git-merge` icon for a deleted
+ * upstream was built and then removed on maintainer instruction, and the reason is
+ * worth keeping: git cannot tell a merged pull request from one closed without
+ * merging and then deleted, so the mark would be confidently wrong for a state
+ * whose whole value is confidence. Real pull-request state holds a PR number and
+ * belongs to an `ide.extensions` badge, which can say it properly.
  *
  * Three shapes this row has no room for, and why: no triangle (`wt-alert` is node
  * health, and the activity vocabulary's `failed` is the outline twin of it), no
@@ -33,7 +32,6 @@ import { rowGlyph, rowTooltip } from "./rowState";
 const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
   dirty: IconPencil,
   unpushed: IconArrowUp,
-  gone: IconGitMerge,
   synced: IconGitBranch,
 };
 

@@ -1008,6 +1008,61 @@ needs the daemon-owned push model. The transport is the thing that is still
 unbuilt; the "evaluate every row, not just the visible one" cadence now has a
 worked precedent in `spawn_dirty_sweep`.
 
+### 2026-09-08 — Reversed: no merged glyph at all, and `upstream_gone` survives as a guard
+
+The previous day's entry is **reversed on the rendering question**, on maintainer
+instruction, after driving the running feature. Its reasoning about the core/
+customization line still holds and is not withdrawn; what changed is the judgement
+about whether a *glyph* should be drawn on a proposition that is only usually true.
+
+**Chosen:** the rail renders three git states — `dirty`, `unpushed`, `synced` —
+and **nothing** for a deleted upstream. The maintainer's framing was the useful
+one: the row should read as a progression a reader follows (edited → pushed →
+reviewed → merged), and once you ask for that, the missing middle is *"a pull
+request exists"*, which git cannot answer at any price. A merge glyph sitting at
+the end of a progression whose middle is absent, on a fact that cannot distinguish
+merged from closed-and-deleted, claims more than the row can support. A mark whose
+whole value is confidence must not be the one that is sometimes wrong.
+
+Two things fell out of it that are worth not rediscovering:
+
+- **`upstream_gone` stays on the wire with nothing rendering it, and is
+  load-bearing.** Remove `gone` from the precedence chain and such a checkout
+  falls through to `synced`, reporting "everything is pushed" to a remote branch
+  that no longer exists. It is now the *guard* against a wrong claim rather than
+  the source of a right one — `gitState.ts` says so at the use site, because a
+  future reader tidying an unrendered field would reintroduce the bug.
+- **The tooltip keeps the sentence.** "`origin/x` is gone — the remote branch was
+  deleted, which usually means its pull request was merged" is still emitted, now
+  reachable only when another fact holds the row's glyph slot. A tooltip is allowed
+  to be probabilistic where a glyph is not, which is the distinction the whole
+  reversal turns on.
+
+**Also rejected, in the same conversation:** making the git statuses themselves
+config-driven — a `rail` slot whose declared commands produce every row glyph,
+git ones included. Two arguments killed it. It would have veld spawn a subprocess
+per worktree to recompute, more slowly and through a user script, something it
+already computes in-process from one `for-each-ref` per repo; and it would leave
+the rail blank on a fresh clone, which is the failure mode
+[the backlog note below](#the-extension-backlog) already warns about for
+badges-on-every-row. The narrower version — core computes the statuses, config
+maps each to an icon and tone — was offered and declined as unnecessary: *"keep it
+like it is right now"*. That one remains cheap and available if the glyph choices
+ever become contentious, and it is what rule 1 of
+[Two rules that follow](#two-rules-that-follow) describes: a policy knob on a core
+capability, not an extension.
+
+**Still open, and now the only route to what was asked for:** the `rail` slot for
+command-backed badges, so a project's own `gh` adapter can put real pull-request
+state on a row. Worth recording that the *rendering* half of this is already
+built — a badge's stdout may override its `icon` per value (`extensions.rs`), and
+`display: "icon"` already renders a badge as a glyph rather than a label
+(`Extensions.tsx`) — so what is missing is `rail` in `EXTENSION_SLOTS`, the
+per-worktree fan-out, and a precedence decision against the activity and git
+glyphs in the row's single slot. The fan-out is the real cost: one forge call per
+worktree per refresh, where the top-bar badge makes one for the visible worktree
+only.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of
@@ -1018,7 +1073,7 @@ idea.
 
 | Feature | Data contract it needs | UI surface | Status |
 |---|---|---|---|
-| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog — asked for again 2026-09-07 and answered in core only as far as git can state it, see the decision log |
+| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog, and now the *only* route to this — core deliberately renders no merged glyph (decision log, 2026-09-08). Rendering is half-built already: per-value `icon` override plus `display: "icon"`; missing is `rail` in `EXTENSION_SLOTS` and the per-worktree fan-out |
 | Open a worktree in an external IDE (WebStorm, VS Code, …) | a local binary per editor | top bar | **Tier 1 round 1** (`type: "action"`) |
 | CI check status for a worktree's branch | provider API | top bar, worktree detail | backlog — expressible as a second `type: "status"` today |
 | Per-worktree staleness ("branch is N behind origin") | **already exposed as core data** — see note | rail row, worktree detail | core data shipped; badge = extension |
@@ -1050,10 +1105,12 @@ idea.
 >
 > As of 2026-09-07 the *per-worktree* half of that data is core too and already on
 > the wire: `WorktreeView.git` carries `ahead`, `behind`, `upstream`,
-> `upstream_gone` and `dirty` for every checkout. `behind` in particular is
-> carried and **deliberately unrendered** — the top bar's pill already answers it
-> for the main checkout — so a project wanting a per-worktree staleness badge
-> needs no new daemon work, only the `rail` slot.
+> `upstream_gone` and `dirty` for every checkout. **Two of those five are
+> deliberately unrendered**: `behind`, because the top bar's pill already answers
+> it for the main checkout, and `upstream_gone`, which exists to stop a
+> merged-and-tidied checkout being reported as fully pushed (decision log,
+> 2026-09-08). So a project wanting a per-worktree staleness badge needs no new
+> daemon work, only the `rail` slot.
 
 ## Rules for agents
 

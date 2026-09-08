@@ -71,7 +71,6 @@ describe("rowGlyph", () => {
     const gits: WorktreeGitSignals[] = [
       signals({ dirty: true }),
       signals({ ahead: 4 }),
-      signals({ ahead: null, behind: null, upstream_gone: true }),
       signals(),
     ];
     for (const state of states) {

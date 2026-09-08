@@ -53,19 +53,28 @@ describe("rowGitState", () => {
     expect(rowGitState(signals({ ahead: 2 }))).toBe("unpushed");
   });
 
-  it("shows gone for a deleted upstream branch", () => {
-    // git reports no counts for `[gone]`, which is why `ahead` is null here.
-    expect(
-      rowGitState(signals({ ahead: null, behind: null, upstream_gone: true })),
-    ).toBe("gone");
+  /**
+   * **No merged glyph, and this is the assertion that keeps it honest.** A deleted
+   * upstream renders nothing rather than something confidently wrong — git cannot
+   * tell a merged pull request from one closed without merging and then deleted.
+   *
+   * The trap it guards is the fall-through: with `gone` out of the precedence
+   * chain, such a checkout would otherwise reach `synced` and claim everything is
+   * pushed to a remote branch that no longer exists.
+   */
+  it("shows nothing for a deleted upstream, and never calls it synced", () => {
+    const gone = signals({ ahead: null, behind: null, upstream_gone: true });
+    expect(rowGitState(gone)).toBeNull();
+    // The one that matters: clean, with an upstream, and still not `synced`.
+    expect(rowGitState(signals({ upstream_gone: true }))).toBeNull();
   });
 
   /**
    * The one ordering that carries a consequence: every other state describes work
-   * that is safely somewhere else, and dirty describes work that is not. A merged
-   * worktree with a stray edit must not read as safe to throw away.
+   * that is safely somewhere else, and dirty describes work that is not. A
+   * merged-and-tidied worktree with a stray edit must not read as safe to bin.
    */
-  it("ranks dirty above a gone upstream", () => {
+  it("ranks dirty above a deleted upstream", () => {
     expect(
       rowGitState(
         signals({ dirty: true, ahead: null, behind: null, upstream_gone: true }),
@@ -93,9 +102,7 @@ describe("rowGitState", () => {
   it("ranks synced last — it is the absence of anything to do", () => {
     expect(rowGitState(signals({ dirty: true }))).toBe("dirty");
     expect(rowGitState(signals({ ahead: 1 }))).toBe("unpushed");
-    expect(
-      rowGitState(signals({ ahead: null, behind: null, upstream_gone: true })),
-    ).toBe("gone");
+    expect(rowGitState(signals())).toBe("synced");
   });
 });
 
@@ -130,8 +137,13 @@ describe("gitTooltipLines", () => {
     ]);
   });
 
-  /** Core measured a deleted ref; it does not claim to know a PR was merged. */
-  it("glosses a gone upstream without asserting the merge", () => {
+  /**
+   * The line survives the glyph's removal, and is now reachable only alongside
+   * another fact — a dirty tree, or an activity glyph holding the slot. Worth
+   * keeping: "the branch you pushed to is gone" is the most useful sentence about
+   * such a checkout, and it still never asserts the merge outright.
+   */
+  it("glosses a deleted upstream without asserting the merge", () => {
     const [line] = gitTooltipLines(
       signals({ ahead: null, behind: null, upstream_gone: true }),
     );
@@ -167,9 +179,10 @@ describe("gitDescription", () => {
     expect(gitDescription(signals({ dirty: true }))).toBe("uncommitted changes");
     expect(gitDescription(signals({ ahead: 2 }))).toBe("2 commits not pushed");
     expect(gitDescription(signals({ ahead: 1 }))).toBe("1 commit not pushed");
+    expect(gitDescription(signals())).toBe("everything pushed");
+    // No glyph for a deleted upstream, so no clause for it either.
     expect(
       gitDescription(signals({ ahead: null, behind: null, upstream_gone: true })),
-    ).toBe("upstream branch deleted");
-    expect(gitDescription(signals())).toBe("everything pushed");
+    ).toBeUndefined();
   });
 });

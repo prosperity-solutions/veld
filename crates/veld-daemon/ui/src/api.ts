@@ -201,11 +201,17 @@ export interface WorktreeGitSignals {
    * `[gone]`, which appears once a `fetch --prune` has seen the remote branch
    * disappear.
    *
-   * **Close to "already merged", and not the same claim.** A squash-merge and
-   * branch delete leaves exactly this; so does a pull request closed without
-   * merging and then deleted. Only a forge separates them, which is what an
-   * `ide.extensions` PR badge is for — so the glyph and its tooltip say what was
-   * measured and let the reader draw the usual conclusion.
+   * **Nothing renders this, and it is still load-bearing.** A merged glyph was
+   * built for it and then removed on maintainer instruction: a squash-merge and
+   * branch delete leaves exactly this state, and so does a pull request closed
+   * without merging and then deleted, so a mark would be confidently wrong for a
+   * reader whose whole use for it is confidence. Real pull-request state holds a PR
+   * number and belongs to an `ide.extensions` badge.
+   *
+   * What still reads it is `rowGitState`, as a **guard**: without it a
+   * merged-and-tidied checkout falls through to `synced` and claims everything is
+   * pushed to a remote branch that no longer exists. So this is the rare field
+   * that is worth sending precisely because of a state it *prevents*.
    */
   upstream_gone: boolean;
 }

@@ -14,9 +14,6 @@ import type { WorktreeGitSignals } from "../api";
  *   and it is what `git worktree remove` refuses on.
  * - **`unpushed`** — a clean tree with commits its upstream does not have. The work
  *   is committed but has not left the machine.
- * - **`gone`** — the upstream branch has been deleted. Usually a merged pull
- *   request; see {@link WorktreeGitSignals.upstream_gone} for why the name is what
- *   was measured rather than "merged".
  * - **`synced`** — everything this checkout has is on the remote. The quietest
  *   state, and the only one that is *not* a call to action: it is here because it
  *   is the first step of a progression a reader tracks (pushed → reviewed →
@@ -28,13 +25,26 @@ import type { WorktreeGitSignals } from "../api";
  * exactly this. Saying otherwise in a tooltip would be veld asserting something it
  * never looked at.
  *
- * Two states git can also report are deliberately absent. **`behind`** is on the
- * wire but unrendered — the top bar's staleness pill already answers it for the
- * main checkout, and a second amber mark per row was not asked for. **"no upstream
- * at all"** is not a state either: a branch that has never been pushed renders
- * nothing, which is what keeps it from ever being confused with `gone`. It is also
- * rare in practice, because a worktree veld creates branches from
+ * # Three things git reports that deliberately render nothing
+ *
+ * **A deleted upstream** — git's `[gone]`, what a merged-and-tidied pull request
+ * leaves behind. There is no merged glyph, on maintainer instruction: git cannot
+ * tell a merged pull request from one closed without merging and then deleted, and
+ * a mark that is confidently wrong about which teaches people to distrust the rest
+ * of the row. Real pull-request state belongs to an `ide.extensions` badge, which
+ * holds a PR number and can say it properly.
+ *
+ * `upstream_gone` is still read here, and is load-bearing rather than vestigial:
+ * it is what stops such a checkout falling through to `synced` and claiming
+ * everything is pushed when the branch it was pushed to no longer exists.
+ *
+ * **A branch that was never pushed** — no upstream means nothing to be in sync
+ * *with*. Rare in practice, because a worktree veld creates branches from
  * `origin/<default>` and gets an upstream automatically.
+ *
+ * **`behind`** — on the wire but unrendered: the top bar's staleness pill already
+ * answers it for the main checkout, and a second amber mark per row was not asked
+ * for.
  *
  * # Worst-state-wins, and `dirty` is the worst
  *
@@ -47,18 +57,25 @@ import type { WorktreeGitSignals } from "../api";
  * branch whose upstream is `[gone]`, so `ahead` is `null` in exactly that case.
  * The ordering between them is therefore only a tie-break on paper.
  */
-export type GitRowState = "dirty" | "unpushed" | "gone" | "synced";
+export type GitRowState = "dirty" | "unpushed" | "synced";
 
 /** The one state a row's glyph shows, or `null` for no glyph at all. */
 export function rowGitState(git: WorktreeGitSignals | undefined): GitRowState | null {
   if (!git) return null;
   if (git.dirty) return "dirty";
   if (git.ahead !== null && git.ahead > 0) return "unpushed";
-  if (git.upstream_gone) return "gone";
-  // Last, because it is the absence of anything to do. `dirty === false` and not
-  // merely falsy: `null` is "the sweep has not looked", and a row must not claim
-  // everything is pushed on the strength of a reading that never happened.
-  if (git.upstream !== null && git.dirty === false) return "synced";
+  // Last, because it is the absence of anything to do. Three conditions, and each
+  // one is a claim this state would otherwise get wrong:
+  //
+  // - `dirty === false`, not merely falsy — `null` means the sweep has not looked,
+  //   and a row must not claim everything is pushed off a reading never taken.
+  // - an upstream exists — otherwise there is nothing to be in sync *with*.
+  // - **the upstream has not been deleted.** Without this, a merged-and-tidied
+  //   branch reads as "everything is pushed" to a remote branch that no longer
+  //   exists. There is no glyph for `[gone]` (see the type doc), so this is the
+  //   only thing keeping that row honest, which is why `upstream_gone` is still
+  //   on the wire with nothing rendering it.
+  if (git.upstream !== null && !git.upstream_gone && git.dirty === false) return "synced";
   return null;
 }
 
@@ -85,6 +102,12 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
   if (git.dirty) lines.push("Uncommitted changes");
   const upstream = git.upstream ?? "its upstream";
   if (git.upstream_gone) {
+    // **Kept even though no glyph renders `[gone]`.** This line is now reachable
+    // only alongside another fact — a dirty tree, or an activity glyph holding the
+    // slot — which is exactly the position the no-upstream line below is in. Worth
+    // keeping for those cases: "the branch you pushed to is gone" is the single
+    // most useful sentence about such a checkout, and dropping it would mean a
+    // hovering reader learns less than the daemon knows.
     lines.push(
       `${upstream} is gone — the remote branch was deleted, which usually means its pull request was merged`,
     );
@@ -125,6 +148,5 @@ export function gitDescription(git: WorktreeGitSignals | undefined): string | un
   if (state === "unpushed") {
     return `${commits(git?.ahead ?? 0)} not pushed`;
   }
-  if (state === "synced") return "everything pushed";
-  return "upstream branch deleted";
+  return "everything pushed";
 }
