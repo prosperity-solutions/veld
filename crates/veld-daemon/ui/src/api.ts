@@ -164,8 +164,14 @@ export interface WorktreeGitStatus {
  *
  * Every field is nullable and `null` means **not known**, which is a different
  * fact from `0` or `false`: an unmounted volume, a repo with no remote, and a
- * worktree the dirty sweep has not reached yet all read as "no glyph" rather than
- * as "clean". Same distinction `CarryOverReport.files` makes, for the same reason.
+ * worktree the dirty sweep has not reached yet are all *unknown*, not clean. Same
+ * distinction `CarryOverReport.files` makes, for the same reason.
+ *
+ * Today that distinction has no visual consequence — a clean row renders no glyph
+ * either, because absence is the rail's word for "nothing to see" (the maintainer
+ * declined an untouched-worktree glyph on exactly those grounds). It is kept
+ * because it stops anything here *asserting* clean off a reading that never
+ * happened, which is the bug the moment a future surface does render that state.
  *
  * Not to be confused with {@link WorktreeGitStatus}, which is the on-demand
  * *file list* the delete and trash flows fetch for one worktree. This is the
