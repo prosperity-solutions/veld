@@ -1015,8 +1015,9 @@ instruction, after driving the running feature. Its reasoning about the core/
 customization line still holds and is not withdrawn; what changed is the judgement
 about whether a *glyph* should be drawn on a proposition that is only usually true.
 
-**Chosen:** the rail renders three git states — `dirty`, `unpushed`, `synced` —
-and **nothing** for a deleted upstream. The maintainer's framing was the useful
+**Chosen:** the rail renders two git states — `dirty` and `unpushed` — and
+**nothing** for a deleted upstream. (A `synced` state was in this entry's first
+version; see the addendum at the end.) The maintainer's framing was the useful
 one: the row should read as a progression a reader follows (edited → pushed →
 reviewed → merged), and once you ask for that, the missing middle is *"a pull
 request exists"*, which git cannot answer at any price. A merge glyph sitting at
@@ -1026,12 +1027,12 @@ whole value is confidence must not be the one that is sometimes wrong.
 
 Two things fell out of it that are worth not rediscovering:
 
-- **`upstream_gone` stays on the wire with nothing rendering it, and is
-  load-bearing.** Remove `gone` from the precedence chain and such a checkout
-  falls through to `synced`, reporting "everything is pushed" to a remote branch
-  that no longer exists. It is now the *guard* against a wrong claim rather than
-  the source of a right one — `gitState.ts` says so at the use site, because a
-  future reader tidying an unrendered field would reintroduce the bug.
+- **`upstream_gone` stays on the wire with nothing rendering it.** Its consumer is
+  the tooltip (below). It was briefly also a *guard* — while `synced` existed, it
+  was what stopped such a checkout being reported as fully pushed — and that role
+  disappeared with `synced`. Kept because it costs nothing (same
+  `%(upstream:track)` field as `ahead` and `behind`) and is what a `rail`-slot
+  pull-request badge would want first.
 - **The tooltip keeps the sentence.** "`origin/x` is gone — the remote branch was
   deleted, which usually means its pull request was merged" is still emitted, now
   reachable only when another fact holds the row's glyph slot. A tooltip is allowed
@@ -1051,6 +1052,23 @@ like it is right now"*. That one remains cheap and available if the glyph choice
 ever become contentious, and it is what rule 1 of
 [Two rules that follow](#two-rules-that-follow) describes: a policy knob on a core
 capability, not an extension.
+
+**Addendum, same day — `synced` removed too, and the rule that replaced it.** A
+branch glyph for "everything is pushed" was added on maintainer request (as the
+first step of the progression above) and then cut on driving it, for two reasons
+worth keeping. It "does not help in communicating not yet saved work" — the
+column's job — and it was **permanently lit on the main checkout**, which never
+leaves that state, so one row was decorated forever with a mark nobody could act
+on. That is the same decoration argument that had already declined an
+untouched-worktree glyph earlier in the day, arriving a second time from the
+opposite direction.
+
+What settled the vocabulary is a rule rather than a list: **every state is work
+that is not safe yet, and nothing else is a state.** A mark means "this checkout
+is holding something you could still lose". That is why `behind` is on the wire
+and unrendered (being behind is not work you are holding), why a deleted upstream
+renders nothing, and why clean-and-pushed renders nothing. It is also the test to
+apply to any state proposed for this column later.
 
 **Still open, and now the only route to what was asked for:** the `rail` slot for
 command-backed badges, so a project's own `gh` adapter can put real pull-request

@@ -1,4 +1,4 @@
-import { IconArrowUp, IconGitBranch, IconPencil } from "@tabler/icons-react";
+import { IconArrowUp, IconPencil } from "@tabler/icons-react";
 
 import type { WorktreeGitSignals } from "../api";
 import type { GitRowState } from "../gitstate/gitState";
@@ -15,9 +15,13 @@ import { rowGlyph, rowTooltip } from "./rowState";
  * warning, which is right: having edits is the normal state of a checkout you are
  * working in, not something to escalate. `arrow-up` for commits not pushed, the
  * convention every git UI already uses (`↑2`), so it needs no tooltip to be
- * understood. `git-branch` for everything-pushed, the quiet resting state.
+ * understood.
  *
- * **There is deliberately no merged glyph.** A `git-merge` icon for a deleted
+ * **Two glyphs, and every one of them means "this checkout is holding
+ * something".** A branch glyph for everything-pushed was built and removed: it
+ * does not communicate not-yet-saved work, and it sat permanently lit on the main
+ * checkout, which never leaves that state. **There is deliberately no merged glyph
+ * either.** A `git-merge` icon for a deleted
  * upstream was built and then removed on maintainer instruction, and the reason is
  * worth keeping: git cannot tell a merged pull request from one closed without
  * merging and then deleted, so the mark would be confidently wrong for a state
@@ -32,7 +36,6 @@ import { rowGlyph, rowTooltip } from "./rowState";
 const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
   dirty: IconPencil,
   unpushed: IconArrowUp,
-  synced: IconGitBranch,
 };
 
 /**

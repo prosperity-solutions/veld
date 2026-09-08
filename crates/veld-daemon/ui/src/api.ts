@@ -208,10 +208,10 @@ export interface WorktreeGitSignals {
    * reader whose whole use for it is confidence. Real pull-request state holds a PR
    * number and belongs to an `ide.extensions` badge.
    *
-   * What still reads it is `rowGitState`, as a **guard**: without it a
-   * merged-and-tidied checkout falls through to `synced` and claims everything is
-   * pushed to a remote branch that no longer exists. So this is the rare field
-   * that is worth sending precisely because of a state it *prevents*.
+   * Its one consumer is the **tooltip**, where "the branch you pushed to is gone"
+   * is the most useful sentence about such a checkout — reachable when a dirty
+   * tree or an activity glyph holds the row's slot. A tooltip may be probabilistic
+   * where a glyph may not, which is the whole distinction here.
    */
   upstream_gone: boolean;
 }

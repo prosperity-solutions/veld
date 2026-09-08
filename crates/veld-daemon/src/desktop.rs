@@ -929,6 +929,23 @@ struct WorktreeGitSignals {
     /// than `origin/<itself>` — a worktree created from the default branch and
     /// never pushed. Then `ahead` is the branch's own commits, which is the same
     /// answer by a different route, and the one the reader wants either way.
+    ///
+    /// **Known, deliberate false positive: a branch pushed without `-u`.** The
+    /// count is always against the *configured* upstream, because that is what
+    /// `%(upstream:track)` reports and asking anything else costs a `rev-list` per
+    /// branch — which would give up the property that makes this half free (one
+    /// process per repo, never entering a working tree). So `git push origin HEAD`
+    /// on such a branch creates `origin/<branch>`, leaves the upstream pointing at
+    /// `origin/main`, and this keeps reporting the work as unpushed.
+    ///
+    /// Accepted for two reasons. It is hard to reach by accident — `push.default`
+    /// is `simple`, which *refuses* a plain `git push` when the upstream's name
+    /// differs from the branch's and tells the user to set one, and
+    /// `push.autoSetupRemote=true` (git ≥ 2.37) removes it entirely. And the
+    /// failure direction is the safe one: it **over**-reports work as unpushed, so
+    /// a reader is nagged to push something already pushed rather than being told
+    /// nothing about work that really is only local. Pinned by
+    /// `ahead_counts_against_the_configured_upstream_not_the_branchs_own_remote`.
     ahead: Option<i64>,
     /// The mirror image, carried because it costs nothing — it comes out of the
     /// same `for-each-ref` field as `ahead`. No glyph renders it today: the repo's
@@ -948,11 +965,12 @@ struct WorktreeGitSignals {
     /// to an `ide.extensions` badge — this repo's own top-bar one already does it
     /// with `gh`.
     ///
-    /// The UI reads it as a **guard** instead: without it a merged-and-tidied
-    /// checkout looks clean with an upstream and is reported as "everything is
-    /// pushed" to a remote branch that no longer exists. It also still reaches the
-    /// tooltip, which is where a sentence may be probabilistic where a glyph may
-    /// not.
+    /// It reaches the **tooltip** instead, which is its only consumer: "the branch
+    /// you pushed to is gone" is the most useful sentence about such a checkout,
+    /// and a tooltip may be probabilistic where a glyph may not. Kept rather than
+    /// dropped because it costs nothing — it falls out of the same
+    /// `%(upstream:track)` field as `ahead` and `behind` — and because it is what
+    /// a `rail`-slot pull-request badge would want first.
     upstream_gone: bool,
 }
 
@@ -6902,6 +6920,116 @@ mod tests {
         assert!(
             after.contains_key(main_path),
             "every checked-out branch must be keyed by its worktree path"
+        );
+    }
+
+    /// The one wrong answer `ahead` gives, pinned so it stays deliberate.
+    ///
+    /// A branch pushed with `git push origin HEAD` — no `-u` — has a remote copy
+    /// and is fully pushed, but its configured upstream is still `origin/main`, so
+    /// `%(upstream:track)` keeps reporting it ahead. See the field's doc for why
+    /// this is accepted rather than fixed: the fix costs a `rev-list` per branch,
+    /// and the failure over-reports rather than hiding work.
+    ///
+    /// If someone later makes the counts exact, this test is what should fail — and
+    /// the assertion to change is `Some(1)` to `Some(0)`, not the fixture.
+    #[tokio::test]
+    async fn ahead_counts_against_the_configured_upstream_not_the_branchs_own_remote() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        std::fs::write(work.join("a.txt"), "a").unwrap();
+        git(&work, &["add", "a.txt"]);
+        git(&work, &["commit", "-m", "A"]);
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-u", "origin", "main"]);
+
+        // The veld-created shape: cut from a remote-tracking ref, so the upstream
+        // is `origin/main` rather than the branch's own name.
+        let feat = dir.path().join("feat");
+        git(
+            &work,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feat",
+                feat.to_str().unwrap(),
+                "origin/main",
+            ],
+        );
+        std::fs::write(feat.join("b.txt"), "b").unwrap();
+        git(&feat, &["add", "b.txt"]);
+        git(&feat, &["commit", "-m", "B"]);
+
+        // Pushed, but without `-u`: the remote branch exists and the work is on the
+        // remote. `push.default = simple` would refuse a bare `git push` here, which
+        // is what makes this hard to reach by accident.
+        git(&feat, &["push", "origin", "HEAD"]);
+        git(&feat, &["fetch", "origin"]);
+        assert!(
+            git_raw(
+                FsPath::new(&work),
+                &["rev-parse", "--verify", "refs/remotes/origin/feat"],
+            )
+            .await
+            .is_ok(),
+            "the fixture must actually have created the remote branch"
+        );
+
+        let by_path = repo_upstreams(FsPath::new(&work)).await;
+        let key = feat.canonicalize().unwrap().to_string_lossy().into_owned();
+        let signals = by_path.get(&key).expect("the feat worktree's branch");
+        assert_eq!(
+            signals.upstream.as_deref(),
+            Some("origin/main"),
+            "pushing without -u must leave the upstream where it was"
+        );
+        assert_eq!(
+            signals.ahead,
+            Some(1),
+            "the count is against the configured upstream, so pushed-without-`-u` \
+             still reads as one commit ahead — the accepted false positive"
+        );
+
+        // And setting the upstream is what resolves it, which is the advice the
+        // field's doc gives and the reason this is tolerable.
+        git(&feat, &["branch", "--set-upstream-to=origin/feat", "feat"]);
+        let fixed = repo_upstreams(FsPath::new(&work)).await;
+        assert_eq!(
+            fixed.get(&key).and_then(|s| s.ahead),
+            Some(0),
+            "with its own remote as the upstream, the branch reads as fully pushed"
         );
     }
 

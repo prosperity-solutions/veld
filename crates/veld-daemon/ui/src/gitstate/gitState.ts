@@ -14,37 +14,33 @@ import type { WorktreeGitSignals } from "../api";
  *   and it is what `git worktree remove` refuses on.
  * - **`unpushed`** — a clean tree with commits its upstream does not have. The work
  *   is committed but has not left the machine.
- * - **`synced`** — everything this checkout has is on the remote. The quietest
- *   state, and the only one that is *not* a call to action: it is here because it
- *   is the first step of a progression a reader tracks (pushed → reviewed →
- *   merged), not because "clean" is interesting on its own.
  *
- * **`synced` does not mean "no pull request exists".** Core cannot know that — a
- * pull request is a forge object, and nothing in the git CLI can be asked about
- * one. A branch that is pushed, in sync, and has an open pull request renders
- * exactly this. Saying otherwise in a tooltip would be veld asserting something it
- * never looked at.
+ * # Every state is work that is not safe yet, and nothing else is a state
  *
- * # Three things git reports that deliberately render nothing
+ * That is the rule the vocabulary settled on, and it is what keeps the column
+ * scannable: a mark here always means *this checkout is holding something*. So
+ * three things git reports render nothing at all.
+ *
+ * **Everything pushed.** A branch glyph for it was built and removed — it "does
+ * not help in communicating not yet saved work", and it was permanently lit on the
+ * main checkout, which never leaves that state and so was decorated forever with a
+ * mark nobody could act on.
  *
  * **A deleted upstream** — git's `[gone]`, what a merged-and-tidied pull request
- * leaves behind. There is no merged glyph, on maintainer instruction: git cannot
- * tell a merged pull request from one closed without merging and then deleted, and
- * a mark that is confidently wrong about which teaches people to distrust the rest
- * of the row. Real pull-request state belongs to an `ide.extensions` badge, which
- * holds a PR number and can say it properly.
+ * leaves behind. No merged glyph either: git cannot tell a merged pull request from
+ * one closed without merging and then deleted, and a mark that is confidently
+ * wrong about which teaches people to distrust the rest of the row. Real
+ * pull-request state belongs to an `ide.extensions` badge, which holds a PR number
+ * and can say it properly. `upstream_gone` stays on the wire for the tooltip,
+ * which may be probabilistic where a glyph may not.
  *
- * `upstream_gone` is still read here, and is load-bearing rather than vestigial:
- * it is what stops such a checkout falling through to `synced` and claiming
- * everything is pushed when the branch it was pushed to no longer exists.
- *
- * **A branch that was never pushed** — no upstream means nothing to be in sync
- * *with*. Rare in practice, because a worktree veld creates branches from
+ * **A branch that was never pushed** — no upstream, so no count, so nothing to
+ * report. Rare in practice, because a worktree veld creates branches from
  * `origin/<default>` and gets an upstream automatically.
  *
- * **`behind`** — on the wire but unrendered: the top bar's staleness pill already
- * answers it for the main checkout, and a second amber mark per row was not asked
- * for.
+ * **`behind`** is on the wire and unrendered for the same reason: being behind is
+ * not work you are holding, and the top bar's staleness pill already answers it
+ * for the main checkout.
  *
  * # Worst-state-wins, and `dirty` is the worst
  *
@@ -57,25 +53,16 @@ import type { WorktreeGitSignals } from "../api";
  * branch whose upstream is `[gone]`, so `ahead` is `null` in exactly that case.
  * The ordering between them is therefore only a tie-break on paper.
  */
-export type GitRowState = "dirty" | "unpushed" | "synced";
+export type GitRowState = "dirty" | "unpushed";
 
 /** The one state a row's glyph shows, or `null` for no glyph at all. */
 export function rowGitState(git: WorktreeGitSignals | undefined): GitRowState | null {
   if (!git) return null;
   if (git.dirty) return "dirty";
   if (git.ahead !== null && git.ahead > 0) return "unpushed";
-  // Last, because it is the absence of anything to do. Three conditions, and each
-  // one is a claim this state would otherwise get wrong:
-  //
-  // - `dirty === false`, not merely falsy — `null` means the sweep has not looked,
-  //   and a row must not claim everything is pushed off a reading never taken.
-  // - an upstream exists — otherwise there is nothing to be in sync *with*.
-  // - **the upstream has not been deleted.** Without this, a merged-and-tidied
-  //   branch reads as "everything is pushed" to a remote branch that no longer
-  //   exists. There is no glyph for `[gone]` (see the type doc), so this is the
-  //   only thing keeping that row honest, which is why `upstream_gone` is still
-  //   on the wire with nothing rendering it.
-  if (git.upstream !== null && !git.upstream_gone && git.dirty === false) return "synced";
+  // Nothing else is a state. In particular there is no "everything is pushed" —
+  // see the type doc — so `dirty === null` (not measured) and `dirty === false`
+  // (measured, clean) both correctly reach here and render the same blank space.
   return null;
 }
 
@@ -118,11 +105,6 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
     if (git.behind !== null && git.behind > 0) {
       lines.push(`${commits(git.behind)} behind ${upstream}`);
     }
-    if (git.upstream !== null && git.ahead === 0 && !git.dirty && git.behind === 0) {
-      // The `synced` line. Deliberately says only what was measured: veld never
-      // asked a forge anything, so it cannot add "and no pull request exists".
-      lines.push(`Everything is pushed to ${upstream}`);
-    }
     if (git.upstream === null && git.dirty !== null) {
       // Said only alongside another fact: on its own it is not a state worth a
       // glyph (see the type doc), and a tooltip with nothing but this would open
@@ -145,8 +127,5 @@ export function gitDescription(git: WorktreeGitSignals | undefined): string | un
   const state = rowGitState(git);
   if (state === null) return undefined;
   if (state === "dirty") return "uncommitted changes";
-  if (state === "unpushed") {
-    return `${commits(git?.ahead ?? 0)} not pushed`;
-  }
-  return "everything pushed";
+  return `${commits(git?.ahead ?? 0)} not pushed`;
 }

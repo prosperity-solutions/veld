@@ -21,19 +21,16 @@ describe("rowGitState", () => {
     expect(rowGitState(undefined)).toBeNull();
   });
 
-  it("shows synced for a clean, fully pushed branch", () => {
-    // The quiet resting state, and the first step of the progression a reader
-    // follows. It asserts nothing about a pull request — core never asked a forge.
-    expect(rowGitState(signals())).toBe("synced");
-  });
-
   /**
-   * **`dirty === false`, never merely falsy.** `null` is "the sweep has not looked
-   * yet", and a row must not claim everything is pushed on the strength of a
-   * reading that never happened — which is the whole reason the two are separate
-   * values on the wire.
+   * **Every state is work that is not safe yet, and nothing else is a state.** A
+   * branch glyph for "everything is pushed" was built and removed: it does not
+   * communicate not-yet-saved work, and it was permanently lit on the main
+   * checkout, which never leaves that state.
    */
-  it("will not claim synced before the dirty sweep has answered", () => {
+  it("shows nothing for a clean, fully pushed branch", () => {
+    expect(rowGitState(signals())).toBeNull();
+    // Not measured and measured-clean render the same blank space, which is what
+    // the rail means by absence everywhere else.
     expect(rowGitState(signals({ dirty: null }))).toBeNull();
   });
 
@@ -62,10 +59,10 @@ describe("rowGitState", () => {
    * chain, such a checkout would otherwise reach `synced` and claim everything is
    * pushed to a remote branch that no longer exists.
    */
-  it("shows nothing for a deleted upstream, and never calls it synced", () => {
-    const gone = signals({ ahead: null, behind: null, upstream_gone: true });
-    expect(rowGitState(gone)).toBeNull();
-    // The one that matters: clean, with an upstream, and still not `synced`.
+  it("shows nothing for a deleted upstream", () => {
+    expect(
+      rowGitState(signals({ ahead: null, behind: null, upstream_gone: true })),
+    ).toBeNull();
     expect(rowGitState(signals({ upstream_gone: true }))).toBeNull();
   });
 
@@ -94,15 +91,9 @@ describe("rowGitState", () => {
   });
 
   it("does not treat being behind as a state of its own", () => {
-    // On the wire, unrendered — the top bar's staleness pill already answers it.
-    // Such a row is still `synced`: nothing of *yours* is unpushed.
-    expect(rowGitState(signals({ behind: 4 }))).toBe("synced");
-  });
-
-  it("ranks synced last — it is the absence of anything to do", () => {
-    expect(rowGitState(signals({ dirty: true }))).toBe("dirty");
-    expect(rowGitState(signals({ ahead: 1 }))).toBe("unpushed");
-    expect(rowGitState(signals())).toBe("synced");
+    // On the wire, unrendered: being behind is not work you are holding, and the
+    // top bar's staleness pill already answers it for the main checkout.
+    expect(rowGitState(signals({ behind: 4 }))).toBeNull();
   });
 });
 
@@ -112,11 +103,17 @@ describe("gitTooltipLines", () => {
     expect(gitTooltipLines(signals({ dirty: null, upstream: null }))).toEqual([]);
   });
 
-  it("says what was measured for a synced branch, and nothing more", () => {
-    const lines = gitTooltipLines(signals());
-    expect(lines).toEqual(["Everything is pushed to origin/feat-x"]);
-    // Never "and no pull request exists" — veld did not ask a forge.
-    expect(lines.join("")).not.toMatch(/pull request|PR/i);
+  it("still reports a deleted upstream, which is why the field is sent", () => {
+    // Reachable only when another fact holds the row's glyph slot — a dirty tree,
+    // or an activity glyph. This is now `upstream_gone`'s only consumer.
+    const lines = gitTooltipLines(signals({ dirty: true, upstream_gone: true }));
+    expect(lines[0]).toBe("Uncommitted changes");
+    expect(lines[1]).toContain("origin/feat-x is gone");
+  });
+
+  it("says nothing at all for a clean, fully pushed branch", () => {
+    // No glyph renders, so no tooltip opens; there is nothing to say either.
+    expect(gitTooltipLines(signals())).toEqual([]);
   });
 
   /**
@@ -172,15 +169,15 @@ describe("gitDescription", () => {
   it("is undefined when no glyph renders, so the row adds no clause", () => {
     expect(gitDescription(undefined)).toBeUndefined();
     expect(gitDescription(signals({ dirty: null }))).toBeUndefined();
-    expect(gitDescription(signals({ upstream: null, ahead: null }))).toBeUndefined();
+    expect(gitDescription(signals())).toBeUndefined();
   });
 
   it("describes each state in words for a screen reader", () => {
     expect(gitDescription(signals({ dirty: true }))).toBe("uncommitted changes");
     expect(gitDescription(signals({ ahead: 2 }))).toBe("2 commits not pushed");
     expect(gitDescription(signals({ ahead: 1 }))).toBe("1 commit not pushed");
-    expect(gitDescription(signals())).toBe("everything pushed");
-    // No glyph for a deleted upstream, so no clause for it either.
+    // No glyph for a clean branch or a deleted upstream, so no clause for either.
+    expect(gitDescription(signals())).toBeUndefined();
     expect(
       gitDescription(signals({ ahead: null, behind: null, upstream_gone: true })),
     ).toBeUndefined();
