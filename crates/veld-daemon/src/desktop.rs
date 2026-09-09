@@ -2579,67 +2579,48 @@ struct NodeOptionView {
 /// The ids of panes that declare a `sessions` lister, read from the checkout
 /// whose config `pane_sessions::list` will read.
 ///
-/// A sibling of [`extensions_view_for`] with the same three cases and the same
-/// fail-closed `None`, kept as its own function because the *panes* do not move
-/// with `declare_root` — only this flag does, and inlining the distinction into
-/// the pane loop is how the two would drift.
+/// A sibling of [`extensions_view_for`] taking the same already-parsed config,
+/// and kept as its own function because the *panes* do not move with
+/// `declare_root` — only this flag does, and inlining the distinction into the
+/// pane loop is how the two would drift.
 fn panes_with_sessions(
-    own_cfg: Option<&veld_core::config::VeldConfig>,
-    own_root: &str,
-    declare_root: Option<&str>,
+    declared_cfg: Option<&veld_core::config::VeldConfig>,
 ) -> std::collections::HashSet<String> {
-    let ids = |cfg: &veld_core::config::VeldConfig| {
-        cfg.ide_section()
-            .panes
-            .iter()
-            .filter(|p| {
-                let veld_core::ide::PaneBody::Terminal(t) = &p.body;
-                t.sessions.is_some()
-            })
-            .map(|p| p.id.clone())
-            .collect()
-    };
-    match declare_root {
-        None => std::collections::HashSet::new(),
-        Some(root) if root == own_root => own_cfg.map(ids).unwrap_or_default(),
-        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
-            .and_then(|p| veld_core::config::parse_config(&p).ok())
-            .map(|c| ids(&c))
-            .unwrap_or_default(),
-    }
+    declared_cfg
+        .map(|cfg| {
+            cfg.ide_section()
+                .panes
+                .iter()
+                .filter(|p| {
+                    let veld_core::ide::PaneBody::Terminal(t) = &p.body;
+                    t.sessions.is_some()
+                })
+                .map(|p| p.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-fn extensions_view_for(
-    own_cfg: Option<&veld_core::config::VeldConfig>,
-    own_root: &str,
-    declare_root: Option<&str>,
-) -> Vec<ExtensionView> {
-    match declare_root {
-        // `extensions.source = main` with no resolvable main checkout — fail
-        // closed, exactly as `extensions::worktree_target` does for the
-        // status/activate endpoints, so the listing and the endpoints that
-        // act on it never disagree about what exists.
-        None => Vec::new(),
-        Some(root) if root == own_root => own_cfg
-            .map(|c| {
-                c.ide_section()
-                    .extensions
-                    .iter()
-                    .map(extension_view)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
-            .and_then(|p| veld_core::config::parse_config(&p).ok())
-            .map(|c| {
-                c.ide_section()
-                    .extensions
-                    .iter()
-                    .map(extension_view)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }
+/// The extensions a worktree renders, from the config of the checkout that
+/// *declares* them.
+///
+/// Takes the already-parsed config rather than a root to parse, because its
+/// caller needs the same config for [`panes_with_sessions`] and `parse_config`
+/// is uncached — see the comment at the call site. `None` covers both
+/// "`extensions.source = main` with no resolvable main checkout" and "that
+/// config does not parse", and both fail **closed**, exactly as
+/// `extensions::worktree_target` does for the status/activate endpoints, so the
+/// listing and the endpoints that act on it never disagree about what exists.
+fn extensions_view_for(declared_cfg: Option<&veld_core::config::VeldConfig>) -> Vec<ExtensionView> {
+    declared_cfg
+        .map(|c| {
+            c.ide_section()
+                .extensions
+                .iter()
+                .map(extension_view)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
@@ -2649,7 +2630,25 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
         .as_deref()
         .and_then(|p| veld_core::config::parse_config(p).ok());
     let declare_root = super::extensions::resolve_declare_root(db, &wt, db.extensions_source());
-    let extensions_view = extensions_view_for(cfg.as_ref(), &wt.path, declare_root.as_deref());
+    // **Parsed once, used twice.** Both of the calls below need the declaring
+    // root's config, and with the shipped `extensions.source = main` default that
+    // root is a different checkout for every non-main worktree — so a parse each
+    // would be two file reads, two JSONC parses and two `include` glob expansions
+    // per worktree, in a loop over every worktree, on every `/api/repos`.
+    // `parse_config` is uncached, and this listing is the hottest read path there
+    // is.
+    let declared_cfg = match declare_root.as_deref() {
+        // Already parsed above as this worktree's own — the common case for the
+        // main checkout, and for anyone on `extensions.source = worktree`.
+        Some(root) if root == wt.path => cfg.clone(),
+        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
+            .and_then(|p| veld_core::config::parse_config(&p).ok()),
+        None => None,
+    };
+    // `declared_cfg` is already `None` for both fail-closed cases — no declaring
+    // root, or one whose config does not parse — so neither consumer needs to be
+    // told which it was.
+    let extensions_view = extensions_view_for(declared_cfg.as_ref());
     // Which pane ids have a `sessions` lister **according to `declare_root`**,
     // because that is the config `pane_sessions::list` will actually read.
     //
@@ -2658,7 +2657,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     // moves with the declaring root. Without the split, a pane declared with a
     // picker on a branch would advertise `has_sessions` and then get an empty
     // answer from the endpoint — a request and a mystery for nothing.
-    let session_panes = panes_with_sessions(cfg.as_ref(), &wt.path, declare_root.as_deref());
+    let session_panes = panes_with_sessions(declared_cfg.as_ref());
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.

@@ -1825,6 +1825,14 @@ function DockView(props: {
                     <Menu.Item
                       key={spec.id}
                       leftSection={paneIcon(spec.icon, 14)}
+                      // **Always a fresh start, even for a pane whose chooser
+                      // card would ask.** This is a hover menu: knowing whether
+                      // there is anything to ask about costs a child process
+                      // per declaring pane, and starting those on a hover is
+                      // the one thing this feature must not do. "New … pane"
+                      // also says what it does, so it is not a surprise — the
+                      // chooser is where the choice lives, and the command
+                      // palette is fresh for the same reason.
                       onClick={() => convertOrAdd(active, configPaneTab(spec))}
                     >
                       New {spec.label} pane

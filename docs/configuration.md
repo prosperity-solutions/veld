@@ -2744,6 +2744,12 @@ most 50 rows are shown.
 lister. Not on a timer, and never from the `+` menu — hovering a menu must not
 start processes.
 
+That is also why **the `+` menu and the command palette always start a pane
+fresh**, even one whose chooser card would ask: finding out whether there is
+anything to ask about costs a child process per declaring pane, and neither of
+those surfaces is worth that. Both say "New … pane", so neither is a surprise —
+the choice lives on the chooser.
+
 That still means Veld runs a command from your repo without you clicking the
 thing it is about, which is exactly what a `status` extension does, so it is
 under the same posture: stdin closed, no terminal, `NO_COLOR=1`, a 10-second

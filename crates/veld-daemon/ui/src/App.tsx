@@ -5483,6 +5483,11 @@ function AppInner(props: {
           hint:
             spec.description ??
             (worktree ? worktreeLabel(worktree) : undefined),
+          // Fresh, never the earlier-sessions picker, matching the `+` menu and
+          // for the same reason: finding out whether there is anything to pick
+          // costs a child process per declaring pane, and the palette is a
+          // keystroke away at all times. The pane chooser is where that choice
+          // lives — the palette's own entry says "New … pane".
           run: () => setLayout(addTabToFocused(layout, configPaneTab(spec))),
         });
       }
