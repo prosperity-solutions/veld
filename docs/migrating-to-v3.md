@@ -456,14 +456,32 @@ relates to the keep-awake ceiling above it.
 
 ### Terminal ergonomics
 
-`ide.panes[]` gained `allow_terminal_renaming` (default `false`), which lets the
-process inside a config-declared pane rename its own tab with the terminal title
-it sets (OSC 0/2). A plain terminal — a login shell, not a pane — always adopts
-its title; this is the opt-in for a pane whose own title is more useful than its
-fixed `label`. Veld's terminals also ring the bell (BEL), and the OSC 9 "notify"
-sequence raises a notification *and* rings the bell with it, naming the worktree
-and the pane's own name with a click that focuses the pane — terminal
-ergonomics, not a persisted inbox. All additive.
+A config-declared pane in `ide.panes[]` adopts the terminal title (OSC 0/2) the
+process inside it sets, exactly as a plain terminal — a login shell, not a pane —
+always has. `fixed_label` (default `false`) is the opt-*out*: set it where the
+pane's `label` is a landmark worth more than a live task title. Veld's terminals
+also ring the bell (BEL), and the OSC 9 "notify" sequence raises a notification
+*and* rings the bell with it, naming the worktree and the pane's own name with a
+click that focuses the pane — terminal ergonomics, not a persisted inbox.
+
+**One key was removed rather than renamed.** An earlier v3 shipped
+`allow_terminal_renaming` (default `false`), which made the adoption above
+opt-in. It is gone, and there is no alias.
+
+**Delete the line, whichever value it held.** The pane itself is never at risk:
+an unknown key under `ide.panes[]` is a `veld lint` warning naming the retired
+key and its replacement, never a load error, and the pane keeps working. But the
+schema's terminal branch is closed (`additionalProperties: false`), so the key
+that only *warns* in `veld lint` is a hard **error** in an editor and in any
+schema check a project runs in CI — which is why even the `true` case, the value
+the shipped example recommended, has to go.
+
+Behaviour changes for exactly one config: a pane that set the key to `false`.
+Write `"fixed_label": true` on it to keep the fixed tab name. A pane that set it
+to `true` already had the behaviour that is now the default. Note that the
+`veld lint` warning only appears when somebody runs `veld lint` — the IDE does
+not surface it — so this paragraph, not a notice in the app, is what tells a
+project with a pinned pane to act.
 
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld

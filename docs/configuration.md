@@ -2547,7 +2547,16 @@ shown disabled, and spends that line on the reason instead.
 | `resume` | An object with `argv` or `shell`: what to run instead when the pane is restored and its shell is gone. |
 | `auto_resume` | Whether veld may run `resume` without being asked. Defaults to `false`. |
 | `close_on_exit` | Whether a **clean** exit closes the pane. Defaults to `true`. A non-zero exit never closes it. |
-| `allow_terminal_renaming` | Whether the process in the pane may rename its own tab with the terminal title it sets (OSC 0/2). Defaults to `false`. A plain terminal (a login shell, not a pane) always adopts its title; this opts a config pane in, because its `label` is how you navigate a rail full of agent panes. |
+| `fixed_label` | Whether the tab is pinned to `label`, ignoring any terminal title (OSC 0/2) the process sets. Defaults to `false`, so a pane adopts its process's title exactly as a plain terminal always has — for a coding agent that title is what it is working on, and a rail of identically-labelled panes tells you nothing. Set it for a pane whose `label` is a landmark worth more than whatever the tool would call itself. |
+
+`fixed_label` replaced an earlier key, `allow_terminal_renaming`, whose default
+was the opposite — a pane kept its `label` unless the repo opted in. That key is
+gone with no alias: delete it, whichever value it held. `veld lint` names it as
+an unknown key and the pane still works, but the schema's terminal branch is
+closed, so an editor or a schema check reports it as an error. Only a pane that
+set it to `false` changes behaviour, and `"fixed_label": true` is the
+replacement for that one. See
+[migrating-to-v3.md](migrating-to-v3.md#terminal-ergonomics).
 
 Nothing about this is specific to a vendor. Veld knows how to run a command in a
 terminal and how to hand it a stable token; which tool that is, and what its

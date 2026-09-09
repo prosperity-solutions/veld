@@ -163,12 +163,19 @@ export interface PaneTab {
    * pane is allowed to rename itself.
    *
    * Kept **off** the config-declared `title` so the pane's configured `label`
-   * survives as the thing a fresh pane (and a non-allowing pane) is named by:
-   * `allow_terminal_renaming` decides at *write time* whether this field is ever
-   * set, and `paneTabLabel` just prefers it when present. A plain terminal
-   * always fills it; a config pane only when its flag is on.
+   * survives as the thing a fresh pane (and a pinned pane) is named by:
+   * `fixed_label` decides at *write time* whether this field is ever set, and
+   * `paneTabLabel` just prefers it when present. A plain terminal always fills
+   * it; a config pane unless the project pinned its label.
+   *
+   * The type is [`AdoptedTermTitle`] and not `string` **so that the clamp
+   * cannot be skipped.** This is the one field on a tab whose content a process
+   * writes, and since a config pane adopts its title by default rather than by
+   * opting in, the population that can write it is now every declared pane. A
+   * second write site passing a raw OSC payload here is the natural mistake,
+   * and it is one the compiler refuses rather than one a convention asks for.
    */
-  termTitle?: string;
+  termTitle?: AdoptedTermTitle;
   /** `browser` only: where the pane opens, and where it returns after a
    *  reload. Kept in the layout rather than in `browserHost` because it is the
    *  one piece of a pane worth restoring — the page itself is re-fetchable. */
@@ -1177,8 +1184,180 @@ export interface PaneMount {
   spec: string;
   autoResume: boolean;
   closeOnExit: boolean;
-  /** Whether the pane's process may rename its tab with an OSC 0/2 title. */
-  allowTerminalRenaming: boolean;
+  /** Whether the tab is pinned to the pane's `label`, ignoring any OSC 0/2
+   *  title its process sets. */
+  fixedLabel: boolean;
+}
+
+/**
+ * Whether a pane's process may rename its tab with the terminal title it sets
+ * (OSC 0/2).
+ *
+ * A plain terminal — a login shell, so no `PaneMount` at all — always may, as
+ * it always has. A config-declared pane does too: for a coding agent that title
+ * names the task it is on, which is what tells four otherwise identical agent
+ * panes apart. `fixed_label` is the project's opt-out, for a pane whose `label`
+ * is a navigation landmark worth more than a live title.
+ */
+export function mayAdoptTerminalTitle(pane: PaneMount | undefined): boolean {
+  if (!pane) return true;
+  return !pane.fixedLabel;
+}
+
+/**
+ * How long an adopted terminal title may be. Matches the shell's own
+ * `MAX_TITLE_LEN` (`desktop/src/validate.js`), which bounds the same string on
+ * its way to a native title bar.
+ */
+export const MAX_TERM_TITLE = 200;
+
+/**
+ * A terminal title that has been through [`adoptedTermTitle`].
+ *
+ * A branded `string`, so it reads as one everywhere it is *used* and can only be
+ * *produced* by the one function that cleans it. `PaneTab.termTitle` is typed as
+ * this rather than `string` for the reason recorded there: a raw OSC payload
+ * reaching the field is the mistake worth a compiler error rather than a code
+ * comment.
+ */
+export type AdoptedTermTitle = string & { readonly __adoptedTermTitle: unique symbol };
+
+/**
+ * Clean up a terminal title before it becomes a tab's name.
+ *
+ * The raw OSC 0/2 payload is whatever the process wrote — xterm hands it over
+ * verbatim, up to its own 10-million-character limit — and since the flip it
+ * reaches a tab by default rather than by a repo opting in. So it is cleaned,
+ * once, here.
+ *
+ * **What the bound is for: rendering.** The title is drawn in the tab strip and
+ * its tooltip, and a detached window's native title is built from it
+ * (`paneTabLabel` → `desktopWindow.setTitle`, where the shell applies its own
+ * `safeTitle`). It is *not* a bound on any stored or transferred document —
+ * `layoutForPersistence` and `tabForTransport` keep the field out of those
+ * entirely, which is structural rather than a limit to respect. Do not
+ * re-justify `MAX_TERM_TITLE` in terms of a byte ceiling somewhere else; those
+ * were the reasons before the stripping existed, and they are all gone.
+ *
+ * Three things are removed. **Control characters**, which a tab strip draws as
+ * boxes. **Bidi controls**, which reorder a title on screen. **Zero-width and
+ * blank-rendering padding**, which pads one title out to look like another — and
+ * the other may be the pinned pane whose `label` is load-bearing
+ * (`Claude (skip permissions)`).
+ *
+ * **This is a legibility bound, not a spoofing defence, and the class is not
+ * exhaustive.** It covers the bidi controls and the common invisibles; Unicode
+ * has more of both, and homoglyphs (Cyrillic `а`) it cannot touch at all. Two
+ * consequences worth stating rather than discovering: a determined title can
+ * still come out looking like its neighbour, and a repo that needs a tab it can
+ * *trust* sets `fixed_label` — that is the guarantee, not this function. What is
+ * deliberately kept is the zero-width **joiner and non-joiner** (U+200C/200D)
+ * and the variation selectors: load-bearing in Arabic, Persian and several
+ * Indic scripts and in every multi-part emoji, so stripping them would mangle
+ * correct text to inconvenience an attacker who has better options.
+ *
+ * The clamp counts **code points, not UTF-16 code units**, because slicing a JS
+ * string at 200 units can land inside a surrogate pair and leave a lone
+ * surrogate — ill-formed UTF-16, which `JSON.stringify` emits and a strict JSON
+ * parser rejects outright. A bound that hands the next consumer an unparseable
+ * string is worse than no bound; `desktop/src/validate.js` slices the same field
+ * the same way, for the same reason.
+ *
+ * An empty result is `undefined` rather than `""`, which is what lets a title of
+ * `""` mean "back to the pane's `label`" — used by a fresh relaunch, where the
+ * previous conversation's title must not survive.
+ */
+export function adoptedTermTitle(raw: string): AdoptedTermTitle | undefined {
+  const text = raw
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    // Bidi controls (incl. the Arabic letter mark and both directional marks),
+    // the line and paragraph separators, and the characters that take a position
+    // while rendering as nothing: soft hyphen, zero-width space, word joiner,
+    // the invisible math operators, the byte-order mark, the Mongolian vowel
+    // separator, the deprecated format controls, and the Hangul fillers
+    // (halfwidth included). Not exhaustive, and not meant to be — see above.
+    // U+200C/200D and the variation selectors are deliberately absent.
+    .replace(
+      /[\u00ad\u061c\u115f\u1160\u180e\u200b\u200e\u200f\u2028\u2029\u202a-\u202e\u2060-\u2065\u2066-\u206f\u3164\ufeff\uffa0]/g,
+      "",
+    )
+    .trim();
+  if (text === "") return undefined;
+  // `Array.from` iterates code points, so a surrogate pair is one element and
+  // cannot be cut in half. `text` is non-empty and already trimmed at both ends,
+  // so its first code point survives the slice and `trimEnd` cannot remove it —
+  // there is no second empty case to check for here.
+  //
+  // This is also the only place the brand is minted, and everything above this
+  // line is the reason it is safe to.
+  return Array.from(text)
+    .slice(0, MAX_TERM_TITLE)
+    .join("")
+    .trimEnd() as AdoptedTermTitle;
+}
+
+/**
+ * A layout stripped of the fields nothing reads back, ready to persist.
+ *
+ * Today that is exactly one field: `termTitle`. `parseTab` deliberately does not
+ * read it back — an adopted title is display-only, and a reattach gets it from
+ * the process itself — so writing it was never restoring anything. What it *did*
+ * do, once every declared pane adopted a title by default rather than by opting
+ * in, is turn each title a process sets into a layout mutation: a `PUT`, a
+ * SQLite `IMMEDIATE` transaction and a `layout_changed` broadcast to every other
+ * client, per debounce window, for as long as a tool keeps its title live. The
+ * write debounce collapses one gesture; it does not collapse a stream.
+ *
+ * Two other problems go with it. A 10-million-character OSC payload is now
+ * structurally unable to reach `MAX_LAYOUT_BYTES`, whatever the clamp does. And
+ * the dedupe in `writeLayout` keys on this document, so a title change no longer
+ * counts as a change at all.
+ *
+ * Read and write are now symmetric, which is the property to keep: `termTitle`
+ * lives in memory for as long as the page does, and nowhere else.
+ */
+export function layoutForPersistence(layout: PaneLayout): PaneLayout {
+  let touched = false;
+  const docks = layout.docks.map((dock) => ({
+    ...dock,
+    tabs: dock.tabs.map((tab) => {
+      const stripped = tabForTransport(tab);
+      if (stripped !== tab) touched = true;
+      return stripped;
+    }),
+  })) as [Dock, Dock];
+  return touched ? { ...layout, docks } : layout;
+}
+
+/**
+ * One tab with the same fields stripped, for handing to another window.
+ *
+ * The sibling of [`layoutForPersistence`] for the *other* boundary a tab
+ * crosses. A detach or a cross-window move sends live `PaneTab`s through the
+ * shell's main process, and the receiving renderer runs them through `parseTab`
+ * — which drops `termTitle` exactly as a restore does. So carrying it there buys
+ * nothing and costs twice: against `MAX_TAB_BYTES`, which drops the offending
+ * tab from the transfer with nothing on screen to say a dragged pane went
+ * nowhere, and against `MAX_SEED_BYTES`, where a whole dock's worth is the
+ * difference between a new window opening and "Couldn't open a new window".
+ *
+ * With `layoutForPersistence` this makes the rule stateable: **`termTitle` never
+ * leaves the page as a field, and is never stored.** Three boundaries carry
+ * tabs out and all three strip it — the layout write (`layoutForPersistence`),
+ * a detach or cross-window move (`PaneArea`), and a detached window's retained
+ * snapshot (`App.tsx`). The shell truncates the field too, because a boundary
+ * defends itself.
+ *
+ * The title *text* does travel, on exactly one path: `paneTabLabel` feeds
+ * `desktopWindow.setTitle` so a detached window has a native title. That is a
+ * rendered string, bounded again by the shell's own `safeTitle`, not a tab field
+ * anything reads back — which is the distinction the rule above turns on.
+ */
+export function tabForTransport(tab: PaneTab): PaneTab {
+  if (tab.termTitle === undefined) return tab;
+  const { termTitle: _dropped, ...rest } = tab;
+  return rest;
 }
 
 /**
@@ -1440,9 +1619,8 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
       // shells: "Claude" and "Terminal 2" are different things in one strip.
       // `termTitle` is the title the process set via OSC 0/2 — written to the
       // layout only when the pane is allowed to rename itself (a plain
-      // terminal always is; a config pane only with
-      // `allow_terminal_renaming`), so reaching for it here is safe without
-      // re-checking the flag.
+      // terminal always is; a config pane unless it declares `fixed_label`),
+      // so reaching for it here is safe without re-checking the flag.
       return tab.termTitle || (tab.spec ? tab.title : terminalLabel(layout, tab.id));
     case "new":
       return "New pane";
@@ -1521,7 +1699,11 @@ export function layoutSlotKey(slot: string): string {
 }
 
 export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
-  return JSON.stringify(layouts);
+  const persistable: Record<number, PaneLayout> = {};
+  for (const [key, layout] of Object.entries(layouts)) {
+    persistable[Number(key)] = layoutForPersistence(layout);
+  }
+  return JSON.stringify(persistable);
 }
 
 /** The two `getItem`/`setItem` calls this module needs, so tests can pass fakes

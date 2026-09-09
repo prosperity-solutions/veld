@@ -981,7 +981,7 @@ with the reason on that second line.
 | `resume` | `{ argv }` or `{ shell }` — what to run when the pane is restored and its shell is gone. |
 | `auto_resume` | Default `false`. Ignored (with a lint problem) without `resume`. |
 | `close_on_exit` | Default `true`. Closes the pane on a **clean** exit only; a non-zero exit always keeps it so the error stays readable. Only fires on an exit someone saw, so it never competes with `auto_resume`. Note it also means a deliberate `/exit` never shows the Resume button — set `false` to stop and choose. |
-| `allow_terminal_renaming` | Default `false`. Whether the process in the pane may rename its own tab with the terminal title it sets (OSC 0/2). A plain terminal always adopts its title; this opts a config pane in, because its `label` is how you navigate a rail full of agent panes. |
+| `fixed_label` | Default `false`. Pins the tab to `label`, ignoring the terminal title (OSC 0/2) the process sets. Left unset, a pane adopts that title like a plain terminal always has — for a coding agent it names the task, which is what tells four agent panes apart. Set it where `label` is the landmark (`Claude (skip permissions)` must not become a task name). Replaced `allow_terminal_renaming`, whose default was the opposite; the old key is now an unknown-key lint warning and the pane keeps working. |
 
 **`${veld.pane.token}` is the whole trick.** Veld mints a UUID the first time a
 pane launches, remembers it against that pane in its database, and interpolates

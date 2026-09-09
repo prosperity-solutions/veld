@@ -2460,8 +2460,9 @@ struct PaneView {
     auto_resume: bool,
     /// Whether a clean exit closes the pane.
     close_on_exit: bool,
-    /// Whether the pane's process may rename its tab with an OSC 0/2 title.
-    allow_terminal_renaming: bool,
+    /// Whether the tab is pinned to the pane's `label`, ignoring any OSC 0/2
+    /// title its process sets.
+    fixed_label: bool,
 }
 
 /// A config-declared extension as the UI needs to see it.
@@ -2688,7 +2689,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
                         can_resume: terminal.resume.is_some(),
                         auto_resume: terminal.auto_resume,
                         close_on_exit: terminal.close_on_exit,
-                        allow_terminal_renaming: terminal.allow_terminal_renaming,
+                        fixed_label: terminal.fixed_label,
                     }
                 })
                 .collect();

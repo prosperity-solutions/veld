@@ -331,4 +331,18 @@ export const PROMOTIONS: Promotion[] = [
       "A second checkout starts exactly where one you are working in is — staged, unstaged and untracked files and all. Spin off…, in a worktree's ⋯ menu.",
     glyph: "panes",
   },
+  {
+    // A default that flipped, which is the shape this channel is for: nobody
+    // goes looking for it, and everybody sees their tabs change. The headline
+    // is the question the rail now answers rather than the sequence it parses,
+    // and the body spends its last clause on the opt-out because somebody whose
+    // `label` was the landmark needs to know it is still available.
+    id: "pane-tabs-name-the-task",
+    since: "2026-09-09",
+    eyebrow: "Changed",
+    headline: "Know which agent pane is on which task",
+    body:
+      "A pane your project declares now takes the title its tool sets, so four Claude tabs read as four tasks. Pin one back with fixed_label in veld.json.",
+    glyph: "terminal",
+  },
 ];
