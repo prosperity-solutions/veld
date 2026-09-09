@@ -360,8 +360,39 @@ test("mailtoAddress still accepts an internationalised address", () => {
   assert.equal(mailtoAddress("mailto:%E7%94%B0%E4%B8%AD@example.jp"), "田中@example.jp");
 });
 
+/**
+ * `dispatchContextMenuAction`'s body, read out of `browserViews.js` as text.
+ *
+ * Text, because `browserViews.js` requires `electron` and cannot be loaded under
+ * `node --test`. **Shared by both gates below on purpose:** an earlier version
+ * inlined this twice, and the copy in the meta-test had dropped the
+ * "did we actually find it" assertion — so renaming the function made
+ * `source.slice(-1, …)` return `""` and both of the meta-test's assertions passed
+ * against an empty string. The test whose job is to prove the gate is
+ * load-bearing became the one test that checked nothing. One helper, one set of
+ * guards, both callers.
+ */
+function dispatchBody() {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  const source = fs.readFileSync(path.join(__dirname, "browserViews.js"), "utf8");
+  const marker = "function dispatchContextMenuAction(";
+  const from = source.indexOf(marker);
+  assert.notEqual(from, -1, "dispatchContextMenuAction not found in browserViews.js — renamed?");
+  // The function ends at the first `}` in column zero after it, which is the
+  // file's own formatting convention throughout.
+  const to = source.indexOf("\n}\n", from);
+  assert.notEqual(to, -1, "could not find the end of dispatchContextMenuAction");
+  const body = source.slice(from, to);
+  // The slice has to be the real thing, or every assertion built on it is vacuous.
+  assert.ok(body.length > 0, "sliced an empty dispatch body");
+  assert.ok(body.includes("switch (id)"), "slice does not contain the dispatch switch");
+  assert.ok(!body.includes("veld:browser:command"), "slice leaked into the IPC handler");
+  return { source, body };
+}
+
 test("every id the builder can emit is dispatched in browserViews.js", () => {
-  // The drift gate. `MENU_IDS`, `contextMenuItems` and `runContextMenuAction`'s
+  // The drift gate. `MENU_IDS`, `contextMenuItems` and `dispatchContextMenuAction`'s
   // switch are three lists in two files with nothing tying them together, and the
   // switch's `default: break` makes a mismatch a menu row that silently does
   // nothing — no error, no log, nothing anybody sees. So: assert the builder
@@ -375,22 +406,7 @@ test("every id the builder can emit is dispatched in browserViews.js", () => {
   // three `case` labels, so all three could be deleted from the menu dispatch and
   // this test would still be green. A gate with three fake assertions in it is
   // worse than no gate, because it is believed.
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const source = fs.readFileSync(path.join(__dirname, "browserViews.js"), "utf8");
-
-  const marker = "function dispatchContextMenuAction(";
-  const from = source.indexOf(marker);
-  assert.notEqual(from, -1, "dispatchContextMenuAction not found — did it get renamed?");
-  // The function ends at the first `}` in column zero after it, which is the
-  // file's own formatting convention throughout.
-  const to = source.indexOf("\n}\n", from);
-  assert.notEqual(to, -1, "could not find the end of dispatchContextMenuAction");
-  const body = source.slice(from, to);
-
-  // The slice has to be the real thing, or every assertion below is vacuous.
-  assert.ok(body.includes("switch (id)"), "slice does not contain the dispatch switch");
-  assert.ok(!body.includes("veld:browser:command"), "slice leaked into the IPC handler");
+  const { body } = dispatchBody();
 
   for (const id of MENU_IDS) {
     assert.ok(
@@ -431,11 +447,7 @@ test("the drift gate would actually fail if a case went missing", () => {
   // body, removes the `back` case the way a careless edit would, and confirms the
   // assertion the gate makes no longer holds. Without the slice this passed
   // anyway, because `veld:browser:command` supplies the same label.
-  const fs = require("node:fs");
-  const path = require("node:path");
-  const source = fs.readFileSync(path.join(__dirname, "browserViews.js"), "utf8");
-  const from = source.indexOf("function dispatchContextMenuAction(");
-  const body = source.slice(from, source.indexOf("\n}\n", from));
+  const { source, body } = dispatchBody();
 
   const withoutBack = body.replace('case "back":', "");
   assert.ok(!withoutBack.includes('case "back":'), "meta-test removed nothing");

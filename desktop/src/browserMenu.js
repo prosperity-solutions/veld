@@ -273,7 +273,7 @@ function contextMenuItems(params, caps) {
  * Every id `contextMenuItems` can emit.
  *
  * Exported so `browserMenu.test.js` can hold this list and
- * `runContextMenuAction`'s `switch` in `browserViews.js` together. Nothing else
+ * `dispatchContextMenuAction`'s `switch` in `browserViews.js` together. Nothing else
  * does: they are two independent lists in two files, and the `switch`'s
  * `default: break` makes a drift between them a menu row that silently does
  * nothing rather than an error anybody sees.

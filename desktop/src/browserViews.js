@@ -1012,6 +1012,12 @@ function popupContextMenu(window, viewId, entry, params) {
       ...(params?.menuSourceType ? { sourceType: params.menuSourceType } : {}),
     });
   } catch (error) {
+    // A throw *after* `openMenus.set` would leave an entry whose
+    // `menu-will-close` can never fire, since the menu never showed. It self-heals
+    // — the next right-click's `closeContextMenu`, or dispose, clears it — but
+    // until then `closeContextMenu` would call `closePopup` on a menu that was
+    // never up and warn about it. A no-op when nothing was set.
+    openMenus.delete(menuKey(window, viewId));
     // Swallowed with a warning: this runs inside a `webContents` event handler in
     // the main process, where an uncaught throw is Electron's modal error box
     // rather than a stack trace nobody sees. No menu is worse than a menu; a
