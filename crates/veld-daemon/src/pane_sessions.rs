@@ -367,6 +367,26 @@ async fn evaluate(
     // Falling back to the pane id keeps a spec that cannot interpolate — which
     // `run_one` is about to report as failed anyway — from sharing a cell with an
     // unrelated one.
+    // **Before the cell, because it is the pane's answer and the cell is shared.**
+    // Two panes may run one lister and declare different `requires_bin`; keyed on
+    // the command, whichever missed the cache first would otherwise decide "the
+    // binary is missing" for both, and `mine` cannot correct it because `state`
+    // and `message` are the half that legitimately *is* shared.
+    if let Some(missing) = missing_pane_binaries(&pane.requires_bin).first() {
+        // `empty`, so the card is left exactly as the worktree listing drew it —
+        // which already names the missing binary on that card's own line
+        // (`PaneView::missing`). The message here is for whoever is reading the
+        // endpoint, not for the UI, which renders nothing for this state; saying
+        // it twice on one card is how two surfaces start disagreeing.
+        return PaneSessionsView {
+            id: pane.id.clone(),
+            label: picker.label.clone(),
+            ask_first: picker.ask_first,
+            state: "empty",
+            sessions: Vec::new(),
+            message: Some(format!("{missing} is not installed on this machine")),
+        };
+    }
     let key = interpolated(&picker.command, builtins).unwrap_or_else(|| pane.id.clone());
     let cell = cell(root, declare_root, &key);
     // Held across the run on purpose: a second chooser opening mid-run waits
@@ -419,21 +439,6 @@ async fn run_one(
         sessions: Vec::new(),
         message,
     };
-
-    // The same gate the pane itself is behind. Running a lister for a pane the
-    // user cannot start would spend a subprocess to populate a picker attached
-    // to a disabled card.
-    if let Some(missing) = missing_pane_binaries(&pane.requires_bin).first() {
-        // `empty`, so the card is left exactly as the worktree listing drew it —
-        // which already names the missing binary on that card's own line
-        // (`PaneView::missing`). The message here is for whoever is reading the
-        // endpoint, not for the UI, which renders nothing for this state; saying
-        // it twice on one card is how two surfaces start disagreeing.
-        return base(
-            "empty",
-            Some(format!("{missing} is not installed on this machine")),
-        );
-    }
 
     // `root` is the cwd, `declare_root` is what a relative `argv[0]` resolves
     // against — so a main-declared `scripts/veld/…` lister runs *main's* copy of
@@ -575,12 +580,19 @@ fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Par
             skipped += 1;
             continue;
         }
-        let label = fields.next().map(str::trim).filter(|s| !s.is_empty());
-        let detail = fields.next().map(str::trim).filter(|s| !s.is_empty());
+        // **Sanitised before the emptiness test, not after.** A field of nothing
+        // but bidi overrides is non-empty as written and empty once cleaned, so
+        // deciding first gave the row a blank label where the value should have
+        // stood in — the one outcome `bare_ids_need_no_adapter` exists to
+        // prevent — and a blank second line under it.
+        let clean = |f: Option<&str>| f.map(|s| sanitize(s)).filter(|s: &String| !s.is_empty());
+        let mut fields = fields.map(str::trim);
+        let label = clean(fields.next());
+        let detail = clean(fields.next());
         rows.push(SessionRow {
             value: value.to_owned(),
-            label: clip(&sanitize(label.unwrap_or(value)), MAX_SESSION_LABEL_CHARS),
-            detail: detail.map(|d| clip(&sanitize(d), MAX_SESSION_LABEL_CHARS)),
+            label: clip(label.as_deref().unwrap_or(value), MAX_SESSION_LABEL_CHARS),
+            detail: detail.map(|d| clip(&d, MAX_SESSION_LABEL_CHARS)),
             in_use: taken.contains(value),
         });
     }
@@ -807,6 +819,16 @@ mod tests {
         // The value itself never needed this: `is_session_value` already refuses
         // every character involved.
         assert_eq!(out.rows[0].value, "abc");
+    }
+
+    #[test]
+    fn a_label_that_sanitises_to_nothing_falls_back_to_the_value() {
+        // A field of nothing but bidi overrides is non-empty as written and empty
+        // once cleaned. Deciding "is there a label" before cleaning gave the row
+        // a blank line where the id should have been.
+        let out = parsed("abc\t\u{202e}\t\u{202d}\n", false);
+        assert_eq!(out.rows[0].label, "abc");
+        assert_eq!(out.rows[0].detail, None);
     }
 
     #[test]

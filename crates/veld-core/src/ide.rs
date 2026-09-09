@@ -1147,12 +1147,26 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
     for (index, item) in items.iter().enumerate() {
         let at = format!("ide.panes[{index}]");
         if let Some(mut pane) = parse_pane(item, &at, out) {
-            // **The picker is dropped, never the pane.** Applied to *accepted*
-            // panes so a config over the cap keeps its first eight pickers
-            // rather than losing all of them, and reported against the entry
-            // that lost one so the author knows which. The pane itself is
-            // untouched: it launches, resumes and auto-resumes as it would if it
-            // had never declared a lister.
+            if out.panes.iter().any(|p| p.id == pane.id) {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.id"),
+                    message: format!(
+                        "duplicate pane id {:?} — the first one wins and this entry was dropped",
+                        pane.id
+                    ),
+                });
+                continue;
+            }
+            // **After the duplicate check**, so an entry about to be discarded
+            // entirely does not first collect a "the pane itself is unaffected"
+            // problem about a pane that is not going to exist.
+            //
+            // **The picker is dropped, never the pane.** Counted over *accepted*
+            // panes so a config over the cap keeps its first eight pickers rather
+            // than losing all of them, and reported against the entry that lost
+            // one so the author knows which. The pane is untouched: it launches,
+            // resumes and auto-resumes as it would if it had never declared a
+            // lister.
             if declares_sessions(&pane)
                 && out.panes.iter().filter(|p| declares_sessions(p)).count()
                     >= MAX_PANE_SESSION_LISTERS
@@ -1167,16 +1181,6 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
                 });
                 let PaneBody::Terminal(terminal) = &mut pane.body;
                 terminal.sessions = None;
-            }
-            if out.panes.iter().any(|p| p.id == pane.id) {
-                out.problems.push(IdeProblem {
-                    location: format!("{at}.id"),
-                    message: format!(
-                        "duplicate pane id {:?} — the first one wins and this entry was dropped",
-                        pane.id
-                    ),
-                });
-                continue;
             }
             out.panes.push(pane);
         }
@@ -4656,6 +4660,18 @@ mod tests {
             .count();
         assert_eq!(with_pickers, MAX_PANE_SESSION_LISTERS);
         assert_eq!(parsed.problems.len(), 2, "one per dropped picker");
+
+        // A duplicate id that would also trip the cap is discarded as a
+        // duplicate and says only that — one entry, one reason.
+        let mut with_dupe = panes.clone();
+        with_dupe.push(pane(0));
+        let dupes = section(json!({ "panes": with_dupe }));
+        let cap_problems = dupes
+            .problems
+            .iter()
+            .filter(|p| p.message.contains("picker was dropped"))
+            .count();
+        assert_eq!(cap_problems, 2, "the duplicate must not add a third");
 
         // **No run of spaces in a message a user reads.** `cargo fmt` reflows a
         // wrapped string literal and silently swallows a missing `\`
