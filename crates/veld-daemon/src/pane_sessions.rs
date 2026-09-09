@@ -697,7 +697,7 @@ mod tests {
                 sessions: None,
                 auto_resume: false,
                 close_on_exit: true,
-                allow_terminal_renaming: false,
+                fixed_label: false,
             }),
         };
         let picker = SessionsPicker {
