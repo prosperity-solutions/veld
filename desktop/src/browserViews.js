@@ -55,6 +55,22 @@ const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
 const { safeAreaPayload } = require("./safeArea");
 // The permission policy is likewise its own tested, Electron-free module.
 const permissions = require("./permissions");
+// Whether a focus a browser pane just took belongs to the page's load or to the
+// user — an Electron-free rule, in its own module for the same reason as the two
+// above, and the only part of the focus guard that can be unit-tested.
+const { isLoadFocus } = require("./focusSteal");
+
+/**
+ * Input events that mean "the user pressed on this page".
+ *
+ * Wider than `mouseDown` because this file turns touch emulation on for a pane
+ * showing a device (`Emulation.setEmitTouchEventsForMouse`), and Chromium reports
+ * a press through whichever of these families the pane is configured for. Missing
+ * the one that fires would leave the user with no way to force focus into a
+ * mobile-emulated pane that keeps reloading — the exact hole the press signal is
+ * here to close. Costs nothing to be generous: every one of them is a press.
+ */
+const PRESS_EVENTS = new Set(["mouseDown", "pointerDown", "touchStart", "gestureTapDown"]);
 
 /**
  * Per-window view cap.
@@ -82,12 +98,42 @@ const MAX_VIEWS_PER_WINDOW = 16;
  *            touchActive: boolean, mediaActive: boolean, safeAreaActive: boolean,
  *            safeAreaApplied: SafeAreaInsets|null,
  *            frameReady: boolean, emulated: boolean, dragging: boolean,
+ *            focused: boolean, navStartedAt: number, requestedAt: number,
  *            touchQueue: Promise<void>|undefined}} Entry
  */
 
 /** window.id → (viewId → Entry) */
 /** @type {Map<number, Map<string, Entry>>} */
 const byWindow = new Map();
+
+/**
+ * The view that last legitimately took the keyboard, per window — `undefined`
+ * when that was the `/ide` renderer itself.
+ *
+ * Written only on an *accepted* focus, never on blur, and that asymmetry is the
+ * whole point. When one pane steals focus from another, Chromium blurs the old
+ * one before it focuses the new one, so by the time the steal is refused the
+ * loser has already been forgotten if blur cleared this. Keeping the last
+ * accepted answer is what lets the keyboard go back to the pane it came from
+ * rather than to the host page.
+ */
+/** @type {Map<number, string>} */
+const focusOwner = new Map();
+
+/**
+ * The clock both of the focus guard's windows are measured against.
+ *
+ * `performance.now()`, **not `Date.now()`**: these are two durations of a few
+ * hundred milliseconds, and wall clock is not monotonic. An NTP correction or a
+ * manual clock change stepping *backwards* makes an arbitrarily old press look
+ * like it just happened, which turns the guard off for that pane until wall clock
+ * catches up — an hour's step is an hour with the fix disabled. A step *forwards*
+ * (the usual shape of a sleep/wake) expires an in-flight navigation's window and
+ * lets one steal through. Neither is reachable with a monotonic source.
+ */
+function guardNow() {
+  return performance.now();
+}
 
 function entriesFor(windowId) {
   const existing = byWindow.get(windowId);
@@ -586,8 +632,76 @@ function applyEmulation(window, viewId, entry) {
  * the next one that starts, so the pane can show *why* it is blank instead of
  * just being blank.
  */
+/**
+ * Windows whose own `webContents` is already reporting when it takes the keyboard.
+ *
+ * A `WeakSet` on the window rather than a set of ids: nothing has to unregister it,
+ * and a destroyed window takes its entry with it.
+ */
+const hostFocusTracked = new WeakSet();
+
+/**
+ * Notice when the `/ide` page itself takes the keyboard back.
+ *
+ * The counterpart to the `focusOwner` write in a view's `focus` listener: without
+ * it, clicking out of a pane and into the app leaves this map still naming that
+ * pane, and the next refused steal would hand the keyboard to a view the user had
+ * left rather than to the page they are in.
+ */
+function trackHostFocus(window) {
+  if (hostFocusTracked.has(window)) return;
+  hostFocusTracked.add(window);
+  window.webContents.on("focus", () => focusOwner.delete(window.id));
+}
+
+/**
+ * Undo a focus a page load took: give the keyboard back to whoever had it.
+ *
+ * Synchronous, inside the `focus` listener — measured as the one that works. The
+ * hand-back lands 1-2 ms after the steal, before a keystroke can fall down the
+ * gap, and the guest's `blur` follows immediately rather than the two fighting.
+ *
+ * The destination is the last view to take focus legitimately, so that a pane
+ * reloading in one dock cannot empty the keyboard out of a pane the user is typing
+ * in in the other. With no such view — or one that has since gone — it is the
+ * `/ide` renderer, which restores its own document's `activeElement` and so puts
+ * the caret back in the terminal it was in.
+ */
+function handBackFocus(window, viewId) {
+  if (window.isDestroyed()) return;
+  // **Nothing to hand back while this window is not the key one.** Measured on
+  // Electron 43: a view raises no `focus` event at all once its window loses OS
+  // focus, so this is a guard against a state that has not been observed rather
+  // than a live branch — and it stays because the cost of being wrong is the bug
+  // one layer up. `focus()` on a background window is how AppKit is asked to make
+  // it key, so a refused steal in a window the user is not in would raise Veld
+  // over whatever application they *are* in, once per refresh. The keyboard is not
+  // in this window; there is nothing here to restore.
+  if (!window.isFocused()) return;
+  const owner = focusOwner.get(window.id);
+  // `byWindow.get`, not `entriesFor`: this is a lookup, and `entriesFor` would mint
+  // an empty map for a window whose views have already been disposed.
+  const previous = owner !== undefined && owner !== viewId
+    ? byWindow.get(window.id)?.get(owner)
+    : undefined;
+  if (previous && !previous.view.webContents.isDestroyed()) {
+    // **Vouched for, exactly as the IPC `focus` command is.** The steal blurred
+    // this view on its way past, so its `focused` is already false — and if it is
+    // itself an auto-refreshing preview, its own navigation window may still be
+    // open. Without this, handing the keyboard back to it would be refused as a
+    // load-steal in turn, and the second hand-back finds `owner === viewId`, falls
+    // through to the host, and empties the keyboard out of the pane the user is
+    // typing in. Two dev-server previews, one per dock, is all that takes.
+    previous.requestedAt = guardNow();
+    previous.view.webContents.focus();
+    return;
+  }
+  if (!window.webContents.isDestroyed()) window.webContents.focus();
+}
+
 function attachListeners(window, viewId, entry) {
   const wc = entry.view.webContents;
+  trackHostFocus(window);
   const push = (error) => send(window, "veld:browser:state", stateOf(viewId, entry, error));
 
   wc.on("did-start-loading", () => push(null));
@@ -722,7 +836,52 @@ function attachListeners(window, viewId, entry) {
   //
   // Reported rather than inferred: only this process can see the native focus,
   // and the renderer resolves the view id back to the dock its tab sits in.
-  wc.on("focus", () => send(window, "veld:browser:focused", { viewId }));
+  wc.on("focus", () => {
+    // **A page load must not move the keyboard.** See [`isLoadFocus`] for what
+    // Chromium does here and why a hidden pane could empty the keyboard out of
+    // the terminal the user was typing in, once per `<meta refresh>`.
+    if (isLoadFocus(entry, guardNow())) {
+      handBackFocus(window, viewId);
+      // Deliberately no *new* `veld:browser:focused` from this view: the focused
+      // dock did not move, and saying it did would hand ⌘W a target the user never
+      // chose. (The hand-back can still make the pane that *does* hold the keyboard
+      // re-announce itself — same view id, so the renderer's updater returns the
+      // same layout and nothing re-renders. Only the host-branch hand-back is
+      // silent end to end, which is the case the "0 messages" measurement covers.)
+      return;
+    }
+    entry.focused = true;
+    focusOwner.set(window.id, viewId);
+    send(window, "veld:browser:focused", { viewId });
+  });
+
+  // Cleared on any blur, deliberately unlike `focusOwner` above. The asymmetry
+  // there exists because a steal blurs the previous holder before focusing the
+  // thief; this field is about *this* view only, and a view that has lost the
+  // keyboard has lost it. It survives the case that matters — a focused pane
+  // reloading itself raises `focus` again with no `blur` between, measured — see
+  // [`isLoadFocus`], which records why that fact is written down.
+  wc.on("blur", () => {
+    entry.focused = false;
+  });
+
+  // The navigation half of the focus guard. Main frame only, and cross-document
+  // only: a subframe cannot take the window's keyboard on its own, and a
+  // same-document (fragment / `pushState`) navigation keeps the frame it already
+  // had — neither raises the focus this guard is about, and treating them as if
+  // they did would refuse a click that lands next to a single-page app's routing.
+  //
+  // **Only the start is recorded — there is deliberately no "and the load has not
+  // finished yet" half.** The first version had one, and it was a race the
+  // measurements themselves show: the steal lands 2-26 ms after the navigation
+  // starts, `did-stop-loading` 5-125 ms after, and every observed margin between
+  // them was 3-20 ms. A load finishing inside that margin would have cleared the
+  // flag before the focus it exists to refuse arrived. Recency alone cannot race,
+  // and nothing is lost — see [`isLoadFocus`].
+  wc.on("did-start-navigation", (details) => {
+    if (!details.isMainFrame || details.isSameDocument) return;
+    entry.navStartedAt = guardNow();
+  });
 
   wc.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown") return;
@@ -870,6 +1029,21 @@ function attachListeners(window, viewId, entry) {
   // bounds handler does — so the page receives the coordinates its own
   // `pointermove` would have carried.
   wc.on("input-event", (_e, input) => {
+    // **A press on the page is the user asking for the keyboard**, and it outranks
+    // the load guard above — which cannot otherwise tell a click into a pane that
+    // is still loading from Chromium's own refocus, and so refused it.
+    //
+    // Recorded *and acted on*, because the order in which Chromium reports the
+    // press and raises the focus is not something this process can depend on:
+    // recording alone loses the case where the focus came first and was already
+    // refused, and re-focusing alone loses the case where the press came first
+    // and the focus behind it would be refused in turn. Together they are
+    // ordering-independent. Re-focusing is skipped when the view already has the
+    // keyboard, so an ordinary click inside a focused page costs nothing.
+    if (PRESS_EVENTS.has(input.type)) {
+      entry.requestedAt = guardNow();
+      if (!entry.focused && !wc.isDestroyed()) wc.focus();
+    }
     if (!entry.dragging) return;
     if (input.type !== "mouseMove" && input.type !== "mouseUp") return;
     if (window.isDestroyed() || window.webContents.isDestroyed()) return;
@@ -1507,6 +1681,9 @@ function disposeEntry(window, entry, viewId) {
   // A prompt this pane raised can no longer be answered — its chrome is going
   // away — and the page behind it is blocked on the callback.
   if (viewId !== undefined) abandonPrompts({ windowId: window.id, viewId });
+  // A closed pane must not be handed the keyboard back later — the entry is about
+  // to be unreachable and its `webContents` destroyed.
+  if (focusOwner.get(window.id) === viewId) focusOwner.delete(window.id);
   // A view disposed mid-gesture must not stay armed: nothing else clears this once the
   // entry is unreachable, and a forwarding view costs a cursor read and an IPC message
   // per mouse move.
@@ -1540,6 +1717,7 @@ function disposeWindow(window) {
   // answered, and the page behind it is blocked on the callback.
   abandonPrompts({ windowId: window.id });
   policyByWindow.delete(window.id);
+  focusOwner.delete(window.id);
   const entries = byWindow.get(window.id);
   if (!entries) return;
   for (const [viewId, entry] of entries) disposeEntry(window, entry, viewId);
@@ -1692,6 +1870,17 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       // Set only while the page is dragging this screen's edge; see the
       // `input-event` listener for what it turns on and why.
       dragging: false,
+      // The focus guard's state — whether this view holds the keyboard, when its
+      // last main-frame navigation started, and when the keyboard was last
+      // *asked* to come here. Both stamps are [`guardNow`]'s clock, not wall
+      // clock. See [`isLoadFocus`].
+      focused: false,
+      // `-Infinity`, not `0`, for both: these mean "has not happened", and a zero
+      // reads as "happened at the clock's origin" — which for a monotonic clock is
+      // process start, so a pane created in the first second of the app's life
+      // would have started life inside both windows.
+      navStartedAt: Number.NEGATIVE_INFINITY,
+      requestedAt: Number.NEGATIVE_INFINITY,
     };
     entries.set(viewId, entry);
     window.contentView.addChildView(view);
@@ -1951,6 +2140,12 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
         wc.stop();
         break;
       case "focus":
+        // Recorded before the call, not after: this is the app asking for the
+        // keyboard, and the load guard must not mistake it for a page taking it.
+        // Without this a `focus` command landing while the pane happened to be
+        // mid-navigation was swallowed, and the handler still resolved — an
+        // explicit request refused with no signal back. See [`isLoadFocus`].
+        found.entry.requestedAt = guardNow();
         wc.focus();
         break;
       default:
