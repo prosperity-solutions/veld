@@ -448,6 +448,17 @@ pub fn is_session_value(value: &str) -> bool {
     if value.chars().count() > MAX_SESSION_VALUE_CHARS {
         return false;
     }
+    // **No `..` anywhere.** The charset above makes the value inert as a *shell
+    // token*, which is the hazard the doc comment names — but it permits `/` and
+    // `.`, so it is not inert as a *path*, and a `resume` that uses the token as
+    // one is the natural shape for a file-backed tool
+    // (`--transcript ~/.agent/${veld.pane.token}.jsonl`). Without this,
+    // `a/../../../../etc/passwd` passes. Rejecting the two characters together
+    // rather than `/` alone keeps a path-shaped handle usable, which is why `/`
+    // is in the set at all.
+    if value.contains("..") {
+        return false;
+    }
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '@' | '/'))
 }
 
@@ -4686,6 +4697,12 @@ mod tests {
             // own flag parser reads this as an option.
             "-r",
             "--dangerously-skip-permissions",
+            // Inert in a shell, *not* inert as a path — and a `resume` using the
+            // token as a path component is the natural shape for a file-backed
+            // tool.
+            "a/../../../../etc/passwd",
+            "..",
+            "a..b",
             // Non-ASCII is not a session id in any tool we know of, and letting
             // it through would put homoglyphs in a value nobody reads closely.
             "sessión",

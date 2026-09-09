@@ -1183,6 +1183,11 @@ export interface PaneSessionRow {
   label: string;
   /** A quieter second line, when the script wrote a third field. */
   detail?: string;
+  /** Whether a pane in this worktree currently has this session open. The
+   *  daemon computes it — the client is never told a pane's token, so it
+   *  cannot — and `resolve_pane` refuses the adopt regardless. This is only so
+   *  the row can say so *before* the click. */
+  in_use?: boolean;
 }
 
 /** One pane's answer from `paneSessionOptions`. Mirrors `PaneSessionsView`. */

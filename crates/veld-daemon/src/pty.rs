@@ -1606,6 +1606,20 @@ async fn resolve_pane(
                     "that is not a session id veld will pass to a command",
                 ));
             }
+            // **Refused here and not only in the picker**, because the picker
+            // cannot be the guard: the client is never told a pane's token (see
+            // `Db::resumable_panes`), so it can only render what this daemon
+            // marked, and a request that skipped the UI is exactly the case a
+            // client-side check misses. Two panes on one transcript is silent
+            // corruption of the user's own conversation, which is why this is a
+            // refusal rather than a warning.
+            if live_pane_tokens(worktree_id).await.contains(picked) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "that session is already open in another pane — close it, or \
+                     pick a different one",
+                ));
+            }
             // **The row has to be written.** This is not a fresh start, but the
             // token has never been in the ledger — veld did not mint it — and the
             // ledger is the only thing that makes the pane resumable later. Without
@@ -1670,6 +1684,32 @@ async fn resolve_pane(
         token,
         record_token,
     })
+}
+
+/// The tokens this worktree has recorded whose session is **still live in this
+/// daemon** — i.e. a pane somewhere currently has that conversation open.
+///
+/// Exists for one reason: adopting a session a second pane is already running
+/// means two agents writing one transcript, which corrupts it. A *recorded*
+/// token is not enough to refuse on — a pane closed last week left a row and its
+/// conversation is perfectly fine to reopen — so liveness is the question, and
+/// only the registry can answer it.
+pub(crate) async fn live_pane_tokens(worktree_id: i64) -> std::collections::HashSet<String> {
+    let Ok(db) = veld_core::db::Db::open() else {
+        // Fail *open*, deliberately. This gate exists to prevent an accident, not
+        // an attack — the same user could run `claude --resume X` twice in two
+        // terminals — so a database that will not open must not also stop
+        // somebody resuming a conversation.
+        return std::collections::HashSet::new();
+    };
+    let Ok(rows) = db.pane_tokens(worktree_id) else {
+        return std::collections::HashSet::new();
+    };
+    let sessions = SESSIONS.lock().await;
+    rows.into_iter()
+        .filter(|(session_id, _)| sessions.contains_key(session_id))
+        .map(|(_, token)| token)
+        .collect()
 }
 
 /// Whether a launch in this mode runs under a token the `pane_sessions` ledger

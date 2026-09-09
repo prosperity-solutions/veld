@@ -2338,13 +2338,26 @@ function PaneSessionsModal(props: {
           <button
             key={row.value}
             className="session-row"
+            // Listed, not hidden. A conversation missing from the list with no
+            // explanation reads as lost; the row is the only place the reason
+            // fits. `aria-disabled` rather than `disabled` for the reason the
+            // pane cards use it — a disabled button dispatches no pointer
+            // events, so its tooltip could never open.
+            aria-disabled={row.in_use || undefined}
+            title={
+              row.in_use
+                ? "Already open in another pane — close that one, or pick a different session"
+                : undefined
+            }
             onClick={() => {
-              if (spec) props.onPick(spec, row.value);
+              if (spec && !row.in_use) props.onPick(spec, row.value);
             }}
           >
             <span className="session-row-main">{row.label}</span>
-            {row.detail ? (
-              <span className="session-row-sub">{row.detail}</span>
+            {row.detail || row.in_use ? (
+              <span className="session-row-sub">
+                {row.in_use ? "Open in another pane" : row.detail}
+              </span>
             ) : null}
           </button>
         ))}
@@ -2372,17 +2385,27 @@ function PaneButton(props: {
   // "there is something to say": rows to pick from, or a lister that failed and
   // whose author needs to see it.
   //
-  // Two states are deliberately *not* that, and both must leave the card exactly
-  // as it was before this feature existed — not merely un-clickable:
+  // **An allow-list, not an exclude-list, and that polarity is the point.** The
+  // states that say something are named here; every other state — including one
+  // added to `PaneSessionsView` later by somebody who never opens this file —
+  // leaves the card exactly as it was before this feature existed.
   //
-  // - `empty` — the project's script said "nothing here". The common answer.
-  // - `off` — the *user* turned project commands off machine-wide. Their own
-  //   choice, already explained in Settings, and the docs promise the panes
-  //   themselves are untouched. An earlier cut let this one through and every
-  //   declaring pane lost its description to a settings message and grew a dead
-  //   "0 earlier" button.
+  // Written the other way round first, and it shipped the bug that proves the
+  // rule: `off` (the user turned project commands off machine-wide) was not in
+  // the exclusion list, so every declaring pane lost its description to a
+  // settings message and grew a dead "0 earlier" button. An exclude-list makes
+  // "offer it" the default for anything unforeseen, which is the wrong default
+  // for a control that rewrites a card.
+  //
+  // - `ok` — rows to pick from.
+  // - `failed` / `timeout` — the project's script is broken and its author is
+  //   the only one who can fix it, so it must be visible rather than silent.
+  // - everything else (`empty`, `off`, anything future) — say nothing.
   const offers =
-    answer !== undefined && answer.state !== "empty" && answer.state !== "off";
+    answer !== undefined &&
+    (answer.state === "ok" ||
+      answer.state === "failed" ||
+      answer.state === "timeout");
   const asks = offers && answer.ask_first;
   const count = offers ? answer.sessions.length : 0;
   const card = (

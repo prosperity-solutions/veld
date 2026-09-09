@@ -230,10 +230,13 @@ the first user message out of the JSONL for the row's label, which is what turns
 BSD (macOS) and GNU, and `find -printf` is GNU-only. Handle both or your picker
 works on one developer's machine.
 
-### Worked adapter: Codex
+### Codex: the config half is the interesting half
 
-`codex` mints its own ids, and its default pane shape (`codex resume --last`)
-cannot take a pick. To give Codex a picker, change `resume` to accept an id first:
+**Do this one config change before anything else, or nothing you write can
+work.** `codex` mints its own ids, and the pane shape Veld's own docs give it —
+`resume: { argv: ["codex", "resume", "--last"] }` — ignores `${veld.pane.token}`,
+so every pick would open the most recent session regardless. `veld lint` refuses
+that combination outright. Point `resume` at the token first:
 
 ```jsonc
 { "id": "codex", "type": "terminal", "label": "Codex",
@@ -243,23 +246,52 @@ cannot take a pick. To give Codex a picker, change `resume` to accept an id firs
   "sessions": { "argv": ["scripts/veld/codex-sessions.sh"] } }
 ```
 
-Then list `~/.codex/sessions` the same way as above, filtering to rows whose
-recorded working directory is `$PWD`.
+For the script, use the generic adapter below against `~/.codex/sessions`.
+**Veld does not verify Codex's on-disk layout and this guide will not pretend
+to** — it is a private path that has moved before, so read your own machine
+first (`ls -R ~/.codex/sessions | head`) rather than trusting a snippet, and
+filter to the sessions whose recorded working directory is `$PWD`. The one thing
+worth saying about it: Codex's own `codex resume` already lists sessions for the
+current directory, so for Codex specifically the [do-nothing
+option](#before-you-write-one) is unusually strong.
 
 ### Worked adapter: anything with a sessions directory
 
 If the tool keeps one file or directory per session under a predictable path,
-you already have the whole script:
+you already have the whole script. **Copy this one** — it is complete, and the
+only lines you change are the two at the top:
 
 ```bash
 #!/usr/bin/env bash
 set -uo pipefail
-dir="$HOME/.mytool/sessions"
+
+dir="$HOME/.mytool/sessions"   # where your tool keeps them
+ext="json"                     # one file per session
+
+# Not an error, and this is the line that makes the picker disappear in a
+# worktree with no history rather than showing an empty one.
 [ -d "$dir" ] || exit 0
-find "$dir" -maxdepth 1 -name '*.json' -print 2>/dev/null \
-  | head -n 20 \
-  | while read -r f; do basename "$f" .json; done
+
+mtime() { stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0; }
+
+rows=$(
+  for f in "$dir"/*."$ext"; do
+    [ -f "$f" ] || continue
+    printf '%s\t%s\n' "$(mtime "$f")" "$f"
+  done | sort -rn | head -n 15
+)
+[ -n "$rows" ] || exit 0
+
+now=$(date +%s)
+printf '%s\n' "$rows" | while IFS=$'\t' read -r ts f; do
+  id=$(basename "$f" ".$ext")
+  hours=$(( (now - ts) / 3600 ))
+  printf '%s\t%sh ago\t%s\n' "$id" "$hours" "$id"
+done
 ```
+
+Remember `chmod +x`. Without it the picker shows its failed state carrying the
+OS error, which is legible but puzzling the first time.
 
 ---
 

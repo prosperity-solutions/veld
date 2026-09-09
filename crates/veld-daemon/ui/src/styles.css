@@ -2623,6 +2623,21 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   background: var(--elev);
 }
 
+/* A session a live pane already has open. Adopting it a second time would put
+   two agents on one transcript, which the daemon refuses — so the row explains
+   itself rather than disappearing, because a conversation missing from the list
+   with no reason reads as lost. */
+.session-row[aria-disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.session-row[aria-disabled]:hover,
+.session-row[aria-disabled]:focus-visible {
+  border-color: transparent;
+  background: transparent;
+}
+
 /* *Start fresh*, the first row and the click the user actually made. Given a
    visible border and a rule under it so it reads as the dialog's own answer
    rather than as the newest session in the list — the one confusion that would

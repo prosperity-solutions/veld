@@ -1337,8 +1337,13 @@ everything around them.
 find the old wording: the pane schema said Veld "does not execute a config
 command to decide whether to draw a menu item". That is still true of
 `requires_bin` and of whether a *pane* is offered. It is not true of whether the
-picker's second card is offered, and the schema now says which is which rather
-than carrying a sentence the code had outgrown.
+**which session that pane opens on**, and the schema now says which is which
+rather than carrying a sentence the code had outgrown. (An earlier revision of
+this paragraph, and of the schema, said "whether a second card is offered" — that
+was true of the first cut for a few hours and was left behind by the same-day
+reversal above. Two documents describing a UI that no longer existed is the
+cost of writing the record before the reversal; the fix is to reread the record's
+own neighbours when reversing, not to write it later.)
 
 ## The extension backlog
 

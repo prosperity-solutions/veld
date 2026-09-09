@@ -2642,6 +2642,10 @@ before this pane existed. Both have the same answer sitting on your disk, and
 | `label` | Names the list inside the dialog, and the card's button when `ask_first` is `false`. Defaults to *Resume an earlier session…*. |
 | `ask_first` | Whether clicking the pane opens the picker instead of starting fresh. Defaults to **`true`** — see [below](#the-click-asks-and-that-is-the-default-on-purpose). |
 
+The script needs its executable bit (`chmod +x`) like any other — a missing one
+surfaces as the picker's failed state with the OS error, which is legible but
+puzzling the first time.
+
 **Clicking the pane then asks which session you want**, with *Start fresh* as the
 first row and what the script found underneath. Pick a row and **the pane's own
 `resume` command runs**, with `${veld.pane.token}` set to the value you picked.
@@ -2747,6 +2751,24 @@ deadline enforced by killing the process group, and a cap on how much output is
 read. It is also under the same machine-wide off switch — **Settings → General → Let
 projects run their own status commands**. Turn that off and the pickers stop
 being offered; the panes themselves are untouched.
+
+**And it reads its declaration the way a badge does: from whichever checkout
+`extensions.source` names, `main` by default.** That is the same guard, for the
+same reason — a command that runs without a click must not come from a branch you
+merely checked out to review. The command still *executes* in the worktree you are
+looking at, with its own branch.
+
+> **The trade-off bites while you are writing one.** Add `sessions` on a branch
+> and it does nothing, with no error: `main` has no such declaration, so nothing
+> runs. Set **Settings → General → Read a project's extensions from → This
+> worktree** while you develop it, and set it back afterwards — that setting is
+> also what hands somebody else's branch the same capability.
+
+At most **8 panes in one project** may declare a lister, because they all run at
+once on a screen somebody is waiting for. Past that, `veld lint` drops the extra
+*pickers* and leaves the panes alone. Repeated requests inside a few seconds are
+answered from the previous run rather than starting another, and two windows
+asking at the same moment spend one child process between them.
 
 > **Before you write a lister, check whether your tool already has one.** `claude
 > --resume` with no argument opens Claude Code's own picker, and `codex resume`
@@ -2892,6 +2914,11 @@ dies on launch:
 `${veld.pane.id}` · `${veld.pane.label}` · `${veld.pane.token}` ·
 `${veld.worktree}` · `${veld.root}` · `${veld.branch}` · `${veld.branch_raw}`
 (`argv` only) · `${veld.project}` · `${veld.username}`
+
+**One exception, and it is the same list minus one name:** a `sessions` command
+may not reference `${veld.pane.token}`, because it runs to decide *which* session
+there will be — there is no token yet. `veld lint` says so rather than letting it
+resolve to nothing. Everything else on that line works there.
 
 They mean exactly what they mean everywhere else — in particular
 `${veld.worktree}` is the **slugified directory name**, not a path, and

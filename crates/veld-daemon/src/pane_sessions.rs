@@ -97,7 +97,7 @@
 //! several panes (`--agent ${veld.pane.id}`). `pane.token` is deliberately
 //! absent from both: this command runs to decide *which* token there will be.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path as FsPath;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -183,6 +183,15 @@ pub(crate) struct SessionRow {
     /// A second, quieter line. The script's third field, when it wrote one.
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// Whether a pane in this worktree currently has this session open.
+    ///
+    /// Computed here rather than left to the client, because the client is
+    /// never told a pane's token (`Db::resumable_panes` withholds it), so it
+    /// structurally cannot work this out. `resolve_pane` refuses the adopt
+    /// regardless — this field is only so the picker can say so *before* the
+    /// click instead of after it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    in_use: bool,
 }
 
 /// What one pane's lister produced.
@@ -283,6 +292,11 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
         }));
     }
 
+    // Which of this worktree's recorded tokens belong to a session that is
+    // *currently open* — so a row for a conversation another pane is running can
+    // say so before it is clicked. `resolve_pane` refuses it either way.
+    let taken = super::pty::live_pane_tokens(id).await;
+
     // From `config`, which is `declare_root`'s — but `root` and `branch` are the
     // viewed worktree's, so `${veld.branch}` names the checkout being looked at
     // rather than main's. Same split as a badge's.
@@ -300,7 +314,8 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
         builtins.insert("pane.label".to_owned(), pane.label.clone());
         let root = root.clone();
         let declare_root = declare_root.clone();
-        async move { evaluate(pane, picker, &root, &declare_root, &builtins).await }
+        let taken = taken.clone();
+        async move { evaluate(pane, picker, &root, &declare_root, &builtins, &taken).await }
     });
 
     Ok(Json(PaneSessionsResponse {
@@ -315,6 +330,7 @@ async fn evaluate(
     root: &str,
     declare_root: &str,
     builtins: &HashMap<String, String>,
+    taken: &HashSet<String>,
 ) -> PaneSessionsView {
     let cell = cell(root, declare_root, &pane.id);
     // Held across the run on purpose: a second chooser opening mid-run waits
@@ -329,7 +345,7 @@ async fn evaluate(
     // Stamped before the run, not after, so the floor measures from when the
     // work started — the reasoning `extensions::evaluate` spells out.
     let started = Instant::now();
-    let view = run_one(pane, picker, root, declare_root, builtins).await;
+    let view = run_one(pane, picker, root, declare_root, builtins, taken).await;
     *guard = Some((started, view.clone()));
     view
 }
@@ -340,6 +356,7 @@ async fn run_one(
     root: &str,
     declare_root: &str,
     builtins: &HashMap<String, String>,
+    taken: &HashSet<String>,
 ) -> PaneSessionsView {
     let base = |state: &'static str, message: Option<String>| PaneSessionsView {
         id: pane.id.clone(),
@@ -403,13 +420,23 @@ async fn run_one(
         );
     }
 
-    let parsed = parse_sessions(&out.stdout, out.truncated);
+    let parsed = parse_sessions(&out.stdout, out.truncated, taken);
     if parsed.rows.is_empty() {
-        // No rows and nothing dropped is the ordinary "nothing to resume here"
-        // answer. No rows but lines dropped is a script that is not producing what
-        // it thinks it is, and saying nothing would leave the author debugging a
-        // picker that never appears.
-        return base("empty", parsed.note);
+        // **Two different answers that both produce no rows.**
+        //
+        // Nothing dropped is the ordinary "nothing to resume here": the script
+        // printed nothing, the pane opens as it always did, no dialog.
+        //
+        // Rows *dropped* is a script that is not producing what it thinks it is
+        // — a badge-shaped adapter printing one line of JSON is the case that
+        // will actually happen — and `empty` renders nothing, so the note would
+        // be computed and then thrown away, leaving the author debugging a
+        // picker that never appears with no message anywhere. That is a broken
+        // script, and this module's contract is that a broken script is visible.
+        return match parsed.note {
+            Some(note) => base("failed", Some(note)),
+            None => base("empty", None),
+        };
     }
     PaneSessionsView {
         sessions: parsed.rows,
@@ -424,7 +451,7 @@ struct Parsed {
 }
 
 /// Read a lister's stdout into rows. See the module docs for the contract.
-fn parse_sessions(stdout: &str, truncated: bool) -> Parsed {
+fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Parsed {
     // A cut payload keeps its whole lines and loses the partial tail one. That is
     // the opposite of what a badge does with a cut payload, and it is right for
     // the same reason: a badge's payload is one indivisible object, a list's is
@@ -469,6 +496,7 @@ fn parse_sessions(stdout: &str, truncated: bool) -> Parsed {
             value: value.to_owned(),
             label: clip(label.unwrap_or(value), MAX_SESSION_LABEL_CHARS),
             detail: detail.map(|d| clip(d, MAX_SESSION_LABEL_CHARS)),
+            in_use: taken.contains(value),
         });
     }
 
@@ -496,8 +524,18 @@ fn parse_sessions(stdout: &str, truncated: bool) -> Parsed {
 mod tests {
     use super::*;
 
+    /// No pane in this worktree currently holds a session — the ordinary case,
+    /// and the one every parsing test wants.
+    fn none_taken() -> HashSet<String> {
+        HashSet::new()
+    }
+
+    fn parsed(stdout: &str, truncated: bool) -> Parsed {
+        parse_sessions(stdout, truncated, &none_taken())
+    }
+
     fn values(stdout: &str) -> Vec<String> {
-        parse_sessions(stdout, false)
+        parsed(stdout, false)
             .rows
             .into_iter()
             .map(|r| r.value)
@@ -506,7 +544,7 @@ mod tests {
 
     #[test]
     fn bare_ids_need_no_adapter() {
-        let out = parse_sessions("abc123\ndef456\n", false);
+        let out = parsed("abc123\ndef456\n", false);
         assert_eq!(values("abc123\ndef456\n"), ["abc123", "def456"]);
         // With no label field, the value is its own label — a picker showing
         // blank rows would be worse than one showing ids.
@@ -517,7 +555,7 @@ mod tests {
 
     #[test]
     fn tabs_carry_the_label_and_the_detail() {
-        let out = parse_sessions("abc123\t2h ago · the pane bug\t41 messages\n", false);
+        let out = parsed("abc123\t2h ago · the pane bug\t41 messages\n", false);
         assert_eq!(out.rows[0].label, "2h ago · the pane bug");
         assert_eq!(out.rows[0].detail.as_deref(), Some("41 messages"));
     }
@@ -526,13 +564,13 @@ mod tests {
     fn a_fourth_field_stays_in_the_detail() {
         // `splitn(3)` on purpose: a label written by a script that happens to
         // contain a tab must not silently become a phantom column.
-        let out = parse_sessions("abc\tlabel\tone\ttwo\n", false);
+        let out = parsed("abc\tlabel\tone\ttwo\n", false);
         assert_eq!(out.rows[0].detail.as_deref(), Some("one\ttwo"));
     }
 
     #[test]
     fn one_bad_line_never_costs_the_others() {
-        let out = parse_sessions("abc\n; rm -rf /\ndef\n", false);
+        let out = parsed("abc\n; rm -rf /\ndef\n", false);
         assert_eq!(
             out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
             ["abc", "def"]
@@ -545,7 +583,7 @@ mod tests {
         // The value is the row's identity all the way into React's key, so two
         // rows with one value is a duplicate-key warning and two rows nobody can
         // tell apart.
-        let out = parse_sessions("abc\tfirst\ndef\nabc\tsecond\n", false);
+        let out = parsed("abc\tfirst\ndef\nabc\tsecond\n", false);
         assert_eq!(
             out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
             ["abc", "def"]
@@ -563,13 +601,24 @@ mod tests {
 
     #[test]
     fn empty_output_is_no_sessions_not_an_error() {
-        assert_eq!(parse_sessions("", false).rows, Vec::new());
-        assert_eq!(parse_sessions("   \n\n", false).note, None);
+        assert_eq!(parsed("", false).rows, Vec::new());
+        assert_eq!(parsed("   \n\n", false).note, None);
+    }
+
+    #[test]
+    fn a_session_another_pane_is_running_is_marked() {
+        let taken = HashSet::from(["busy".to_owned()]);
+        let out = parse_sessions("busy\nfree\n", false, &taken);
+        assert!(out.rows[0].in_use, "the one a live pane holds");
+        assert!(!out.rows[1].in_use);
+        // Still listed, not dropped: the row is the only place the user can be
+        // told *why* they cannot have it.
+        assert_eq!(out.rows.len(), 2);
     }
 
     #[test]
     fn a_truncated_payload_drops_only_its_partial_tail() {
-        let out = parse_sessions("abc\ndef\nghi-half", true);
+        let out = parsed("abc\ndef\nghi-half", true);
         assert_eq!(
             out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
             ["abc", "def"]
@@ -583,7 +632,7 @@ mod tests {
             .map(|i| format!("s{i}"))
             .collect::<Vec<_>>()
             .join("\n");
-        let out = parse_sessions(&stdout, false);
+        let out = parsed(&stdout, false);
         assert_eq!(out.rows.len(), MAX_PANE_SESSIONS);
         assert!(out.note.as_deref().unwrap().contains("5 more"));
     }
@@ -599,7 +648,7 @@ mod tests {
     #[test]
     fn a_long_label_is_clipped_not_dropped() {
         let long = "x".repeat(MAX_SESSION_LABEL_CHARS + 40);
-        let out = parse_sessions(&format!("abc\t{long}"), false);
+        let out = parsed(&format!("abc\t{long}"), false);
         assert_eq!(out.rows[0].label.chars().count(), MAX_SESSION_LABEL_CHARS);
     }
 }
