@@ -126,7 +126,7 @@ you already know this. They are not error handling; they are the interface.
 | Your command… | What veld does |
 |---|---|
 | exits **0 with no output** | There are none here. **No dialog, no picker, nothing** — the pane opens exactly as it did before you added this. Use this for "not applicable in this worktree" rather than printing a placeholder. |
-| exits **non-zero** | The dialog still opens (so the pane is never blocked), with *Start fresh* and the **last line of your stderr**. Write a real message to stderr rather than swallowing errors — it is the only place your users will see it. |
+| exits **non-zero** | The dialog still opens (so the pane is never blocked), with *Start fresh* and the **last line of your stderr**. Under `ask_first: false` there is no dialog, so the card's button is disabled and carries the message instead. Write a real message to stderr rather than swallowing errors — it is the only place your users will see it. |
 | prints a **row veld cannot use** | That row is dropped and the dialog says how many. One malformed line never costs you the other nineteen. |
 
 ### The value has a charset, and it is a security boundary
@@ -301,9 +301,22 @@ the same posture and the same switch:
   own status commands**, turns it off. The pane still works; the picker is not
   offered.
 
-Declarations come from the **worktree's own** `veld.json` — there is no
-`extensions.source` equivalent, because the command a pane runs already comes from
-there.
+**Declarations come from whichever checkout `extensions.source` names — `main` by
+default**, exactly as a badge's do. Same reason: this is a repo-declared command
+veld runs *without you clicking the pane*, so checking out somebody's
+pull-request branch must not run that branch's lister. The commands still execute
+in the worktree you are looking at, with its own branch, and a relative
+`argv[0]` resolves against the declaring checkout — so a `scripts/veld/…` lister
+runs main's copy of the script.
+
+The cost is the one that setting already documents: **a picker added on a branch
+does not appear until it merges.** `extensions.source = worktree` is the escape
+hatch for testing one before it does — and it is also the setting that hands a
+hostile branch the same capability, so flip it back when you are done.
+
+At most **8 panes per project** may declare a lister; they all run at once when
+the chooser opens. Past that, `veld lint` drops the extra pickers (never the
+panes).
 
 ---
 

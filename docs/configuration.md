@@ -2723,7 +2723,7 @@ has, for the same reason — an author who has written one already knows this on
 | The command… | What happens |
 |---|---|
 | exits 0 with **no output** | There are none here, and **the picker is not offered at all**. This is the answer a fresh clone gives, and it is not an error. |
-| exits **non-zero** | The card appears, disabled, with the last line of stderr. A broken script is visible, never silent. |
+| exits **non-zero** | The dialog still opens, with *Start fresh* and the last line of your stderr — so the pane is never blocked by a broken script and the author still gets told. (Under `ask_first: false`, where there is no dialog, the card's button is disabled and carries the message instead.) |
 | prints a row whose value is unusable | That row is dropped and the picker says how many. One bad line never costs the other nineteen. |
 
 A usable value is 1–128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or

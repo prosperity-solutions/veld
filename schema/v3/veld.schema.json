@@ -468,7 +468,7 @@
               "requires_bin": {
                 "type": "array",
                 "items": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
-                "description": "Executable names that must be on the user's PATH for this pane to be offered. Names, never paths — a path would pass or fail on one machine's layout. Absent or empty means always offered. Resolved by a PATH lookup, never by running anything: veld does not execute a config command to decide whether THIS pane is offered. (`sessions` below is the single place a pane runs a project command before you click anything, and what it decides is whether to offer a SECOND card beside this one — never whether to offer the pane itself.)"
+                "description": "Executable names that must be on the user's PATH for this pane to be offered. Names, never paths — a path would pass or fail on one machine's layout. Absent or empty means always offered. Resolved by a PATH lookup, never by running anything: veld does not execute a config command to decide whether THIS pane is offered. (`sessions` below is the single place a pane runs a project command before you click anything, and what it decides is which session THIS pane opens on — never whether the pane is offered.)"
               },
               "argv": { "$ref": "#/$defs/argv" },
               "shell": {

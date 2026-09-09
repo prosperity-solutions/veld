@@ -1015,11 +1015,17 @@ pub(crate) fn resolve_declare_root(
 /// `root` with this worktree's own `branch`, so a badge's `${veld.branch}`
 /// still names the worktree being looked at, not main's.
 ///
+/// **Shared with `pane_sessions`**, and shared rather than reimplemented for the
+/// reason that module's own doc now records: every surface that runs a
+/// repo-declared command *without a click* has to answer "declared where?" the
+/// same way, or the `extensions.source = main` default stops being the guard it
+/// is advertised as.
+///
 /// One database open for all of it: the switch and the source are read from
 /// the handle that is already being opened to resolve the worktree, because
 /// putting a second `Db::open()` on a request path is a design decision and
 /// not a detail (AGENTS.md).
-fn worktree_target(id: i64) -> Result<(String, String, bool, Option<String>), ApiError> {
+pub(crate) fn worktree_target(id: i64) -> Result<(String, String, bool, Option<String>), ApiError> {
     let db = open_desktop_db()?;
     let wt = db
         .get_worktree(id)

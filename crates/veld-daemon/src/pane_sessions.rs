@@ -21,19 +21,40 @@
 //! description of it is: **veld runs a repo-declared command without the user
 //! clicking the thing it is about.** That is exactly what a `status` extension
 //! already does, so this reuses that machinery wholesale rather than inventing a
-//! second posture — [`super::extensions::spawn_command`]'s bounds (stdin closed,
-//! no tty, process-group kill from a drop guard, capped output, `NO_COLOR`), and
-//! the same machine-wide off switch, `extensions.autoRefresh`.
+//! second posture: [`super::extensions::spawn_command`]'s bounds (stdin closed,
+//! no tty, process-group kill from a drop guard, capped output, `NO_COLOR`), the
+//! machine-wide off switch `extensions.autoRefresh`, the single-flight memory
+//! below, and — the one that matters most — the **same answer to "declared
+//! where?"**.
 //!
-//! Two things narrow it further than a badge:
+//! ### Declared where: `extensions.source`, not the worktree
 //!
-//! - It is not on a timer. It runs when the pane chooser is on screen and asks,
-//!   and never otherwise.
-//! - Declarations come from the **worktree's own** `veld.json`, with no
-//!   `extensions.source` equivalent — because the command a pane runs already
-//!   comes from there (`pty::resolve_pane` reads `root_config_in`), and a picker
-//!   sourced from somewhere other than the pane it feeds would be two answers to
-//!   one question.
+//! Declarations are read from `resolve_declare_root`, which is `main` by
+//! default, exactly as a badge's are. The commands still *run* in the worktree
+//! being viewed, with its own branch.
+//!
+//! **An earlier cut of this module read the worktree's own `veld.json`**, and
+//! argued it was safe because `pty::resolve_pane` does the same. That argument
+//! is wrong in one word: `resolve_pane` runs on a **click**. This does not. A
+//! review round found the consequence — check out somebody's pull-request
+//! branch, select that worktree in the IDE, and if it has no open tabs the pane
+//! chooser mounts by itself and asks for the listers, so the branch's own
+//! `sessions: {shell: …}` ran with no gesture at all. That is precisely the hole
+//! the `extensions.source = main` default was introduced to close
+//! (`docs/extensions-vision.md`, 2026-08-13), and this surface has to be behind
+//! it or the default stops meaning what it says.
+//!
+//! The cost is the one that decision already accepted and documented: a picker
+//! added on a branch does not appear until it merges, and
+//! `extensions.source = worktree` is the escape hatch for testing one. The
+//! residual is also the same — a main-declared lister whose `argv[0]` is a
+//! repo-relative script is resolved against `declare_root` by
+//! [`super::extensions::spawn_command`], so it runs main's copy, not the
+//! branch's.
+//!
+//! Two things still narrow this further than a badge: it is **not on a timer**
+//! (it runs when the pane chooser asks, and never otherwise), and it is capped
+//! at [`veld_core::ide::MAX_PANE_SESSION_LISTERS`] panes per project.
 //!
 //! ## The stdout contract
 //!
@@ -65,21 +86,32 @@
 //! - **a line whose value is not [`veld_core::ide::is_session_value`] is
 //!   dropped**, and the picker says how many. One bad line never costs the other
 //!   nineteen.
+//!
+//! ## Variables
+//!
+//! [`veld_core::ide::PANE_SESSIONS_BUILTINS`] is what `veld lint` accepts and
+//! [`list`] is what resolves them, and they are a hand-maintained pair like the
+//! two scopes before them — `pty::tests::sessions_commands_resolve_exactly_the_names_lint_accepts`
+//! is the test that keeps them equal. `pane.id` and `pane.label` are added per
+//! pane on top of `worktree_builtins`, which is what lets one script serve
+//! several panes (`--agent ${veld.pane.id}`). `pane.token` is deliberately
+//! absent from both: this command runs to decide *which* token there will be.
 
 use std::collections::HashMap;
 use std::path::Path as FsPath;
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::extract::Path;
-use axum::http::StatusCode;
 use serde::Serialize;
 use veld_core::ide::{
-    MAX_PANE_SESSIONS, MAX_SESSION_LABEL_CHARS, PaneBody, PaneDef, SessionsPicker,
+    MAX_PANE_SESSION_LISTERS, MAX_PANE_SESSIONS, MAX_SESSION_LABEL_CHARS, PaneBody, PaneDef,
+    SessionsPicker,
 };
 
-use super::desktop::{ApiError, db_err, err, open_desktop_db};
-use super::extensions::{clip, load_section, spawn_command, tail_suffix};
+use super::desktop::ApiError;
+use super::extensions::{clip, load_section, spawn_command, tail_suffix, worktree_target};
 use super::pty::{missing_pane_binaries, worktree_builtins};
 
 /// How long one pane's lister gets.
@@ -91,8 +123,57 @@ use super::pty::{missing_pane_binaries, worktree_builtins};
 /// wants to know.
 const SESSIONS_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long one pane's answer is reused before the lister runs again.
+///
+/// The badge runner's `FORCED_REFRESH_FLOOR` by another name, and for the same
+/// reason its comment gives: without it, holding a control down — or a script
+/// posting in a loop — spends a child process per event. Deliberately seconds
+/// and not `refresh_seconds`-scale: a session that ended thirty seconds ago is
+/// exactly the one somebody is looking for, so this may only be long enough to
+/// absorb a burst, never long enough to hide a session.
+const SESSIONS_FLOOR: Duration = Duration::from_secs(3);
+
+/// One pane's last answer in one worktree, with when its run *started*.
+///
+/// **A rate-limit memory, not a cache**, copied from `extensions::Cell` and for
+/// its reason: the mutex is held across the child run, so a second request
+/// arriving mid-run waits and then shares the first one's answer instead of
+/// starting a parallel `python3`. A TTL cache would instead return stale and let
+/// both callers launch.
+type Cell = Arc<tokio::sync::Mutex<Option<(Instant, PaneSessionsView)>>>;
+
+/// `(worktree path, declare_root, pane id)`.
+///
+/// Keyed on the worktree's **path, never its database id** — `worktrees.id` is
+/// an `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and rows are hard-deleted, so
+/// SQLite reuses ids, and this map lives as long as the daemon. A reused id would
+/// serve a deleted checkout's session list to a new one. `declare_root` is in the
+/// key for the same reason it is in the badge runner's: flipping
+/// `extensions.source` changes which config produced the answer.
+type Key = (String, String, String);
+
+static RESULTS: LazyLock<Mutex<HashMap<Key, Cell>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn cell(root: &str, declare_root: &str, id: &str) -> Cell {
+    let mut map = RESULTS.lock().expect("pane sessions results poisoned");
+    // Bounded the way the badge runner bounds its own map: this grows with
+    // (worktrees × panes) and nothing removes a worktree's entries when it is
+    // deleted, so a long-lived daemon would otherwise accumulate them forever.
+    if map.len() > MAX_TRACKED {
+        map.clear();
+    }
+    Arc::clone(
+        map.entry((root.to_owned(), declare_root.to_owned(), id.to_owned()))
+            .or_default(),
+    )
+}
+
+/// How many `(worktree, declare_root, pane)` answers to remember before dropping
+/// the lot. Generous: 18 worktrees × 8 listers is 144.
+const MAX_TRACKED: usize = 512;
+
 /// One session a pane could adopt.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct SessionRow {
     /// What goes into `${veld.pane.token}`. Always passes
     /// [`veld_core::ide::is_session_value`] by the time it is on the wire.
@@ -105,7 +186,7 @@ pub(crate) struct SessionRow {
 }
 
 /// What one pane's lister produced.
-#[derive(Debug, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub(crate) struct PaneSessionsView {
     /// The `ide.panes[].id` this belongs to.
     id: String,
@@ -143,16 +224,19 @@ pub(crate) struct PaneSessionsResponse {
 /// it keeps the fan-out bounded by config rather than by however many requests a
 /// client feels like making.
 pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsResponse>, ApiError> {
-    let (root, branch, auto_refresh) = {
-        let db = open_desktop_db()?;
-        let wt = db
-            .get_worktree(id)
-            .map_err(db_err)?
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-        (wt.path, wt.branch, db.extensions_auto_refresh())
+    // The *same* resolver the badge endpoints use, deliberately shared rather
+    // than reimplemented — see this module's docs on "declared where?".
+    let (root, branch, auto_refresh, declare_root) = worktree_target(id)?;
+    // `extensions.source = main` with no resolvable main checkout: fail closed,
+    // exactly as `extensions::status` and `desktop::extensions_view_for` do, so
+    // no surface disagrees about what is declared.
+    let Some(declare_root) = declare_root else {
+        return Ok(Json(PaneSessionsResponse { panes: Vec::new() }));
     };
 
-    let Some((config, section)) = load_section(&root) else {
+    // Declarations from `declare_root`; the branch and the working directory
+    // below stay this worktree's own.
+    let Some((config, section)) = load_section(&declare_root) else {
         return Ok(Json(PaneSessionsResponse { panes: Vec::new() }));
     };
 
@@ -163,6 +247,10 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
             let PaneBody::Terminal(terminal) = &pane.body;
             terminal.sessions.as_ref().map(|s| (pane, s))
         })
+        // `parse_panes` already drops pickers past the cap with a lint problem,
+        // so this is the defensive half of the same bound: the config is re-read
+        // from disk on every request and this is the process count it decides.
+        .take(MAX_PANE_SESSION_LISTERS)
         .collect();
     if declared.is_empty() {
         return Ok(Json(PaneSessionsResponse { panes: Vec::new() }));
@@ -178,10 +266,13 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
                     ask_first: picker.ask_first,
                     state: "off",
                     sessions: Vec::new(),
-                    // Names the toggle as the settings screen labels it. A
-                    // message pointing at a control the reader cannot find is
-                    // worse than no message, and this one is the whole reason a
-                    // picker they configured is not appearing.
+                    // Names the toggle as the settings screen labels it. **The
+                    // UI deliberately renders nothing at all for this state** —
+                    // the switch is the user's own choice and Settings already
+                    // explains it, so a pane must look exactly as it did before
+                    // this feature existed. The message is here for whoever is
+                    // reading the endpoint (a `curl`, the daemon log, a future
+                    // client), not for a card.
                     message: Some(
                         "veld is not running project commands on this machine (Settings → \
                          General → Let projects run their own status commands)"
@@ -192,15 +283,24 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
         }));
     }
 
-    let builtins = worktree_builtins(FsPath::new(&root), &branch, &config);
+    // From `config`, which is `declare_root`'s — but `root` and `branch` are the
+    // viewed worktree's, so `${veld.branch}` names the checkout being looked at
+    // rather than main's. Same split as a badge's.
+    let worktree = worktree_builtins(FsPath::new(&root), &branch, &config);
 
     // Concurrent, like the badge fan-out: these are independent child processes
     // and the screen waits for the slowest one either way. The count is already
     // bounded by how many panes a project declares.
     let runs = declared.into_iter().map(|(pane, picker)| {
-        let builtins = builtins.clone();
+        // Per pane, because two of the names in `PANE_SESSIONS_BUILTINS` are the
+        // pane's own. Built here rather than in `run_one` so the worktree half —
+        // which involves a `slugify` and a config read — is computed once.
+        let mut builtins = worktree.clone();
+        builtins.insert("pane.id".to_owned(), pane.id.clone());
+        builtins.insert("pane.label".to_owned(), pane.label.clone());
         let root = root.clone();
-        async move { run_one(pane, picker, &root, &builtins).await }
+        let declare_root = declare_root.clone();
+        async move { evaluate(pane, picker, &root, &declare_root, &builtins).await }
     });
 
     Ok(Json(PaneSessionsResponse {
@@ -208,10 +308,37 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
     }))
 }
 
+/// One pane's answer, behind the single-flight memory.
+async fn evaluate(
+    pane: &PaneDef,
+    picker: &SessionsPicker,
+    root: &str,
+    declare_root: &str,
+    builtins: &HashMap<String, String>,
+) -> PaneSessionsView {
+    let cell = cell(root, declare_root, &pane.id);
+    // Held across the run on purpose: a second chooser opening mid-run waits
+    // here and is then answered from the run the first one made, instead of
+    // forking a second copy of the project's script.
+    let mut guard = cell.lock().await;
+    if let Some((at, view)) = guard.as_ref() {
+        if at.elapsed() < SESSIONS_FLOOR {
+            return view.clone();
+        }
+    }
+    // Stamped before the run, not after, so the floor measures from when the
+    // work started — the reasoning `extensions::evaluate` spells out.
+    let started = Instant::now();
+    let view = run_one(pane, picker, root, declare_root, builtins).await;
+    *guard = Some((started, view.clone()));
+    view
+}
+
 async fn run_one(
     pane: &PaneDef,
     picker: &SessionsPicker,
     root: &str,
+    declare_root: &str,
     builtins: &HashMap<String, String>,
 ) -> PaneSessionsView {
     let base = |state: &'static str, message: Option<String>| PaneSessionsView {
@@ -227,16 +354,30 @@ async fn run_one(
     // user cannot start would spend a subprocess to populate a picker attached
     // to a disabled card.
     if let Some(missing) = missing_pane_binaries(&pane.requires_bin).first() {
+        // `empty`, so the card is left exactly as the worktree listing drew it —
+        // which already names the missing binary on that card's own line
+        // (`PaneView::missing`). The message here is for whoever is reading the
+        // endpoint, not for the UI, which renders nothing for this state; saying
+        // it twice on one card is how two surfaces start disagreeing.
         return base(
             "empty",
             Some(format!("{missing} is not installed on this machine")),
         );
     }
 
-    // `root` twice: a pane's declarations always come from the worktree it runs
-    // in, so the "declared here, ran there" split a badge can have does not exist
-    // for this one. See the module docs.
-    let out = match spawn_command(&picker.command, root, root, builtins, SESSIONS_TIMEOUT).await {
+    // `root` is the cwd, `declare_root` is what a relative `argv[0]` resolves
+    // against — so a main-declared `scripts/veld/…` lister runs *main's* copy of
+    // the script even while its cwd is the branch being viewed. See the module
+    // docs on "declared where?".
+    let out = match spawn_command(
+        &picker.command,
+        root,
+        declare_root,
+        builtins,
+        SESSIONS_TIMEOUT,
+    )
+    .await
+    {
         Err(message) => return base("failed", Some(message)),
         Ok(out) => out,
     };
@@ -313,6 +454,15 @@ fn parse_sessions(stdout: &str, truncated: bool) -> Parsed {
             over_cap += 1;
             continue;
         }
+        // **First wins.** A script that walks more than one session directory can
+        // print the same basename twice, and the value is the row's identity all
+        // the way to the browser (React keys off it) — so a duplicate is a
+        // duplicate-key warning and two rows that cannot be told apart. Counted
+        // with the skipped rows rather than silently swallowed.
+        if rows.iter().any(|r: &SessionRow| r.value == value) {
+            skipped += 1;
+            continue;
+        }
         let label = fields.next().map(str::trim).filter(|s| !s.is_empty());
         let detail = fields.next().map(str::trim).filter(|s| !s.is_empty());
         rows.push(SessionRow {
@@ -333,7 +483,7 @@ fn parse_sessions(stdout: &str, truncated: bool) -> Parsed {
     }
     if skipped > 0 {
         notes.push(format!(
-            "{skipped} line(s) were skipped because their first field is not a usable session id"
+            "{skipped} line(s) were skipped — their first field is not a usable session id, or              repeats one already listed"
         ));
     }
     Parsed {
@@ -387,6 +537,20 @@ mod tests {
             out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
             ["abc", "def"]
         );
+        assert!(out.note.as_deref().unwrap().contains("1 line(s)"));
+    }
+
+    #[test]
+    fn a_repeated_value_is_listed_once() {
+        // The value is the row's identity all the way into React's key, so two
+        // rows with one value is a duplicate-key warning and two rows nobody can
+        // tell apart.
+        let out = parse_sessions("abc\tfirst\ndef\nabc\tsecond\n", false);
+        assert_eq!(
+            out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
+            ["abc", "def"]
+        );
+        assert_eq!(out.rows[0].label, "first", "the first occurrence wins");
         assert!(out.note.as_deref().unwrap().contains("1 line(s)"));
     }
 

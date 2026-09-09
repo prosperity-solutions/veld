@@ -2230,40 +2230,55 @@ function usePaneSessions(
   worktreeId: number,
   panes: PaneSpec[],
 ): Map<string, PaneSessionsView> {
-  const [answers, setAnswers] = useState<Map<string, PaneSessionsView>>(new Map());
+  // **The answers carry the worktree they answer for, and are compared during
+  // render** — the same shape `paneSessions` above uses, and for a sharper
+  // reason here. The chooser stays mounted across a worktree switch, so an
+  // effect that merely cancels the in-flight request leaves the *previous*
+  // worktree's rows on screen until the new ones land: the card says "3 earlier
+  // sessions", the dialog lists another checkout's conversations, and adopting
+  // one posts that id into this worktree's pane, which then runs
+  // `claude --resume <other worktree's session>` here. Clearing inside the
+  // effect narrows that window but cannot close it, because an effect runs after
+  // the render that already drew the stale card.
+  const [answered, setAnswered] = useState<{
+    worktreeId: number;
+    answers: Map<string, PaneSessionsView>;
+  } | null>(null);
   // The primitive, not the array: `panes` is a fresh array on every render of the
   // parent, so depending on it directly would re-run this on every keystroke
   // elsewhere in the tree — one child process per keystroke.
   const wanted = panes.some((p) => p.has_sessions);
   useEffect(() => {
-    if (!wanted) {
-      setAnswers(new Map());
-      return;
-    }
-    // Guards the worktree switch, not just unmount: the chooser stays mounted
-    // across one, so a slow lister from the previous worktree would otherwise
-    // land as this one's sessions — offering to resume a conversation from a
-    // different branch.
+    if (!wanted) return;
+    // Still needed alongside the stamp: without it a slow lister from a worktree
+    // the user has already left back-fills state nobody is going to read, and
+    // would win a race against the current one's answer.
     let live = true;
     void api
       .paneSessionOptions(worktreeId)
       .then((r) => {
         if (!live) return;
-        setAnswers(new Map(r.panes.map((p) => [p.id, p])));
+        setAnswered({
+          worktreeId,
+          answers: new Map(r.panes.map((p) => [p.id, p])),
+        });
       })
       .catch(() => {
         // Silent, and this is the one place in this feature that is. A failing
         // *script* is reported on the card, because the author needs to see it;
         // a failing *request* means the daemon is unreachable, which the app is
         // already saying elsewhere and which no toast here would improve.
-        if (live) setAnswers(new Map());
+        if (live) setAnswered({ worktreeId, answers: new Map() });
       });
     return () => {
       live = false;
     };
   }, [worktreeId, wanted]);
-  return answers;
+  return answered?.worktreeId === worktreeId ? answered.answers : NO_SESSIONS;
 }
+
+/** Shared empty answer, so "not known yet" is not a new object every render. */
+const NO_SESSIONS: Map<string, PaneSessionsView> = new Map();
 
 /**
  * The card that opens a pane's earlier-sessions picker, when there are any.
@@ -2355,11 +2370,20 @@ function PaneButton(props: {
   const missing = `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`;
   // **Whether a click asks, and whether anything is asked about.** `offers` is
   // "there is something to say": rows to pick from, or a lister that failed and
-  // whose author needs to see it. `empty` is deliberately not that — a project
-  // whose script found nothing has said "nothing here", and the pane must open
-  // exactly as it did before this feature existed.
-  const offers = answer !== undefined && answer.state !== "empty";
-  const asks = offers && answer.state !== "off" && answer.ask_first;
+  // whose author needs to see it.
+  //
+  // Two states are deliberately *not* that, and both must leave the card exactly
+  // as it was before this feature existed — not merely un-clickable:
+  //
+  // - `empty` — the project's script said "nothing here". The common answer.
+  // - `off` — the *user* turned project commands off machine-wide. Their own
+  //   choice, already explained in Settings, and the docs promise the panes
+  //   themselves are untouched. An earlier cut let this one through and every
+  //   declaring pane lost its description to a settings message and grew a dead
+  //   "0 earlier" button.
+  const offers =
+    answer !== undefined && answer.state !== "empty" && answer.state !== "off";
+  const asks = offers && answer.ask_first;
   const count = offers ? answer.sessions.length : 0;
   const card = (
     <button

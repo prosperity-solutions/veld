@@ -2576,6 +2576,39 @@ struct NodeOptionView {
 /// (this worktree's own config) parsed at all: a worktree with no `veld.json`
 /// of its own must still see main's badges when `extensions.source = main`,
 /// which is the entire point of the reversal this setting exists for.
+/// The ids of panes that declare a `sessions` lister, read from the checkout
+/// whose config `pane_sessions::list` will read.
+///
+/// A sibling of [`extensions_view_for`] with the same three cases and the same
+/// fail-closed `None`, kept as its own function because the *panes* do not move
+/// with `declare_root` — only this flag does, and inlining the distinction into
+/// the pane loop is how the two would drift.
+fn panes_with_sessions(
+    own_cfg: Option<&veld_core::config::VeldConfig>,
+    own_root: &str,
+    declare_root: Option<&str>,
+) -> std::collections::HashSet<String> {
+    let ids = |cfg: &veld_core::config::VeldConfig| {
+        cfg.ide_section()
+            .panes
+            .iter()
+            .filter(|p| {
+                let veld_core::ide::PaneBody::Terminal(t) = &p.body;
+                t.sessions.is_some()
+            })
+            .map(|p| p.id.clone())
+            .collect()
+    };
+    match declare_root {
+        None => std::collections::HashSet::new(),
+        Some(root) if root == own_root => own_cfg.map(ids).unwrap_or_default(),
+        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
+            .and_then(|p| veld_core::config::parse_config(&p).ok())
+            .map(|c| ids(&c))
+            .unwrap_or_default(),
+    }
+}
+
 fn extensions_view_for(
     own_cfg: Option<&veld_core::config::VeldConfig>,
     own_root: &str,
@@ -2617,6 +2650,15 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
         .and_then(|p| veld_core::config::parse_config(p).ok());
     let declare_root = super::extensions::resolve_declare_root(db, &wt, db.extensions_source());
     let extensions_view = extensions_view_for(cfg.as_ref(), &wt.path, declare_root.as_deref());
+    // Which pane ids have a `sessions` lister **according to `declare_root`**,
+    // because that is the config `pane_sessions::list` will actually read.
+    //
+    // The panes themselves come from this worktree's own config below (a click
+    // is consent, so `resolve_pane` reads the worktree), and only this one flag
+    // moves with the declaring root. Without the split, a pane declared with a
+    // picker on a branch would advertise `has_sessions` and then get an empty
+    // answer from the endpoint — a request and a mystery for nothing.
+    let session_panes = panes_with_sessions(cfg.as_ref(), &wt.path, declare_root.as_deref());
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
@@ -2702,7 +2744,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
                         available: missing.is_empty(),
                         missing,
                         can_resume: terminal.resume.is_some(),
-                        has_sessions: terminal.sessions.is_some(),
+                        has_sessions: session_panes.contains(&p.id),
                         auto_resume: terminal.auto_resume,
                         close_on_exit: terminal.close_on_exit,
                         fixed_label: terminal.fixed_label,

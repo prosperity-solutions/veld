@@ -377,6 +377,22 @@ pub const MIN_EXTENSION_REFRESH_SECONDS: u64 = 15;
 /// What a `status` extension refreshes at when it does not say.
 pub const DEFAULT_EXTENSION_REFRESH_SECONDS: u64 = 60;
 
+/// How many panes in one project may declare a `sessions` lister.
+///
+/// The pane list itself has never been capped, and this does not cap it — a
+/// project may declare as many panes as it likes. What is capped is how many of
+/// them may run a **child process when the pane chooser opens**, which is a cost
+/// bound veld owns rather than the last person to edit somebody's config
+/// (the same reasoning as [`MAX_EXTENSIONS_PER_PROJECT`], and the same reason
+/// that one exists at 24 while this is far lower: a badge runs one command on a
+/// timer, and these all run at once, on a screen somebody is waiting for).
+///
+/// Eight is generous against the real shape: a project with eight distinct
+/// coding-agent panes has more agents than opinions. Over the cap the *pickers*
+/// past the eighth are dropped with a `veld lint` problem — never the panes,
+/// which keep working exactly as they would without the feature.
+pub const MAX_PANE_SESSION_LISTERS: usize = 8;
+
 /// How many rows a pane's `sessions` lister may contribute.
 ///
 /// Another veld-owned cost bound, and here it is a *usability* one as much as a
@@ -1108,7 +1124,26 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
     };
     for (index, item) in items.iter().enumerate() {
         let at = format!("ide.panes[{index}]");
-        if let Some(pane) = parse_pane(item, &at, out) {
+        if let Some(mut pane) = parse_pane(item, &at, out) {
+            // **The picker is dropped, never the pane.** Applied to *accepted*
+            // panes so a config over the cap keeps its first eight pickers
+            // rather than losing all of them, and reported against the entry
+            // that lost one so the author knows which. The pane itself is
+            // untouched: it launches, resumes and auto-resumes as it would if it
+            // had never declared a lister.
+            if declares_sessions(&pane)
+                && out.panes.iter().filter(|p| declares_sessions(p)).count()
+                    >= MAX_PANE_SESSION_LISTERS
+            {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.sessions"),
+                    message: format!(
+                        "more than {MAX_PANE_SESSION_LISTERS} panes in this project declare a                          `sessions` command, and they all run at once when the pane chooser                          opens — this one's picker was dropped. The pane itself is unaffected"
+                    ),
+                });
+                let PaneBody::Terminal(terminal) = &mut pane.body;
+                terminal.sessions = None;
+            }
             if out.panes.iter().any(|p| p.id == pane.id) {
                 out.problems.push(IdeProblem {
                     location: format!("{at}.id"),
@@ -1122,6 +1157,13 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
             out.panes.push(pane);
         }
     }
+}
+
+/// Whether this pane declares a `sessions` lister — i.e. whether it counts
+/// against [`MAX_PANE_SESSION_LISTERS`].
+fn declares_sessions(pane: &PaneDef) -> bool {
+    let PaneBody::Terminal(terminal) = &pane.body;
+    terminal.sessions.is_some()
 }
 
 fn parse_extensions(value: &serde_json::Value, out: &mut IdeSection) {

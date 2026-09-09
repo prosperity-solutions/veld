@@ -1191,7 +1191,8 @@ Same runner, same bounds, same `extensions.autoRefresh` off switch. Two
 narrowings: it is not on a timer (it runs once, while the pane chooser is on
 screen, and never from the `+` hover menu), and declarations come from the
 worktree's own `veld.json` with no `extensions.source` equivalent, because the
-command a pane runs already comes from there.
+command a pane runs already comes from there. **That second half was wrong and is
+reversed below** (2026-09-09, "Reversed again").
 
 `is_session_value` — 1–128 characters of `[A-Za-z0-9._:@/-]` starting
 alphanumeric — is not cosmetic validation. `resume` may be declared with `shell`,
@@ -1258,6 +1259,79 @@ and a word, rather than the icon-in-a-corner shape that was rejected above. Two
 sibling buttons inside a wrapper, never a button nested in a button: that is
 invalid HTML and unreachable by keyboard, and it is the reason the first cut
 reached for a separate card at all.
+
+### 2026-09-09 — Reversed again: a pane's `sessions` lister obeys `extensions.source`, and `main` is the default
+
+Found by the threat-model angle of this feature's own review round, and it is the
+most valuable thing that round produced, because the code was wrong *and the
+document above argued it was right*.
+
+The first cut read the lister's declaration from **the worktree's own
+`veld.json`**, and justified it in one sentence: the command a pane runs already
+comes from there, so a picker sourced elsewhere would be two answers to one
+question. That sentence is true of `pty::resolve_pane` and false of this
+endpoint, and the difference is the only thing that mattered: **`resolve_pane`
+runs on a click. The lister does not.**
+
+The consequence, verified against the three defaults rather than argued:
+`extensions_auto_refresh()` is `true`, `PaneChooser` mounts *by itself* when a
+worktree has no open tabs, and `usePaneSessions` fires on mount. So checking out
+somebody's pull-request branch and selecting that worktree in the IDE ran the
+branch's own `sessions: {shell: …}` with no gesture at all — arbitrary code as
+the user. That is exactly the hole the 2026-08-13 `extensions.source = main`
+reversal exists to close, and this surface had walked straight around it.
+
+**Now:** `pane_sessions::list` resolves its declaring root through the *same*
+`worktree_target` / `resolve_declare_root` the badge endpoints use — shared, not
+reimplemented, so the two cannot drift again — and fails closed when `main` mode
+finds no main checkout. `PaneView.has_sessions` is computed from the same root,
+so the UI does not POST for a picker that will not answer. The commands still run
+in the viewed worktree with its own branch, and a relative `argv[0]` resolves
+against the declaring checkout, both matching a badge exactly.
+
+**The rule this leaves behind, stated so the next surface does not have to
+rediscover it:** *every surface that runs a repo-declared command without the
+user clicking the thing it is about must answer "declared where?" through
+`resolve_declare_root`.* Not "must look like it does" — must call it. A
+hand-rolled `load_section(&worktree_path)` is how this happened, and it read as
+obviously correct at the time.
+
+The cost is the one the earlier reversal already priced: a picker added on a
+branch does not appear until it merges, and `extensions.source = worktree`
+restores per-branch declarations for testing one — with the same trade attached,
+now for two features instead of one.
+
+### 2026-09-09 — Bounds the badge posture had and this one had not
+
+The same review round, two angles independently on the same lines: the module
+claimed to reuse the badge runner's posture "wholesale", and three of its bounds
+had not come along.
+
+- **A count cap.** `ide.extensions` is capped at 24 in the parser *and* the
+  schema. `ide.panes` has never been capped and still is not — but the number of
+  panes that may run a **child process when the chooser opens** now is, at
+  `MAX_PANE_SESSION_LISTERS` = 8. Over the cap, `parse_panes` drops the *pickers*
+  past the eighth with a `veld lint` problem and leaves every pane working. Eight
+  because they all run at once, on a screen somebody is waiting for — which is
+  why it is far below the badge cap of 24, where one command runs per timer tick.
+- **A refresh floor.** Every POST re-ran every lister unconditionally, so
+  toggling to the chooser in a loop spent a child process per event — the failure
+  `FORCED_REFRESH_FLOOR` exists for, whose own comment names holding a Refresh
+  button down. `SESSIONS_FLOOR` is 3s: long enough to absorb a burst, and
+  deliberately far below badge-scale intervals, because a session that ended
+  thirty seconds ago is exactly the one somebody is looking for and a longer
+  memory would hide it.
+- **Single-flight.** A `Cell` keyed `(worktree path, declare_root, pane id)` with
+  the mutex held across the child run, copied from `extensions::RESULTS`
+  including the reason it is keyed on the worktree's *path* and never its
+  database id: `worktrees.id` has no `AUTOINCREMENT` and rows are hard-deleted,
+  so SQLite reuses ids and a long-lived daemon would serve a deleted checkout's
+  session list to a new one.
+
+Worth recording as a pattern rather than three fixes: **"reuses X's machinery
+wholesale" is a claim a reviewer can check line by line, and a comment that makes
+it is worth checking.** Here it was true of the spawn bounds and false of
+everything around them.
 
 **The one promise this feature bends**, recorded because a future reader will
 find the old wording: the pane schema said Veld "does not execute a config
