@@ -220,15 +220,15 @@ pub const MAX_NEWS_ITEMS: usize = 5;
 /// Mirrors the schema's `$defs.pane` terminal branch, which sets
 /// `additionalProperties: false` — so without this an editor red-squiggles
 /// `"autoresume": true` while `veld lint` accepts it and the pane silently takes
-/// the default. Both of the defaults a typo can reach change behaviour
-/// (`auto_resume` false, `close_on_exit` true), which is the worst shape for a
-/// silent one.
+/// the default. Every default a typo can reach changes behaviour
+/// (`auto_resume` false, `close_on_exit` true, `fixed_label` false), which is
+/// the worst shape for a silent one.
 pub const TERMINAL_PANE_KEYS: &[&str] = &[
-    "allow_terminal_renaming",
     "argv",
     "auto_resume",
     "close_on_exit",
     "description",
+    "fixed_label",
     "icon",
     "id",
     "label",
@@ -729,20 +729,24 @@ pub struct TerminalPane {
     /// disappears with it is the oldest complaint about terminal emulators.
     #[serde(default = "default_true")]
     pub close_on_exit: bool,
-    /// Whether the process in the pane may rename its own tab with the terminal
-    /// title it sets (OSC 0/2), instead of the pane's configured `label`.
+    /// Pin the tab to the pane's configured `label`, ignoring any terminal
+    /// title (OSC 0/2) the process inside it sets.
     ///
-    /// A config-declared pane's `label` is intentional — it is how the user
-    /// navigates a rail full of agent panes — so a tool like Claude Code that
-    /// sets a dynamic title is kept off the label by default. Plain terminals
-    /// (a login shell, not a pane) always adopt their OSC title. This flag is
-    /// the opt-in for a pane whose own title is more useful than its fixed one.
+    /// Defaults to `false`: a pane adopts its process's title, exactly as a
+    /// plain terminal (a login shell) always has, because for a coding agent
+    /// that title is what it is *working on* and a rail of four identical
+    /// `label`s tells the user nothing. Set it for a pane whose `label` is a
+    /// navigation landmark worth more than whatever the tool would call itself.
     ///
-    /// The stored `title` is only ever a *display* override: the pane's
-    /// identity on the wire and in `${veld.pane.id}` stays its `id`, and the
-    /// config `label` is what a fresh pane is born with.
+    /// The adopted title is only ever a *display* override: the pane's identity
+    /// on the wire and in `${veld.pane.id}` stays its `id`, and the config
+    /// `label` is what a fresh pane is born with. Setting this on a pane that
+    /// has already renamed itself takes effect on that pane's **next load** —
+    /// the client captures the decision when a session is created, and an
+    /// adopted title is not read back out of a stored layout — so it is not a
+    /// live switch.
     #[serde(default)]
-    pub allow_terminal_renaming: bool,
+    pub fixed_label: bool,
 }
 
 fn default_true() -> bool {
@@ -1640,10 +1644,27 @@ fn parse_pane(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> Optio
 
     // After the body, so a pane that is being dropped for a real reason does not
     // also collect a pile of key complaints.
+    // A key this version retired, called out by name rather than left in the
+    // generic list below. The list is alphabetical, so `fixed_label` happens to
+    // appear in it — but "here are the twelve legal keys" does not tell the one
+    // author whose config changes meaning (`allow_terminal_renaming: false`)
+    // which of the twelve to write, and that author is the whole reason this
+    // arm exists. Same shape as the `ui` -> `ide` rename in `config.rs`.
+    if entry.contains_key("allow_terminal_renaming") {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.allow_terminal_renaming"),
+            message: "was removed; a pane now adopts its process's terminal title by \
+                      default. Delete the key — if it was `false`, write \
+                      `\"fixed_label\": true` to keep the tab on the pane's `label`"
+                .to_owned(),
+        });
+    }
+
     let mut unknown: Vec<&str> = entry
         .keys()
         .map(String::as_str)
         .filter(|k| !TERMINAL_PANE_KEYS.contains(k))
+        .filter(|k| *k != "allow_terminal_renaming")
         .collect();
     if !unknown.is_empty() {
         unknown.sort_unstable();
@@ -1718,12 +1739,12 @@ fn parse_terminal_pane(
         }
     };
 
-    let allow_terminal_renaming = match entry.get("allow_terminal_renaming") {
+    let fixed_label = match entry.get("fixed_label") {
         None => false,
         Some(serde_json::Value::Bool(b)) => *b,
         Some(_) => {
             out.problems.push(IdeProblem {
-                location: format!("{at}.allow_terminal_renaming"),
+                location: format!("{at}.fixed_label"),
                 message: "must be true or false".to_owned(),
             });
             return None;
@@ -1746,7 +1767,7 @@ fn parse_terminal_pane(
         resume,
         auto_resume,
         close_on_exit,
-        allow_terminal_renaming,
+        fixed_label,
     })
 }
 
@@ -3943,37 +3964,85 @@ mod tests {
         assert!(terminal.resume.is_none());
         assert!(!terminal.auto_resume, "auto_resume must default to false");
         assert!(
-            !terminal.allow_terminal_renaming,
-            "a config pane must not let its process rename the tab by default"
+            !terminal.fixed_label,
+            "a config pane must adopt its process's terminal title by default"
         );
     }
 
     #[test]
-    fn allow_terminal_renaming_round_trips_and_is_fail_closed() {
+    fn fixed_label_round_trips_and_defaults_to_renaming() {
         let parsed = one_pane(json!({ "id": "claude", "type": "terminal", "argv": ["claude"] }));
         let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
-        assert!(!terminal.allow_terminal_renaming);
+        assert!(!terminal.fixed_label);
 
         let parsed = one_pane(
-            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "allow_terminal_renaming": true }),
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "fixed_label": true }),
         );
         assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
         let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
-        assert!(terminal.allow_terminal_renaming);
+        assert!(terminal.fixed_label);
 
         // A non-boolean is a problem, not a silent default.
         let parsed = one_pane(
-            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "allow_terminal_renaming": "yes" }),
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "fixed_label": "yes" }),
         );
         assert_eq!(parsed.panes.len(), 0);
         assert!(
             parsed
                 .problems
                 .iter()
-                .any(|p| p.location.ends_with("allow_terminal_renaming")),
+                .any(|p| p.location.ends_with("fixed_label")),
             "{:?}",
             parsed.problems
         );
+    }
+
+    /// The predecessor of `fixed_label`, removed rather than aliased.
+    ///
+    /// A config still carrying it keeps its pane — an unknown key is a lint
+    /// warning, never a drop — and the pane takes the new default, which is the
+    /// behaviour `allow_terminal_renaming: true` asked for anyway. The one
+    /// config that changes meaning is an explicit `false`, so the warning has to
+    /// name `fixed_label` rather than only list the legal keys: the author whose
+    /// pinned tab just came unpinned is the reader this message is for.
+    #[test]
+    fn the_removed_renaming_flag_names_its_replacement_and_keeps_the_pane() {
+        for value in [json!(false), json!(true)] {
+            let parsed = one_pane(json!({
+                "id": "claude",
+                "type": "terminal",
+                "argv": ["claude"],
+                "allow_terminal_renaming": value,
+            }));
+            assert_eq!(parsed.panes.len(), 1, "the pane survives a retired key");
+            let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+            assert!(!terminal.fixed_label);
+            let named = parsed
+                .problems
+                .iter()
+                .find(|p| p.location.ends_with("allow_terminal_renaming"))
+                .unwrap_or_else(|| {
+                    panic!("no problem named the retired key: {:?}", parsed.problems)
+                });
+            assert!(
+                named.message.contains("fixed_label"),
+                "the warning must name the replacement, not just the legal keys: {:?}",
+                named.message
+            );
+            // Reported once, by the arm that can explain it — not a second time
+            // as an anonymous unknown key.
+            assert_eq!(
+                parsed
+                    .problems
+                    .iter()
+                    .filter(|p| p.location.ends_with("allow_terminal_renaming")
+                        || p.message.contains("allow_terminal_renaming"))
+                    .count(),
+                1,
+                "{:?}",
+                parsed.problems
+            );
+        }
     }
 
     #[test]
@@ -4307,6 +4376,13 @@ mod tests {
 
     /// The key list and the schema's terminal branch are two hand-maintained
     /// copies of one set; nothing but this ties them together.
+    ///
+    /// It compares those two to each other and to nothing else — in particular
+    /// not to what [`parse_terminal_pane`] actually reads. A key read there but
+    /// absent from *both* copies passes this test and then draws a permanent
+    /// "unknown pane key(s)" warning on every config that uses it, because the
+    /// unknown-key check filters against the list rather than against the reads.
+    /// Adding a key is three edits, and this catches two of them.
     #[test]
     fn the_schema_terminal_pane_keys_match_the_parser() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

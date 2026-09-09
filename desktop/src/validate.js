@@ -404,10 +404,23 @@ function safeTransferTab(raw) {
     // the seed path stringifies again and a throw there loses the window.
     return null;
   }
-  // `title` is the one field a previewed page controls directly
-  // (`document.title` is pushed onto the tab record), so it is truncated rather
-  // than allowed to set the size of everything downstream.
+  // Two fields on a tab are written by content rather than by the app, so both
+  // are truncated rather than allowed to set the size of everything downstream:
+  // `title` for a previewed page (`document.title` is pushed onto the tab
+  // record), and `termTitle` for the OSC 0/2 title a terminal's own process
+  // sets — which every config-declared pane now adopts by default, not just an
+  // opted-in one. Untruncated, either can push the tab past `MAX_TAB_BYTES`,
+  // and the tab is then dropped from the transfer with nothing on screen to say
+  // a dragged pane went nowhere.
   if (typeof round.title === "string") round.title = round.title.slice(0, MAX_TITLE_LEN);
+  // By code point, not code unit: the renderer already clamps this string to
+  // `MAX_TITLE_LEN` code points, so an all-astral title can be twice that many
+  // units, and a second unit-wise slice is exactly how a surrogate pair gets cut
+  // in half — which is the shape `JSON.stringify` emits and a JSON parser
+  // refuses. Inert today (`parseTab` drops the field on the receiving side), and
+  // not worth leaving as the one place that can produce ill-formed UTF-16.
+  if (typeof round.termTitle === "string")
+    round.termTitle = Array.from(round.termTitle).slice(0, MAX_TITLE_LEN).join("");
   if (utf8Length(JSON.stringify(round)) > MAX_TAB_BYTES) return null;
   return round;
 }

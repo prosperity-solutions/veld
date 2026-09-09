@@ -25,6 +25,7 @@ import { terminalPrefs, type TerminalPrefs } from "../shared/settings";
 import { chromeless, layoutSlot, pathForFile, windowSeed } from "../shell";
 import { isMac } from "../shortcuts/registry";
 import {
+  mayAdoptTerminalTitle,
   type PaneMount,
   parseLayouts,
   type RestartKind,
@@ -126,11 +127,21 @@ interface Session {
    *  which reads as "clicking the tab closed my pane". */
   closeOnExit: boolean;
   /** Whether this pane's process may rename its tab with an OSC 0/2 title.
-   *  A plain terminal (no `spec`) always may; a config pane only when its
-   *  `allow_terminal_renaming` is set. Captured at mount like `closeOnExit`,
-   *  for the same reason: the decision belongs to the host, which runs even
-   *  while no pane component is mounted. */
-  allowTerminalRenaming: boolean;
+   *  A plain terminal (no `spec`) always may; a config pane unless it declares
+   *  `fixed_label`. Captured at mount like `closeOnExit`, for the same reason:
+   *  the decision belongs to the host, which runs even while no pane component
+   *  is mounted.
+   *
+   *  Named for `mayAdoptTitle`, not for the config key, because the two have
+   *  opposite sense — `fixed_label` is the opt-*out*, and the single place that
+   *  inversion happens is `mayAdoptTerminalTitle`. A reader two files away
+   *  should not have to remember which way round it went. */
+  mayAdoptTitle: boolean;
+  /** The last OSC 0/2 title this session's process set, or `null` if it has set
+   *  none. Held here because the tab's copy is deliberately not persisted and
+   *  can be replaced by another client's layout — see
+   *  `reannounceTerminalTitles`. */
+  termTitle: string | null;
   term: Terminal;
   fit: FitAddon;
   /** Detached until a pane mounts it; never destroyed by a mere unmount. */
@@ -782,11 +793,8 @@ function ensure(
     exitCode: null,
     launched: false,
     closeOnExit: pane?.closeOnExit ?? false,
-    // A plain terminal always adopts its OSC title; a config pane only when
-    // the project opted in. `spec` is the discriminator: undefined means login
-    // shell, and login shells are free to rename themselves.
-    allowTerminalRenaming:
-      pane?.spec === undefined || (pane?.allowTerminalRenaming ?? false),
+    mayAdoptTitle: mayAdoptTerminalTitle(pane),
+    termTitle: null,
     state: "connecting",
     detail: "",
     restarting: null,
@@ -876,10 +884,16 @@ function ensure(
   // parses the sequence and reports the result here — the only parser worth
   // trusting, since BEL doubles as an OSC terminator and a naive byte scan
   // would misread it. Fired only when this pane is allowed to rename itself
-  // (a plain terminal always is; a config pane only with its flag), so the
-  // consumer never re-checks the decision.
+  // (a plain terminal always is; a config pane unless it declares
+  // `fixed_label`), so the consumer never re-checks the decision.
   term.onTitleChange((title) => {
-    if (!s.allowTerminalRenaming) return;
+    if (!s.mayAdoptTitle) return;
+    // Remembered as well as announced. The tab's copy lives in the layout, which
+    // is *not* persisted (`layoutForPersistence`) and is replaced wholesale when
+    // another client's write is pushed here — so the session, which outlives
+    // both, is the only place a live title can be recovered from without waiting
+    // for the process to say it again. `reannounceTerminalTitles` is the reader.
+    s.termTitle = title;
     for (const fn of titleListeners) fn({ sessionId: id, title });
   });
   // A BEL (U+0007) is the "something finished" baseline — a terminal rings it
@@ -1151,12 +1165,37 @@ export function onTerminalOpenUrl(
 }
 
 /**
+ * Re-announce every live session's last known terminal title.
+ *
+ * For the one case that silently undoes the whole feature: adopting a layout
+ * this client did not write. `parseTab` drops `termTitle` by design, so a
+ * `layout_changed` push — or a save that lost its version check — replaces the
+ * on-screen tabs with ones that have no adopted name, and a rail of agent panes
+ * collapses back to four identical `label`s until each process happens to
+ * retitle itself. A tool that titles itself once at startup never does.
+ *
+ * Cheap and idempotent: `updateTab` returns the same layout when the title is
+ * already there, so a re-announce that changes nothing costs one comparison per
+ * tab.
+ */
+export function reannounceTerminalTitles(): void {
+  for (const [id, s] of sessions) {
+    if (s.termTitle === null || !s.mayAdoptTitle) continue;
+    for (const fn of titleListeners) fn({ sessionId: id, title: s.termTitle });
+  }
+}
+
+/**
  * A shell set its own tab title with OSC 0/2.
  *
  * The session id *is* the terminal tab's id, so the consumer can find the tab
  * in the layout and adopt the title — but only when the pane is allowed to
- * rename itself (`allowTerminalRenaming`); the host already decided that, and
- * this event only fires for a plain terminal or an opted-in config pane.
+ * rename itself (`mayAdoptTitle`); the host already decided that, and this
+ * event never fires for a config pane that declared `fixed_label`.
+ *
+ * The title is raw: whatever the process wrote. `adoptedTermTitle` is what makes
+ * it fit to be a tab name, and `PaneTab.termTitle`'s type is what stops a
+ * consumer forgetting.
  */
 export function onTerminalTitleChange(
   fn: (event: { sessionId: string; title: string }) => void,
@@ -1443,7 +1482,16 @@ export function restartTerminal(id: string): void {
     startTerminal(id, "fresh", "fresh");
     return;
   }
+  // The other restart branch, and it needs the same forgetting `startTerminal`
+  // does: the shell that set this title is the one being ended. Without it
+  // `reannounceTerminalTitles` re-asserts a dead shell's name onto the tab after
+  // the next external layout adoption — the one event that used to clear it —
+  // and a shell with no title hook (bash's default) never overwrites it.
   cancelAutoReconnect(s);
+  if (s.mayAdoptTitle) {
+    s.termTitle = null;
+    for (const fn of titleListeners) fn({ sessionId: id, title: "" });
+  }
   s.generation += 1;
   s.ws?.close();
   s.ws = null;
@@ -1531,6 +1579,24 @@ export function startTerminal(
   // Same reason as `restartTerminal`: the pane id is reused, so everything the inbox knows
   // about this session belongs to the process that just ended.
   inbox.restarted(id);
+  // The tab's adopted title belongs to that process too — but only a `fresh`
+  // launch abandons it. A new conversation under a new token must not keep the
+  // old one's task title, since nothing else ever clears the field; a `resume`
+  // is picking that same conversation back up, and wiping its name would leave
+  // the tab on its `label` until a tool that titles itself once at startup
+  // happened to do it again — which it never does. Announced through the same
+  // channel a real OSC 0/2 uses; an empty title is how the consumer spells
+  // "back to the pane's `label`".
+  //
+  // Gated on `mayAdoptTitle` like the real event is, so the statement "this
+  // event never fires for a pane that declared `fixed_label`" stays true — it is
+  // the licence `App.tsx` cites for doing no gating of its own, and a clear that
+  // slipped past it would be the counter-example even while its empty payload
+  // happens to be a no-op.
+  if (mode === "fresh" && s.mayAdoptTitle) {
+    s.termTitle = null;
+    for (const fn of titleListeners) fn({ sessionId: id, title: "" });
+  }
   // And the shell's absence is not news when the user is the one who asked for a
   // new one — without this, "start fresh" answers with "the previous shell is
   // gone", which is both redundant and reads as a fault.

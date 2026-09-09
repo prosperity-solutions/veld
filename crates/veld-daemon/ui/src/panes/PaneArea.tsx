@@ -112,6 +112,7 @@ import {
   newPaneTab,
   newTabId,
   paneTabLabel,
+  tabForTransport,
   parseTransferTabs,
   replaceTab,
   paneAnswerFor,
@@ -957,7 +958,10 @@ export function PaneArea(props: {
         worktreeId: props.worktreeId,
         repoRoot: props.repoRoot,
         ratio: layout.ratio,
-        tabs,
+        // `tabForTransport`, not the live tabs: an adopted terminal title never
+        // leaves the page it was adopted on, and the receiving renderer would
+        // drop it anyway. See its doc comment for what carrying it costs.
+        tabs: tabs.map(tabForTransport),
       });
       if (!result?.moved && !result?.opened) {
         notifyError(
@@ -986,7 +990,8 @@ export function PaneArea(props: {
         worktreeId: props.worktreeId,
         repoRoot: props.repoRoot,
         ratio: layout.ratio,
-        tabs,
+        // See `dropOutTabs` above: stripped, not live.
+        tabs: tabs.map(tabForTransport),
       });
       if (!result?.opened) {
         notifyError(
@@ -2641,7 +2646,7 @@ function TerminalPane(props: {
             spec: specId,
             autoResume: resumable && (spec?.auto_resume ?? false),
             closeOnExit: spec?.close_on_exit ?? false,
-            allowTerminalRenaming: spec?.allow_terminal_renaming ?? false,
+            fixedLabel: spec?.fixed_label ?? false,
           }
         : undefined,
     );

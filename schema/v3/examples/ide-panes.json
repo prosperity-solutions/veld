@@ -15,18 +15,17 @@
         // though the shell itself is long gone.
         "id": "claude",
         "type": "terminal",
+        // Claude sets a dynamic terminal title (OSC 0/2) naming the task it is
+        // working on, and a pane adopts it — so there is no flag here. That is
+        // what makes a rail of agent panes tellable apart, and it is why this
+        // `label` is what the tab is called only until the tool says otherwise.
         "label": "Claude",
         "description": "Claude Code in this worktree",
         "icon": "sparkles",
         "requires_bin": ["claude"],
         "argv": ["claude", "--session-id", "${veld.pane.token}"],
         "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
-        "auto_resume": true,
-        // Claude sets a dynamic terminal title (OSC 0/2) naming the task it is
-        // working on. Off by default because a config pane's `label` is how you
-        // navigate a rail full of agent panes — opt in when the live title is
-        // more useful than the fixed one.
-        "allow_terminal_renaming": true
+        "auto_resume": true
       },
       {
         // A second mode is a second pane, not a variant: panes have no
@@ -44,7 +43,12 @@
           "--session-id",
           "${veld.pane.token}"
         ],
-        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] }
+        "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        // The opposite call to the pane above, for the same reason a second
+        // mode is a second pane: "which of these two is the unsafe one" is the
+        // question this tab has to answer, and a live task title would take the
+        // answer away. `fixed_label` pins the tab to `label`.
+        "fixed_label": true
       },
       {
         // The other shape: `codex` mints its own session id and has no flag to
@@ -52,7 +56,10 @@
         // --last` continues the most recent session, filtered to this
         // worktree — which still gives the pane a Resume button and still
         // works with `auto_resume`. What it gives up is per-pane identity: two
-        // Codex panes here would resume the same session.
+        // Codex panes here would resume the same session. Like the Claude pane
+        // and unlike the one above it, this entry sets no `fixed_label`, so the
+        // tab follows whatever title codex gives itself. Add
+        // `"fixed_label": true` if you would rather it always read "Codex".
         "id": "codex",
         "type": "terminal",
         "label": "Codex",

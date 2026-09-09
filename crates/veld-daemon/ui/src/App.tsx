@@ -178,6 +178,7 @@ import {
   addTab,
   addTabToFocused,
   adoptTabs,
+  adoptedTermTitle,
   allTabs,
   findTab,
   browserIds,
@@ -194,6 +195,7 @@ import {
   nextFreeProfile,
   paneTabBaseLabel,
   paneTabLabel,
+  tabForTransport,
   parseSessionSets,
   parseTransferTabs,
   revealDiagPane,
@@ -248,6 +250,7 @@ import {
   applyTerminalTheme,
   onTerminalOpenUrl,
   onTerminalTitleChange,
+  reannounceTerminalTitles,
   openExternally,
   pruneTerminals,
   noteExpectedResumes,
@@ -1541,6 +1544,13 @@ function AppInner(props: {
         noteExpectedResumes(terminalIds(next));
         return { ...prev, [worktreeId]: next };
       });
+      // The adopted tab names do not travel with a layout — `parseTab` drops
+      // `termTitle` on purpose — so an external write would otherwise collapse a
+      // rail of agent panes back to four identical `label`s until each process
+      // retitled itself, which a tool that titles itself once at startup never
+      // does. The sessions still know their titles; queued after the adoption so
+      // it lands on top of it.
+      reannounceTerminalTitles();
     });
   }, []);
 
@@ -4156,18 +4166,23 @@ function AppInner(props: {
   );
 
   // A shell set its own tab title (OSC 0/2). The host has already gated it on
-  // the pane allowing renaming (a plain terminal always may; a config pane only
-  // with its flag), so this is a pure write: adopt the title onto the tab the
-  // session lives in. Keyed off the layouts so a shell in a worktree the user
-  // has switched away from still renames its own tab.
+  // the pane allowing renaming (a plain terminal always may; a config pane
+  // unless it declares `fixed_label`), so the only judgement left here is
+  // `adoptedTermTitle`, which bounds and cleans the string — the payload is
+  // whatever a process wrote, and since the flip it reaches this tab by default
+  // rather than by a repo opting in. An empty result clears the field, which is
+  // how a fresh relaunch gets the tab back to its `label`. Keyed off the layouts
+  // so a shell in a worktree the user has switched away from still renames its
+  // own tab.
   useEffect(
     () =>
       onTerminalTitleChange(({ sessionId, title }) => {
+        const termTitle = adoptedTermTitle(title);
         setLayouts((prev) => {
           for (const [key, l] of Object.entries(prev)) {
             if (dockOf(l, sessionId) === null) continue;
             const idx = Number(key);
-            const next = updateTab(prev[idx], sessionId, { termTitle: title });
+            const next = updateTab(prev[idx], sessionId, { termTitle });
             return next === prev[idx] ? prev : { ...prev, [idx]: next };
           }
           return prev;
@@ -4556,7 +4571,14 @@ function AppInner(props: {
     // nothing, which is the one thing closing a detached window must never do.
     if (activeWtKey !== "" && String(worktree.id) !== activeWtKey) return;
     void desktopWindow
-      .snapshot({ worktreeId: worktree.id, tabs: layout ? allTabs(layout) : [] })
+      // Stripped, like every other tab crossing into the shell: the snapshot is
+      // only ever handed back through `parseTransferTabs`, which drops
+      // `termTitle` anyway, and an unstripped one made every OSC title change a
+      // retained-snapshot IPC into the privileged process.
+      .snapshot({
+        worktreeId: worktree.id,
+        tabs: layout ? allTabs(layout).map(tabForTransport) : [],
+      })
       .catch(() => {
         // The window can still be used; only the hand-back is lost, and the
         // shells it names outlive it either way under the detach grace.
@@ -4720,7 +4742,7 @@ function AppInner(props: {
       // of being reaped with the worktree like every other window's are.
       const ownId = Number(activeWtKey);
       const own = Number.isSafeInteger(ownId) ? layouts[ownId] : undefined;
-      const tabs = own ? allTabs(own) : [];
+      const tabs = own ? allTabs(own).map(tabForTransport) : [];
       if (tabs.length > 0) {
         void desktopWindow.snapshot({ worktreeId: ownId, tabs }).catch(() => {});
       }

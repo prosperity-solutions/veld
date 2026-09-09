@@ -42,6 +42,11 @@ import {
   lastBlankBrowserId,
   moveTab,
   moveTabToOtherDock,
+  type AdoptedTermTitle,
+  adoptedTermTitle,
+  layoutForPersistence,
+  MAX_TERM_TITLE,
+  mayAdoptTerminalTitle,
   newPaneTab,
   newTabId,
   nextFreeProfile,
@@ -68,6 +73,7 @@ import {
   terminalIds,
   terminalLabel,
   writeLayouts,
+  tabForTransport,
   updateTab,
   urlForProfile,
   urlLabel,
@@ -485,6 +491,65 @@ describe("persistence", () => {
     l = addTab(l, 0, term());
     const back = parseLayouts(serializeLayouts({ 7: l }));
     expect(back[7]).toEqual(l);
+  });
+
+  // The write half of the same asymmetry the next test pins on the read half.
+  // Storing a field nothing reads back is not free: it made every title a
+  // process sets into a layout mutation — a PUT, a SQLite transaction and a
+  // broadcast to every other client — for as long as a tool keeps its title
+  // live.
+  // The other boundary a tab crosses. Same rule, same reason: the receiving
+  // renderer runs a transferred tab through `parseTab`, which drops the field —
+  // so carrying it only spends `MAX_TAB_BYTES` and `MAX_SEED_BYTES`.
+  it("does not hand an adopted title to another window either", () => {
+    const tab: PaneTab = {
+      id: "t9",
+      kind: "terminal",
+      title: "Claude",
+      spec: "claude",
+      termTitle: adopted("fix the login flow"),
+    };
+    expect(tabForTransport(tab)).not.toHaveProperty("termTitle");
+    // Unchanged tabs come back identical, so a transfer of ordinary tabs
+    // allocates nothing.
+    const plain = term();
+    expect(tabForTransport(plain)).toBe(plain);
+  });
+
+  it("does not persist an adopted terminal title at all", () => {
+    let l = twoDock();
+    l = addTab(l, 0, { id: "t9", kind: "terminal", title: "Claude", spec: "claude" });
+    l = updateTab(l, "t9", { termTitle: adopted("fix the login flow") });
+
+    const stored = JSON.parse(serializeLayouts({ 7: l }));
+    const storedTab = stored[7].docks[0].tabs.find((t: PaneTab) => t.id === "t9");
+    expect(storedTab).toBeDefined();
+    expect(storedTab).not.toHaveProperty("termTitle");
+    // The on-screen layout is untouched — this is a write-time projection.
+    const live = l.docks[0].tabs.find((t) => t.id === "t9") as PaneTab;
+    expect(paneTabLabel(l, live)).toBe("fix the login flow");
+    // And a layout with nothing to strip is handed back as-is, so the app's
+    // save effect keeps seeing a stable document.
+    const plainLayout = addTab(twoDock(), 0, term());
+    expect(layoutForPersistence(plainLayout)).toBe(plainLayout);
+  });
+
+  // What makes `fixed_label` reliable without any code reading the flag back.
+  // An adopted OSC title is display-only, so it is written to storage (the
+  // whole layout is stringified) and deliberately *not* read back — which is
+  // why a pane the project pins after the fact returns to its `label` on the
+  // next load instead of being stuck on a title nothing will overwrite.
+  it("drops an adopted terminal title on the way back in", () => {
+    let l = twoDock();
+    l = addTab(l, 0, { id: "t9", kind: "terminal", title: "Claude", spec: "claude" });
+    l = updateTab(l, "t9", { termTitle: adopted("fix the login flow") });
+    const before = l.docks[0].tabs.find((t) => t.id === "t9") as PaneTab;
+    expect(paneTabLabel(l, before)).toBe("fix the login flow");
+
+    const back = parseLayouts(serializeLayouts({ 7: l }));
+    const tab = back[7].docks[0].tabs.find((t) => t.id === "t9");
+    expect(tab?.termTitle).toBeUndefined();
+    expect(paneTabLabel(back[7], tab as PaneTab)).toBe("Claude");
   });
 
   it("returns nothing for absent or unparseable storage", () => {
@@ -1247,12 +1312,14 @@ describe("paneTabLabel", () => {
     const l = twoDock();
     // A plain terminal adopts its OSC 0/2 title over "Terminal N".
     const plain = term();
-    expect(paneTabLabel(l, { ...plain, termTitle: "build: npm run dev" })).toBe(
+    expect(paneTabLabel(l, { ...plain, termTitle: adopted("build: npm run dev") })).toBe(
       "build: npm run dev",
     );
     // A config pane that opted in does too, over its configured label.
     const cfg = configPaneTab({ id: "claude", label: "Claude" });
-    expect(paneTabLabel(l, { ...cfg, termTitle: "fix login flow" })).toBe("fix login flow");
+    expect(paneTabLabel(l, { ...cfg, termTitle: adopted("fix login flow") })).toBe(
+      "fix login flow",
+    );
     // Without a termTitle, both keep what they were born with.
     expect(paneTabLabel(l, cfg)).toBe("Claude");
     expect(paneTabLabel(l, plain)).toBe("Terminal");
@@ -1266,13 +1333,13 @@ describe("paneTabBaseLabel", () => {
     l = addTab(l, 0, plain);
     // The exact shape that made a banner read "· sleep 5 && printf '…'": a
     // preexec hook renames the tab to the running command line.
-    const running = { ...plain, termTitle: "sleep 5 && printf '\\033]9;done\\007'" };
+    const running = { ...plain, termTitle: adopted("sleep 5 && printf '\\033]9;done\\007'") };
     expect(paneTabLabel(l, running)).toBe("sleep 5 && printf '\\033]9;done\\007'");
     expect(paneTabBaseLabel(l, running)).toBe("Terminal");
 
     // A config pane falls back to its configured label, not its spec id.
     const cfg = configPaneTab({ id: "claude", label: "Claude" });
-    expect(paneTabBaseLabel(l, { ...cfg, termTitle: "fix login flow" })).toBe("Claude");
+    expect(paneTabBaseLabel(l, { ...cfg, termTitle: adopted("fix login flow") })).toBe("Claude");
   });
 
   it("numbers plain terminals the way the strip does", () => {
@@ -1281,7 +1348,7 @@ describe("paneTabBaseLabel", () => {
     const second = term();
     l = addTab(addTab(l, 0, first), 0, second);
     expect(paneTabBaseLabel(l, second)).toBe("Terminal 2");
-    expect(paneTabBaseLabel(l, { ...second, termTitle: "vim x.rs" })).toBe("Terminal 2");
+    expect(paneTabBaseLabel(l, { ...second, termTitle: adopted("vim x.rs") })).toBe("Terminal 2");
   });
 
   it("is `paneTabLabel` for every non-terminal kind", () => {
@@ -1889,12 +1956,119 @@ describe("paneAnswerFor", () => {
   });
 });
 
+/**
+ * A `termTitle` fixture, minted the way production mints one.
+ *
+ * `PaneTab.termTitle` is branded so only `adoptedTermTitle` can produce it — see
+ * the field's own comment. That makes a test fixture go through the real
+ * cleaner, which is the point: a fixture no production path could produce is a
+ * test of nothing. Throws rather than returning `undefined`, so a fixture that
+ * cleans away to nothing fails loudly here instead of silently asserting a
+ * fallback.
+ */
+function adopted(raw: string): AdoptedTermTitle {
+  const title = adoptedTermTitle(raw);
+  if (title === undefined) throw new Error(`fixture cleaned away to nothing: ${JSON.stringify(raw)}`);
+  return title;
+}
+
+describe("adoptedTermTitle", () => {
+  it("keeps an ordinary title", () => {
+    expect(adoptedTermTitle("fix the login flow")).toBe("fix the login flow");
+  });
+
+  it("clamps to the length the native title bar already clamps to", () => {
+    const long = "x".repeat(MAX_TERM_TITLE + 500);
+    expect(adoptedTermTitle(long)).toHaveLength(MAX_TERM_TITLE);
+  });
+
+  it("strips control characters a tab strip would draw as boxes", () => {
+    expect(adoptedTermTitle("build\u0007 step\u001b[31m")).toBe("build  step [31m");
+  });
+
+  it("clamps on code points, so a surrogate pair is never cut in half", () => {
+    // The failure this guards: `slice(0, 200)` on UTF-16 code units lands
+    // inside the emoji and leaves a lone `\ud83d`, which `JSON.stringify`
+    // emits and a strict JSON parser refuses — so the next boundary the tab
+    // crosses rejects the whole document rather than the title.
+    const title = adopted("a".repeat(MAX_TERM_TITLE - 1) + "\u{1F600}" + "tail");
+    expect(Array.from(title)).toHaveLength(MAX_TERM_TITLE);
+    expect(title.endsWith("\u{1F600}")).toBe(true);
+    expect(/[\ud800-\udbff](?![\udc00-\udfff])/.test(title)).toBe(false);
+    // The round trip the daemon actually performs.
+    expect(JSON.parse(JSON.stringify(title))).toBe(title);
+  });
+
+  // The other half of the strip's contract, and the reason it is not just
+  // "remove everything Default_Ignorable": these characters are load-bearing in
+  // correct text, so removing them would mangle real titles to inconvenience an
+  // attacker who can still reach for a Cyrillic homoglyph.
+  it("keeps the joiners and variation selectors real text needs", () => {
+    // U+200D holds a multi-part emoji together.
+    expect(adoptedTermTitle("\u{1F468}\u200d\u{1F4BB} building")).toBe(
+      "\u{1F468}\u200d\u{1F4BB} building",
+    );
+    // U+200C (ZWNJ) is load-bearing in Persian.
+    expect(adoptedTermTitle("\u0645\u06cc\u200c\u062e\u0648\u0627\u0646\u0645")).toBe(
+      "\u0645\u06cc\u200c\u062e\u0648\u0627\u0646\u0645",
+    );
+    // U+FE0F picks the emoji presentation; without it this is a dingbat.
+    expect(adoptedTermTitle("\u2764\ufe0f done")).toBe("\u2764\ufe0f done");
+  });
+
+  it("strips bidi overrides, so one tab cannot read as another", () => {
+    expect(adoptedTermTitle("Claude \u202e)snoissimrep piks(")).toBe(
+      "Claude )snoissimrep piks(",
+    );
+    // And the invisible padding that pretends to be the pinned neighbour.
+    expect(adoptedTermTitle("Cla\u00adude (skip permissions)")).toBe("Claude (skip permissions)");
+    expect(adoptedTermTitle("Claude\u200b\u200e (skip permissions)")).toBe(
+      "Claude (skip permissions)",
+    );
+    expect(adoptedTermTitle("Cl\u2060a\ufeffu\u3164d\uffa0e")).toBe("Claude");
+    // The deprecated format controls, which have no use in a title at all.
+    expect(adoptedTermTitle("Cla\u206aude\u2065")).toBe("Claude");
+  });
+
+  // The reason the empty case returns `undefined` rather than a blank string:
+  // a title made only of characters that render as nothing is a tab with no
+  // name at all, and the pane's `label` is the right answer for it.
+  it("is undefined for a title that is entirely invisible", () => {
+    expect(adoptedTermTitle("\u2060\ufeff\u200b\u3164\uffa0\u206a\u2065")).toBeUndefined();
+  });
+
+  // The clear. `updateTab` writes `undefined` over a stored title, and
+  // `paneTabLabel` falls back to the pane's `label` — which is what a fresh
+  // relaunch needs, and what a process that blanks its own title should get.
+  it("is undefined for a title with nothing in it", () => {
+    expect(adoptedTermTitle("")).toBeUndefined();
+    expect(adoptedTermTitle("   ")).toBeUndefined();
+    expect(adoptedTermTitle("\u0000\u0007")).toBeUndefined();
+  });
+});
+
+describe("mayAdoptTerminalTitle", () => {
+  const pane = { spec: "claude", autoResume: false, closeOnExit: true, fixedLabel: false };
+
+  it("always lets a plain terminal rename itself", () => {
+    expect(mayAdoptTerminalTitle(undefined)).toBe(true);
+  });
+
+  it("lets a config-declared pane rename itself by default", () => {
+    expect(mayAdoptTerminalTitle(pane)).toBe(true);
+  });
+
+  it("pins a config-declared pane that asked for a fixed label", () => {
+    expect(mayAdoptTerminalTitle({ ...pane, fixedLabel: true })).toBe(false);
+  });
+});
+
 describe("startPlanFor", () => {
   const pane = {
     spec: "claude",
     autoResume: false,
     closeOnExit: true,
-    allowTerminalRenaming: false,
+    fixedLabel: false,
   };
 
   it("runs a login shell when there is no pane spec", () => {
