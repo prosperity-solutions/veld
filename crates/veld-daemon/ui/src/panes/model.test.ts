@@ -22,6 +22,10 @@ import {
   browserTab,
   configPaneTab,
   takePendingAdopt,
+  paneTakesPrompt,
+  type PromptStep,
+  promptStep,
+  seedPane,
   fileLabel,
   filePathIn,
   paneAnswerFor,
@@ -2374,5 +2378,162 @@ describe("what Restart means for a pane", () => {
     expect(restartNeedsConfirmation({ live: false, kind: "resume", canResume: true })).toBe(
       false,
     );
+  });
+});
+
+describe("seedPane", () => {
+  it("takes the place of a new worktree's undecided pane", () => {
+    const layout = defaultLayout();
+    const chooser = allTabs(layout)[0];
+    expect(chooser.kind).toBe("new");
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    const seeded = seedPane(layout, tab);
+    // One tab, not two: a pane arriving with the worktree *is* the answer to
+    // the chooser's question, so leaving it behind would hand the user a stale
+    // "new pane" tab to close.
+    expect(allTabs(seeded)).toHaveLength(1);
+    expect(allTabs(seeded)[0].id).toBe(tab.id);
+    expect(seeded.docks[0].activeId).toBe(tab.id);
+  });
+
+  it("finds the chooser in whichever dock holds it", () => {
+    const chooser = newPaneTab();
+    const layout: PaneLayout = {
+      docks: [
+        { tabs: [{ id: "t1", kind: "terminal", title: "Terminal" }], activeId: "t1" },
+        { tabs: [chooser], activeId: chooser.id },
+      ],
+      ratio: 0.5,
+      focused: 0,
+    };
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    const seeded = seedPane(layout, tab);
+    expect(seeded.docks[1].tabs.map((t) => t.id)).toEqual([tab.id]);
+    expect(seeded.docks[0].tabs.map((t) => t.id)).toEqual(["t1"]);
+  });
+
+  it("adds when there is no chooser to consume", () => {
+    const layout: PaneLayout = {
+      docks: [
+        { tabs: [{ id: "t1", kind: "terminal", title: "Terminal" }], activeId: "t1" },
+        { tabs: [], activeId: null },
+      ],
+      ratio: 0.5,
+      focused: 0,
+    };
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    const seeded = seedPane(layout, tab);
+    expect(seeded.docks[0].tabs.map((t) => t.id)).toEqual(["t1", tab.id]);
+  });
+});
+
+describe("paneTakesPrompt", () => {
+  const pane = (over: Partial<Parameters<typeof paneTakesPrompt>[0]> = {}) => ({
+    kind: "terminal",
+    available: true,
+    can_resume: true,
+    ...over,
+  });
+
+  it("infers an agent from a resume command when the project says nothing", () => {
+    // Every agent pane in this repo's own veld.json (Claude, Codex, Pi) declares
+    // one, so the picker is right with no config change.
+    expect(paneTakesPrompt(pane())).toBe(true);
+    // `git-log` does not, and a prompt typed into it would exit with the pane.
+    expect(paneTakesPrompt(pane({ can_resume: false }))).toBe(false);
+  });
+
+  it("lets the project override the inference either way", () => {
+    expect(paneTakesPrompt(pane({ can_resume: false, agent: true }))).toBe(true);
+    expect(paneTakesPrompt(pane({ can_resume: true, agent: false }))).toBe(false);
+  });
+
+  it("never offers a pane that cannot run", () => {
+    // The refusal would otherwise arrive after the checkout exists — and an
+    // explicit `agent: true` must not talk its way past a missing binary.
+    expect(paneTakesPrompt(pane({ available: false }))).toBe(false);
+    expect(paneTakesPrompt(pane({ available: false, agent: true }))).toBe(false);
+  });
+
+  it("never offers a pane that is not a terminal", () => {
+    // There is only one kind today; a future `browser` pane has no keyboard to
+    // type a prompt into, and this is what stops it being offered one.
+    expect(paneTakesPrompt(pane({ kind: "browser" }))).toBe(false);
+  });
+});
+
+/**
+ * The prompt-delivery gate — the safety argument for writing bytes into a pty
+ * from the browser, tested directly.
+ *
+ * Only the pure decision is here; the timers, the socket and the
+ * `INITIAL_PROMPTS` map around it live in `terminalHost.ts`, which is exactly
+ * why this was extracted from them — that module cannot be imported at all
+ * without a DOM.
+ */
+describe("promptStep", () => {
+  const ready = {
+    spec: "claude",
+    registered: true,
+    wsOpen: true,
+    replaying: false,
+    bracketedPaste: true,
+    ended: false,
+    expired: false,
+  };
+  const step = (over: Partial<typeof ready> = {}): PromptStep =>
+    promptStep({ ...ready, ...over });
+
+  it("sends once a program has the keyboard and the socket can carry it", () => {
+    expect(step()).toBe("send");
+  });
+
+  it("never hands a prompt to a plain terminal, whatever else is true", () => {
+    // **The invariant this whole gate exists for.** A login shell sets DECSET
+    // 2004 itself (measured: `zsh -l` turns it on after 0.74s), so the mode says
+    // nothing there — and the newline after the text would run the prompt as a
+    // shell command. `no-pane` is a permanent drop, not a wait.
+    expect(step({ spec: undefined })).toBe("no-pane");
+    expect(step({ spec: undefined, bracketedPaste: false })).toBe("no-pane");
+    expect(step({ spec: undefined, expired: true })).toBe("no-pane");
+  });
+
+  it("waits while no program has opened an input yet", () => {
+    // The first seconds of an agent's startup: the pane is up, the socket is
+    // live, the TUI has not enabled bracketed paste yet.
+    expect(step({ bracketedPaste: false })).toBe("wait");
+  });
+
+  it("refuses to write during a scrollback replay or a closed socket", () => {
+    // The same predicate a keystroke goes through (`canSend`), because this *is*
+    // a keystroke: a replay makes xterm answer queries the shell never asked.
+    expect(step({ replaying: true })).toBe("wait");
+    expect(step({ wsOpen: false })).toBe("wait");
+  });
+
+  it("keeps waiting while the socket is down, because it reconnects", () => {
+    // The agent behind it is still running with nothing typed into it, so giving
+    // up would lose the prompt to a transient the app recovers from by itself.
+    expect(step({ wsOpen: false, bracketedPaste: false })).toBe("wait");
+  });
+
+  it("gives up when the command has exited or the session was taken over", () => {
+    expect(step({ ended: true, bracketedPaste: false })).toBe("give-up");
+    // No longer the registered owner of its tab id: whatever answers to that id
+    // now was not opened for this prompt.
+    expect(step({ registered: false })).toBe("give-up");
+  });
+
+  it("prefers sending over giving up when a program had an input and then left", () => {
+    // `ended` with the gate still open is a program that enabled bracketed paste
+    // and exited in the same breath. The text is better spent on it than on a
+    // toast — and the send path re-checks immediately before it writes.
+    expect(step({ ended: true, bracketedPaste: true })).toBe("send");
+  });
+
+  it("expires only once the deadline has passed with the gate still shut", () => {
+    expect(step({ bracketedPaste: false, expired: true })).toBe("expired");
+    // An expired deadline never overrides a gate that did open.
+    expect(step({ expired: true })).toBe("send");
   });
 });

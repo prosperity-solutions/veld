@@ -17,6 +17,7 @@ import {
   type SettingsDoc,
   type StatsResponse,
   type CreatedWorktree,
+  type PaneSpec,
   type Worktree,
   type WorktreeGitStatus,
   type ViewableFile,
@@ -44,6 +45,7 @@ import {
 import { pruneRunHistory } from "./shared/runHistory";
 import {
   applyTerminalPrefs,
+  queueInitialPrompt,
   setBellSuppressed,
   setPaneCloseHandler,
 } from "./panes/terminalHost";
@@ -189,17 +191,21 @@ import {
   diagTab,
   dockOf,
   focusDock,
+  hasTab,
+  type PaneTab,
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
   nextFreeProfile,
   paneTabBaseLabel,
+  paneTakesPrompt,
   paneTabLabel,
   tabForTransport,
   parseSessionSets,
   parseTransferTabs,
   revealDiagPane,
   saveLayouts,
+  seedPane,
   serializeSessionSets,
   sessionSetFor,
   normalizeBrowserUrl,
@@ -3562,6 +3568,23 @@ function AppInner(props: {
   // be made *before* a `setLayouts` call cannot come from inside the updater — see the
   // terminal `open_url` handler.
   const layoutsRef = useRef<Record<number, PaneLayout>>({});
+  /**
+   * An agent pane the create dialog asked for, waiting for its worktree's
+   * layout to exist.
+   *
+   * The New worktree dialog can start an agent on a prompt, and the pane it
+   * needs belongs to a worktree that has no layout yet: layouts are seeded
+   * when a worktree is first *shown* (the effect below), which happens after
+   * the create response, after the claim, and asynchronously. A ref rather
+   * than state because nothing renders from it — it is a one-shot fact handed
+   * from a click to the next seed, and re-rendering on it would only make the
+   * hand-off visible.
+   */
+  const pendingAgentRef = useRef<{
+    worktreeId: number;
+    spec: PaneSpec;
+    prompt: string;
+  } | null>(null);
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
@@ -3647,21 +3670,37 @@ function AppInner(props: {
       );
       return;
     }
+    // The agent pane the create dialog asked for, if this is that worktree.
+    // Read once, here, so every branch below agrees about whether there is one.
+    const wanted =
+      pendingAgentRef.current?.worktreeId === id ? pendingAgentRef.current : null;
     // Through the ref, not `layouts`: this effect is keyed on the selection
     // alone, so the render's `layouts` can be a commit behind a layout that has
     // just been adopted — and re-fetching one already on screen would restore an
     // older version over the user's last change.
-    if (layoutsRef.current[id]) return;
+    //
+    // **A pending agent pane goes on regardless.** A newly created worktree with
+    // a layout already in this window is reachable — `worktrees.id` is a
+    // reusable SQLite rowid, so a permanently deleted checkout's layout can
+    // still be stored under the number the new one just took — and the answer
+    // there is to put the pane into the layout that exists, not to report a
+    // failure and not to replace what is on screen. Returning early instead
+    // discarded the pane silently, which is the whole class of bug this
+    // hand-off keeps producing.
+    const alreadyHere = layoutsRef.current[id] !== undefined;
+    if (alreadyHere && wanted === null) return;
     let cancelled = false;
     void (async () => {
       let stored: PaneLayout | null = null;
-      try {
-        stored = await readLayout(id);
-      } catch {
-        // The daemon is unreachable. Seeding a default is the same answer as
-        // "nothing stored", and it cannot destroy anything: the first save
-        // presents version 0, loses the check against whatever is really there,
-        // and adopts it.
+      if (!alreadyHere) {
+        try {
+          stored = await readLayout(id);
+        } catch {
+          // The daemon is unreachable. Seeding a default is the same answer as
+          // "nothing stored", and it cannot destroy anything: the first save
+          // presents version 0, loses the check against whatever is really
+          // there, and adopts it.
+        }
       }
       if (cancelled) return;
       // **Before the panes render.** These shells were expected to be running
@@ -3669,10 +3708,38 @@ function AppInner(props: {
       // instead of quietly opening a fresh prompt — which is exactly what a
       // browser tab used to do for every terminal the app had open.
       if (stored) noteExpectedResumes(terminalIds(stored));
+      // Built here rather than inside the updater: `configPaneTab` mints a tab
+      // id and records the user's consent to a fresh launch
+      // (`markPaneCreated`), and an updater React may call twice would spend
+      // both twice.
+      let agentTab: PaneTab | null = null;
+      if (wanted !== null && pendingAgentRef.current === wanted) {
+        pendingAgentRef.current = null;
+        agentTab = configPaneTab(wanted.spec);
+        // Queued before the pane can mount, which is what makes the prompt
+        // arrive on this pane's *first* launch rather than on whatever it is
+        // doing by the time a later effect gets round to it.
+        queueInitialPrompt(agentTab.id, wanted.prompt, wanted.spec.label);
+      }
+      // Idempotent, because a React updater may run twice: `hasTab` makes a
+      // second pass a no-op instead of a second copy of the same pane.
+      const seed = (layout: PaneLayout) =>
+        agentTab === null || hasTab(layout, agentTab.id)
+          ? layout
+          : seedPane(layout, agentTab);
       setLayouts((prev) => {
-        if (prev[id]) return prev;
-        if (stored) return { ...prev, [id]: stored };
-        return { ...prev, [id]: defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO) };
+        const existing = prev[id];
+        // A layout arrived while `readLayout` was in flight — another window
+        // yielding this worktree, or a socket frame. It is not replaced: it is
+        // the newer one. But the pane the user asked for still belongs in it.
+        if (existing) {
+          const next = seed(existing);
+          return next === existing ? prev : { ...prev, [id]: next };
+        }
+        return {
+          ...prev,
+          [id]: seed(stored ?? defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO)),
+        };
       });
     })();
     return () => {
@@ -6712,13 +6779,31 @@ function AppInner(props: {
           markerStyle={markerStyle(settings ?? {})}
           onStyleChange={(style) => void saveSettings({ "worktree.markerStyle": style })}
           createFrom={gitCreateFrom(settings ?? {})}
+          // The panes of the checkout being looked at, which is the best answer
+          // available: the new one does not exist yet, and `ide.panes` comes
+          // from the repo's own `veld.json` — so unless the new branch changes
+          // that file, these are the panes it will have. The one that is picked
+          // is re-resolved against the created checkout below, because "unless"
+          // is not "never".
+          agents={(worktree?.ide.panes ?? []).filter(paneTakesPrompt)}
           onCreate={async (body) => {
             let created: CreatedWorktree;
+            // **Split before the spread.** `agent` and `prompt` are instructions
+            // to *this client* about what to open once the checkout exists; the
+            // daemon has no field for either. Spreading `body` whole posted them
+            // to `/api/worktrees` anyway — TypeScript exempts spread properties
+            // from its excess-property check, so nothing complained, and serde
+            // dropped them silently because `CreateWorktreeBody` does not
+            // `deny_unknown_fields`. That sent the user's prompt to the daemon
+            // for no reason, and left a create that would 422 the day anyone
+            // added that attribute (as two other bodies in `desktop.rs` already
+            // have).
+            const { agent, prompt, ...create } = body;
             try {
               created = await api.createWorktree({
                 repo_root: repo.root,
                 lane: dialog.lane,
-                ...body,
+                ...create,
               });
             } catch (e) {
               // A create can fail *after* `git worktree add` has succeeded — the
@@ -6730,6 +6815,44 @@ function AppInner(props: {
               // user reads why the rest did not.
               await refresh();
               throw e;
+            }
+            // **Resolved against the checkout that now exists**, not against the
+            // list the dialog offered. Those came from the worktree the user was
+            // looking at, and `ide.panes` is read from each checkout's own
+            // `veld.json` — a branch that removes the pane, or that lands on a
+            // machine missing its `requires_bin`, must not leave the prompt
+            // waiting for a pane nothing will open.
+            if (agent !== undefined && prompt !== undefined) {
+              const spec = created.ide.panes.find((p) => p.id === agent);
+              if (spec !== undefined && paneTakesPrompt(spec)) {
+                pendingAgentRef.current = {
+                  worktreeId: created.id,
+                  spec,
+                  prompt,
+                };
+              } else {
+                // The checkout is made and is perfectly usable; only the agent
+                // did not start. Reported rather than thrown, so the dialog
+                // closes on a create that succeeded.
+                notifyError(
+                  // The label where there is one, the id only when the pane is
+                  // gone from this checkout's config and there is no label left
+                  // to name it by.
+                  `Could not start ${spec?.label ?? agent} in ${worktreeLabel(created)}`,
+                  new Error(
+                    spec === undefined
+                      ? "this checkout's veld.json does not declare that pane"
+                      : spec.available
+                        ? "this checkout's veld.json no longer declares it as an agent"
+                        // The fallback text is unreachable on any payload the
+                      // daemon actually sends — `available: false` is defined as
+                      // `missing` being non-empty — and is kept because this is
+                      // the only place that would otherwise render an empty
+                      // reason if the two ever disagreed.
+                      : `needs ${(spec.missing ?? []).join(", ") || "a missing executable"}`,
+                  ),
+                );
+              }
             }
             // What the carry-over did, said out loud.
             //

@@ -513,6 +513,10 @@
                 "$ref": "#/$defs/commandObject",
                 "description": "What to run instead of `argv`/`shell` when the pane is restored and its shell is gone — typically the tool's own resume flag with ${veld.pane.token}. Absent means the pane can only ever start fresh. A resume that fails is never silently retried as a fresh launch: that would start a new billable session and present to the user as data loss."
               },
+              "agent": {
+                "type": "boolean",
+                "description": "Whether this pane is a coding agent \u2014 a program that takes a prompt and works on it. The IDE's New worktree dialog offers the project's agents and types your prompt into the one you pick; nothing else reads this. Absent is the useful state: the answer is then inferred from `resume`, because a pane that can pick its session up again is one holding a conversation, while a pane that cannot (a `git log`, a `tail -f`) is one where a typed prompt would be run as a command or lost with the pane. Set it only where that inference is wrong \u2014 `true` for an agent with no resume flag, `false` to keep a resumable pane out of the picker."
+              },
               "auto_resume": {
                 "type": "boolean",
                 "default": false,

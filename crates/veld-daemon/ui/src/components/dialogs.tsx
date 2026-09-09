@@ -12,8 +12,10 @@ import {
   ScrollArea,
   SegmentedControl,
   Select,
+  SimpleGrid,
   Stack,
   Text,
+  Textarea,
   TextInput,
   Tooltip,
 } from "@mantine/core";
@@ -24,6 +26,7 @@ import {
   type DbHealth,
   type DirtyFile,
   type EmojiHolder,
+  type PaneSpec,
   type Repo,
   type RepoBranches,
   type Worktree,
@@ -33,10 +36,13 @@ import { describeAge } from "../dbhealth/model";
 import type { GitCreateFrom, MarkerStyle } from "../shared/settings";
 import {
   aliasCollides,
+  DEFAULT_WORKTREE_NAME,
   deriveAlias,
   deriveBranch,
   deriveDisplayName,
+  nameFromPrompt,
   takenExcluding,
+  uniqueName,
   worktreeLabel,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
@@ -559,6 +565,71 @@ export function createBlockers(input: {
   return { localTaken, branchExistsLocally, ready };
 }
 
+/**
+ * The name the create will actually use, and whether the dialog picked it.
+ *
+ * **The Name field is optional now, and this is what makes that true.** The
+ * dialog leads with a prompt, because "start an agent on this" is what most
+ * creates here are — and a person who has just described a task in a sentence
+ * has already said what the checkout is for. Asking them to name it as well is
+ * the ceremony this whole dialog was rearranged to remove.
+ *
+ * Three cases, in order:
+ *
+ * - **Typed.** Returned untouched, and `auto: false` — the derivations and every
+ *   error message stay exactly what they were, because a name somebody chose is
+ *   theirs and a collision in it is worth reporting rather than working around.
+ * - **Borrowed from the prompt** ([`nameFromPrompt`]). `Fix the login redirect
+ *   loop` beats `Workspace 4` by enough to be worth the derivation.
+ * - **[`DEFAULT_WORKTREE_NAME`]**, when there is no prompt — or when the prompt
+ *   yields a name the *alias* cannot hold. A prompt written in Cyrillic slugs to
+ *   `""`, which would disable Create on a field the user was told they could
+ *   leave alone.
+ *
+ * A generated name is moved out of the way of anything that would refuse it
+ * ([`uniqueName`]) rather than reported as a clash: the user did not choose it,
+ * so there is nothing for them to resolve.
+ */
+export function effectiveName(input: {
+  /** The Name field, verbatim. */
+  typed: string;
+  prompt: string;
+  /** Whether a generated name is usable — see the dialog, which asks both about
+   *  the sibling aliases and about the branch it would cut. */
+  isFree: (name: string) => boolean;
+}): { name: string; auto: boolean } {
+  if (input.typed.trim() !== "") return { name: input.typed, auto: false };
+  const borrowed = nameFromPrompt(input.prompt);
+  const base = deriveAlias(borrowed) === "" ? DEFAULT_WORKTREE_NAME : borrowed;
+  return { name: uniqueName(base, (n) => !input.isFree(n)), auto: true };
+}
+
+/**
+ * Which pane the prompt goes to: the user's pick, else the project's first.
+ *
+ * **Resolved on every render rather than seeded into state**, because the agent
+ * list is rebuilt from the 5s poll and can change under an open dialog — a
+ * `veld.json` edit, or a `requires_bin` that finishes installing and flips
+ * `available`. A mount-time snapshot got both ends of that wrong: a dialog
+ * opened before the list resolved kept `null`, so the prompt column rendered,
+ * the user typed, Create succeeded and *nothing started* with no error; and a
+ * pick that later left the list left the `Select` blank with a dead id still on
+ * its way to the daemon.
+ *
+ * A function rather than an inline expression for the reason [`effectiveName`]
+ * and `panes/model.ts`'s `promptStep` are: it decides which program is handed
+ * the user's words, the inline version of it shipped wrong once already, and a
+ * one-line fallback chain is exactly the shape a later edit breaks silently.
+ */
+export function chooseAgent(
+  agents: { id: string }[],
+  picked: string | null,
+): string | null {
+  // `find`, not `picked` straight through: a stale pick falls back to the first
+  // offered pane rather than to nothing.
+  return agents.find((a) => a.id === picked)?.id ?? agents[0]?.id ?? null;
+}
+
 export function NewWorktreeDialog(props: {
   onCreate: (body: {
     branch: string;
@@ -568,6 +639,12 @@ export function NewWorktreeDialog(props: {
     display_name?: string;
     emoji?: string;
     marker_color?: string;
+    /** The `ide.panes[].id` to open in the new checkout, or absent for none.
+     *  Only ever sent alongside a `prompt` — see the dialog's own note. */
+    agent?: string;
+    /** What to type into that pane once it is ready. Absent when the user left
+     *  the field empty, which is the "just give me the checkout" case. */
+    prompt?: string;
   }) => Promise<void>;
   /** The repo whose branches the source picker lists. */
   repoRoot: string;
@@ -586,6 +663,16 @@ export function NewWorktreeDialog(props: {
   /** The repo's existing aliases, for the collision check. Courtesy only — the
    *  daemon's transaction is the authority (see `aliasCollides`). */
   takenAliases: string[];
+  /**
+   * The project's terminal panes, as things that can pick up a prompt.
+   *
+   * Filtered by the caller to the ones that are *available* — a pane whose
+   * `requires_bin` is missing cannot run, and offering it here would move the
+   * refusal to after the checkout exists. Empty for a project that declares no
+   * panes at all, which is what turns the prompt half of this dialog off: there
+   * would be nothing to hand the text to.
+   */
+  agents: PaneSpec[];
   /** Which rail section the "＋" was clicked in — `""` for ungrouped. Shown, not
    *  editable: the click already chose it, and a second control saying the same
    *  thing is one more thing to disagree with. */
@@ -604,6 +691,24 @@ export function NewWorktreeDialog(props: {
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
+  /**
+   * What the chosen agent should start on, and the field this dialog now leads
+   * with.
+   *
+   * Empty is a first-class answer: it means "just make me the checkout", which
+   * is what this dialog did before it grew a prompt, and nothing is launched —
+   * see [`launch`].
+   */
+  const [prompt, setPrompt] = useState("");
+  /**
+   * Which pane the prompt goes to.
+   *
+   * Defaults to the project's **first** available pane rather than to nothing.
+   * The order is `ide.panes`' own, which is the order the project wrote them
+   * in — so the default is the project's stated preference, and a dialog that
+   * opened on "pick one" would make the common case a click it does not need.
+   */
+  const [agent, setAgent] = useState<string | null>(null);
   /**
    * Which of the four sources the checkout comes from.
    *
@@ -674,19 +779,6 @@ export function NewWorktreeDialog(props: {
   }, [loaded.choices, loaded.colors]);
   const chosen = marker;
 
-  const alias = deriveAlias(name);
-  const displayName = deriveDisplayName(name);
-  const derivedBranch = deriveBranch(name);
-  /** The remote-tracking ref currently selected, resolved to its row. */
-  const remote = branches?.remote.find((r) => r.name === remoteRef) ?? null;
-  /** See [`branchForMode`], which owns the rule. */
-  const branch = branchForMode({
-    mode,
-    derivedBranch,
-    branchEdit,
-    localBranch,
-    remoteLocalName: remote?.local_name ?? null,
-  });
   /** The alias this dialog has submitted and is waiting on. While a create is
    *  in flight the 5s `refresh()` poll can already surface the checkout it is
    *  creating (the daemon registers the row before its response returns), so
@@ -700,6 +792,55 @@ export function NewWorktreeDialog(props: {
    *  it exists to silence. */
   const [pendingAlias, setPendingAlias] = useState<string | null>(null);
   const taken = takenExcluding(props.takenAliases, pendingAlias);
+  /**
+   * Whether a name the dialog is about to generate would actually create.
+   *
+   * Both refusals, because either one would leave Create disabled on a field
+   * the user was told to ignore: a sibling already holding the alias, and — for
+   * the modes that cut a branch from the name — a local branch of that name
+   * already existing. `local_branch` and `remote_branch` take their branch from
+   * a picker, so the name cannot clash there and pretending otherwise would
+   * renumber a checkout for no reason.
+   */
+  const nameIsFree = (candidate: string) => {
+    if (aliasCollides(deriveAlias(candidate), taken)) return false;
+    // **Both halves, in every mode, and that is the point.** The name's derived
+    // branch is unused when the branch comes from a picker or the user has typed
+    // one, so numbering the name over a clash it will not have is unnecessary —
+    // and skipping the check there was tried and is worse. `uniqueName` runs on
+    // every render, so a condition that changes mid-dialog changes the *name*
+    // mid-dialog: typing in the Branch field flipped `Fix login 2` back to `Fix
+    // login`, and switching Start-from flipped it again, with the "identified
+    // as" receipt following it around. An unnecessary number costs nothing; a
+    // name that changes while you read it is the failure `uniqueName`'s
+    // deterministic bound exists to prevent.
+    //
+    // Compared case-insensitively, unlike the *typed*-branch check in
+    // `createBlockers`: git refs are case-sensitive but a macOS `.git` is not,
+    // so `Fix-Login` and `fix-login` cannot both exist here, and for a generated
+    // name over-renumbering is free while under-renumbering fails the create.
+    const branch = deriveBranch(candidate).toLowerCase();
+    return !(branches?.local.some((b) => b.name.toLowerCase() === branch) ?? false);
+  };
+  /** See [`effectiveName`], which owns the rule. */
+  const { name: chosenName, auto: autoNamed } = effectiveName({
+    typed: name,
+    prompt,
+    isFree: nameIsFree,
+  });
+  const alias = deriveAlias(chosenName);
+  const displayName = deriveDisplayName(chosenName);
+  const derivedBranch = deriveBranch(chosenName);
+  /** The remote-tracking ref currently selected, resolved to its row. */
+  const remote = branches?.remote.find((r) => r.name === remoteRef) ?? null;
+  /** See [`branchForMode`], which owns the rule. */
+  const branch = branchForMode({
+    mode,
+    derivedBranch,
+    branchEdit,
+    localBranch,
+    remoteLocalName: remote?.local_name ?? null,
+  });
   const collides = aliasCollides(alias, taken);
   /** See [`spinOffSource`], which owns the identity rule. */
   const from = spinOffSource(props.sources, fromPath);
@@ -734,6 +875,35 @@ export function NewWorktreeDialog(props: {
     carryOver,
   });
 
+  /** See [`chooseAgent`], which owns the rule. */
+  const agentId = chooseAgent(props.agents, agent);
+  /**
+   * The pane to open in the new checkout and the text to hand it — or `null`.
+   *
+   * **Both, or neither.** A prompt with no agent has nowhere to go, and an agent
+   * with no prompt is not what this field is for: the maintainer's rule for the
+   * empty prompt is that the dialog does exactly what it did before, which is
+   * open the checkout on its pane chooser. So the agent picker is a statement
+   * about *this* prompt, not a per-checkout setting, and leaving the prompt
+   * empty is how you say "no thanks" without also having to say it twice.
+   */
+  const launch =
+    prompt.trim() !== "" && agentId !== null
+      ? { agent: agentId, prompt: prompt.trim() }
+      : null;
+  /**
+   * A prompt with no agent left to run it.
+   *
+   * Only reachable by the list emptying *under* an open dialog — the viewed
+   * checkout being trashed, or its `veld.json` losing its agent panes, both of
+   * which ride the 5s poll. The prompt column unmounts with it, so without this
+   * the typed text disappears and Create quietly makes a checkout that starts
+   * nothing: the same silent outcome `chooseAgent` was written to remove, one
+   * step further along. Blocked and said out loud instead, in the footer, which
+   * is the one part of the dialog that cannot unmount.
+   */
+  const promptHasNoAgent = prompt.trim() !== "" && agentId === null;
+  const formRef = useRef<HTMLFormElement>(null);
   const { busy, error, submit } = useSubmit(() => {
     // Captured at submit, before the daemon's response: this is the alias the
     // in-flight create is about to make, and it must not read as a collision
@@ -761,6 +931,9 @@ export function NewWorktreeDialog(props: {
         // assignment is the honest fallback.
         emoji: chosen.emoji || undefined,
         marker_color: chosen.color || undefined,
+        // See `launch`: the pane and the text travel together or not at all.
+        agent: launch?.agent,
+        prompt: launch?.prompt,
       })
       .catch((e) => {
         // The create is no longer in flight. The dialog stays open on failure,
@@ -771,9 +944,342 @@ export function NewWorktreeDialog(props: {
       });
   });
 
+  /**
+   * Everything the dialog used to ask for, as one block.
+   *
+   * Lifted into a variable rather than left inline because it is rendered two
+   * ways: bare, for a project with no panes to offer (where there is no prompt
+   * half above it and an "Options" header would be a heading over the whole
+   * dialog), and inside a collapsed disclosure otherwise. Two copies of forty
+   * lines of fields would drift.
+   */
+  const options = (
+    <Stack gap="sm">
+      <TextInput
+        label="Name"
+        placeholder={autoNamed ? chosenName : "Checkout V2"}
+        description={
+          autoNamed
+            ? prompt.trim() === ""
+              ? "Optional. Left empty, the checkout is numbered for you."
+              : "Optional. Left empty, it is taken from your prompt."
+            : undefined
+        }
+        value={name}
+        onChange={(e) => setName(e.currentTarget.value)}
+        /* Both blocking states go on `error`, not only the collision. An
+           unusable name disables Create exactly as a collision does, so
+           rendering it as dimmed prose below the field made the one thing
+           stopping you the quietest thing on screen. */
+        error={
+          collides
+            ? "This repo already has a checkout with that name"
+            : name.trim() !== "" && alias === ""
+              ? "Nothing in that name can be used as an identifier — add a letter or a digit"
+              : null
+        }
+        /* The prompt takes the focus when there is one; this field is the
+           landing place only for a project with no panes to offer. Mantine's
+           focus trap takes the first `data-autofocus` in the DOM, so leaving
+           both would be decided by source order rather than deliberately. */
+        data-autofocus={props.agents.length === 0 || undefined}
+      />
+      {/* The receipt for the lossy derivation. The rail shows the name you
+          typed, verbatim — but the *identifier* underneath it cannot hold a
+          space or a capital (it defaults the run name, which becomes a
+          hostname), so it is still worth showing before anything is created.
+          Monospace because it is an identifier. */}
+      {alias !== "" && (
+        <Text size="xs" c="dimmed">
+          {autoNamed ? "Will be shown as " : "Shown as "}
+          <b>{displayName}</b>; identified as{" "}
+          <Text span ff="monospace">
+            {alias}
+          </Text>
+          {/* Why the two differ, on the screen where they first differ. The
+              old single-name receipt carried this and dropping it left a
+              first-time creator watching their name change with no reason
+              given — the rule now lives only in the *rename* dialog, which
+              is a different screen they have not seen yet. */}
+          {alias !== displayName ? " (letters, digits and dashes only)" : ""}
+        </Text>
+      )}
+      {/* Where it lands. Stated rather than assumed: the create was started
+          from one specific rail section and a dialog that says nothing about
+          it makes the destination a thing you have to remember clicking. */}
+      {props.lane !== "" && (
+        <Text size="xs" c="dimmed">
+          Filed under <b>{props.lane}</b>.
+        </Text>
+      )}
+      {/* The source. A `Select`, not a checkbox pair: there are four
+          answers now, and the previous "create the branch?" checkbox could
+          only express two of them. `new_branch` sits first and is the
+          default — see `mode`. */}
+      <Select
+        label="Start from"
+        data={[
+          { value: "new_branch", label: "A new branch" },
+          { value: "local_branch", label: "An existing local branch" },
+          { value: "remote_branch", label: "A remote branch" },
+          {
+            value: "worktree",
+            label: "Another worktree (spin-off)",
+            // Nothing to branch off when this is the repo's only checkout.
+            disabled: props.sources.length === 0,
+          },
+        ]}
+        value={mode}
+        allowDeselect={false}
+        onChange={(v) => {
+          if (!v) return;
+          setMode(v as SourceMode);
+          // The branch override was a guess against the *previous* mode's
+          // rules — a derived new-ref name means nothing once the branch
+          // comes from a picker, and vice versa. Hand it back to the mode's
+          // own derivation rather than carrying a stale ref across.
+          setBranchEdit(null);
+        }}
+      />
+      {/* The receipt for what the chosen source actually does. Each of the
+          four starts the checkout somewhere different, and a picker whose
+          consequences are not written down is a picker you guess at. */}
+      {mode === "new_branch" && (
+        <Text size="xs" c="dimmed">
+          {props.createFrom === "origin" ? (
+            <>
+              Fetched from the remote first, so the branch starts at the
+              latest{" "}
+              <Text span ff="monospace">
+                origin/main
+              </Text>{" "}
+              — change this in Settings → Git.
+            </>
+          ) : (
+            "Cut from the repo's current HEAD — change this in Settings → Git."
+          )}
+        </Text>
+      )}
+      {mode === "local_branch" && (
+        <Text size="xs" c="dimmed">
+          Checked out as it is. No branch is created, and a branch already
+          checked out somewhere else cannot be checked out again.
+        </Text>
+      )}
+      {mode === "remote_branch" && (
+        <Text size="xs" c="dimmed">
+          The remote is fetched first, then a new local branch is created
+          tracking it — so the checkout starts at what the remote has now.
+        </Text>
+      )}
+      {mode === "worktree" && (
+        <Text size="xs" c="dimmed">
+          A new branch is cut from that checkout's HEAD, so its commits —
+          including the ones it has never pushed — come along.
+        </Text>
+      )}
+      {/* One error line for the whole picker. The lists are only needed by
+          three of the four modes, so a failed fetch must not stop the
+          default create working. */}
+      {branchesError !== null && mode !== "new_branch" && (
+        <Text size="xs" c="red">
+          Could not read this repo's branches: {branchesError}
+        </Text>
+      )}
+      {mode === "local_branch" && (
+        /* **An `Autocomplete`, not a `Select`, and that is the whole
+           finding.** Before this dialog had a source picker, an existing
+           branch was checked out by typing its name into a plain text box —
+           which needed no daemon call and accepted any commit-ish
+           `validate_branch` allows, so a tag or a SHA produced a
+           detached-HEAD checkout. A `Select` fed from `refs/heads` took
+           both of those away: the tag became unreachable, and a branch-list
+           fetch that failed *or never settled* (there is no request
+           timeout) left the only control disabled on "Loading…" — turning
+           an improvement into "you cannot check out an existing branch at
+           all". An `Autocomplete` is the old text box with the list
+           offered on top of it: everything that worked still works, and
+           the suggestions are a help rather than a gate. */
+        <Autocomplete
+          label="Local branch"
+          placeholder="feat/checkout-v2"
+          description={
+            branchesError !== null
+              ? "The branch list could not be read, so type the name exactly as git has it."
+              : "Pick one, or type any ref git has — a tag or a commit gives a detached checkout."
+          }
+          // Rendered-count cap: a repo can have thousands of branches and
+          // Mantine's Combobox does not virtualise. Filtering runs over the
+          // whole list first, so typing still reaches every branch.
+          limit={200}
+          data={(branches?.local ?? []).map((b) => ({
+            value: b.name,
+            // The holder is named, not just flagged: "in use" with no
+            // answer to "by what?" sends you to the rail to work it out.
+            label:
+              b.checked_out_in === null
+                ? b.name
+                : `${b.name} — checked out in ${labelForPath(b.checked_out_in)}`,
+          }))}
+          value={localBranch}
+          onChange={(v) => {
+            setLocalBranch(v);
+            // One-time fill, not a follow-forever rule: an empty Name is
+            // the common case here and typing the branch again is pure
+            // ceremony, but a name already typed is the user's.
+            if (v !== "" && name.trim() === "") setName(v);
+          }}
+          styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+          error={
+            localTaken !== null
+              ? `Already checked out in ${labelForPath(localTaken)} — git allows one checkout per branch`
+              : null
+          }
+        />
+      )}
+      {/* A `Select` here, unlike the local picker above, and deliberately:
+          a remote-tracking ref has no pre-existing typed-entry behaviour to
+          preserve, and the daemon refuses a ref this repo does not have —
+          so free text could only ever produce a 400. When the list is
+          unreadable `new_branch` already covers "cut a branch", and the
+          error line above says why this picker is empty. */}
+      {mode === "remote_branch" && (
+        <Select
+          label="Remote branch"
+          placeholder={branches ? "Pick a branch" : "Loading…"}
+          searchable
+          nothingFoundMessage="No branch of that name"
+          disabled={!branches}
+          // Rendered-count cap, as above.
+          limit={200}
+          description="As of the last fetch. origin refreshes about once a minute; another remote's branches appear once you have fetched it. The checkout itself always fetches first."
+          data={(branches?.remote ?? []).map((b) => ({
+            value: b.name,
+            label: b.has_local ? `${b.name} — local branch exists` : b.name,
+          }))}
+          value={remoteRef === "" ? null : remoteRef}
+          onChange={(v) => {
+            setRemoteRef(v ?? "");
+            // The branch field follows the newly picked ref rather than
+            // keeping the previous one's short name.
+            setBranchEdit(null);
+            const picked = branches?.remote.find((r) => r.name === v);
+            if (picked && name.trim() === "") setName(picked.local_name);
+          }}
+          styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+        />
+      )}
+      {mode === "worktree" && (
+        <Select
+          label="Branch off"
+          placeholder="Pick a worktree"
+          searchable
+          nothingFoundMessage="No worktree of that name"
+          data={props.sources.map((w) => ({
+            value: w.path,
+            label: `${worktreeLabel(w)} — ${w.branch}`,
+          }))}
+          value={fromPath === "" ? null : fromPath}
+          onChange={(v) => setFromPath(v ?? "")}
+          // The picked source can disappear underneath an open dialog —
+          // binned, or a permanent delete — and `data` is rebuilt from the
+          // live list every render, so the field would otherwise go blank
+          // with Create greyed out and nothing saying why.
+          error={
+            fromPath !== "" && from === null
+              ? "That worktree is no longer available — pick another"
+              : null
+          }
+        />
+      )}
+      {mode === "worktree" && (
+        <>
+          <Checkbox
+            label="Carry over uncommitted changes"
+            checked={carryOver}
+            onChange={(e) => setCarryOver(e.currentTarget.checked)}
+          />
+          <Text size="xs" c="dimmed">
+            Staged, unstaged and untracked files are reproduced in the new
+            checkout, staging and all. {from ? <b>{worktreeLabel(from)}</b> : "The source"} is
+            not modified, and ignored files — build output,{" "}
+            <Text span ff="monospace">
+              node_modules
+            </Text>{" "}
+            — are left where they are.
+          </Text>
+        </>
+      )}
+      {/* The branch field, for the modes that create one. `local_branch`
+          has none: its branch *is* the picker above, and a second box
+          showing the same value is one more thing to disagree with. */}
+      {mode !== "local_branch" && (
+        <TextInput
+          label="New branch"
+          placeholder={branch || "feat/checkout-v2"}
+          description={
+            branchEdit !== null
+              ? "Custom. Clear the field to go back to the derived name."
+              : mode === "remote_branch"
+                ? "Taken from the remote branch. Type here to use something else."
+                : "Derived from the name. Type here to use something else."
+          }
+          value={branch}
+          onChange={(e) => setBranchEdit(e.currentTarget.value)}
+          onBlur={() => {
+            // An empty box means "follow the derivation again" rather than
+            // "create a branch called nothing".
+            if (branchEdit !== null && branchEdit.trim() === "") {
+              setBranchEdit(null);
+            }
+          }}
+          error={
+            branchExistsLocally
+              ? "A local branch of that name already exists — pick another name, or start from that local branch instead"
+              : null
+          }
+          styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+        />
+      )}
+      <Stack gap={6}>
+        <Text size="xs" fw={600} c="dimmed" tt="uppercase">
+          Marker
+        </Text>
+        <MarkerGrids
+          emoji={chosen.emoji}
+          color={chosen.color}
+          usedBy={props.usedBy}
+          colorUsedBy={props.colorUsedBy}
+          style={props.markerStyle}
+          onStyleChange={props.onStyleChange}
+          // Local until the worktree exists, so nothing is ever in flight.
+          busy={null}
+          loaded={loaded}
+          onPick={(patch) =>
+            setMarker((m) => ({
+              emoji: patch.emoji ?? m.emoji,
+              color: patch.marker_color ?? m.color,
+            }))
+          }
+        />
+        <Text size="xs" c="dimmed">
+          A free one is picked at random — change it, or leave it. The other
+          face is saved too, so it is there if you switch.
+        </Text>
+      </Stack>
+    </Stack>
+  );
+
   return (
-    <Modal title="New worktree" onClose={props.onClose}>
-      <form onSubmit={submit}>
+    <Modal
+      title="New worktree"
+      // Wide enough for two columns, and only when there are two: a project
+      // that declares no agent panes has the old single column of fields, and
+      // 940px of dialog around it would be empty space asking to be filled.
+      size={props.agents.length > 0 ? 940 : undefined}
+      onClose={props.onClose}
+    >
+      <form onSubmit={submit} ref={formRef}>
         {/* The fields scroll, the footer does not. The glyph grid is 64 animals and
             pushed the Create button below the fold on a laptop, so the dialog's only
             action was reachable exactly when you had stopped scrolling to look for it.
@@ -782,7 +1288,7 @@ export function NewWorktreeDialog(props: {
             ancestor sticks to the wrong box. */}
         <div
           style={{
-            maxHeight: "min(58vh, 520px)",
+            maxHeight: "min(70vh, 620px)",
             overflowY: "auto",
             // Keeps the focus ring of a field flush against the scrollbar from being
             // clipped, and stops the grids touching the edge.
@@ -790,308 +1296,99 @@ export function NewWorktreeDialog(props: {
             marginRight: -8,
           }}
         >
-        <Stack gap="sm">
-          <TextInput
-            label="Name"
-            placeholder="Checkout V2"
-            value={name}
-            onChange={(e) => setName(e.currentTarget.value)}
-            /* Both blocking states go on `error`, not only the collision. An
-               unusable name disables Create exactly as a collision does, so
-               rendering it as dimmed prose below the field made the one thing
-               stopping you the quietest thing on screen. */
-            error={
-              collides
-                ? "This repo already has a checkout with that name"
-                : name.trim() !== "" && alias === ""
-                  ? "Nothing in that name can be used as an identifier — add a letter or a digit"
-                  : null
-            }
-            data-autofocus
-          />
-          {/* The receipt for the lossy derivation. The rail shows the name you
-              typed, verbatim — but the *identifier* underneath it cannot hold a
-              space or a capital (it defaults the run name, which becomes a
-              hostname), so it is still worth showing before anything is created.
-              Monospace because it is an identifier. */}
-          {alias !== "" && (
-            <Text size="xs" c="dimmed">
-              Shown as <b>{displayName}</b>; identified as{" "}
-              <Text span ff="monospace">
-                {alias}
-              </Text>
-              {/* Why the two differ, on the screen where they first differ. The
-                  old single-name receipt carried this and dropping it left a
-                  first-time creator watching their name change with no reason
-                  given — the rule now lives only in the *rename* dialog, which
-                  is a different screen they have not seen yet. */}
-              {alias !== displayName ? " (letters, digits and dashes only)" : ""}
-            </Text>
-          )}
-          {/* Where it lands. Stated rather than assumed: the create was started
-              from one specific rail section and a dialog that says nothing about
-              it makes the destination a thing you have to remember clicking. */}
-          {props.lane !== "" && (
-            <Text size="xs" c="dimmed">
-              Filed under <b>{props.lane}</b>.
-            </Text>
-          )}
-          {/* The source. A `Select`, not a checkbox pair: there are four
-              answers now, and the previous "create the branch?" checkbox could
-              only express two of them. `new_branch` sits first and is the
-              default — see `mode`. */}
-          <Select
-            label="Start from"
-            data={[
-              { value: "new_branch", label: "A new branch" },
-              { value: "local_branch", label: "An existing local branch" },
-              { value: "remote_branch", label: "A remote branch" },
-              {
-                value: "worktree",
-                label: "Another worktree (spin-off)",
-                // Nothing to branch off when this is the repo's only checkout.
-                disabled: props.sources.length === 0,
-              },
-            ]}
-            value={mode}
-            allowDeselect={false}
-            onChange={(v) => {
-              if (!v) return;
-              setMode(v as SourceMode);
-              // The branch override was a guess against the *previous* mode's
-              // rules — a derived new-ref name means nothing once the branch
-              // comes from a picker, and vice versa. Hand it back to the mode's
-              // own derivation rather than carrying a stale ref across.
-              setBranchEdit(null);
-            }}
-          />
-          {/* The receipt for what the chosen source actually does. Each of the
-              four starts the checkout somewhere different, and a picker whose
-              consequences are not written down is a picker you guess at. */}
-          {mode === "new_branch" && (
-            <Text size="xs" c="dimmed">
-              {props.createFrom === "origin" ? (
-                <>
-                  Fetched from the remote first, so the branch starts at the
-                  latest{" "}
-                  <Text span ff="monospace">
-                    origin/main
-                  </Text>{" "}
-                  — change this in Settings → Git.
-                </>
-              ) : (
-                "Cut from the repo's current HEAD — change this in Settings → Git."
-              )}
-            </Text>
-          )}
-          {mode === "local_branch" && (
-            <Text size="xs" c="dimmed">
-              Checked out as it is. No branch is created, and a branch already
-              checked out somewhere else cannot be checked out again.
-            </Text>
-          )}
-          {mode === "remote_branch" && (
-            <Text size="xs" c="dimmed">
-              The remote is fetched first, then a new local branch is created
-              tracking it — so the checkout starts at what the remote has now.
-            </Text>
-          )}
-          {mode === "worktree" && (
-            <Text size="xs" c="dimmed">
-              A new branch is cut from that checkout's HEAD, so its commits —
-              including the ones it has never pushed — come along.
-            </Text>
-          )}
-          {/* One error line for the whole picker. The lists are only needed by
-              three of the four modes, so a failed fetch must not stop the
-              default create working. */}
-          {branchesError !== null && mode !== "new_branch" && (
-            <Text size="xs" c="red">
-              Could not read this repo's branches: {branchesError}
-            </Text>
-          )}
-          {mode === "local_branch" && (
-            /* **An `Autocomplete`, not a `Select`, and that is the whole
-               finding.** Before this dialog had a source picker, an existing
-               branch was checked out by typing its name into a plain text box —
-               which needed no daemon call and accepted any commit-ish
-               `validate_branch` allows, so a tag or a SHA produced a
-               detached-HEAD checkout. A `Select` fed from `refs/heads` took
-               both of those away: the tag became unreachable, and a branch-list
-               fetch that failed *or never settled* (there is no request
-               timeout) left the only control disabled on "Loading…" — turning
-               an improvement into "you cannot check out an existing branch at
-               all". An `Autocomplete` is the old text box with the list
-               offered on top of it: everything that worked still works, and
-               the suggestions are a help rather than a gate. */
-            <Autocomplete
-              label="Local branch"
-              placeholder="feat/checkout-v2"
-              description={
-                branchesError !== null
-                  ? "The branch list could not be read, so type the name exactly as git has it."
-                  : "Pick one, or type any ref git has — a tag or a commit gives a detached checkout."
-              }
-              // Rendered-count cap: a repo can have thousands of branches and
-              // Mantine's Combobox does not virtualise. Filtering runs over the
-              // whole list first, so typing still reaches every branch.
-              limit={200}
-              data={(branches?.local ?? []).map((b) => ({
-                value: b.name,
-                // The holder is named, not just flagged: "in use" with no
-                // answer to "by what?" sends you to the rail to work it out.
-                label:
-                  b.checked_out_in === null
-                    ? b.name
-                    : `${b.name} — checked out in ${labelForPath(b.checked_out_in)}`,
-              }))}
-              value={localBranch}
-              onChange={(v) => {
-                setLocalBranch(v);
-                // One-time fill, not a follow-forever rule: an empty Name is
-                // the common case here and typing the branch again is pure
-                // ceremony, but a name already typed is the user's.
-                if (v !== "" && name.trim() === "") setName(v);
-              }}
-              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-              error={
-                localTaken !== null
-                  ? `Already checked out in ${labelForPath(localTaken)} — git allows one checkout per branch`
-                  : null
-              }
-            />
-          )}
-          {/* A `Select` here, unlike the local picker above, and deliberately:
-              a remote-tracking ref has no pre-existing typed-entry behaviour to
-              preserve, and the daemon refuses a ref this repo does not have —
-              so free text could only ever produce a 400. When the list is
-              unreadable `new_branch` already covers "cut a branch", and the
-              error line above says why this picker is empty. */}
-          {mode === "remote_branch" && (
-            <Select
-              label="Remote branch"
-              placeholder={branches ? "Pick a branch" : "Loading…"}
-              searchable
-              nothingFoundMessage="No branch of that name"
-              disabled={!branches}
-              // Rendered-count cap, as above.
-              limit={200}
-              description="As of the last fetch. origin refreshes about once a minute; another remote's branches appear once you have fetched it. The checkout itself always fetches first."
-              data={(branches?.remote ?? []).map((b) => ({
-                value: b.name,
-                label: b.has_local ? `${b.name} — local branch exists` : b.name,
-              }))}
-              value={remoteRef === "" ? null : remoteRef}
-              onChange={(v) => {
-                setRemoteRef(v ?? "");
-                // The branch field follows the newly picked ref rather than
-                // keeping the previous one's short name.
-                setBranchEdit(null);
-                const picked = branches?.remote.find((r) => r.name === v);
-                if (picked && name.trim() === "") setName(picked.local_name);
-              }}
-              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-            />
-          )}
-          {mode === "worktree" && (
-            <Select
-              label="Branch off"
-              placeholder="Pick a worktree"
-              searchable
-              nothingFoundMessage="No worktree of that name"
-              data={props.sources.map((w) => ({
-                value: w.path,
-                label: `${worktreeLabel(w)} — ${w.branch}`,
-              }))}
-              value={fromPath === "" ? null : fromPath}
-              onChange={(v) => setFromPath(v ?? "")}
-              // The picked source can disappear underneath an open dialog —
-              // binned, or a permanent delete — and `data` is rebuilt from the
-              // live list every render, so the field would otherwise go blank
-              // with Create greyed out and nothing saying why.
-              error={
-                fromPath !== "" && from === null
-                  ? "That worktree is no longer available — pick another"
-                  : null
-              }
-            />
-          )}
-          {mode === "worktree" && (
-            <>
-              <Checkbox
-                label="Carry over uncommitted changes"
-                checked={carryOver}
-                onChange={(e) => setCarryOver(e.currentTarget.checked)}
+        {/* **Two columns, and nothing hidden.** The first version of this
+            rearrangement put the old fields behind a disclosure, which traded
+            one problem for another: the prompt had room and everything else
+            became a click plus a guess at what was in there. A 560px dialog is
+            what forced the choice — at 940 the prompt gets a column that fits
+            a paragraph and the fields it used to be alone with sit beside it,
+            both visible at once.
+
+            `minColWidth` with `auto-fit`, **not** responsive `cols`. `cols`
+            takes Mantine's breakpoints against the *viewport*, and this grid is
+            inside a modal that is capped to the viewport — so between 768px and
+            940px of window the dialog was as narrow as the window and still
+            split itself into two 360px columns, which is the case the split was
+            supposed to fold out of. `auto-fit` measures the track against the
+            grid's own width instead, needs no query at all, and collapses the
+            empty track — so the no-agents case (one child) fills the row rather
+            than sitting in half a grid. */}
+        <SimpleGrid
+          // `min(360px, 100%)`, not `360`: `minmax(360px, 1fr)` cannot shrink
+          // below its minimum, so a modal narrower than that (a small window,
+          // where Mantine caps the modal at the viewport) would scroll the
+          // fields sideways instead of stacking them. Mantine passes a string
+          // through to the custom property verbatim.
+          minColWidth="min(360px, 100%)"
+          autoFlow="auto-fit"
+          spacing="xl"
+          verticalSpacing="sm"
+        >
+          {props.agents.length > 0 && (
+            <Stack gap="sm">
+              {/* The agent, then the prompt, in that order — it is the order the
+                  sentence goes in ("give Claude this") and it puts the smaller
+                  control above the bigger one. A `Select` even for a project
+                  with a single pane: what is about to run is worth stating, and
+                  a disabled-looking field with one option reads as a choice
+                  already made rather than as an absence. */}
+              <Select
+                label="Agent"
+                description="Terminal panes this project declares (ide.panes)."
+                data={props.agents.map((a) => ({ value: a.id, label: a.label }))}
+                value={agentId}
+                allowDeselect={false}
+                onChange={(v) => setAgent(v)}
+              />
+              {/* **The field this dialog is now for.** A `Textarea`, not a
+                  `TextInput`: prompts are sentences and often several, and a
+                  one-line box that scrolls sideways makes re-reading what you
+                  typed impossible. Autosized so a short prompt does not leave a
+                  hole and a long one does not need scrolling to review, capped
+                  before it can push Create out of the scroll region. */}
+              <Textarea
+                label="Prompt"
+                placeholder="Fix the login redirect loop for expired sessions"
+                autosize
+                // Sized to be the surface the dialog is for, not a field on it:
+                // ten rows is a paragraph of instructions without scrolling, and
+                // it stands the left column up next to the right one's stack of
+                // fields. Autosize still grows it, up to the point where the
+                // dialog's own scroll region would start moving the button.
+                minRows={10}
+                maxRows={20}
+                value={prompt}
+                onChange={(e) => setPrompt(e.currentTarget.value)}
+                onKeyDown={(e) => {
+                  // Enter is a newline in a prompt, so the keyboard submit has
+                  // to be the chord — the same one every composer uses. Shift
+                  // and Alt are excluded rather than ignored: ⌘⇧Enter is the
+                  // run's start/stop (`shortcuts/registry.ts`), and it is the
+                  // one Enter variant `terminalKeys.ts` deliberately hands to
+                  // the page, so answering it here would claim a chord that
+                  // already means something else.
+                  if (e.key !== "Enter" || e.shiftKey || e.altKey) return;
+                  if (!(e.metaKey || e.ctrlKey)) return;
+                  e.preventDefault();
+                  // Guarded here, not by the button: `requestSubmit()` with no
+                  // submitter submits the form whether or not a submit button
+                  // is disabled, so the chord would otherwise reach a create
+                  // the click cannot make — and land on the daemon's refusal
+                  // instead of on the error already rendered next to the field.
+                  if (!ready || busy || promptHasNoAgent) return;
+                  formRef.current?.requestSubmit();
+                }}
+                data-autofocus
               />
               <Text size="xs" c="dimmed">
-                Staged, unstaged and untracked files are reproduced in the new
-                checkout, staging and all. {from ? <b>{worktreeLabel(from)}</b> : "The source"} is
-                not modified, and ignored files — build output,{" "}
-                <Text span ff="monospace">
-                  node_modules
-                </Text>{" "}
-                — are left where they are.
+                {launch
+                  ? `Opens ${props.agents.find((a) => a.id === launch.agent)?.label ?? launch.agent} in the new checkout and types this in once it is ready.`
+                  : "Optional. Left empty, the checkout just opens — nothing is started."}
               </Text>
-            </>
+            </Stack>
           )}
-          {/* The branch field, for the modes that create one. `local_branch`
-              has none: its branch *is* the picker above, and a second box
-              showing the same value is one more thing to disagree with. */}
-          {mode !== "local_branch" && (
-            <TextInput
-              label="New branch"
-              placeholder={branch || "feat/checkout-v2"}
-              description={
-                branchEdit !== null
-                  ? "Custom. Clear the field to go back to the derived name."
-                  : mode === "remote_branch"
-                    ? "Taken from the remote branch. Type here to use something else."
-                    : "Derived from the name. Type here to use something else."
-              }
-              value={branch}
-              onChange={(e) => setBranchEdit(e.currentTarget.value)}
-              onBlur={() => {
-                // An empty box means "follow the derivation again" rather than
-                // "create a branch called nothing".
-                if (branchEdit !== null && branchEdit.trim() === "") {
-                  setBranchEdit(null);
-                }
-              }}
-              error={
-                branchExistsLocally
-                  ? "A local branch of that name already exists — pick another name, or start from that local branch instead"
-                  : null
-              }
-              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
-            />
-          )}
-          <Stack gap={6}>
-            <Text size="xs" fw={600} c="dimmed" tt="uppercase">
-              Marker
-            </Text>
-            <MarkerGrids
-              emoji={chosen.emoji}
-              color={chosen.color}
-              usedBy={props.usedBy}
-              colorUsedBy={props.colorUsedBy}
-              style={props.markerStyle}
-              onStyleChange={props.onStyleChange}
-              // Local until the worktree exists, so nothing is ever in flight.
-              busy={null}
-              loaded={loaded}
-              onPick={(patch) =>
-                setMarker((m) => ({
-                  emoji: patch.emoji ?? m.emoji,
-                  color: patch.marker_color ?? m.color,
-                }))
-              }
-            />
-            <Text size="xs" c="dimmed">
-              A free one is picked at random — change it, or leave it. The other
-              face is saved too, so it is there if you switch.
-            </Text>
-          </Stack>
-        </Stack>
+          {options}
+        </SimpleGrid>
         </div>
         <Stack
           gap="sm"
@@ -1099,8 +1396,14 @@ export function NewWorktreeDialog(props: {
           mt="sm"
           style={{ borderTop: "1px solid var(--border)" }}
         >
+          {promptHasNoAgent && (
+            <Text size="xs" c="red">
+              This project no longer offers an agent that could run your prompt.
+              Clear the prompt to create the checkout on its own.
+            </Text>
+          )}
           <ErrorText error={error} />
-          <Button type="submit" loading={busy} disabled={!ready}>
+          <Button type="submit" loading={busy} disabled={!ready || promptHasNoAgent}>
             Create worktree
           </Button>
         </Stack>

@@ -603,6 +603,10 @@ export interface PaneSpec {
    *  command run, so they come from `paneSessionOptions` and only when the pane
    *  chooser is actually on screen. */
   has_sessions: boolean;
+  /** The project's explicit `agent` answer for this pane, or absent when it gave
+   *  none — see `paneTakesPrompt`, which owns what absent means. Optional in the
+   *  type for that reason *and* because an older daemon omits the key entirely. */
+  agent?: boolean;
   /** Whether a restored pane whose shell is gone may resume without a click. */
   auto_resume: boolean;
   /** Whether a clean (status 0) exit closes the pane. Never applies to a

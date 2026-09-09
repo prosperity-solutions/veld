@@ -497,6 +497,19 @@ the pane exactly as before. What it launches is the pane's existing `resume` wit
 the pane chooser is on screen, under the same bounds and the same
 `extensions.autoRefresh` off switch as `ide.extensions`.
 
+`ide.panes[]` also gained `agent` — whether the pane is a coding agent, i.e.
+whether the IDE's *New worktree…* dialog offers it and types the prompt you typed
+into it. Additive and usually unnecessary: with the key absent the answer is
+inferred from `resume`, so an agent pane written the way this guide already
+describes is offered without any change. Set it where the inference is wrong —
+`true` for an agent with no resume flag, `false` to keep a resumable pane (a
+`psql`, a `git log` with a paging resume) out of a picker that would otherwise
+type a sentence into it. One caveat on the forward direction: a veld older than
+this release does not know the key, so it lints the pane with an
+`unknown pane key(s) "agent"` problem — the pane itself still loads and still
+works, which is the same additive path every other new pane field took. See
+[configuration.md](configuration.md#idepanes-the-projects-own-panes).
+
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld
 runs in that worktree. Nothing existing changes — a config without the key behaves

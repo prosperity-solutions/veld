@@ -2471,6 +2471,14 @@ struct PaneView {
     /// makes only when at least one pane here says `true`, so a project with no
     /// picker costs no request and no subprocess.
     has_sessions: bool,
+    /// The pane's explicit `agent` answer, or absent when it did not give one.
+    ///
+    /// **Sent as three states, not resolved to a bool here.** The client infers
+    /// the absent case from `can_resume` (see `panes/model.ts`), and flattening
+    /// it server-side would tell a client that never asked for the inference
+    /// that the project had declared something it did not.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent: Option<bool>,
     /// Whether a restored pane whose shell is gone may resume without a click.
     auto_resume: bool,
     /// Whether a clean exit closes the pane.
@@ -2744,6 +2752,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
                         missing,
                         can_resume: terminal.resume.is_some(),
                         has_sessions: session_panes.contains(&p.id),
+                        agent: terminal.agent,
                         auto_resume: terminal.auto_resume,
                         close_on_exit: terminal.close_on_exit,
                         fixed_label: terminal.fixed_label,

@@ -224,6 +224,7 @@ pub const MAX_NEWS_ITEMS: usize = 5;
 /// (`auto_resume` false, `close_on_exit` true, `fixed_label` false), which is
 /// the worst shape for a silent one.
 pub const TERMINAL_PANE_KEYS: &[&str] = &[
+    "agent",
     "argv",
     "auto_resume",
     "close_on_exit",
@@ -827,6 +828,25 @@ pub struct TerminalPane {
     /// adopted. Absent means the pane only ever resumes *its own* session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<SessionsPicker>,
+    /// Whether this pane is a **coding agent** — a program that takes a prompt
+    /// and works on it.
+    ///
+    /// Read by the IDE's *New worktree…* dialog, which offers the project's
+    /// agents and hands the one you pick the prompt you typed. Nothing else
+    /// consults it: an agent pane is opened, launched and resumed exactly like
+    /// any other terminal pane.
+    ///
+    /// **Three states, and the absent one is the useful one.** Left unset, the
+    /// answer is inferred from [`Self::resume`]: a pane that declares how to
+    /// pick its session up again is a pane holding a *conversation*, which is
+    /// what a prompt is a turn in — and a pane that does not (`git log`, a
+    /// build, a `tail -f`) is one where a typed prompt would be run as a
+    /// command or dropped on the floor. That inference is right for every agent
+    /// pane written the way the docs already ask for, so the feature works
+    /// without a config change; `true` and `false` are how a project says
+    /// otherwise for one pane without affecting the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<bool>,
     /// Whether veld may run `resume` without being asked. Only ever consulted
     /// when a pane is restored with its shell already gone, never while the user
     /// is watching it — see `crates/veld-daemon/ui/src/panes/terminalHost.ts`.
@@ -2005,6 +2025,23 @@ fn parse_terminal_pane(
         }
     };
 
+    // Absent stays absent rather than resolving to the inferred value here: the
+    // inference belongs to the one client that acts on it, and baking it into
+    // the parsed config would make a pane that never said anything indistinguishable
+    // from one that said `true` — so a later change to the inference would silently
+    // disagree with a `veld.json` a user is reading.
+    let agent = match entry.get("agent") {
+        None => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.agent"),
+                message: "must be true or false".to_owned(),
+            });
+            return None;
+        }
+    };
+
     let fixed_label = match entry.get("fixed_label") {
         None => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -2064,6 +2101,7 @@ fn parse_terminal_pane(
         launch,
         resume,
         sessions,
+        agent,
         auto_resume,
         close_on_exit,
         fixed_label,
@@ -4359,6 +4397,46 @@ mod tests {
                 parsed.problems
             );
         }
+    }
+
+    /// `agent` is three states, and the parser must keep them three.
+    ///
+    /// Resolving the absent case here — to `resume.is_some()`, which is what the
+    /// client infers — would make a pane that said nothing indistinguishable
+    /// from one that said `true`, and a later change to the inference would then
+    /// silently disagree with a `veld.json` somebody is reading.
+    #[test]
+    fn agent_stays_unanswered_when_a_pane_does_not_answer_it() {
+        let parsed = one_pane(json!({
+            "id": "claude", "type": "terminal", "argv": ["claude"],
+            "resume": { "argv": ["claude", "--resume"] },
+        }));
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        assert_eq!(terminal.agent, None, "a resume command is not an answer");
+
+        for answer in [true, false] {
+            let parsed = one_pane(json!({
+                "id": "claude", "type": "terminal", "argv": ["claude"], "agent": answer,
+            }));
+            assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+            let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+            assert_eq!(terminal.agent, Some(answer));
+        }
+
+        // A non-boolean is a problem, not a silent default — same bar as every
+        // other flag on a pane.
+        let parsed = one_pane(
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "agent": "yes" }),
+        );
+        assert_eq!(parsed.panes.len(), 0);
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.location.ends_with("agent")),
+            "{:?}",
+            parsed.problems
+        );
     }
 
     #[test]

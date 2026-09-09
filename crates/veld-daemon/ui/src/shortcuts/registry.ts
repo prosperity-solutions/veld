@@ -395,6 +395,18 @@ export const SHORTCUTS: ShortcutDef[] = [
     desktopOnly: true,
   },
   {
+    id: "submit-prompt",
+    category: "general",
+    title: "Create the worktree from the prompt",
+    description:
+      "Submit the New worktree dialog from its prompt field, where plain Enter is a newline.",
+    // Not ⌘⇧Enter — that is the run's start/stop, and this is the chord every
+    // composer already uses for "send". Answered by the field itself rather
+    // than by `App.tsx`, like Shift+Enter is: nothing at the window level wants
+    // it, and a terminal can never have focus while a modal has the focus trap.
+    combos: [{ mod: true, keys: ["Enter"] }],
+  },
+  {
     id: "insert-newline",
     category: "general",
     title: "Insert a newline in a terminal",

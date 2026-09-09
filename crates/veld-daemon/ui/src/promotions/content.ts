@@ -343,6 +343,38 @@ export const PROMOTIONS: Promotion[] = [
     headline: "Know which agent pane is on which task",
     body:
       "A pane your project declares now takes the title its tool sets, so four Claude tabs read as four tasks. Pin one back with fixed_label in veld.json.",
+    glyph: "panes",
+  },
+  {
+    // **Promoted because the way you start work changed.** Not a new field: the
+    // first question the create dialog asks is no longer "what is this called"
+    // but "what needs doing" — and the habit it replaces (name a checkout, open
+    // it, find the agent pane, type the task) is one nobody drops without being
+    // told the shorter route exists.
+    //
+    // The headline says what the reader now does; "Start a worktree with a
+    // prompt, not a name" was the first draft and describes the dialog instead
+    // — the reader does not experience a field being optional, they experience
+    // not having to think of a name.
+    //
+    // **And it has to be true for a project that declares no agent panes.** The
+    // prompt half of that dialog only renders where there are agents to offer,
+    // and a card shipped to everyone that opens on "pick an agent, describe the
+    // job" promotes a control some readers do not have. The optional name is the
+    // half that is universal, so it leads; the prompt is named as the thing you
+    // get *where* your project declares agents. Gating the card on config was
+    // the alternative and there is no mechanism for it — the channel ships one
+    // static list to every user, which is a good reason for its cards to be
+    // about veld rather than about your veld.json.
+    //
+    // `terminal` rather than `panes`: what arrives is an agent already running
+    // in one, and `panes` is the spin-off card's glyph two rows up.
+    id: "new-worktree-prompt",
+    since: "2026-09-09",
+    eyebrow: "Changed",
+    headline: "Create a worktree without naming it",
+    body:
+      "Nothing in that dialog is required any more, the name included. Where your project declares agent panes, describe the job and one starts on it.",
     glyph: "terminal",
   },
 ];

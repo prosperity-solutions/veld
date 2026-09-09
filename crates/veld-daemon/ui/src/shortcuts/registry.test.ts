@@ -61,6 +61,7 @@ describe("SHORTCUTS", () => {
       "find-in-page",
       "new-window",
       "insert-newline",
+      "submit-prompt",
       "cycle-tabs",
       "new-tab",
       "close-tab",
@@ -132,6 +133,11 @@ describe("SHORTCUTS", () => {
     "previous-project": "not claimed in a terminal",
     // Escape is xterm's: vim, less and every TUI menu need it.
     "close-dialog": "Escape belongs to the terminal",
+    // Bound inside a dialog's own field, and a modal holds the focus trap — so
+    // no terminal can have focus while it is pressable. ⌘Enter in a terminal
+    // stays the program's (Claude Code binds it), which is why it is answered
+    // by the field rather than by the window.
+    "submit-prompt": "only bound inside a modal, which traps focus",
   };
   it("lets every page-dispatched modified chord past a focused terminal", () => {
     for (const s of SHORTCUTS) {
