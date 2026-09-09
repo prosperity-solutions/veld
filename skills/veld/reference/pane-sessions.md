@@ -219,7 +219,10 @@ slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
 dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
 [ -d "$dir" ] || exit 0          # no sessions here — not an error
 
-mtime() { stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0; }
+# GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
+# FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
+# fires and the substitution captures both. BSD has no `-c` and fails cleanly.
+mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
 
 rows=$(
   for f in "$dir"/*.jsonl; do
@@ -241,9 +244,15 @@ That is a working picker. This repo's own
 the first user message out of the JSONL for the row's label, which is what turns
 *"3h ago"* into *"3h ago · fixing the pane resume bug"*. Copy it if you want that.
 
-**Two portability traps it exists to document:** `stat`'s flag differs between
-BSD (macOS) and GNU, and `find -printf` is GNU-only. Handle both or your picker
-works on one developer's machine.
+**Two portability traps it exists to document.** `find -printf` is GNU-only, so
+the timestamp comes from `stat` — whose flag differs between BSD (macOS) and GNU,
+and whose *failure* differs too. Try **GNU's `-c` first**: GNU's `-f` is
+`--file-system` and takes no argument, so `stat -f '%m' FILE` on Linux reads
+`%m` as a second file operand, prints a filesystem dump to **stdout** and exits
+1 — the `||` fires and your substitution captures the dump as well as the epoch.
+BSD has no `-c` at all and rejects it cleanly, with nothing on stdout. So the
+platform that fails cleanly goes second, and it is worth guarding the result to
+digits either way.
 
 ### Codex: the config half is the interesting half
 
@@ -287,7 +296,10 @@ ext="json"                     # one file per session
 # worktree with no history rather than showing an empty one.
 [ -d "$dir" ] || exit 0
 
-mtime() { stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0; }
+# GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
+# FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
+# fires and the substitution captures both. BSD has no `-c` and fails cleanly.
+mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
 
 rows=$(
   for f in "$dir"/*."$ext"; do

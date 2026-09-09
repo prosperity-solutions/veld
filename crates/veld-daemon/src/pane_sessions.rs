@@ -142,7 +142,7 @@ const SESSIONS_FLOOR: Duration = Duration::from_secs(3);
 /// both callers launch.
 type Cell = Arc<tokio::sync::Mutex<Option<(Instant, PaneSessionsView)>>>;
 
-/// `(worktree path, declare_root, pane id)`.
+/// `(worktree path, declare_root, the interpolated command)`.
 ///
 /// Keyed on the worktree's **path, never its database id** — `worktrees.id` is
 /// an `INTEGER PRIMARY KEY` with no `AUTOINCREMENT` and rows are hard-deleted, so
@@ -150,20 +150,35 @@ type Cell = Arc<tokio::sync::Mutex<Option<(Instant, PaneSessionsView)>>>;
 /// serve a deleted checkout's session list to a new one. `declare_root` is in the
 /// key for the same reason it is in the badge runner's: flipping
 /// `extensions.source` changes which config produced the answer.
+///
+/// **The third element is the command, not the pane id**, and that is the one
+/// place this diverges from `extensions::RESULTS`. A badge's command is its own;
+/// a lister's is routinely *shared* — the real shape of this feature is several
+/// panes of one tool, and this repo's own config is two Claude panes running one
+/// `claude-sessions.sh`. Keyed on the pane, that is two identical forks of a
+/// script that itself forks a `python3` per row. Keyed on the command they
+/// collapse to one, and a script that *does* differ per pane (because it reads
+/// `${veld.pane.id}`) interpolates to a different string and correctly does not.
 type Key = (String, String, String);
 
 static RESULTS: LazyLock<Mutex<HashMap<Key, Cell>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn cell(root: &str, declare_root: &str, id: &str) -> Cell {
+fn cell(root: &str, declare_root: &str, command: &str) -> Cell {
     let mut map = RESULTS.lock().expect("pane sessions results poisoned");
     // Bounded the way the badge runner bounds its own map: this grows with
-    // (worktrees × panes) and nothing removes a worktree's entries when it is
+    // (worktrees × commands) and nothing removes a worktree's entries when it is
     // deleted, so a long-lived daemon would otherwise accumulate them forever.
+    //
+    // **Cells with a run in flight are spared**, which the badge runner also
+    // does and for a reason worth restating: a plain `clear()` drops a cell a
+    // task is holding the lock on, the next request builds a fresh one, and the
+    // single-flight guarantee lapses at exactly the moment the map is busiest.
+    // `strong_count == 1` means this map is the only owner, so nobody is inside.
     if map.len() > MAX_TRACKED {
-        map.clear();
+        map.retain(|_, c| Arc::strong_count(c) > 1);
     }
     Arc::clone(
-        map.entry((root.to_owned(), declare_root.to_owned(), id.to_owned()))
+        map.entry((root.to_owned(), declare_root.to_owned(), command.to_owned()))
             .or_default(),
     )
 }
@@ -323,6 +338,21 @@ pub(crate) async fn list(Path(id): Path<i64>) -> Result<Json<PaneSessionsRespons
     }))
 }
 
+/// The command as it will actually be spawned, for use as a cache key.
+///
+/// `None` when it does not interpolate — the same failure `spawn_command` is
+/// about to return, so the caller does not need to distinguish it here.
+fn interpolated(
+    spec: &veld_core::config::CommandSpec,
+    builtins: &HashMap<String, String>,
+) -> Option<String> {
+    let ctx = veld_core::variables::VariableContext {
+        builtins: builtins.clone(),
+        ..Default::default()
+    };
+    spec.interpolate(&ctx).ok().map(|s| s.display())
+}
+
 /// One pane's answer, behind the single-flight memory.
 async fn evaluate(
     pane: &PaneDef,
@@ -332,14 +362,20 @@ async fn evaluate(
     builtins: &HashMap<String, String>,
     taken: &HashSet<String>,
 ) -> PaneSessionsView {
-    let cell = cell(root, declare_root, &pane.id);
+    // The *interpolated* command, so two panes running one script share a run and
+    // two panes running the same script with different `${veld.pane.id}` do not.
+    // Falling back to the pane id keeps a spec that cannot interpolate — which
+    // `run_one` is about to report as failed anyway — from sharing a cell with an
+    // unrelated one.
+    let key = interpolated(&picker.command, builtins).unwrap_or_else(|| pane.id.clone());
+    let cell = cell(root, declare_root, &key);
     // Held across the run on purpose: a second chooser opening mid-run waits
     // here and is then answered from the run the first one made, instead of
     // forking a second copy of the project's script.
     let mut guard = cell.lock().await;
     if let Some((at, view)) = guard.as_ref() {
         if at.elapsed() < SESSIONS_FLOOR {
-            return view.clone();
+            return mine(view.clone(), pane, picker);
         }
     }
     // Stamped before the run, not after, so the floor measures from when the
@@ -347,7 +383,24 @@ async fn evaluate(
     let started = Instant::now();
     let view = run_one(pane, picker, root, declare_root, builtins, taken).await;
     *guard = Some((started, view.clone()));
-    view
+    mine(view, pane, picker)
+}
+
+/// Re-stamp a shared answer with *this* pane's identity.
+///
+/// The cell is keyed on the command, so a cached view may have been produced for
+/// a different pane running the same script — and three of its fields are the
+/// pane's, not the command's. Without this, two Claude panes sharing one lister
+/// would have the second one answered under the first one's `id`, and the UI
+/// keys its map by that id: the second pane would show no picker while the first
+/// showed two.
+fn mine(view: PaneSessionsView, pane: &PaneDef, picker: &SessionsPicker) -> PaneSessionsView {
+    PaneSessionsView {
+        id: pane.id.clone(),
+        label: picker.label.clone(),
+        ask_first: picker.ask_first,
+        ..view
+    }
 }
 
 async fn run_one(
@@ -445,6 +498,34 @@ async fn run_one(
     }
 }
 
+/// Strip what a row's *display* text must never carry.
+///
+/// `clip` bounds length; this bounds content, and the two are different
+/// problems. `NO_COLOR=1`/`TERM=dumb` are requests a command may ignore, and
+/// React escapes markup but not text direction — so without this a label
+/// containing U+202E (right-to-left override) **renders reversed**, and a row can
+/// read as a different session from the one it adopts. That is a spoof on the
+/// one control in this feature where reading the row is how you choose.
+///
+/// Control characters go for the ordinary reason (a stray `\r` or escape
+/// sequence in a card), the bidi overrides for the spoof. Replaced with a space
+/// rather than removed, so a label does not silently close up around what was
+/// taken out.
+fn sanitize(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
 struct Parsed {
     rows: Vec<SessionRow>,
     note: Option<String>,
@@ -494,8 +575,8 @@ fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Par
         let detail = fields.next().map(str::trim).filter(|s| !s.is_empty());
         rows.push(SessionRow {
             value: value.to_owned(),
-            label: clip(label.unwrap_or(value), MAX_SESSION_LABEL_CHARS),
-            detail: detail.map(|d| clip(d, MAX_SESSION_LABEL_CHARS)),
+            label: clip(&sanitize(label.unwrap_or(value)), MAX_SESSION_LABEL_CHARS),
+            detail: detail.map(|d| clip(&sanitize(d), MAX_SESSION_LABEL_CHARS)),
             in_use: taken.contains(value),
         });
     }
@@ -564,9 +645,12 @@ mod tests {
     #[test]
     fn a_fourth_field_stays_in_the_detail() {
         // `splitn(3)` on purpose: a label written by a script that happens to
-        // contain a tab must not silently become a phantom column.
+        // contain a tab must not silently become a phantom column. The tab
+        // itself arrives as a space — `sanitize` flattens control characters,
+        // and the detail renders as one ellipsised line where a tab is noise —
+        // but the *text* is all still there, which is the property that matters.
         let out = parsed("abc\tlabel\tone\ttwo\n", false);
-        assert_eq!(out.rows[0].detail.as_deref(), Some("one\ttwo"));
+        assert_eq!(out.rows[0].detail.as_deref(), Some("one two"));
     }
 
     #[test]
@@ -577,6 +661,53 @@ mod tests {
             ["abc", "def"]
         );
         assert!(out.note.as_deref().unwrap().contains("1 line(s)"));
+    }
+
+    #[test]
+    fn a_shared_answer_is_restamped_with_the_pane_that_asked() {
+        // Two panes running one script share a cell, so the cached view carries
+        // whichever pane ran it first. The UI keys its map on `id`, so handing
+        // the second pane the first one's identity loses it its picker.
+        let other = PaneSessionsView {
+            id: "claude".to_owned(),
+            label: "First label".to_owned(),
+            ask_first: true,
+            state: "ok",
+            sessions: vec![SessionRow {
+                value: "abc".to_owned(),
+                label: "abc".to_owned(),
+                detail: None,
+                in_use: false,
+            }],
+            message: None,
+        };
+        let pane = PaneDef {
+            id: "claude-sonnet".to_owned(),
+            label: "Claude Sonnet".to_owned(),
+            description: None,
+            icon: None,
+            requires_bin: Vec::new(),
+            body: PaneBody::Terminal(veld_core::ide::TerminalPane {
+                launch: veld_core::config::CommandSpec::Argv(vec!["x".to_owned()]),
+                resume: None,
+                sessions: None,
+                auto_resume: false,
+                close_on_exit: true,
+                allow_terminal_renaming: false,
+            }),
+        };
+        let picker = SessionsPicker {
+            label: "Second label".to_owned(),
+            ask_first: false,
+            command: veld_core::config::CommandSpec::Argv(vec!["list.sh".to_owned()]),
+        };
+        let out = mine(other, &pane, &picker);
+        assert_eq!(out.id, "claude-sonnet");
+        assert_eq!(out.label, "Second label");
+        assert!(!out.ask_first);
+        // The half that really is shared comes through untouched.
+        assert_eq!(out.state, "ok");
+        assert_eq!(out.sessions.len(), 1);
     }
 
     #[test]
@@ -644,6 +775,20 @@ mod tests {
         // CRLF. `\r` is not in the accepted set, so without the trim every row
         // would be silently skipped.
         assert_eq!(values("abc\r\ndef\r\n"), ["abc", "def"]);
+    }
+
+    #[test]
+    fn a_label_cannot_reverse_itself_or_carry_control_bytes() {
+        // U+202E makes the rest of a line render right-to-left, so a row could
+        // read as one session and adopt another — the one spoof that matters on
+        // a control where reading the row *is* the choice.
+        let out = parsed("abc\tsafe\u{202e}gnp.exe\tone\u{0007}two", false);
+        assert!(!out.rows[0].label.contains('\u{202e}'));
+        assert_eq!(out.rows[0].label, "safe gnp.exe");
+        assert_eq!(out.rows[0].detail.as_deref(), Some("one two"));
+        // The value itself never needed this: `is_session_value` already refuses
+        // every character involved.
+        assert_eq!(out.rows[0].value, "abc");
     }
 
     #[test]

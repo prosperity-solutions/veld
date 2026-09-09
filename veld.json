@@ -213,7 +213,7 @@
         // session the declared one opens. Prints nothing in a fresh worktree,
         // and then no picker is offered at all.
         //
-        // Shared by all three Claude panes deliberately: the transcripts are
+        // Shared by both Claude panes deliberately: the transcripts are
         // per-directory, not per-model, so an Opus conversation is offered to
         // the Sonnet pane too — and picking it there resumes it on Sonnet,
         // which is the point of having both.

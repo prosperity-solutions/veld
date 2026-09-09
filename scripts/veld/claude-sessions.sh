@@ -32,6 +32,13 @@ set -uo pipefail
 # letter or a digit replaced by `-`. Derived here rather than hardcoded because
 # panes run in whichever worktree you opened them in.
 #
+# One known divergence, left alone deliberately: `sed` substitutes per
+# *character* and Claude Code per UTF-16 *code unit*, so a path containing an
+# astral character (an emoji) produces one dash here and two there, and the
+# picker is silently absent for that worktree. Matching that in `sed` is not
+# worth what it costs; a worktree directory named with an emoji is rare and the
+# failure is confined to the picker.
+#
 # **A lister does NOT run in your login shell.** The pane does — `$SHELL -l -i -c`
 # — but veld runs this one directly with the daemon's environment plus a resolved
 # `PATH`. So `CLAUDE_CONFIG_DIR` exported from `.zshrc` is visible to `claude` in
@@ -59,10 +66,26 @@ dir="$config_dir/projects/$slug"
 # rather than "there is nothing here". Scoped to one directory, never a walk.
 #
 # `-printf` is GNU-only, so the mtime comes from `stat`, whose flag differs
-# between BSD (macOS) and GNU. Both are tried; if neither works the list is
-# simply unsorted, which is worse than newest-first and much better than empty.
+# between BSD (macOS) and GNU.
+#
+# **GNU first, and the order is not cosmetic.** GNU's `-f` is `--file-system` and
+# takes no argument, so `stat -f '%m' FILE` on Linux reads `%m` as a *second
+# file operand*: it complains about `%m` on stderr (suppressed here) and prints a
+# six-line filesystem dump for the real file **to stdout**, then exits 1. The
+# `||` fires, so the substitution captures the dump *and* the epoch. BSD's `stat`
+# has no `-c`, and rejects it with a usage message on stderr and nothing on
+# stdout — which is what a clean fallback looks like. So the platform whose
+# failure is clean goes second.
+#
+# The digit guard is the belt: whatever comes back, only a plain number is used,
+# so an unforeseen third `stat` cannot put text into a sort key.
 mtime() {
-  stat -f '%m' "$1" 2>/dev/null || stat -c '%Y' "$1" 2>/dev/null || echo 0
+  local out
+  out=$(stat -c '%Y' "$1" 2>/dev/null) || out=$(stat -f '%m' "$1" 2>/dev/null) || out=""
+  case "$out" in
+    '' | *[!0-9]*) echo 0 ;;
+    *) echo "$out" ;;
+  esac
 }
 
 # Newest first, and a hard limit well under veld's own 50: this is a picker, and
