@@ -31,6 +31,7 @@ import {
   type RestartKind,
   shouldCloseOnExit,
   startPlanFor,
+  takePendingAdopt,
   storedTerminalIds,
   terminalIds,
 } from "./model";
@@ -972,7 +973,12 @@ function attachUrl(ticket: string, cols: number, rows: number): string {
   return u.toString();
 }
 
-async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
+async function connect(
+  s: Session,
+  mode?: PaneLaunchMode,
+  /** Only for `adopt`: which earlier session the pane's `resume` opens. */
+  sessionToken?: string,
+): Promise<void> {
   const generation = s.generation;
   // Cleared before anything can observe the new attempt: a stale `0` from the
   // previous process would make a pane that closes on clean exit close itself
@@ -987,7 +993,7 @@ async function connect(s: Session, mode?: PaneLaunchMode): Promise<void> {
     // the daemon ignores it when the session is already live.
     const pane =
       s.spec !== undefined && mode !== undefined
-        ? { spec: s.spec, mode }
+        ? { spec: s.spec, mode, sessionToken }
         : undefined;
     const minted = await api.ptyTicket(s.worktreeId, s.id, pane);
     // **The only path to `idle`.** A config pane attaching with no mode is
@@ -1546,7 +1552,14 @@ export function mountTerminal(
         // below and the post-`ready` re-fit correct the size as soon as it is.
       }
     }
-    connect(s, start === "shell" || start === "reattach" ? undefined : start);
+    // Consumed here rather than inside `startPlanFor`, so the plan stays a
+    // question about *what to do* and this stays the one place that acts on it.
+    // Safe to call unconditionally: it is undefined for every other plan.
+    connect(
+      s,
+      start === "shell" || start === "reattach" ? undefined : start,
+      start === "adopt" ? takePendingAdopt(id) : undefined,
+    );
   }
   requestFit(s);
 

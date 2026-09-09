@@ -21,6 +21,7 @@ import {
   browserProfileLabel,
   browserTab,
   configPaneTab,
+  takePendingAdopt,
   fileLabel,
   filePathIn,
   paneAnswerFor,
@@ -2090,6 +2091,29 @@ describe("startPlanFor", () => {
     // Idle stranded a *live* tool behind two buttons that both DELETE its
     // session — so the pane killed the thing it was restored to show.
     expect(startPlanFor("restored-2", pane)).toBe("reattach");
+  });
+
+  it("adopts when the click picked an earlier session", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" }, "sess-abc");
+    // Same click as "fresh" — the user asked for this pane — and it differs only
+    // in which session it opens on.
+    expect(startPlanFor(tab.id, pane)).toBe("adopt");
+  });
+
+  it("hands the picked session to exactly one mount, then forgets it", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" }, "sess-xyz");
+    expect(startPlanFor(tab.id, pane)).toBe("adopt");
+    // `mountTerminal` is what consumes it, after acting on the plan.
+    expect(takePendingAdopt(tab.id)).toBe("sess-xyz");
+    // Spent. A remount must not silently re-adopt — the daemon has recorded the
+    // token by then, so the ordinary resume path owns it.
+    expect(takePendingAdopt(tab.id)).toBeUndefined();
+  });
+
+  it("launches fresh, not adopt, when no session was picked", () => {
+    const tab = configPaneTab({ id: "claude", label: "Claude" });
+    expect(startPlanFor(tab.id, pane)).toBe("fresh");
+    expect(takePendingAdopt(tab.id)).toBeUndefined();
   });
 });
 

@@ -1372,13 +1372,21 @@ struct PaneLaunch {
     /// `["sh", "-c", …]` here so the holder only ever deals with an argv.
     argv: Vec<String>,
     env: Vec<(String, String)>,
-    /// The token this launch runs under, and whether it is new.
-    ///
-    /// A fresh launch's token is recorded only once the holder is up (see
-    /// [`obtain_session`]); a resumed one is already in the database, so there
-    /// is nothing to write.
+    /// The token this launch runs under.
     token: String,
-    fresh: bool,
+    /// Whether that token still has to be written to the `pane_sessions`
+    /// ledger — its **only** consumer, in [`obtain_session`].
+    ///
+    /// Named for the write and not for the launch, because "fresh" is the word
+    /// that got this wrong once: [`PaneMode::Adopt`] is not a fresh start in any
+    /// sense a *user* would recognise, and it still needs the row, because the
+    /// token it runs under has never been recorded. A resumed launch is the only
+    /// case that does not — its row is what supplied the token.
+    ///
+    /// Written only once the holder is actually up: a row written before the
+    /// spawn would outlive a failure and offer a resume for a conversation that
+    /// was never created.
+    record_token: bool,
 }
 
 /// Which command a config-declared pane should run.
@@ -1393,6 +1401,18 @@ enum PaneMode {
     Fresh,
     /// Re-run the pane's `resume` command under the token it launched with.
     Resume,
+    /// Run the pane's `resume` command under a token the *user picked* from the
+    /// pane's `sessions` list — a session this pane never started, and in general
+    /// one veld never minted.
+    ///
+    /// Its own mode rather than a `Resume` with an extra field, because the two
+    /// differ in where the token comes from and therefore in what has to be
+    /// checked: `Resume` reads a token veld itself wrote to the pane ledger and
+    /// can trust on sight, while this one arrives in a request body and has to
+    /// clear `veld_core::ide::is_session_value` before it goes anywhere near a
+    /// command. Collapsing them would put a request-supplied string on the path
+    /// that never validates one.
+    Adopt,
 }
 
 static TICKETS: LazyLock<Mutex<HashMap<String, Ticket>>> =
@@ -1418,6 +1438,18 @@ struct TicketRequest {
     /// ignored when the session is already live — there is nothing to spawn.
     #[serde(default)]
     mode: Option<PaneMode>,
+    /// The session the user picked out of the pane's `sessions` list. Required
+    /// by, and only read by, [`PaneMode::Adopt`].
+    ///
+    /// **A value, never a command** — the same rule `pane` above is under. It is
+    /// substituted into `${veld.pane.token}` in the pane's own declared `resume`,
+    /// so what runs is fixed by the project's config and only *which session* it
+    /// runs against comes from here. `resolve_pane` re-checks it against
+    /// `veld_core::ide::is_session_value` rather than trusting that it came from
+    /// a list veld itself produced: this is a request body, and the list it was
+    /// rendered from is long gone by the time the ticket is minted.
+    #[serde(default)]
+    session_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1443,6 +1475,9 @@ async fn resolve_pane(
     db: &veld_core::db::Db,
     spec_id: &str,
     mode: PaneMode,
+    // Only read by `PaneMode::Adopt` — the session the user picked out of the
+    // pane's `sessions` list, still unvalidated at this point.
+    session_token: Option<&str>,
     worktree_id: i64,
     session_id: &str,
     worktree_path: &FsPath,
@@ -1504,8 +1539,9 @@ async fn resolve_pane(
     }
 
     let veld_core::ide::PaneBody::Terminal(terminal) = &pane.body;
-    let (spec, token, fresh) = match mode {
-        PaneMode::Fresh => (&terminal.launch, veld_core::db::mint_pane_token(), true),
+    let record_token = mode_records_token(mode);
+    let (spec, token) = match mode {
+        PaneMode::Fresh => (&terminal.launch, veld_core::db::mint_pane_token()),
         PaneMode::Resume => {
             let resume = terminal.resume.as_ref().ok_or_else(|| {
                 err(
@@ -1531,7 +1567,78 @@ async fn resolve_pane(
                         "this pane has nothing to resume — start it fresh",
                     )
                 })?;
-            (resume, recorded.token, false)
+            (resume, recorded.token)
+        }
+        PaneMode::Adopt => {
+            // Declared, not merely present: a pane that never offered a list is
+            // one a client asking to adopt is asking for a command path the
+            // project did not open.
+            //
+            // **Asked of the DECLARING root, not of this worktree**, and that is
+            // the whole subtlety. Everything else in `resolve_pane` reads the
+            // worktree's own config, because a click is consent for whatever it
+            // declares. But the *list* was produced by `pane_sessions::list`, and
+            // that reads `resolve_declare_root` (main, by default) — so "did a
+            // list exist for this pane" is a question only that config can
+            // answer. Asking the worktree instead refuses every adopt on any
+            // branch that predates the picker's declaration, which on merge day
+            // is every branch there is: main declares `sessions`, the rows arrive
+            // from main's lister, and each pick 409s.
+            //
+            // The safety property is unaffected, because it was never about this
+            // check: what may run is still only the pane's own declared `resume`,
+            // read from the worktree, with a validated value substituted.
+            if !declares_sessions_at(db, worktree_id, spec_id) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the {} pane does not offer earlier sessions to resume",
+                        pane.label
+                    ),
+                ));
+            }
+            let resume = terminal.resume.as_ref().ok_or_else(|| {
+                err(
+                    StatusCode::CONFLICT,
+                    format!("the {} pane has no resume command", pane.label),
+                )
+            })?;
+            let picked = session_token.ok_or_else(|| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "adopting a session needs the session to adopt",
+                )
+            })?;
+            // The one gate between a project script's stdout and an interpolated
+            // command. See `veld_core::ide::is_session_value` for what it closes
+            // and why it is far narrower than "looks like a session id".
+            if !veld_core::ide::is_session_value(picked) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "that is not a session id veld will pass to a command",
+                ));
+            }
+            // **Refused here and not only in the picker**, because the picker
+            // cannot be the guard: the client is never told a pane's token (see
+            // `Db::resumable_panes`), so it can only render what this daemon
+            // marked, and a request that skipped the UI is exactly the case a
+            // client-side check misses. Two panes on one transcript is silent
+            // corruption of the user's own conversation, which is why this is a
+            // refusal rather than a warning.
+            if live_pane_tokens(worktree_id).await.contains(picked) {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    "that session is already open in another pane — close it, or \
+                     pick a different one",
+                ));
+            }
+            // **The row has to be written.** This is not a fresh start, but the
+            // token has never been in the ledger — veld did not mint it — and the
+            // ledger is the only thing that makes the pane resumable later. Without
+            // the row, the adopted conversation is unreachable the moment its shell
+            // dies: `auto_resume`, the dead-pane card's Resume and the tab menu's
+            // Restart-and-resume all read `db.pane_session` and would 409.
+            (resume, picked.to_owned())
         }
     };
 
@@ -1587,8 +1694,91 @@ async fn resolve_pane(
             ("VELD_PANE_TOKEN".to_owned(), token.clone()),
         ],
         token,
-        fresh,
+        record_token,
     })
+}
+
+/// Whether the checkout that *declares* this worktree's pickers offers one for
+/// this pane.
+///
+/// The mirror of `pane_sessions::list`'s own lookup, and it has to be, or the
+/// surface that produced a row and the surface that acts on it disagree about
+/// whether that row could exist. Fails **closed**: an unresolvable declaring
+/// root, an unreadable config or a missing pane all mean "no list was offered",
+/// which refuses the adopt rather than allowing one nothing vouched for.
+fn declares_sessions_at(db: &veld_core::db::Db, worktree_id: i64, spec_id: &str) -> bool {
+    let Ok(Some(wt)) = db.get_worktree(worktree_id) else {
+        return false;
+    };
+    let source = db.extensions_source();
+    let Some(declare_root) =
+        crate::feedback_server::extensions::resolve_declare_root(db, &wt, source)
+    else {
+        return false;
+    };
+    let Some(path) = veld_core::config::root_config_in(FsPath::new(&declare_root)) else {
+        return false;
+    };
+    let Ok(config) = veld_core::config::parse_config(&path) else {
+        return false;
+    };
+    config.ide_section().pane(spec_id).is_some_and(|pane| {
+        let veld_core::ide::PaneBody::Terminal(terminal) = &pane.body;
+        terminal.sessions.is_some()
+    })
+}
+
+/// The tokens this worktree has recorded whose session is **still live in this
+/// daemon** — i.e. a pane somewhere currently has that conversation open.
+///
+/// Exists for one reason: adopting a session a second pane is already running
+/// means two agents writing one transcript, which corrupts it. A *recorded*
+/// token is not enough to refuse on — a pane closed last week left a row and its
+/// conversation is perfectly fine to reopen — so liveness is the question, and
+/// only the registry can answer it.
+pub(crate) async fn live_pane_tokens(worktree_id: i64) -> std::collections::HashSet<String> {
+    let Ok(db) = veld_core::db::Db::open() else {
+        // Fail *open*, deliberately. This gate exists to prevent an accident, not
+        // an attack — the same user could run `claude --resume X` twice in two
+        // terminals — so a database that will not open must not also stop
+        // somebody resuming a conversation.
+        return std::collections::HashSet::new();
+    };
+    let Ok(rows) = db.pane_tokens(worktree_id) else {
+        return std::collections::HashSet::new();
+    };
+    let sessions = SESSIONS.lock().await;
+    rows.into_iter()
+        .filter(|(session_id, _)| sessions.contains_key(session_id))
+        .map(|(_, token)| token)
+        .collect()
+}
+
+/// Whether a launch in this mode runs under a token the `pane_sessions` ledger
+/// has not seen, and therefore has to be written to it.
+///
+/// A three-line `match` rather than a boolean computed inline, and it earns the
+/// function: **getting this wrong is silent, and it did go wrong.** The `Adopt`
+/// arm first shipped as "not fresh, so nothing to write", which reads correctly
+/// — an adopted pane is not a fresh start — and left the row unwritten, so the
+/// adopted conversation became unreachable the moment its shell died
+/// (`auto_resume`, the dead-pane card's Resume and the tab menu's
+/// Restart-and-resume all read `Db::pane_session` and 409 without it).
+///
+/// Exhaustive on purpose: a fourth [`PaneMode`] is a compile error here, which is
+/// the only place that question gets asked.
+const fn mode_records_token(mode: PaneMode) -> bool {
+    match mode {
+        // veld minted it a line ago; nothing else knows it yet.
+        PaneMode::Fresh => true,
+        // The row is where the token came from — writing it back is a no-op at
+        // best and, before the holder is up, a lie at worst.
+        PaneMode::Resume => false,
+        // The *user* picked it out of a project script's output. veld never
+        // minted it and nothing has stored it, so this is its only chance to be
+        // remembered — and being remembered is what makes the pane resumable.
+        PaneMode::Adopt => true,
+    }
 }
 
 /// Wrap an `argv` pane command for the user's login shell:
@@ -2028,12 +2218,27 @@ async fn mint_ticket(
     // silently, and in a pane whose whole identity is that command. Resolving one
     // we then do not use costs a config read; not resolving one we need replaces
     // the terminal.
+    // **A `session_token` is only ever meaningful with `mode: "adopt"`.** Without
+    // this, a body carrying one and no `mode` falls through the
+    // `unwrap_or(PaneMode::Fresh)` below and silently mints a *new* token — the
+    // exact outcome `PaneMode::Resume` refuses to fall back to, and for the same
+    // reason: it starts a new billable conversation and reads to the user as the
+    // one they picked having been lost. Refusing the request is the only answer
+    // that cannot lose a conversation, and no client sends this shape.
+    if body.session_token.is_some() && body.mode != Some(PaneMode::Adopt) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "a session to adopt only means anything with mode \"adopt\"",
+        ));
+    }
+
     let pane = match (&body.pane, registered) {
         (Some(spec_id), false) => Some(
             resolve_pane(
                 &db,
                 spec_id,
                 body.mode.unwrap_or(PaneMode::Fresh),
+                body.session_token.as_deref(),
                 body.worktree_id,
                 &body.session_id,
                 &cwd,
@@ -3580,7 +3785,7 @@ async fn obtain_session(
     // adoption: nothing was launched, the row for that launch already exists, and
     // writing a second one would offer a resume for a conversation this attach
     // did not start.
-    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.fresh && !adopted) {
+    if let Some(pane) = ticket.pane.as_ref().filter(|p| p.record_token && !adopted) {
         record_pane_launch(ticket, pane);
     }
     if adopted {
@@ -4910,6 +5115,7 @@ mod tests {
             body: veld_core::ide::PaneBody::Terminal(veld_core::ide::TerminalPane {
                 launch: veld_core::config::CommandSpec::Argv(vec!["true".to_owned()]),
                 resume: None,
+                sessions: None,
                 auto_resume: false,
                 close_on_exit: true,
                 fixed_label: false,
@@ -4925,6 +5131,53 @@ mod tests {
         let mut names: Vec<&str> = ctx.builtins.keys().map(String::as_str).collect();
         names.sort_unstable();
         assert_eq!(names, veld_core::ide::PANE_BUILTINS.to_vec());
+    }
+
+    /// Every mode's answer to "does the ledger need this token", stated once.
+    ///
+    /// The regression this pins: `Adopt` returning false meant an adopted
+    /// session had no `pane_sessions` row, so it could never be resumed again —
+    /// while five documents said it could.
+    #[test]
+    fn only_a_resume_reuses_a_token_the_ledger_already_holds() {
+        assert!(mode_records_token(PaneMode::Fresh));
+        assert!(mode_records_token(PaneMode::Adopt));
+        assert!(!mode_records_token(PaneMode::Resume));
+    }
+
+    /// The third of the same pair, for a pane's `sessions` lister.
+    ///
+    /// `PANE_SESSIONS_BUILTINS` is what `veld lint` accepts and
+    /// `pane_sessions::list` is what resolves them. It is `PANE_BUILTINS` minus
+    /// `pane.token` — the lister runs to decide *which* token there will be — so
+    /// it is neither of the two scopes above and needs its own gate. The failure
+    /// this catches actually happened during review: `${veld.pane.id}` was
+    /// accepted by lint, documented as usable in
+    /// `skills/veld/reference/pane-sessions.md`, and resolved by nothing, so
+    /// every declaring pane rendered "could not resolve the command".
+    #[test]
+    fn sessions_commands_resolve_exactly_the_names_lint_accepts() {
+        let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "3",
+            "name": "probe",
+            "nodes": {},
+        }))
+        .expect("minimal config");
+        // Mirrors `pane_sessions::list`: the worktree scope, plus the pane's own
+        // two names. Kept in step by this assertion and nothing else.
+        let mut builtins = worktree_builtins(FsPath::new("/tmp/wt"), "main", &cfg);
+        builtins.insert("pane.id".to_owned(), "probe".to_owned());
+        builtins.insert("pane.label".to_owned(), "Probe".to_owned());
+        let mut names: Vec<&str> = builtins.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        assert_eq!(names, veld_core::ide::PANE_SESSIONS_BUILTINS.to_vec());
+
+        // And the one name a lister must *not* be offered, stated as an
+        // assertion rather than left to the two sorted lists above agreeing.
+        assert!(
+            !veld_core::ide::PANE_SESSIONS_BUILTINS.contains(&"pane.token"),
+            "a sessions lister runs before there is a token to reference"
+        );
     }
 
     /// The same gate for `ide.extensions`, whose scope is one name-family narrower.
@@ -5796,7 +6049,7 @@ mod tests {
                         argv,
                         env: vec![("VELD_PANE_TOKEN".to_owned(), "tok-123".to_owned())],
                         token: "tok-123".to_owned(),
-                        fresh: true,
+                        record_token: true,
                     }),
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),

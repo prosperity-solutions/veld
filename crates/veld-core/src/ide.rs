@@ -234,6 +234,7 @@ pub const TERMINAL_PANE_KEYS: &[&str] = &[
     "label",
     "requires_bin",
     "resume",
+    "sessions",
     "shell",
     "type",
 ];
@@ -251,6 +252,25 @@ pub const PANE_BUILTINS: &[&str] = &[
     "pane.id",
     "pane.label",
     "pane.token",
+    "project",
+    "root",
+    "username",
+    "worktree",
+];
+
+/// The `${veld.*}` names a pane's `sessions` lister may reference, in sorted
+/// order.
+///
+/// [`PANE_BUILTINS`] minus `pane.token`, and for the reason that set exists at
+/// all: the lister runs to decide *which* session a pane is about to adopt, so
+/// at that moment there is no token — the pick becomes one. `pane.id` and
+/// `pane.label` are both known from the declaration and stay available, which is
+/// what lets one script serve several panes (`--agent ${veld.pane.id}`).
+pub const PANE_SESSIONS_BUILTINS: &[&str] = &[
+    "branch",
+    "branch_raw",
+    "pane.id",
+    "pane.label",
     "project",
     "root",
     "username",
@@ -356,6 +376,102 @@ pub const MIN_EXTENSION_REFRESH_SECONDS: u64 = 15;
 
 /// What a `status` extension refreshes at when it does not say.
 pub const DEFAULT_EXTENSION_REFRESH_SECONDS: u64 = 60;
+
+/// How many panes in one project may declare a `sessions` lister.
+///
+/// The pane list itself has never been capped, and this does not cap it — a
+/// project may declare as many panes as it likes. What is capped is how many of
+/// them may run a **child process when the pane chooser opens**, which is a cost
+/// bound veld owns rather than the last person to edit somebody's config
+/// (the same reasoning as [`MAX_EXTENSIONS_PER_PROJECT`], and the same reason
+/// that one exists at 24 while this is far lower: a badge runs one command on a
+/// timer, and these all run at once, on a screen somebody is waiting for).
+///
+/// Eight is generous against the real shape: a project with eight distinct
+/// coding-agent panes has more agents than opinions. Over the cap the *pickers*
+/// past the eighth are dropped with a `veld lint` problem — never the panes,
+/// which keep working exactly as they would without the feature.
+pub const MAX_PANE_SESSION_LISTERS: usize = 8;
+
+/// How many rows a pane's `sessions` lister may contribute.
+///
+/// Another veld-owned cost bound, and here it is a *usability* one as much as a
+/// cost one: an agent CLI's session directory reaches the hundreds, and a picker
+/// that lists all of them is a picker nobody reads. The script is expected to do
+/// the choosing (`ls -t … | head`); this is the floor under a script that
+/// forgets to, and the rows past it are dropped with the picker saying so.
+pub const MAX_PANE_SESSIONS: usize = 50;
+
+/// The longest a `sessions` row's value may be.
+///
+/// A session id in the wild is a UUID (36) or a short hash; 128 leaves room for
+/// a path-shaped handle without letting a runaway script push a kilobyte into an
+/// argv.
+pub const MAX_SESSION_VALUE_CHARS: usize = 128;
+
+/// The longest a `sessions` row's label or description may be, in characters.
+pub const MAX_SESSION_LABEL_CHARS: usize = 160;
+
+/// Whether `value` is acceptable as a `sessions` row's value.
+///
+/// **This is the security boundary of the whole feature**, so it is deliberately
+/// far tighter than "what a session id looks like". The value travels from a
+/// project script's stdout, through the browser, back to the daemon, and is
+/// interpolated into the pane's declared `resume` command as `${veld.pane.token}`
+/// — the same slot a veld-minted token fills. **Three** distinct hazards, all
+/// closed here rather than downstream, and the third is the one a future reader
+/// is most likely to "simplify" away, because unlike the other two it is not
+/// about veld at all:
+///
+/// - **A `resume` declared with `shell` is a shell string.** `argv` is safe by
+///   construction (the element count is fixed before interpolation), but `shell`
+///   is a permanently-supported escape hatch, and a value containing `$(…)`,
+///   backticks, `;` or a quote would be *command execution* rather than an
+///   argument. The accepted set contains no shell metacharacter at all, so the
+///   value is inert in both positions and neither one needs a special case.
+/// - **A leading `-` is argument injection even in `argv`.** The same hole
+///   `worktree_builtins` closes for a branch named `-foo`: the receiving
+///   program's own flag parser reads it as an option. So the first character is
+///   restricted further, to alphanumeric.
+///
+/// - **`..` is path traversal in the receiving tool.** The accepted set contains
+///   `/` and `.` — a session handle really can be path-shaped — so the value is
+///   inert as a *shell token* and would not be inert as a *path*. veld itself
+///   never treats it as one (it reaches an argv, `VELD_PANE_TOKEN`, and a TEXT
+///   column, and nothing else), which is exactly why this is easy to drop: the
+///   consumer is the **tool**, whose `resume` may well be
+///   `--transcript ~/.agent/${veld.pane.token}.jsonl`. Without this check,
+///   `a/../../../../etc/passwd` is a valid pick.
+///
+/// What this does *not* try to be is a check that the session exists. It cannot
+/// be — only the tool knows — and the failure mode of a wrong-but-well-formed
+/// value is the tool printing "no such session" in the pane it was asked to
+/// open, which is legible and harmless.
+#[must_use]
+pub fn is_session_value(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphanumeric() {
+        return false;
+    }
+    if value.chars().count() > MAX_SESSION_VALUE_CHARS {
+        return false;
+    }
+    // **No `..` anywhere.** The charset above makes the value inert as a *shell
+    // token*, which is the hazard the doc comment names — but it permits `/` and
+    // `.`, so it is not inert as a *path*, and a `resume` that uses the token as
+    // one is the natural shape for a file-backed tool
+    // (`--transcript ~/.agent/${veld.pane.token}.jsonl`). Without this,
+    // `a/../../../../etc/passwd` passes. Rejecting the two characters together
+    // rather than `/` alone keeps a path-shaped handle usable, which is why `/`
+    // is in the set at all.
+    if value.contains("..") {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '@' | '/'))
+}
 
 /// The interpreted `ide` section, plus whatever could not be interpreted.
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -707,6 +823,10 @@ pub struct TerminalPane {
     /// left off. Absent means the pane can only ever start fresh.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<crate::config::CommandSpec>,
+    /// How the pane finds sessions it did not start, so one can be picked and
+    /// adopted. Absent means the pane only ever resumes *its own* session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sessions: Option<SessionsPicker>,
     /// Whether veld may run `resume` without being asked. Only ever consulted
     /// when a pane is restored with its shell already gone, never while the user
     /// is watching it — see `crates/veld-daemon/ui/src/panes/terminalHost.ts`.
@@ -752,6 +872,50 @@ pub struct TerminalPane {
 fn default_true() -> bool {
     true
 }
+
+/// How a pane offers sessions that veld did not start.
+///
+/// The whole feature is one command and one rule. The command prints the
+/// sessions it can find — veld learns nothing about where a coding agent keeps
+/// them, which is the same division of labour a `status` extension has with
+/// `gh`. The rule is the one this codebase already holds everywhere a runtime
+/// value meets a command: **the pick chooses a value, never a command.** The
+/// picked value is dropped into `${veld.pane.token}` and the pane's own declared
+/// `resume` runs, so nothing a script prints can change *what* is executed —
+/// only which session it is executed against.
+///
+/// That is also why this needs no launch command of its own, and must not have
+/// one. `resume` already says "pick this tool's session back up, by id"; a
+/// session found on disk is a session, so it goes through the same door as the
+/// pane's own. The consequence is the useful one: an adopted session is written
+/// into the pane's ledger exactly like a minted token, so `auto_resume` brings
+/// it back after a reboot with no second mechanism.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SessionsPicker {
+    /// What the picker's entry point is called. Defaults to
+    /// `"Resume an earlier session…"`.
+    pub label: String,
+    /// Whether clicking the pane opens the picker, rather than starting fresh.
+    ///
+    /// **Defaults to `true`, and the default is the whole point.** A picker
+    /// behind a small control on the card is a picker most people never find —
+    /// and "you already have a conversation about this" is exactly the thing
+    /// somebody needs told *before* they start a second one. So the click asks,
+    /// and starting fresh is the first row of the answer.
+    ///
+    /// It only ever asks when there is something to ask about: a lister that
+    /// found nothing produces no dialog at all, and the pane opens as it always
+    /// did. `false` is for a project whose panes are usually a fresh start —
+    /// the click launches, and the list moves to a button on the card.
+    pub ask_first: bool,
+    /// What veld runs to list them. See [`crate::ide`]'s module docs for the
+    /// stdout contract; the short version is one row per line,
+    /// `value<TAB>label<TAB>description`, and no output means "none here".
+    pub command: crate::config::CommandSpec,
+}
+
+/// What [`SessionsPicker::label`] is when the author does not say.
+pub const DEFAULT_SESSIONS_LABEL: &str = "Resume an earlier session…";
 
 /// How a pane's tab is illustrated.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -982,7 +1146,7 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
     };
     for (index, item) in items.iter().enumerate() {
         let at = format!("ide.panes[{index}]");
-        if let Some(pane) = parse_pane(item, &at, out) {
+        if let Some(mut pane) = parse_pane(item, &at, out) {
             if out.panes.iter().any(|p| p.id == pane.id) {
                 out.problems.push(IdeProblem {
                     location: format!("{at}.id"),
@@ -993,9 +1157,41 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
                 });
                 continue;
             }
+            // **After the duplicate check**, so an entry about to be discarded
+            // entirely does not first collect a "the pane itself is unaffected"
+            // problem about a pane that is not going to exist.
+            //
+            // **The picker is dropped, never the pane.** Counted over *accepted*
+            // panes so a config over the cap keeps its first eight pickers rather
+            // than losing all of them, and reported against the entry that lost
+            // one so the author knows which. The pane is untouched: it launches,
+            // resumes and auto-resumes as it would if it had never declared a
+            // lister.
+            if declares_sessions(&pane)
+                && out.panes.iter().filter(|p| declares_sessions(p)).count()
+                    >= MAX_PANE_SESSION_LISTERS
+            {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.sessions"),
+                    message: format!(
+                        "more than {MAX_PANE_SESSION_LISTERS} panes in this project declare a \
+                         `sessions` command, and they all run at once when the pane chooser \
+                         opens — this one's picker was dropped. The pane itself is unaffected"
+                    ),
+                });
+                let PaneBody::Terminal(terminal) = &mut pane.body;
+                terminal.sessions = None;
+            }
             out.panes.push(pane);
         }
     }
+}
+
+/// Whether this pane declares a `sessions` lister — i.e. whether it counts
+/// against [`MAX_PANE_SESSION_LISTERS`].
+fn declares_sessions(pane: &PaneDef) -> bool {
+    let PaneBody::Terminal(terminal) = &pane.body;
+    terminal.sessions.is_some()
 }
 
 fn parse_extensions(value: &serde_json::Value, out: &mut IdeSection) {
@@ -1713,6 +1909,76 @@ fn parse_terminal_pane(
         }
     };
 
+    let sessions = match entry.get("sessions") {
+        None => None,
+        Some(value) => {
+            let sessions_at = format!("{at}.sessions");
+            let Some(map) = value.as_object() else {
+                out.problems.push(IdeProblem {
+                    location: sessions_at,
+                    message: "must be an object with `argv` or `shell`".to_owned(),
+                });
+                return None;
+            };
+            let label = match map.get("label") {
+                None => DEFAULT_SESSIONS_LABEL.to_owned(),
+                Some(v) => match v.as_str().map(str::trim) {
+                    Some(text) if !text.is_empty() => text.to_owned(),
+                    _ => {
+                        out.problems.push(IdeProblem {
+                            location: format!("{sessions_at}.label"),
+                            message: "must be a non-empty string".to_owned(),
+                        });
+                        return None;
+                    }
+                },
+            };
+            let ask_first = match map.get("ask_first") {
+                None => true,
+                Some(serde_json::Value::Bool(b)) => *b,
+                Some(_) => {
+                    out.problems.push(IdeProblem {
+                        location: format!("{sessions_at}.ask_first"),
+                        message: "must be true or false".to_owned(),
+                    });
+                    return None;
+                }
+            };
+            let mut unknown: Vec<&str> = map
+                .keys()
+                .map(String::as_str)
+                .filter(|k| !SESSIONS_KEYS.contains(k))
+                .collect();
+            if !unknown.is_empty() {
+                unknown.sort_unstable();
+                out.problems.push(IdeProblem {
+                    location: sessions_at.clone(),
+                    message: format!(
+                        "unknown key(s) {}. `sessions` may declare: {}",
+                        unknown
+                            .iter()
+                            .map(|k| format!("{k:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        SESSIONS_KEYS.join(", ")
+                    ),
+                });
+            }
+            let command = parse_command_in_scope(
+                map,
+                &sessions_at,
+                "pane sessions",
+                PANE_SESSIONS_BUILTINS,
+                out,
+            )?;
+            Some(SessionsPicker {
+                label,
+                ask_first,
+                command,
+            })
+        }
+    };
+
     let auto_resume = match entry.get("auto_resume") {
         None => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -1762,13 +2028,63 @@ fn parse_terminal_pane(
         auto_resume
     };
 
+    // Both checks downgrade rather than drop, the way `auto_resume` above does:
+    // the pane still works, it just cannot do the thing the author asked for, and
+    // saying so beats silently rendering a picker that leads nowhere.
+    let sessions = match (sessions, &resume) {
+        (Some(_), None) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.sessions"),
+                message: "needs a `resume` command — a picked session is adopted by running \
+                          `resume` against it, so without one there is nothing for the pick to \
+                          do. The picker was dropped"
+                    .to_owned(),
+            });
+            None
+        }
+        // A `resume` that never mentions the token resumes the same thing
+        // whatever you pick, which is the one outcome a picker must not have:
+        // the user chooses a session, sees a pane open, and is somewhere else.
+        (Some(picker), Some(resume_spec)) if !mentions_pane_token(resume_spec) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.sessions"),
+                message: "has no effect, because this pane's `resume` command never references \
+                          ${veld.pane.token} — the picked session is delivered through it, so a \
+                          resume that ignores it would open the same session whatever was \
+                          picked. The picker was dropped"
+                    .to_owned(),
+            });
+            let _ = picker;
+            None
+        }
+        (other, _) => other,
+    };
+
     Some(TerminalPane {
         launch,
         resume,
+        sessions,
         auto_resume,
         close_on_exit,
         fixed_label,
     })
+}
+
+/// Extra keys a `sessions` picker may declare, in sorted order.
+pub const SESSIONS_KEYS: &[&str] = &["argv", "ask_first", "label", "shell"];
+
+/// Whether a command references `${veld.pane.token}` anywhere.
+///
+/// Textual on purpose: the same substring is what `interpolate` will later
+/// replace, so asking the question this way cannot disagree with the answer that
+/// matters. `parse_command_in_scope` has already rejected any `${veld.*}` name
+/// outside the closed set, so there is no near-miss spelling left to miss.
+fn mentions_pane_token(spec: &crate::config::CommandSpec) -> bool {
+    const TOKEN: &str = "${veld.pane.token}";
+    match spec {
+        crate::config::CommandSpec::Argv(argv) => argv.iter().any(|a| a.contains(TOKEN)),
+        crate::config::CommandSpec::Shell(script) => script.contains(TOKEN),
+    }
 }
 
 /// Read the `argv` / `shell` pair out of a carrier object.
@@ -4272,6 +4588,201 @@ mod tests {
     }
 
     #[test]
+    fn a_sessions_picker_needs_a_resume_that_uses_the_token() {
+        // Nothing to deliver the pick through.
+        let no_resume = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude"],
+            "sessions": { "argv": ["list.sh"] },
+        }));
+        let PaneBody::Terminal(terminal) = &no_resume.panes[0].body;
+        assert!(terminal.sessions.is_none());
+        assert_eq!(no_resume.problems[0].location, "ide.panes[0].sessions");
+
+        // A resume that ignores the token opens the same session whatever was
+        // picked, which is worse than not offering the choice.
+        let ignores = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["codex"],
+            "resume": { "argv": ["codex", "resume", "--last"] },
+            "sessions": { "argv": ["list.sh"] },
+        }));
+        let PaneBody::Terminal(terminal) = &ignores.panes[0].body;
+        assert!(terminal.sessions.is_none());
+        assert_eq!(ignores.problems[0].location, "ide.panes[0].sessions");
+
+        // Both downgrades keep the pane itself, the way `auto_resume`'s does.
+        assert_eq!(no_resume.panes.len(), 1);
+        assert_eq!(ignores.panes.len(), 1);
+    }
+
+    #[test]
+    fn a_sessions_picker_defaults_its_label_and_keeps_its_command() {
+        let parsed = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+            "sessions": { "argv": ["list.sh"] },
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        let picker = terminal.sessions.as_ref().expect("picker survives");
+        assert_eq!(picker.label, DEFAULT_SESSIONS_LABEL);
+        // The default that carries the feature: a click asks. A picker behind a
+        // small control is one most people never find.
+        assert!(picker.ask_first);
+        assert_eq!(
+            picker.command,
+            crate::config::CommandSpec::Argv(vec!["list.sh".to_owned()])
+        );
+    }
+
+    #[test]
+    fn the_lister_cap_drops_the_picker_and_keeps_the_pane() {
+        let pane = |i: usize| {
+            json!({
+                "id": format!("p{i}"), "type": "terminal",
+                "argv": ["x", "${veld.pane.token}"],
+                "resume": { "argv": ["x", "-r", "${veld.pane.token}"] },
+                "sessions": { "argv": ["list.sh"] },
+            })
+        };
+        let panes: Vec<serde_json::Value> = (0..MAX_PANE_SESSION_LISTERS + 2).map(pane).collect();
+        let parsed = section(json!({ "panes": panes }));
+
+        // Every pane survives — the cap is on how many run a command, not on how
+        // many panes a project may have.
+        assert_eq!(parsed.panes.len(), MAX_PANE_SESSION_LISTERS + 2);
+        let with_pickers = parsed
+            .panes
+            .iter()
+            .filter(|p| {
+                let PaneBody::Terminal(t) = &p.body;
+                t.sessions.is_some()
+            })
+            .count();
+        assert_eq!(with_pickers, MAX_PANE_SESSION_LISTERS);
+        assert_eq!(parsed.problems.len(), 2, "one per dropped picker");
+
+        // A duplicate id that would also trip the cap is discarded as a
+        // duplicate and says only that — one entry, one reason.
+        let mut with_dupe = panes.clone();
+        with_dupe.push(pane(0));
+        let dupes = section(json!({ "panes": with_dupe }));
+        let cap_problems = dupes
+            .problems
+            .iter()
+            .filter(|p| p.message.contains("picker was dropped"))
+            .count();
+        assert_eq!(cap_problems, 2, "the duplicate must not add a third");
+
+        // **No run of spaces in a message a user reads.** `cargo fmt` reflows a
+        // wrapped string literal and silently swallows a missing `\`
+        // continuation, which shipped once in this very message — and `veld
+        // lint` prints it verbatim.
+        for problem in &parsed.problems {
+            assert!(
+                !problem.message.contains("  "),
+                "a lint message lost its line continuation: {:?}",
+                problem.message
+            );
+        }
+    }
+
+    #[test]
+    fn ask_first_is_opt_out_and_must_be_a_boolean() {
+        let off = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+            "sessions": { "argv": ["list.sh"], "ask_first": false },
+        }));
+        assert!(off.problems.is_empty(), "{:?}", off.problems);
+        let PaneBody::Terminal(terminal) = &off.panes[0].body;
+        assert!(
+            !terminal
+                .sessions
+                .as_ref()
+                .expect("picker survives")
+                .ask_first
+        );
+
+        let wrong = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+            "sessions": { "argv": ["list.sh"], "ask_first": "no" },
+        }));
+        assert!(wrong.panes.is_empty());
+        assert_eq!(
+            wrong.problems[0].location,
+            "ide.panes[0].sessions.ask_first"
+        );
+    }
+
+    #[test]
+    fn a_sessions_command_may_not_reference_the_token_it_produces() {
+        // The lister runs to decide *which* token there will be, so there is
+        // none yet — a reference would resolve to nothing at exactly the moment
+        // the author most expects it to work.
+        let parsed = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+            "sessions": { "argv": ["list.sh", "${veld.pane.token}"] },
+        }));
+        assert_eq!(parsed.problems[0].location, "ide.panes[0].sessions");
+        assert!(
+            parsed.problems[0].message.contains("${veld.pane.token}"),
+            "{:?}",
+            parsed.problems[0]
+        );
+        // ...while the two pane names that *are* known at that point work.
+        let ok = one_pane(json!({
+            "id": "a", "type": "terminal", "argv": ["claude", "${veld.pane.token}"],
+            "resume": { "argv": ["claude", "-r", "${veld.pane.token}"] },
+            "sessions": { "argv": ["list.sh", "${veld.pane.id}", "${veld.root}"] },
+        }));
+        assert!(ok.problems.is_empty(), "{:?}", ok.problems);
+    }
+
+    #[test]
+    fn a_session_value_is_narrow_enough_to_be_inert_in_a_shell() {
+        for good in [
+            "1f2e3d4c-8a91-4c02-9f13-77bbd2e5a410",
+            "abc123",
+            "2026-09-09T10:00:00",
+            "user@host",
+            "a/b/c.jsonl",
+        ] {
+            assert!(is_session_value(good), "{good} should be accepted");
+        }
+        for bad in [
+            "",
+            // Command substitution, and the reason `shell` needs no special case.
+            "$(id)",
+            "`id`",
+            "a;rm -rf /",
+            "a b",
+            "a|b",
+            "a'b",
+            "a\"b",
+            "a\nb",
+            // Argument injection: `argv` has no shell, but a receiving program's
+            // own flag parser reads this as an option.
+            "-r",
+            "--dangerously-skip-permissions",
+            // Inert in a shell, *not* inert as a path — and a `resume` using the
+            // token as a path component is the natural shape for a file-backed
+            // tool.
+            "a/../../../../etc/passwd",
+            "..",
+            "a..b",
+            // Non-ASCII is not a session id in any tool we know of, and letting
+            // it through would put homoglyphs in a value nobody reads closely.
+            "sessión",
+        ] {
+            assert!(!is_session_value(bad), "{bad:?} should be refused");
+        }
+        assert!(is_session_value(&"a".repeat(MAX_SESSION_VALUE_CHARS)));
+        assert!(!is_session_value(&"a".repeat(MAX_SESSION_VALUE_CHARS + 1)));
+    }
+
+    #[test]
     fn icons_are_a_name_from_the_allowlist_or_an_emoji() {
         let named = one_pane(json!({
             "id": "a", "type": "terminal", "argv": ["x"], "icon": "robot",
@@ -4407,6 +4918,24 @@ mod tests {
             .collect();
         keys.sort_unstable();
         assert_eq!(keys, TERMINAL_PANE_KEYS.to_vec());
+
+        // The nested `sessions` object is closed the same way and drifts the
+        // same way, so it is checked here rather than left to be noticed by an
+        // author whose editor and `veld lint` disagree.
+        let sessions = &branch["properties"]["sessions"];
+        assert_eq!(
+            sessions["additionalProperties"],
+            serde_json::json!(false),
+            "the key check below only means anything while the schema is closed"
+        );
+        let mut session_keys: Vec<&str> = sessions["properties"]
+            .as_object()
+            .expect("$defs.pane sessions must list properties")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        session_keys.sort_unstable();
+        assert_eq!(session_keys, SESSIONS_KEYS.to_vec());
     }
 
     #[test]

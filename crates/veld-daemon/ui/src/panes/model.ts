@@ -1162,17 +1162,46 @@ export function takePendingStart(id: string): boolean {
 }
 
 /**
+ * Panes created by picking an *earlier* session, keyed the same way and for the
+ * same window: from the click until the first mount reads it.
+ *
+ * Deliberately not persisted with the tab. The daemon writes an adopted session
+ * into the pane ledger the moment it launches, so a reload or a restore resumes
+ * it through the ordinary `resume` path with no client-side memory at all —
+ * storing it here too would be a second answer to a question that already has
+ * one, and the two would drift the first time a session was adopted twice.
+ */
+const PENDING_ADOPT = new Map<string, string>();
+
+/** Note which earlier session this newly created pane is adopting. */
+export function markPaneAdopting(id: string, sessionToken: string): void {
+  PENDING_ADOPT.set(id, sessionToken);
+}
+
+/** The session this pane was created to adopt, consuming the fact. */
+export function takePendingAdopt(id: string): string | undefined {
+  const value = PENDING_ADOPT.get(id);
+  PENDING_ADOPT.delete(id);
+  return value;
+}
+
+/**
  * A tab for one of the project's own panes.
  *
  * The `title` is stored rather than derived, unlike a plain terminal's: a pane
  * whose spec has since been renamed or removed should keep reading as what the
  * user opened, not silently become "Terminal 2".
  */
-export function configPaneTab(spec: { id: string; label: string }): PaneTab {
+export function configPaneTab(
+  spec: { id: string; label: string },
+  /** An earlier session the user picked, when the pane was opened that way. */
+  adopt?: string,
+): PaneTab {
   const id = newTabId();
   // Before the tab exists, so the first mount can tell "the user just asked for
   // this" from "this came back from storage" — see `startPlanFor`.
   markPaneCreated(id);
+  if (adopt) markPaneAdopting(id, adopt);
   return { id, kind: "terminal", title: spec.label, spec: spec.id };
 }
 
@@ -1371,12 +1400,16 @@ export function tabForTransport(tab: PaneTab): PaneTab {
  *
  *  - a plain terminal always starts its login shell, as it always has
  *  - a pane the user just asked for launches fresh; the click was the consent
+ *  - unless the click picked an earlier session, in which case it adopts that
  *  - a restored pane resumes only when the project asked for it
  *  - otherwise it reattaches, because its tool is very often still running
  */
 export function startPlanFor(id: string, pane?: PaneMount): StartPlan {
   if (!pane) return "shell";
-  if (takePendingStart(id)) return "fresh";
+  // Both branches are the same click — the user asked for this pane — and differ
+  // only in which session it opens. `adopt` is checked without consuming, so the
+  // host can read the value when it acts on the plan.
+  if (takePendingStart(id)) return PENDING_ADOPT.has(id) ? "adopt" : "fresh";
   if (pane.autoResume) return "resume";
   // **Reattach, not idle.** A restored pane's tool is very often still running:
   // a page reload, or a detach into a second window, gives a fresh renderer with

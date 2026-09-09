@@ -200,6 +200,27 @@
             "opus"
           ]
         },
+        // `resume` above only ever reopens the conversation THIS pane started,
+        // which is nothing at all in a worktree you have not used yet — and
+        // nothing for every conversation you had before this pane existed.
+        // `sessions` is the other half: a command that finds what Claude Code
+        // already has on disk for this directory, so you can pick one.
+        //
+        // The script prints `<id>\t<label>\t<detail>` per line; the id lands in
+        // ${veld.pane.token} and the `resume` above is what runs — which is why
+        // the picked session comes back in auto mode on Opus like any other.
+        // A script can never contribute a command here, only choose which
+        // session the declared one opens. Prints nothing in a fresh worktree,
+        // and then no picker is offered at all.
+        //
+        // Shared by both Claude panes deliberately: the transcripts are
+        // per-directory, not per-model, so an Opus conversation is offered to
+        // the Sonnet pane too — and picking it there resumes it on Sonnet,
+        // which is the point of having both.
+        "sessions": {
+          "label": "Resume an earlier Claude session",
+          "argv": ["scripts/veld/claude-sessions.sh"]
+        },
         "auto_resume": true
       },
       {
@@ -232,6 +253,13 @@
             "--model",
             "sonnet"
           ]
+        },
+        // Same script as the Opus pane above, and the same note applies: the
+        // list is per-directory, so this offers Opus conversations too and
+        // resumes whichever you pick on Sonnet.
+        "sessions": {
+          "label": "Resume an earlier Claude session",
+          "argv": ["scripts/veld/claude-sessions.sh"]
         },
         "auto_resume": true
       },
@@ -283,6 +311,14 @@
         // The cost of having no token, and the reason the claude pane above
         // has one: two Codex panes open in the same worktree would both resume
         // the same session, because "the most recent one" is a single answer.
+        //
+        // It is also why this pane has no `sessions` picker while the Claude
+        // ones do. A picked session is delivered through ${veld.pane.token} in
+        // `resume`, and this `resume` does not reference it — so every pick
+        // would open `--last` regardless, which is the one outcome a picker
+        // must not have. `veld lint` refuses that combination rather than
+        // rendering it. Point `resume` at `codex resume ${veld.pane.token}` and
+        // a picker becomes possible here too.
         "id": "codex",
         "type": "terminal",
         "label": "Codex - auto",

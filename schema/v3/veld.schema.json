@@ -468,12 +468,46 @@
               "requires_bin": {
                 "type": "array",
                 "items": { "type": "string", "minLength": 1, "pattern": "^[^/\\\\]+$" },
-                "description": "Executable names that must be on the user's PATH for this pane to be offered. Names, never paths — a path would pass or fail on one machine's layout. Absent or empty means always offered. Resolved by a PATH lookup, never by running anything: veld does not execute a config command to decide whether to draw a menu item."
+                "description": "Executable names that must be on the user's PATH for this pane to be offered. Names, never paths — a path would pass or fail on one machine's layout. Absent or empty means always offered. Resolved by a PATH lookup, never by running anything: veld does not execute a config command to decide whether THIS pane is offered. (`sessions` below is the single place a pane runs a project command before you click anything, and what it decides is which session THIS pane opens on — never whether the pane is offered.)"
               },
               "argv": { "$ref": "#/$defs/argv" },
               "shell": {
                 "type": "string",
                 "description": "Run via sh -c; you own the quoting."
+              },
+              "sessions": {
+                "type": "object",
+                "additionalProperties": false,
+                "oneOf": [{ "required": ["argv"] }, { "required": ["shell"] }],
+                "description": "How this pane offers sessions it did NOT start — the ones the tool already has lying around for this worktree. veld runs this command when the pane chooser is on screen and, by default, asks which session you want the moment you click the pane — starting fresh is the first row. It launches the pane's own `resume` against the one you pick, with ${veld.pane.token} set to it. So a picked value never becomes a command: it only chooses which session the command you already declared runs against. Requires `resume`, and that `resume` must reference ${veld.pane.token} — without either the pick has nowhere to go, and `veld lint` says so and drops the picker. STDOUT CONTRACT: one row per line, `value`, then optionally a TAB and the text to show, then optionally a second TAB and a quieter detail line. `ls -t ~/.claude/projects/$slug/*.jsonl | xargs -n1 basename -s .jsonl` is a working picker with no adapter at all. Exit 0 with NO output means there are none here and the pane simply does not offer the choice — the answer a fresh clone gives. A non-zero exit offers the choice and says it failed, with the stderr tail. A row whose value is not 1-128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or `/`, beginning with a letter or digit and containing no `..`, is dropped — that set keeps the value inert inside a `shell` command, stops a leading `-` being read as a flag, and stops a `..` reaching a tool that resolves the id against its own transcripts directory. At most 50 rows are shown. THE COMMAND RUNS WITHOUT YOU CLICKING THE PANE — once, while the pane chooser is on screen, never on a timer — so it sits under the same posture and the same machine-wide off switch as `ide.extensions`: Settings, run project commands automatically.",
+                "properties": {
+                  "label": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "What the picker's dialog is titled, and what its button says when `ask_first` is false. Defaults to \"Resume an earlier session…\"."
+                  },
+                  "ask_first": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Whether clicking the pane opens the picker instead of starting fresh. TRUE by default, and the default is the point: a picker behind a small control is one most people never find, and \"you already have a conversation about this worktree\" is exactly what somebody needs told BEFORE they start a second one. Starting fresh is then the first row of the dialog, so it is still one extra click and never a dead end. It only ever asks when there is something to ask about — a lister that found nothing opens the pane exactly as it always did, with no dialog. Set false for a project whose panes are usually a fresh start: the click launches, and the list moves to a button on the card."
+                  },
+                  "argv": { "$ref": "#/$defs/argv" },
+                  "shell": {
+                    "type": "string",
+                    "description": "Run via sh -c; you own the quoting."
+                  }
+                },
+                "examples": [
+                  {
+                    "label": "Resume an earlier Claude session",
+                    "argv": ["scripts/veld/claude-sessions.sh"]
+                  },
+                  {
+                    "label": "Earlier sessions",
+                    "argv": ["scripts/veld/claude-sessions.sh"],
+                    "ask_first": false
+                  }
+                ]
               },
               "resume": {
                 "$ref": "#/$defs/commandObject",

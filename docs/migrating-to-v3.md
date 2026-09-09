@@ -483,6 +483,20 @@ to `true` already had the behaviour that is now the default. Note that the
 not surface it — so this paragraph, not a notice in the app, is what tells a
 project with a pinned pane to act.
 
+`ide.panes[]` also gained `sessions` — an `argv`/`shell` command (plus an
+optional `label`) that lists sessions the pane did **not** start, so an earlier
+conversation can be picked and resumed. Additive, and it changes nothing for a
+pane that does not declare it. By default (`ask_first`) clicking such a pane asks
+which session, with *Start fresh* as the dialog's first row — and it only asks
+when the command actually found something, so a worktree with no history opens
+the pane exactly as before. What it launches is the pane's existing `resume` with
+`${veld.pane.token}` set to the picked value. It needs `resume`, and needs that `resume` to reference the token — a
+`codex resume --last` shape cannot deliver a pick, so declaring both is a
+`veld lint` problem and the picker is dropped. Note this is the first thing in
+`ide.panes` that runs a command *before you click a pane*; it happens once while
+the pane chooser is on screen, under the same bounds and the same
+`extensions.autoRefresh` off switch as `ide.extensions`.
+
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld
 runs in that worktree. Nothing existing changes — a config without the key behaves

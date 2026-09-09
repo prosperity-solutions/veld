@@ -703,6 +703,9 @@ other than the ones below is **reserved**: parsed, stored, not rendered, and
       "requires_bin": ["claude"],
       "argv": ["claude", "--session-id", "${veld.pane.token}"],
       "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+      "sessions": { "label": "Resume an earlier Claude session",
+                    "argv": ["scripts/veld/claude-sessions.sh"] },
+      // ...or "ask_first": false to keep click-to-launch
       "auto_resume": true
     }
   ]
@@ -976,9 +979,10 @@ with the reason on that second line.
 | `type` | **Required.** `terminal`. An unknown type is skipped with a lint problem, and the *rest* of `ide.panes` still applies — so a config written for a newer veld costs one pane, not the block. |
 | `label` / `description` | Menu text (defaults to `id`) and tooltip. |
 | `icon` | An emoji, or a Tabler name from the allowlist (`sparkles`, `robot`, `bolt`, `terminal-2`, …). ASCII means "name", so a typo is a lint problem, not a tab labelled `sparkle`. |
-| `requires_bin` | Executable **names** on `PATH`. Never paths, and never a command veld runs — deciding whether to draw a menu item must not execute anything. |
+| `requires_bin` | Executable **names** on `PATH`. Never paths, and never a command veld runs — deciding whether *this pane* is offered must not execute anything. (`sessions` is the one exception in the block, and what it decides is which session the pane opens on, never whether the pane is offered.) |
 | `argv` / `shell` | **Required**, exactly one. |
 | `resume` | `{ argv }` or `{ shell }` — what to run when the pane is restored and its shell is gone. |
+| `sessions` | `{ argv }` or `{ shell }` plus an optional `label` and `ask_first` (default `true`) — a command that lists sessions this pane did **not** start, so one can be picked and resumed. Dropped with a lint problem without `resume`, or when that `resume` never references `${veld.pane.token}`. |
 | `auto_resume` | Default `false`. Ignored (with a lint problem) without `resume`. |
 | `close_on_exit` | Default `true`. Closes the pane on a **clean** exit only; a non-zero exit always keeps it so the error stays readable. Only fires on an exit someone saw, so it never competes with `auto_resume`. Note it also means a deliberate `/exit` never shows the Resume button — set `false` to stop and choose. |
 | `fixed_label` | Default `false`. Pins the tab to `label`, ignoring the terminal title (OSC 0/2) the process sets. Left unset, a pane adopts that title like a plain terminal always has — for a coding agent it names the task, which is what tells four agent panes apart. Set it where `label` is the landmark (`Claude (skip permissions)` must not become a task name). Replaced `allow_terminal_renaming`, whose default was the opposite; the old key is now an unknown-key lint warning and the pane keeps working. |
@@ -1004,6 +1008,62 @@ conversation did not.
   Resume button and `auto_resume` like any other pane. The cost is per-pane
   identity: two such panes in one worktree resume the *same* session, which is
   precisely what the token prevents for tools that cooperate.
+
+**`sessions` is the other half of resuming: a session this pane never started.**
+`resume` reopens what *this pane* launched, which is nothing at all the first
+time you open it in a worktree, and nothing for any conversation from before the
+pane existed. `sessions` names a command that lists what the tool already has on
+disk; **clicking the pane then asks which session**, with *Start fresh* as the
+first row, and picking a row runs **the pane's own `resume`** with
+`${veld.pane.token}` set to the picked value.
+
+```jsonc
+"sessions": { "label": "Resume an earlier Claude session",
+              "argv": ["scripts/veld/claude-sessions.sh"] }
+```
+
+- **`ask_first` defaults to `true`, and that default is the feature.** A picker
+  behind a small control on the card is one most people never find, and "you
+  already have a conversation about this worktree" is what somebody needs told
+  *before* starting a second one. It only asks when there is something to ask
+  about — a lister that found nothing opens the pane exactly as before — a
+  *failed* lister still asks so the author sees the error, and *Start fresh* is
+  always the first row, so it is one extra click and never a dead end.
+  `ask_first: false` keeps click-to-launch and moves the list into a labelled
+  button in the card's other half.
+- **Authoring guide, with worked adapters for Claude Code and Codex, the value
+  charset and the bounds veld enforces: [pane-sessions.md](pane-sessions.md).**
+
+- **A picked value chooses which session a declared command opens. It can never
+  contribute a command.** Same rule as a badge's `actions`. So the resumed
+  session comes back with every flag the pane promises — adopt into a pane
+  labelled *Opus, auto mode* and it resumes on Opus in auto mode.
+- **Stdout is one row per line**: `value`, optionally TAB the text to show,
+  optionally TAB a quieter detail. No tabs needed, so a pipeline ending in
+  `basename` is a working picker.
+- **Exit 0 with no output means "none here", and the picker is not offered at
+  all** — the answer a fresh clone gives, and not an error. A non-zero exit still
+  opens the dialog, with *Start fresh* and the stderr tail (or, under
+  `ask_first: false` where there is no dialog, disables the card's button and puts
+  the message there). A row whose value is not 1–128 chars of `[A-Za-z0-9]` plus
+  `._-:@/` (starting alphanumeric, no `..`) is dropped, and the picker says how
+  many — and a run where *every* row was dropped reports as failed rather than as
+  "none here", so a broken script is never silent. At most 50 rows; ordering is
+  the script's.
+- **The value's charset is the security boundary**, not cosmetics: it has no
+  shell metacharacter (so a `shell` `resume` is safe with no special case),
+  cannot start with `-` (so it cannot be read as a flag), and cannot contain
+  `..` (so a tool that resolves the id against its own transcripts directory
+  cannot be walked out of it).
+- **An adopted session is written into the pane ledger like a minted token**, so
+  `auto_resume` and the ordinary Resume button bring it back after a reboot.
+- **It runs when the pane chooser is on screen**, once, never on a timer and
+  never from the `+` menu — so it is under the same posture and the same off
+  switch as `ide.extensions` (`extensions.autoRefresh`).
+- **Check whether the tool already has a picker first.** `claude --resume` with
+  no argument and `codex resume` both open their own. `sessions` earns its place
+  when the tool has none, when the choice should be *absent* rather than empty,
+  or when the pick must land in a pane whose flags you already decided.
 
 **`auto_resume` is narrower than it sounds.** It fires only when a pane *comes
 into being* with its shell already gone (app start after a reboot, or after the

@@ -544,19 +544,26 @@ impl SettingKey {
         use SettingGroup::*;
         Some(match self {
             // ── General ──────────────────────────────────────────────────────
+            // The title says "commands", not "badges", because two surfaces ride
+            // this switch now and a label naming only the first would quietly
+            // turn off the second. The rule for anything added here: if Veld
+            // runs it from a repo's config without the user clicking the thing
+            // it is about, it belongs behind this toggle *and* in this copy.
             Self::ExtensionsAutoRefresh => toggle(
-                "Let projects refresh their own status badges",
+                "Let projects run their own status commands",
                 "A project's veld.json can declare status badges for the top bar — a pull \
                  request's state, a deploy tag — each backed by a command Veld runs in that \
-                 worktree and re-runs on the interval the project asked for. This is the only \
-                 thing Veld runs from a repo's configuration without you clicking something, so \
-                 it has a switch. Turning it off leaves the project's buttons and menus working \
-                 (a click is you asking) and stops only the unattended half; badges then render \
-                 nothing. Veld bounds these commands either way: no terminal is attached, so a \
-                 tool that would ask for credentials fails instead of waiting; there is a hard \
-                 timeout and an output limit; a minimum refresh interval and a cap on how many a \
-                 project may declare; and every command is written to the daemon log with its \
-                 full arguments.",
+                 worktree and re-runs on the interval the project asked for. It can also give a \
+                 pane a command that lists earlier sessions of the tool it runs, so the pane \
+                 chooser can offer you one to resume. Those are the only things Veld runs from a \
+                 repo's configuration without you clicking the thing they are about, so they \
+                 have a switch. Turning it off leaves the project's buttons and menus working (a \
+                 click is you asking) and stops the unattended half: badges render nothing, and \
+                 panes offer no earlier sessions. Veld bounds these commands either way: no \
+                 terminal is attached, so a tool that would ask for credentials fails instead of \
+                 waiting; there is a hard timeout and an output limit; a cap on how many a project \
+                 may declare, and a floor on how often the same one is re-run; and every command \
+                 is written to the daemon log with its full arguments.",
                 General,
             ),
             Self::ExtensionsSource => Spec {

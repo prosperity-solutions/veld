@@ -25,6 +25,21 @@
         "requires_bin": ["claude"],
         "argv": ["claude", "--session-id", "${veld.pane.token}"],
         "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+        // The other half of resuming: `resume` above picks up the session THIS
+        // pane started, which is nothing at all the first time you open it in a
+        // worktree. `sessions` names a command that finds the ones the tool
+        // already has on disk, so a conversation from last week — or from before
+        // this pane existed — is one click away.
+        //
+        // What the script prints is a value per line, optionally TAB a label and
+        // TAB a detail. The value goes into ${veld.pane.token}, so `resume`
+        // above is what runs; the script can never contribute a command, only
+        // choose which session the declared one opens. Print nothing and the
+        // choice is not offered at all.
+        "sessions": {
+          "label": "Resume an earlier Claude session",
+          "argv": ["scripts/veld/claude-sessions.sh"]
+        },
         "auto_resume": true
       },
       {

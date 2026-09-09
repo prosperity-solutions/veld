@@ -132,6 +132,26 @@ impl Db {
         Ok(rows)
     }
 
+    /// Every `(session_id, token)` this worktree has recorded.
+    ///
+    /// The token-carrying sibling of [`Self::resumable_panes`], and deliberately
+    /// **not** an extension of it: that one withholds tokens because its answer
+    /// crosses to the browser, and this one exists so the *daemon* can tell
+    /// whether a session somebody is about to adopt is already open in another
+    /// pane. Two agents resuming one transcript corrupt it, and the client
+    /// cannot police that itself precisely because it is never told the tokens.
+    pub fn pane_tokens(&self, worktree_id: i64) -> Result<Vec<(String, String)>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "SELECT session_id, token FROM pane_sessions
+             WHERE worktree_id = ?1 ORDER BY session_id",
+        )?;
+        let rows = stmt
+            .query_map(params![worktree_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Keep a worktree's pane rows bounded.
     ///
     /// The FK cascade collects rows when a *worktree* goes, which is the case
