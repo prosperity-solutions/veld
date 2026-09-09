@@ -598,6 +598,11 @@ export interface PaneSpec {
   available: boolean;
   /** Whether the pane declares a resume command at all. */
   can_resume: boolean;
+  /** Whether the pane declares a `sessions` lister — i.e. whether it can offer
+   *  earlier sessions to adopt. A flag, not the rows: the rows cost a project
+   *  command run, so they come from `paneSessionOptions` and only when the pane
+   *  chooser is actually on screen. */
+  has_sessions: boolean;
   /** Whether a restored pane whose shell is gone may resume without a click. */
   auto_resume: boolean;
   /** Whether a clean (status 0) exit closes the pane. Never applies to a
@@ -1160,8 +1165,45 @@ export interface PtyOpenUrl {
  * refuses `resume` for a pane that never launched rather than quietly starting
  * a fresh one — a silent fallback would begin a new billable conversation and
  * read to the user as the old one having been lost.
+ *
+ * `adopt` also runs the pane's `resume` command, but under a token the *user
+ * picked* out of `paneSessionOptions` — a session this pane never started. It
+ * carries `sessionToken` and is the only mode that does; the daemon validates
+ * that value before it reaches a command, because unlike the other two it comes
+ * from a request body rather than from veld's own ledger.
  */
-export type PaneLaunchMode = "fresh" | "resume";
+export type PaneLaunchMode = "fresh" | "resume" | "adopt";
+
+/** One earlier session a pane could adopt. Mirrors `SessionRow` in
+ *  `crates/veld-daemon/src/pane_sessions.rs`. */
+export interface PaneSessionRow {
+  /** What the daemon substitutes into `${veld.pane.token}`. */
+  value: string;
+  /** What to show. The script's second tab-separated field, or the value. */
+  label: string;
+  /** A quieter second line, when the script wrote a third field. */
+  detail?: string;
+}
+
+/** One pane's answer from `paneSessionOptions`. Mirrors `PaneSessionsView`. */
+export interface PaneSessionsView {
+  /** The `ide.panes[].id` this belongs to. */
+  id: string;
+  /** The picker's entry-point text, from `sessions.label`. */
+  label: string;
+  /** Whether clicking the pane opens the picker instead of starting fresh
+   *  (`sessions.ask_first`, default true). A picker behind a small control is
+   *  one most people never find, and "you already have a conversation about
+   *  this" is what somebody needs told *before* starting a second one. */
+  ask_first: boolean;
+  /** `ok` has rows; `empty` ran fine and found none, so offer no picker;
+   *  `failed`/`timeout` offer it and explain; `off` means the machine has
+   *  project commands turned off. */
+  state: "ok" | "empty" | "failed" | "timeout" | "off";
+  sessions: PaneSessionRow[];
+  /** Why, for the non-`ok` states — and for `ok`, what had to be dropped. */
+  message?: string;
+}
 
 /**
  * A run address. **The name alone is not one.**
@@ -1939,7 +1981,7 @@ export const api = {
   ptyTicket: (
     worktreeId: number,
     sessionId: string,
-    pane?: { spec: string; mode: PaneLaunchMode },
+    pane?: { spec: string; mode: PaneLaunchMode; sessionToken?: string },
   ) =>
     request<PtyTicket>("/api/pty/tickets", {
       method: "POST",
@@ -1950,6 +1992,9 @@ export const api = {
         // the project's config. Ignored server-side when the session is
         // already live, since nothing is being spawned.
         ...(pane ? { pane: pane.spec, mode: pane.mode } : {}),
+        // Likewise a *value*, never a command — which session the pane's own
+        // declared `resume` is pointed at. Only `adopt` reads it.
+        ...(pane?.sessionToken ? { session_token: pane.sessionToken } : {}),
       }),
     }),
   /**
@@ -2032,6 +2077,20 @@ export const api = {
   paneSessions: (worktreeId: number) =>
     request<{ resumable: { session_id: string; pane: string }[] }>(
       `/api/pty/panes/${worktreeId}`,
+    ),
+  /**
+   * The earlier sessions this worktree's panes could adopt.
+   *
+   * **This runs the project's `sessions` commands**, one child process per pane
+   * that declares one, which is why it is a POST behind the CSRF gate and why
+   * the caller is the pane chooser mounting rather than a worktree listing.
+   * Ask only when some `PaneSpec.has_sessions` is true — a project with no
+   * picker must cost neither a request nor a subprocess.
+   */
+  paneSessionOptions: (worktreeId: number) =>
+    request<{ panes: PaneSessionsView[] }>(
+      `/api/worktrees/${worktreeId}/panes/sessions`,
+      { method: "POST" },
     ),
   /**
    * End a terminal session now.

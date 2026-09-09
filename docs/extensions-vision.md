@@ -1082,6 +1082,190 @@ glyphs in the row's single slot. The fan-out is the real cost: one forge call pe
 worktree per refresh, where the top-bar badge makes one for the visible worktree
 only.
 
+### 2026-09-09 — `ide.panes[].sessions`: the pick fills the token, and there is no second launch command
+
+**Not an `ide.extensions` change**, but it lands here because it makes a *second*
+config surface run a repo-declared command without a click, and because the fork
+it turned on is the same one this document has now answered three times: where
+does a runtime value stop.
+
+The feature: a pane may declare `sessions`, an `argv`/`shell` command that lists
+sessions the pane did **not** start (a coding agent's transcripts on disk), so
+one can be picked and resumed. Classified **core** by the universal-primitive
+test — Veld executes a process and renders a list of opaque strings, and never
+learns what a session is or where any tool keeps them. The provider-specific half
+is a script in the project's repo, exactly as `scripts/veld/pr-badge.sh` is for
+the PR badge. No backlog row, therefore.
+
+**What was chosen.** The picked value is substituted into `${veld.pane.token}`
+and the pane's **own declared `resume`** runs. `sessions` has no launch command of
+its own and must not get one. The adopted value is written into the
+`pane_sessions` ledger exactly like a Veld-minted token, so `auto_resume` and the
+Resume button carry it across a reboot with no second mechanism. Requiring
+`resume`, and requiring that `resume` to reference the token, are both `validate`
+findings that drop the picker.
+
+That is the same invariant as a badge's `actions`, one step further: **a runtime
+value may choose which declared command runs, and against what, and may never
+contribute one.** It also produces the property that sells the feature — adopt a
+conversation into a pane labelled *Claude Opus, auto mode* and it comes back on
+Opus in auto mode, because the declared `resume` is what ran.
+
+**Rejected, with the argument that killed each.**
+
+- **Let the tool do its own picking** — no lister at all; the pane declares a
+  second static mode running `claude --resume` with no id, and the CLI draws its
+  own list. Genuinely the right answer for Claude and Codex *today*, and the
+  reason the docs now say so out loud. Killed because it cannot do the thing that
+  was asked for: with nothing run, there is no way to know there are no sessions,
+  so a fresh worktree gets a card that opens a terminal, says "none", and — with
+  `close_on_exit` — vanishes. It also cannot serve a tool with no picker of its
+  own, which is most of them.
+- **Enumerate files; execute nothing** — declare a directory and a glob, and let
+  Veld `readdir` it, keeping the "never execute to draw a menu" promise
+  literally. Killed because it makes Veld ship each tool's storage layout,
+  including Claude Code's undocumented cwd-slugification rule. When that changes
+  Veld is broken and the project's config cannot fix it — the exact inversion of
+  why the script lives in the repo.
+- **A new `ide.extensions` type on the existing poller**, referenced from a pane
+  by declared id. Attractive because it adds no execution to panes at all.
+  Killed by the refresh floor: a 15s-minimum timer makes the list stalest exactly
+  when it matters (the second after a session ends is when you want it back),
+  burns a subprocess forever for a menu opened twice a day, and puts a
+  hundreds-of-files listing through the 64 KiB drain cap where it truncates
+  mid-row into a confident half-list.
+- **One project-level session index**, a sibling of `ide.panes` whose rows name a
+  pane id plus a token. Killed because it couples the two halves of config with a
+  hand-maintained string: the script must know Veld's pane ids and keep them in
+  sync, with nothing validating the pairing.
+
+**The stdout contract: line-oriented and tab-separated, deliberately not the
+badge's JSON-or-first-line sniffing.** A badge's simple case is one value, so
+sniffing buys it a free adapter; here the simple case is *already a list*, and
+the free adapter is a pipeline ending in `basename`. `value<TAB>label<TAB>detail`,
+first field only is fine, and the three tolerances are the badge's verbatim
+(empty → absent, non-zero → visible failure, unparseable row → dropped and
+counted) so an author who has written one knows this one. The rejected
+alternatives, with what killed each:
+
+- **Printing paths and letting Veld read mtimes**, which would have given Veld
+  the sorting and the relative-time rendering for free. Killed because
+  `codex resume` has no path to point at, so one of the two named real cases
+  needs a fake-file adapter on day one. (Shortest script of any candidate, and
+  worth remembering if the feature is ever narrowed to file-backed tools.)
+- **A `format` field on the declaration** (`lines` by default, `json` opt-in)
+  instead of one contract. Killed because it buys a permanent knob and a
+  *silent* failure: script prints lines, config says json, child exits 0, picker
+  is empty, and nothing names the liar.
+- **Opaque display lines resolved by a second command** — Veld parses nothing,
+  and hands the picked line verbatim to a resolver whose stdout is the value.
+  The prettiest stdout of the five and the **named trap** of the round: it makes
+  human-readable prose the identity of a resumable session, so the first
+  duplicate label — or the first relative timestamp that ticks between the list
+  run and the resolve run — resumes the *wrong conversation* with no error
+  anywhere. Wrong-session-resumed is the one failure this feature must not have,
+  and it is the reason the value is carried explicitly in field one.
+- **Running the lister interactively in the pane with a real tty**, so
+  `… | fzf` is a picker with search and preview for free. Killed on posture: an
+  interactive child cannot have a deadline, so a hang has nothing left to kill
+  it — it discards every bound the badge runner exists to impose.
+
+**Overridden from the sparring round:** its top pick came with an addendum —
+also accept `\0` between records when stdout contains one, and `\x1f` between
+value and label, to rescue a label containing a tab. Declined. It is a second
+record format for a failure that already degrades gracefully (`splitn(3, '\t')`
+means a tabbed label loses its tail into the detail column, not the row), and
+this config surface's standing rule is one contract rather than an opt-in
+alternative nobody asked for. A script that wants a tab in a label can replace
+it, which is what the example script already does.
+
+**Both sparring rounds ran blind and independently landed on what was built** —
+adoption-into-the-token for the shape, value-first tab-split lines for the
+contract — which is the agreement signal §0.4 says to trust. Both also
+volunteered the same caution: *ship "let the tool do its own picking" first if
+you want it cheap, it may be all anyone needs*, which is now a note in
+`docs/configuration.md` rather than a design change.
+
+**The security posture is the badge's, and the value's charset is the boundary.**
+Same runner, same bounds, same `extensions.autoRefresh` off switch. Two
+narrowings: it is not on a timer (it runs once, while the pane chooser is on
+screen, and never from the `+` hover menu), and declarations come from the
+worktree's own `veld.json` with no `extensions.source` equivalent, because the
+command a pane runs already comes from there.
+
+`is_session_value` — 1–128 characters of `[A-Za-z0-9._:@/-]` starting
+alphanumeric — is not cosmetic validation. `resume` may be declared with `shell`,
+which is a permanently-supported escape hatch, so a value containing `$(…)` or a
+quote would be command execution rather than an argument; and a leading `-` is
+argument injection even in `argv`, the same hole `worktree_builtins` closes for a
+branch named `-foo`. The set contains no shell metacharacter at all, so the value
+is inert in both positions and neither needs a special case. Deliberately *not*
+attempted: proving the session exists (only the tool knows) or re-checking the
+pick against the list it came from (a server-side memo with an expiry, whose
+failure mode is a launch refused for a reason the user cannot see). A
+well-formed-but-wrong value makes the tool print "no such session" in the pane it
+was asked to open, which is legible and harmless.
+
+### 2026-09-09 — Reversed same-day: the click asks, and the separate card is gone
+
+The entry above was written against a first cut where a pane with earlier
+sessions grew a **second card** beside it in the pane chooser. The maintainer
+rejected it on sight, and the reason is worth keeping because it is not a layout
+preference:
+
+> *A resume list hidden behind a small button does not promote the option to
+> resume an old session enough. If we always open the modal first, the user
+> definitely knows.*
+
+That is a claim about **discovery**, and it beats the argument the first cut was
+built on. The first cut optimised for *not costing the everyday click* — a
+separate card (and its rejected sibling, a chip on the card's edge) both keep
+"click the card, get a pane" true. But the thing this feature exists to prevent
+is somebody starting a second conversation about a worktree that already has
+one, and you cannot prevent that with a control they never look at. The cost of
+being wrong is asymmetric: an unnecessary dialog costs one click, a missed
+picker costs a whole duplicate session.
+
+**What it is now.** One card per pane, as before this feature existed. Clicking
+it opens a dialog whose **first row is *Start fresh*** — the click the user
+actually made — with the project's list underneath.
+
+Three bounds are what make that defensible rather than a nag, and none is
+optional:
+
+- **It only asks when there is something to ask about.** `state: "empty"` — the
+  common answer, and the one a fresh clone gives — opens the pane with no dialog
+  at all.
+- **The fresh row is never absent and never moves.** Including when the lister
+  *failed* and the dialog holds nothing else. A dialog that can leave you unable
+  to do the thing you clicked is worse than no dialog.
+- **A failed lister still opens it**, carrying the stderr tail. The pane is never
+  blocked by a broken script, and the author still gets told — the "visible,
+  never silent" tolerance, kept without letting it cost anyone a pane.
+
+**`ask_first` (default `true`) is the knob**, and it lives on the pane's
+`sessions` block rather than in user settings. The argument for a *user* setting
+is real — "stop asking me, I always start fresh" is a person's preference, not a
+project's — and it was declined for now because the default is a discovery
+mechanism whose value is highest on first contact, and one knob is cheaper to
+explain than two that interact. If the ask ever becomes a complaint from someone
+who has already discovered the feature, a user-level override is the follow-up,
+and it should *narrow* the project's answer rather than replace it.
+
+`ask_first: false` keeps click-to-launch and moves the list into the card's
+other half — a labelled button sharing the card's border, with a glyph, a count
+and a word, rather than the icon-in-a-corner shape that was rejected above. Two
+sibling buttons inside a wrapper, never a button nested in a button: that is
+invalid HTML and unreachable by keyboard, and it is the reason the first cut
+reached for a separate card at all.
+
+**The one promise this feature bends**, recorded because a future reader will
+find the old wording: the pane schema said Veld "does not execute a config
+command to decide whether to draw a menu item". That is still true of
+`requires_bin` and of whether a *pane* is offered. It is not true of whether the
+picker's second card is offered, and the schema now says which is which rather
+than carrying a sentence the code had outgrown.
+
 ## The extension backlog
 
 Everything in this table is **customization-layer by the tests above** — none of

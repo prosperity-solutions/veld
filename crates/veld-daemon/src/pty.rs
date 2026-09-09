@@ -1393,6 +1393,18 @@ enum PaneMode {
     Fresh,
     /// Re-run the pane's `resume` command under the token it launched with.
     Resume,
+    /// Run the pane's `resume` command under a token the *user picked* from the
+    /// pane's `sessions` list — a session this pane never started, and in general
+    /// one veld never minted.
+    ///
+    /// Its own mode rather than a `Resume` with an extra field, because the two
+    /// differ in where the token comes from and therefore in what has to be
+    /// checked: `Resume` reads a token veld itself wrote to the pane ledger and
+    /// can trust on sight, while this one arrives in a request body and has to
+    /// clear `veld_core::ide::is_session_value` before it goes anywhere near a
+    /// command. Collapsing them would put a request-supplied string on the path
+    /// that never validates one.
+    Adopt,
 }
 
 static TICKETS: LazyLock<Mutex<HashMap<String, Ticket>>> =
@@ -1418,6 +1430,18 @@ struct TicketRequest {
     /// ignored when the session is already live — there is nothing to spawn.
     #[serde(default)]
     mode: Option<PaneMode>,
+    /// The session the user picked out of the pane's `sessions` list. Required
+    /// by, and only read by, [`PaneMode::Adopt`].
+    ///
+    /// **A value, never a command** — the same rule `pane` above is under. It is
+    /// substituted into `${veld.pane.token}` in the pane's own declared `resume`,
+    /// so what runs is fixed by the project's config and only *which session* it
+    /// runs against comes from here. `resolve_pane` re-checks it against
+    /// `veld_core::ide::is_session_value` rather than trusting that it came from
+    /// a list veld itself produced: this is a request body, and the list it was
+    /// rendered from is long gone by the time the ticket is minted.
+    #[serde(default)]
+    session_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1443,6 +1467,9 @@ async fn resolve_pane(
     db: &veld_core::db::Db,
     spec_id: &str,
     mode: PaneMode,
+    // Only read by `PaneMode::Adopt` — the session the user picked out of the
+    // pane's `sessions` list, still unvalidated at this point.
+    session_token: Option<&str>,
     worktree_id: i64,
     session_id: &str,
     worktree_path: &FsPath,
@@ -1532,6 +1559,49 @@ async fn resolve_pane(
                     )
                 })?;
             (resume, recorded.token, false)
+        }
+        PaneMode::Adopt => {
+            // Declared, not merely present: a pane without `sessions` never
+            // offered a list, so a client asking to adopt into it is asking for a
+            // command path the project did not open. `ide::parse_terminal_pane`
+            // already refuses `sessions` without a `resume`, so the two checks
+            // agree by construction — but this one is the enforcing side, since
+            // the request arrives here and not there.
+            if terminal.sessions.is_none() {
+                return Err(err(
+                    StatusCode::CONFLICT,
+                    format!(
+                        "the {} pane does not offer earlier sessions to resume",
+                        pane.label
+                    ),
+                ));
+            }
+            let resume = terminal.resume.as_ref().ok_or_else(|| {
+                err(
+                    StatusCode::CONFLICT,
+                    format!("the {} pane has no resume command", pane.label),
+                )
+            })?;
+            let picked = session_token.ok_or_else(|| {
+                err(
+                    StatusCode::BAD_REQUEST,
+                    "adopting a session needs the session to adopt",
+                )
+            })?;
+            // The one gate between a project script's stdout and an interpolated
+            // command. See `veld_core::ide::is_session_value` for what it closes
+            // and why it is far narrower than "looks like a session id".
+            if !veld_core::ide::is_session_value(picked) {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    "that is not a session id veld will pass to a command",
+                ));
+            }
+            // `fresh: false` — the tool is being pointed at a conversation that
+            // already exists, so this is a resume in every sense the rest of the
+            // system cares about, and presenting it as a fresh start would put
+            // the wrong copy on the dead-pane card.
+            (resume, picked.to_owned(), false)
         }
     };
 
@@ -2034,6 +2104,7 @@ async fn mint_ticket(
                 &db,
                 spec_id,
                 body.mode.unwrap_or(PaneMode::Fresh),
+                body.session_token.as_deref(),
                 body.worktree_id,
                 &body.session_id,
                 &cwd,
@@ -4910,6 +4981,7 @@ mod tests {
             body: veld_core::ide::PaneBody::Terminal(veld_core::ide::TerminalPane {
                 launch: veld_core::config::CommandSpec::Argv(vec!["true".to_owned()]),
                 resume: None,
+                sessions: None,
                 auto_resume: false,
                 close_on_exit: true,
                 fixed_label: false,

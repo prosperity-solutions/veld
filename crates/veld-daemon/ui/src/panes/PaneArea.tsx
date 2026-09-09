@@ -130,7 +130,7 @@ import { HEADLINE, PaneActivityIcon } from "../inbox/InboxIcon";
 import { useInbox } from "../inbox/useInbox";
 import { notifyError } from "../shared/notify";
 import type { QuickSwitchPrefs } from "../shared/settings";
-import type { PaneSpec, Quicklink, ViewableFile } from "../api";
+import type { PaneSessionsView, PaneSpec, Quicklink, ViewableFile } from "../api";
 import { api } from "../api";
 import { paneIcon } from "./paneIcons";
 import { desktopWindow } from "../shell";
@@ -1160,12 +1160,15 @@ export function PaneArea(props: {
           filesLoading={props.filesLoading}
           filesServing={props.filesServing}
           panes={props.panes}
+          worktreeId={props.worktreeId}
           urlsEmptyHint={props.urlsEmptyHint}
           searchUrl={props.searchUrl}
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
-          onPane={(spec) => onLayout(addTab(layout, 0, configPaneTab(spec)))}
+          onPane={(spec, adopt) =>
+            onLayout(addTab(layout, 0, configPaneTab(spec, adopt)))
+          }
           onBrowser={(tab) => onLayout(addTab(layout, 0, tab))}
           onDiag={(kind) => onLayout(addTab(layout, 0, diagTab(kind)))}
         />
@@ -1886,6 +1889,7 @@ function DockView(props: {
             filesLoading={props.filesLoading}
             filesServing={props.filesServing}
             panes={props.panes}
+            worktreeId={props.worktreeId}
             urlsEmptyHint={props.urlsEmptyHint}
             searchUrl={props.searchUrl}
             // A `new` tab becomes the chosen kind in place; an empty dock has no
@@ -1893,7 +1897,7 @@ function DockView(props: {
             onTerminal={() =>
               convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
             }
-            onPane={(spec) => convertOrAdd(active, configPaneTab(spec))}
+            onPane={(spec, adopt) => convertOrAdd(active, configPaneTab(spec, adopt))}
             onBrowser={(tab) => convertOrAdd(active, tab)}
             onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
           />
@@ -1989,16 +1993,24 @@ function PaneChooser(props: {
   filesServing: boolean;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
+  /** Which worktree's `sessions` listers to run. Only used for that. */
+  worktreeId: number;
   urlsEmptyHint: string;
   /** `browser.searchUrl`, only to say whether a blank pane can search. */
   searchUrl: string;
   onTerminal: () => void;
-  onPane: (spec: PaneSpec) => void;
+  /** `adopt` is a session the user picked out of the pane's `sessions` list. */
+  onPane: (spec: PaneSpec, adopt?: string) => void;
   onBrowser: (tab: PaneTab) => void;
   onDiag: (kind: DiagKind) => void;
 }) {
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const paneSessions = usePaneSessions(props.worktreeId, props.panes);
+  // Which pane's picker is open, or none. The spec rather than the id, because
+  // the modal shows the pane's own label and icon and would otherwise have to
+  // look them back up.
+  const [picking, setPicking] = useState<PaneSpec | null>(null);
   // **Two lists, deliberately.** `places` is what the screen shows unprompted, so
   // its files are the handful `inlineFiles` allows — at most three, from the last
   // day, and none at all while the run is serving URLs of its own. `filePlaces` is
@@ -2036,8 +2048,22 @@ function PaneChooser(props: {
           {/* An unavailable pane is shown disabled with the reason rather than
               omitted — a repo that declares a Claude pane should not look like it
               forgot to. */}
+          {/* One card per declared pane, always — a pane with earlier sessions
+              is still one thing you can open, so it does not get a second card
+              beside it. What changes is what the click *does*: by default it
+              asks which session, because a picker nobody sees is a picker
+              nobody uses, and "you already have a conversation about this
+              worktree" is worth being told before starting another. A project
+              that would rather click-to-launch sets `ask_first: false` and the
+              list moves into the card's other half. */}
           {props.panes.map((spec) => (
-            <PaneButton key={spec.id} spec={spec} onPick={props.onPane} />
+            <PaneButton
+              key={spec.id}
+              spec={spec}
+              onPick={props.onPane}
+              answer={paneSessions.get(spec.id)}
+              onPickSessions={() => setPicking(spec)}
+            />
           ))}
           <button className="pane-card" onClick={props.onTerminal}>
             <span className="pane-card-main">
@@ -2136,6 +2162,18 @@ function PaneChooser(props: {
           );
         }}
       />
+      <PaneSessionsModal
+        spec={picking}
+        answer={picking ? paneSessions.get(picking.id) : undefined}
+        onClose={() => setPicking(null)}
+        onPick={(spec, value) => {
+          setPicking(null);
+          // `value` undefined is *Start fresh*, and `onPane`'s second argument
+          // is already optional — so the fresh row and a plain card click reach
+          // exactly the same code path rather than two that have to agree.
+          props.onPane(spec, value);
+        }}
+      />
       <BookmarksModal
         bookmarks={bookmarks}
         opened={bookmarksOpen}
@@ -2178,10 +2216,152 @@ function PaneChooser(props: {
 }
 
 /** One config-declared pane, as a card of the same size as every other. */
-function PaneButton(props: { spec: PaneSpec; onPick: (spec: PaneSpec) => void }) {
-  const { spec } = props;
-  const missing = `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`;
+/**
+ * The earlier sessions this worktree's panes could adopt, keyed by pane id.
+ *
+ * **Asking costs the project a child process per pane**, so this is as lazy as it
+ * can be made: nothing at all unless some pane declares a lister, and only from
+ * the pane chooser, which is a screen the user navigated to rather than a menu
+ * they brushed past. It is deliberately not refreshed on a timer — the answer
+ * matters at the moment somebody is choosing a pane, and a chooser that is still
+ * on screen five minutes later is one nobody is reading.
+ */
+function usePaneSessions(
+  worktreeId: number,
+  panes: PaneSpec[],
+): Map<string, PaneSessionsView> {
+  const [answers, setAnswers] = useState<Map<string, PaneSessionsView>>(new Map());
+  // The primitive, not the array: `panes` is a fresh array on every render of the
+  // parent, so depending on it directly would re-run this on every keystroke
+  // elsewhere in the tree — one child process per keystroke.
+  const wanted = panes.some((p) => p.has_sessions);
+  useEffect(() => {
+    if (!wanted) {
+      setAnswers(new Map());
+      return;
+    }
+    // Guards the worktree switch, not just unmount: the chooser stays mounted
+    // across one, so a slow lister from the previous worktree would otherwise
+    // land as this one's sessions — offering to resume a conversation from a
+    // different branch.
+    let live = true;
+    void api
+      .paneSessionOptions(worktreeId)
+      .then((r) => {
+        if (!live) return;
+        setAnswers(new Map(r.panes.map((p) => [p.id, p])));
+      })
+      .catch(() => {
+        // Silent, and this is the one place in this feature that is. A failing
+        // *script* is reported on the card, because the author needs to see it;
+        // a failing *request* means the daemon is unreachable, which the app is
+        // already saying elsewhere and which no toast here would improve.
+        if (live) setAnswers(new Map());
+      });
+    return () => {
+      live = false;
+    };
+  }, [worktreeId, wanted]);
+  return answers;
+}
+
+/**
+ * The card that opens a pane's earlier-sessions picker, when there are any.
+ *
+ * Renders nothing for `empty` — which is both the common answer and the point:
+ * a project whose lister finds no sessions in this worktree is not offered the
+ * choice at all. A lister that *failed* is a different thing and does render,
+ * disabled, with the reason: a broken script the author cannot see is a broken
+ * script that stays broken.
+ */
+/**
+ * Pick one earlier session, and open the pane on it.
+ *
+ * A list of plain rows rather than a `Select`: each row carries two lines the
+ * project wrote (a summary and a detail), and the thing being chosen is a
+ * conversation, not a value in a form.
+ */
+function PaneSessionsModal(props: {
+  spec: PaneSpec | null;
+  answer: PaneSessionsView | undefined;
+  onClose: () => void;
+  /** `undefined` is *Start fresh* — the same call the card used to make. */
+  onPick: (spec: PaneSpec, value?: string) => void;
+}) {
+  const { spec, answer } = props;
   return (
+    <Modal
+      opened={spec !== null && answer !== undefined}
+      onClose={props.onClose}
+      title={spec ? spec.label : ""}
+      size="lg"
+    >
+      {/* **Fresh is the first row, always, and it is never absent.** This dialog
+          stands between the user and the click they made, so the thing they
+          asked for has to be reachable in one more click and reachable in the
+          same place every time — including when the lister failed and there is
+          nothing else in here at all. Putting it last, or hiding it once
+          sessions exist, would turn a helpful prompt into a detour. */}
+      <button
+        className="session-row fresh"
+        onClick={() => {
+          if (spec) props.onPick(spec);
+        }}
+      >
+        <span className="session-row-main">
+          <IconPlus size={13} /> Start fresh
+        </span>
+        <span className="session-row-sub">
+          A new session, as if this pane had no history
+        </span>
+      </button>
+      {(answer?.sessions ?? []).length > 0 ? (
+        <p className="session-list-heading">{answer?.label}</p>
+      ) : null}
+      <div className="session-list">
+        {(answer?.sessions ?? []).map((row) => (
+          <button
+            key={row.value}
+            className="session-row"
+            onClick={() => {
+              if (spec) props.onPick(spec, row.value);
+            }}
+          >
+            <span className="session-row-main">{row.label}</span>
+            {row.detail ? (
+              <span className="session-row-sub">{row.detail}</span>
+            ) : null}
+          </button>
+        ))}
+      </div>
+      {answer?.message ? (
+        <Text size="xs" c="dimmed" mt="sm">
+          {answer.message}
+        </Text>
+      ) : null}
+    </Modal>
+  );
+}
+
+function PaneButton(props: {
+  spec: PaneSpec;
+  onPick: (spec: PaneSpec) => void;
+  /** This pane's earlier sessions, once the chooser has asked for them. */
+  answer?: PaneSessionsView;
+  /** Open the picker for this pane. */
+  onPickSessions: () => void;
+}) {
+  const { spec, answer } = props;
+  const missing = `${spec.label} needs ${(spec.missing ?? []).join(", ")} — not found on your PATH`;
+  // **Whether a click asks, and whether anything is asked about.** `offers` is
+  // "there is something to say": rows to pick from, or a lister that failed and
+  // whose author needs to see it. `empty` is deliberately not that — a project
+  // whose script found nothing has said "nothing here", and the pane must open
+  // exactly as it did before this feature existed.
+  const offers = answer !== undefined && answer.state !== "empty";
+  const asks = offers && answer.state !== "off" && answer.ask_first;
+  const count = offers ? answer.sessions.length : 0;
+  const card = (
     <button
       className="pane-card"
       // `aria-disabled`, not `disabled`. A disabled button dispatches no pointer
@@ -2192,7 +2372,12 @@ function PaneButton(props: { spec: PaneSpec; onPick: (spec: PaneSpec) => void })
       aria-disabled={!spec.available || undefined}
       title={spec.available ? (spec.description ?? `Open a ${spec.label} pane`) : missing}
       onClick={() => {
-        if (spec.available) props.onPick(spec);
+        if (!spec.available) return;
+        // The click still opens this pane either way. `asks` only changes
+        // *which* session it opens on, and the dialog's first row is the
+        // fresh start this click used to be.
+        if (asks) props.onPickSessions();
+        else props.onPick(spec);
       }}
     >
       <span className="pane-card-main">
@@ -2246,9 +2431,50 @@ function PaneButton(props: { spec: PaneSpec; onPick: (spec: PaneSpec) => void })
           the previous cut ended up looking like a recommendation. An unavailable
           pane spends the line on why instead. */}
       <span className="pane-card-sub">
-        {spec.available ? (spec.description ?? "") : missing}
+        {/* The picker's own line, when there is one, because the description is
+            the *pane's* and this is news about the pane. Kept to the card's
+            second line rather than added as a third: the grid gives every card
+            the same height, and a third line would push the description out of
+            every other card in the row. */}
+        {offers && spec.available
+          ? answer.state === "ok"
+            ? `${count} earlier session${count === 1 ? "" : "s"} to resume`
+            : (answer.message ?? "could not list earlier sessions")
+          : spec.available
+            ? (spec.description ?? "")
+            : missing}
       </span>
     </button>
+  );
+  // A plain card whenever there is nothing to offer — the overwhelmingly common
+  // case, and the one that must not change shape because of a feature the
+  // project did not use.
+  if (!offers || !spec.available || asks) return card;
+  // `ask_first: false`. The list has to live *somewhere* reachable, so it
+  // becomes the card's other half: a real button, sharing the card's border and
+  // its own hover, wide enough to read rather than an icon in a corner. Two
+  // buttons side by side rather than one nested in the other, which is invalid
+  // HTML and unreachable by keyboard.
+  return (
+    <div className="pane-card-split">
+      {card}
+      <button
+        className="pane-card-side"
+        aria-disabled={answer.state !== "ok" || undefined}
+        title={
+          answer.state === "ok"
+            ? `${answer.label} (${count})`
+            : (answer.message ?? "could not list earlier sessions")
+        }
+        onClick={() => {
+          if (answer.state === "ok") props.onPickSessions();
+        }}
+      >
+        <IconHistory size={15} />
+        <span className="pane-card-side-count">{count}</span>
+        <span className="pane-card-side-label">earlier</span>
+      </button>
+    </div>
   );
 }
 

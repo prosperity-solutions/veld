@@ -724,17 +724,20 @@ pub(crate) async fn activate(
     }))
 }
 
-struct Output {
-    stdout: String,
+pub(crate) struct Output {
+    pub(crate) stdout: String,
     /// True when the child wrote more than [`MAX_OUTPUT_BYTES`] and the rest was
-    /// discarded. The caller must not parse a truncated payload: a contract object
-    /// cut mid-JSON fails to deserialize and would fall through the *tolerant* path,
-    /// putting 60 characters of raw JSON in the bar.
-    truncated: bool,
-    stderr: String,
-    success: bool,
-    code: Option<i32>,
-    timed_out: bool,
+    /// discarded. **Every caller has to decide what a cut payload means**, and the
+    /// two in this crate answer differently on purpose: a badge refuses to parse
+    /// it at all (a contract object cut mid-JSON fails to deserialize and would
+    /// fall through the *tolerant* path, putting 60 characters of raw JSON in the
+    /// bar), while a session list keeps the whole lines and drops the partial
+    /// tail one, because 19 usable rows beat none.
+    pub(crate) truncated: bool,
+    pub(crate) stderr: String,
+    pub(crate) success: bool,
+    pub(crate) code: Option<i32>,
+    pub(crate) timed_out: bool,
 }
 
 /// Resolve an `argv[0]` against the checkout that *declared* it, so a relative
@@ -774,7 +777,7 @@ fn resolve_program(program: &str, declare_root: &str) -> std::path::PathBuf {
 /// - output is capped;
 /// - a relative `argv[0]` is resolved against `declare_root`, not `root` — see
 ///   [`resolve_program`].
-async fn spawn_command(
+pub(crate) async fn spawn_command(
     spec: &veld_core::config::CommandSpec,
     root: &str,
     declare_root: &str,
@@ -1033,7 +1036,7 @@ fn worktree_target(id: i64) -> Result<(String, String, bool, Option<String>), Ap
 /// A worktree without a loadable config simply declares no extensions — never an
 /// error, for the reason `parse_config` carries no semantic checks: a config that
 /// cannot load must not take unrelated surfaces down with it.
-fn load_section(root: &str) -> Option<(veld_core::config::VeldConfig, IdeSection)> {
+pub(crate) fn load_section(root: &str) -> Option<(veld_core::config::VeldConfig, IdeSection)> {
     let path = veld_core::config::root_config_in(FsPath::new(root))?;
     let config = veld_core::config::parse_config(&path).ok()?;
     let section = config.ide_section();
@@ -1072,7 +1075,7 @@ fn first_line(s: &str) -> &str {
 
 /// Clip to `max` **characters**, never bytes — a byte slice would panic on a
 /// multi-byte boundary, and emoji in a badge are entirely expected.
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         return s.to_owned();
     }
@@ -1081,7 +1084,7 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 /// The last line of stderr, as a suffix for an error message, or nothing.
-fn tail_suffix(stderr: &str) -> String {
+pub(crate) fn tail_suffix(stderr: &str) -> String {
     let tail = stderr
         .lines()
         .rfind(|l| !l.trim().is_empty())

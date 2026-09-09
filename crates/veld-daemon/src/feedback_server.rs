@@ -30,6 +30,10 @@ mod desktop;
 #[path = "extensions.rs"]
 mod extensions;
 
+/// Listing the sessions a config-declared pane could adopt.
+#[path = "pane_sessions.rs"]
+mod pane_sessions;
+
 #[path = "worktree_trash.rs"]
 pub mod worktree_trash;
 

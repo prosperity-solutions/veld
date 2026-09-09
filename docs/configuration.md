@@ -2545,6 +2545,7 @@ shown disabled, and spends that line on the reason instead.
 | `requires_bin` | Executable **names** (never paths) that must be on your `PATH` for the pane to be offered. Resolved with a lookup, never by running anything. |
 | `argv` / `shell` | **Required**, exactly one. What a fresh pane runs. |
 | `resume` | An object with `argv` or `shell`: what to run instead when the pane is restored and its shell is gone. |
+| `sessions` | An object with `argv` or `shell`, plus an optional `label` and `ask_first`: a command that lists sessions the pane did **not** start, so one can be picked and resumed. Needs `resume`, and needs that `resume` to reference `${veld.pane.token}`. See [below](#resuming-a-session-this-pane-never-started). |
 | `auto_resume` | Whether veld may run `resume` without being asked. Defaults to `false`. |
 | `close_on_exit` | Whether a **clean** exit closes the pane. Defaults to `true`. A non-zero exit never closes it. |
 | `fixed_label` | Whether the tab is pinned to `label`, ignoring any terminal title (OSC 0/2) the process sets. Defaults to `false`, so a pane adopts its process's title exactly as a plain terminal always has — for a coding agent that title is what it is working on, and a rail of identically-labelled panes tells you nothing. Set it for a pane whose `label` is a landmark worth more than whatever the tool would call itself. |
@@ -2611,6 +2612,148 @@ What you give up is the thing the token buys: **two Codex panes in one worktree
 would both resume the same session**, because "the most recent one" has a single
 answer. With an id per pane, they don't. If a tool ever grows a way to accept an
 externally-chosen id, moving it to the first shape is a one-line change.
+
+#### Resuming a session this pane never started
+
+`resume` above answers one question: *this* pane launched a session, bring it
+back. That is the wrong question in two everyday situations — the first time you
+open the pane in a new worktree, and any time you want a conversation from
+before this pane existed. Both have the same answer sitting on your disk, and
+`sessions` is how a project points Veld at it.
+
+```jsonc
+{
+  "id": "claude",
+  "type": "terminal",
+  "label": "Claude",
+  "requires_bin": ["claude"],
+  "argv": ["claude", "--session-id", "${veld.pane.token}"],
+  "resume": { "argv": ["claude", "--resume", "${veld.pane.token}"] },
+  "sessions": {
+    "label": "Resume an earlier Claude session",
+    "argv": ["scripts/veld/claude-sessions.sh"]
+  }
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `argv` / `shell` | **Required**, exactly one. The command that lists them. |
+| `label` | Names the list inside the dialog, and the card's button when `ask_first` is `false`. Defaults to *Resume an earlier session…*. |
+| `ask_first` | Whether clicking the pane opens the picker instead of starting fresh. Defaults to **`true`** — see [below](#the-click-asks-and-that-is-the-default-on-purpose). |
+
+**Clicking the pane then asks which session you want**, with *Start fresh* as the
+first row and what the script found underneath. Pick a row and **the pane's own
+`resume` command runs**, with `${veld.pane.token}` set to the value you picked.
+That is the whole mechanism, and the reason it is shaped that way is the rule
+this config surface keeps everywhere:
+
+> **A picked value chooses which declared command runs against which session. It
+> can never contribute a command.**
+
+So a script cannot make Veld run something the config did not already declare —
+and the useful consequence is that the resumed session comes back with every flag
+the pane promises. Adopt a conversation into a pane labelled *Claude Opus, auto
+mode* and it resumes on Opus in auto mode, because that is what the declared
+`resume` says.
+
+Two more things follow from reusing `resume` rather than inventing a second
+launch command:
+
+- The adopted session is written into the pane's ledger exactly like a
+  Veld-minted token, so it survives a reboot through `auto_resume` and the
+  ordinary **Resume** button with no further machinery.
+- A `resume` that never mentions `${veld.pane.token}` cannot deliver a pick — the
+  `codex resume --last` shape above is the example — so declaring `sessions`
+  alongside one is a `veld lint` problem and the picker is dropped rather than
+  silently opening the same session whatever you chose.
+
+##### The click asks, and that is the default on purpose
+
+`ask_first` defaults to `true`, and it is the field to understand before the
+rest. A picker hidden behind a small control on the card is a picker most people
+never find — and *"you already have a conversation about this worktree"* is
+exactly the thing somebody needs told **before** they start a second one. So the
+click opens the dialog, and the fresh start they asked for is its first row: one
+extra click, never a dead end, and always in the same place.
+
+Two bounds keep that from being a nuisance:
+
+- **It only asks when there is something to ask about.** A lister that found
+  nothing produces no dialog at all — the pane opens exactly as it did before
+  this feature existed. That is the case a fresh clone hits, and the reason the
+  empty answer is a first-class one rather than an error.
+- **A failed lister still asks**, with the fresh row and the error. The pane is
+  never blocked by a broken script, and the author still gets told.
+
+Set `ask_first: false` for a project whose panes are usually a genuine fresh
+start. The click launches, and the list moves into the card's other half — a
+labelled button sharing the card's border, wide enough to read:
+
+```jsonc
+"sessions": {
+  "label": "Earlier sessions",
+  "argv": ["scripts/veld/claude-sessions.sh"],
+  "ask_first": false
+}
+```
+
+##### What the command prints
+
+One row per line: a value, then optionally a **tab** and the text to show, then
+optionally a second tab and a quieter detail line.
+
+```text
+1f2e3d4c-8a91-4c02-9f13-77bbd2e5a410	2h ago · fixing the pane resume bug	41 messages
+9a8b7c6d-2231-4ff8-b0aa-1e3c9d5f2a77	yesterday · the badge tolerance tests	7 messages
+```
+
+Tabs are optional, so a pipeline that ends in `basename` is a working picker with
+no adapter at all:
+
+```jsonc
+"sessions": {
+  "shell": "ls -t ~/.claude/projects/$(pwd | sed 's|[^A-Za-z0-9]|-|g')/*.jsonl 2>/dev/null | head -15 | xargs -n1 basename -s .jsonl"
+}
+```
+
+The tolerances are the same three [a status extension's stdout](#type-status--a-badge)
+has, for the same reason — an author who has written one already knows this one:
+
+| The command… | What happens |
+|---|---|
+| exits 0 with **no output** | There are none here, and **the picker is not offered at all**. This is the answer a fresh clone gives, and it is not an error. |
+| exits **non-zero** | The card appears, disabled, with the last line of stderr. A broken script is visible, never silent. |
+| prints a row whose value is unusable | That row is dropped and the picker says how many. One bad line never costs the other nineteen. |
+
+A usable value is 1–128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or
+`/`, starting with a letter or digit. That is deliberately narrower than "what a
+session id looks like", because the value is interpolated into a command: the set
+contains no shell metacharacter (so a `resume` declared with `shell` is safe
+without a special case) and cannot start with `-` (so it cannot be read as a flag
+by whatever receives it). Ordering is the script's — Veld never re-sorts — and at
+most 50 rows are shown.
+
+##### When the command runs, and how to stop it
+
+**When the pane chooser is on screen**, once, for every pane that declares a
+lister. Not on a timer, and never from the `+` menu — hovering a menu must not
+start processes.
+
+That still means Veld runs a command from your repo without you clicking the
+thing it is about, which is exactly what a `status` extension does, so it is
+under the same posture: stdin closed, no terminal, `NO_COLOR=1`, a 10-second
+deadline enforced by killing the process group, and a cap on how much output is
+read. It is also under the same machine-wide off switch — **Settings → General → Let
+projects run their own status commands**. Turn that off and the pickers stop
+being offered; the panes themselves are untouched.
+
+> **Before you write a lister, check whether your tool already has one.** `claude
+> --resume` with no argument opens Claude Code's own picker, and `codex resume`
+> does the same — a plain pane running that is less to maintain. `sessions` earns
+> its place when the tool has no picker of its own, when you want the choice
+> *absent* rather than empty in a worktree with no history, or when you want the
+> pick to arrive in a pane whose flags you have already decided.
 
 #### When a pane starts by itself
 
@@ -3051,7 +3194,7 @@ config without you clicking something**:
   out, which is a real improvement in the `main` default over reviewing a pull
   request by checking it out. If you use *This worktree* to develop an extension
   and also review branches you do not trust, turn off *Settings → General → Let
-  projects refresh their own status badges* — buttons and menus keep working,
+  projects run their own status commands* — buttons and menus keep working,
   because a click is you asking.
 
   Two things worth knowing about the `main` default rather than assuming them:

@@ -67,6 +67,12 @@ pub fn routes() -> Router {
             "/api/worktrees/{id}/extensions/activate",
             post(super::extensions::activate),
         )
+        // Same rule, same reason: it runs a project-declared command, so it is a
+        // POST and it sits behind `csrf_layer` with the two above.
+        .route(
+            "/api/worktrees/{id}/panes/sessions",
+            post(super::pane_sessions::list),
+        )
         .route("/api/worktrees/{id}/revert", post(revert_worktree))
         .route("/api/worktrees/{id}/delete", post(delete_trashed_worktree))
         .route("/api/trash", delete(empty_trash))
@@ -2456,6 +2462,15 @@ struct PaneView {
     missing: Vec<String>,
     /// Whether the pane declares a `resume` command at all.
     can_resume: bool,
+    /// Whether the pane declares a `sessions` lister — i.e. whether asking
+    /// `/api/worktrees/{id}/panes/sessions` could produce anything for it.
+    ///
+    /// A flag rather than the rows themselves, and the split is the point: this
+    /// view is built on every worktree listing, which must never run a project's
+    /// commands. The rows come from the separate POST, which the pane chooser
+    /// makes only when at least one pane here says `true`, so a project with no
+    /// picker costs no request and no subprocess.
+    has_sessions: bool,
     /// Whether a restored pane whose shell is gone may resume without a click.
     auto_resume: bool,
     /// Whether a clean exit closes the pane.
@@ -2687,6 +2702,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
                         available: missing.is_empty(),
                         missing,
                         can_resume: terminal.resume.is_some(),
+                        has_sessions: terminal.sessions.is_some(),
                         auto_resume: terminal.auto_resume,
                         close_on_exit: terminal.close_on_exit,
                         fixed_label: terminal.fixed_label,

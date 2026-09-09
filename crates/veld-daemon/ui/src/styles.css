@@ -2526,6 +2526,153 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   overflow: hidden;
 }
 
+/* A pane card plus its earlier-sessions half, for a project that set
+   `ask_first: false` and would rather a click launched. One grid cell holding two
+   real buttons: the card keeps its own hover and its own focus ring, and the
+   right half is wide enough to read (a glyph, a count and a word) rather than an
+   icon crammed into a corner, because the whole reason `ask_first` defaults to
+   true is that a small control does not advertise the option. */
+.pane-card-split {
+  display: flex;
+  min-width: 0;
+}
+
+/* The card gives up its right border and its right corners to the half beside
+   it, so the pair reads as one card with a divider rather than two cards that
+   happen to touch. */
+.pane-card-split > .pane-card {
+  flex: 1;
+  min-width: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.pane-card-side {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  width: 62px;
+  padding: 6px 4px;
+  border: 1px solid var(--border);
+  /* The divider. One border between the halves, not two — the card dropped its
+     own right edge above. */
+  border-left: 1px solid var(--border);
+  border-radius: 0 9px 9px 0;
+  background: var(--panel2);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.pane-card-side:hover,
+.pane-card-side:focus-visible {
+  border-color: var(--border2);
+  background: var(--elev);
+  color: var(--text);
+}
+
+.pane-card-side[aria-disabled] {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.pane-card-side-count {
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.pane-card-side-label {
+  font-size: 9.5px;
+  line-height: 1;
+}
+
+/* The earlier-sessions picker's rows. A list of two-line targets rather than a
+   `Select`, because what is being chosen is a conversation with a summary and a
+   detail, not a value in a form — and because a project's script writes both
+   lines, so neither can be assumed short. */
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 52vh;
+  overflow-y: auto;
+}
+
+.session-row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+}
+
+.session-row:hover,
+.session-row:focus-visible {
+  border-color: var(--border2);
+  background: var(--elev);
+}
+
+/* *Start fresh*, the first row and the click the user actually made. Given a
+   visible border and a rule under it so it reads as the dialog's own answer
+   rather than as the newest session in the list — the one confusion that would
+   make this dialog worse than the card it replaced. */
+.session-row.fresh {
+  margin-bottom: 10px;
+  border-color: var(--border);
+  border-radius: 7px;
+  background: var(--panel2);
+}
+
+.session-row.fresh .session-row-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Names the project's own picker label above its rows, so the dialog says whose
+   list this is when the pane's fresh start sits above it. */
+.session-list-heading {
+  margin: 0 0 5px;
+  padding: 0 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* One line, ellipsised. Unlike `.pane-card-sub` this is a *label a script
+   wrote*, so it has no known length and clamping to two lines would let one row
+   push the next one off the screen. */
+.session-row-main {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row-sub {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: 10.5px;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* A pane-sized target rather than a toolbar-sized one: these are the primary
    action of a whole pane, not a chip in a dense row. */
 .btn.big {
