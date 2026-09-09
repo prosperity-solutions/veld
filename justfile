@@ -414,7 +414,15 @@ test:
     cd desktop && npm test
 
 lint:
+    # **Both clippy passes, because neither is a superset of the other and CI runs
+    # only the second.** `--all-targets` compiles tests and benches, which CI does
+    # not, so it catches a warning in a test module that would otherwise reach
+    # `main`. `-D warnings` — CI's exact line — *promotes* warnings to errors in
+    # the lib and bin targets, which the first pass reports and walks past. A
+    # redundant closure once passed `just lint` and failed CI for exactly that
+    # gap; running both is what makes a green local pre-pass mean something.
     {{clear_instance_env}} cargo clippy --workspace --all-targets
+    {{clear_instance_env}} cargo clippy --workspace -- -D warnings
     cargo fmt --all --check
     cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck

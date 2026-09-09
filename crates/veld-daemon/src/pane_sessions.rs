@@ -585,7 +585,7 @@ fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Par
         // deciding first gave the row a blank label where the value should have
         // stood in — the one outcome `bare_ids_need_no_adapter` exists to
         // prevent — and a blank second line under it.
-        let clean = |f: Option<&str>| f.map(|s| sanitize(s)).filter(|s: &String| !s.is_empty());
+        let clean = |f: Option<&str>| f.map(sanitize).filter(|s: &String| !s.is_empty());
         let mut fields = fields.map(str::trim);
         let label = clean(fields.next());
         let detail = clean(fields.next());
