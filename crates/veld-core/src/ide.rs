@@ -1149,7 +1149,9 @@ fn parse_panes(value: &serde_json::Value, out: &mut IdeSection) {
                 out.problems.push(IdeProblem {
                     location: format!("{at}.sessions"),
                     message: format!(
-                        "more than {MAX_PANE_SESSION_LISTERS} panes in this project declare a                          `sessions` command, and they all run at once when the pane chooser                          opens — this one's picker was dropped. The pane itself is unaffected"
+                        "more than {MAX_PANE_SESSION_LISTERS} panes in this project declare a \
+                         `sessions` command, and they all run at once when the pane chooser \
+                         opens — this one's picker was dropped. The pane itself is unaffected"
                     ),
                 });
                 let PaneBody::Terminal(terminal) = &mut pane.body;
@@ -4615,6 +4617,46 @@ mod tests {
             picker.command,
             crate::config::CommandSpec::Argv(vec!["list.sh".to_owned()])
         );
+    }
+
+    #[test]
+    fn the_lister_cap_drops_the_picker_and_keeps_the_pane() {
+        let pane = |i: usize| {
+            json!({
+                "id": format!("p{i}"), "type": "terminal",
+                "argv": ["x", "${veld.pane.token}"],
+                "resume": { "argv": ["x", "-r", "${veld.pane.token}"] },
+                "sessions": { "argv": ["list.sh"] },
+            })
+        };
+        let panes: Vec<serde_json::Value> = (0..MAX_PANE_SESSION_LISTERS + 2).map(pane).collect();
+        let parsed = section(json!({ "panes": panes }));
+
+        // Every pane survives — the cap is on how many run a command, not on how
+        // many panes a project may have.
+        assert_eq!(parsed.panes.len(), MAX_PANE_SESSION_LISTERS + 2);
+        let with_pickers = parsed
+            .panes
+            .iter()
+            .filter(|p| {
+                let PaneBody::Terminal(t) = &p.body;
+                t.sessions.is_some()
+            })
+            .count();
+        assert_eq!(with_pickers, MAX_PANE_SESSION_LISTERS);
+        assert_eq!(parsed.problems.len(), 2, "one per dropped picker");
+
+        // **No run of spaces in a message a user reads.** `cargo fmt` reflows a
+        // wrapped string literal and silently swallows a missing `\`
+        // continuation, which shipped once in this very message — and `veld
+        // lint` prints it verbatim.
+        for problem in &parsed.problems {
+            assert!(
+                !problem.message.contains("  "),
+                "a lint message lost its line continuation: {:?}",
+                problem.message
+            );
+        }
     }
 
     #[test]

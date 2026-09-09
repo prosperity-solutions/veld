@@ -2748,7 +2748,11 @@ That still means Veld runs a command from your repo without you clicking the
 thing it is about, which is exactly what a `status` extension does, so it is
 under the same posture: stdin closed, no terminal, `NO_COLOR=1`, a 10-second
 deadline enforced by killing the process group, and a cap on how much output is
-read. It is also under the same machine-wide off switch — **Settings → General → Let
+read. **It also runs with the daemon's environment rather than your login
+shell's** — the pane itself gets `$SHELL -l -i -c` and reads your `.zshrc`, the
+lister does not — so a variable your rc exports is invisible to it. Pass anything
+the script needs as an argument in `veld.json`, where the pane and the lister
+both see it. It is also under the same machine-wide off switch — **Settings → General → Let
 projects run their own status commands**. Turn that off and the pickers stop
 being offered; the panes themselves are untouched.
 

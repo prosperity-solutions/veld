@@ -31,8 +31,27 @@ set -uo pipefail
 # The directory name is the working directory with every character that is not a
 # letter or a digit replaced by `-`. Derived here rather than hardcoded because
 # panes run in whichever worktree you opened them in.
+#
+# **A lister does NOT run in your login shell.** The pane does — `$SHELL -l -i -c`
+# — but veld runs this one directly with the daemon's environment plus a resolved
+# `PATH`. So `CLAUDE_CONFIG_DIR` exported from `.zshrc` is visible to `claude` in
+# the pane and *not* here, and the mismatch is silent: this script would look in
+# the default directory, find nothing, exit 0, and the picker simply would not
+# appear. If you move Claude's config directory, set it in `veld.json` instead —
+# `"argv": ["scripts/veld/claude-sessions.sh", "--config-dir", "/path"]` — where
+# both halves can see it.
+config_dir="${CLAUDE_CONFIG_DIR:-}"
+if [ "${1:-}" = "--config-dir" ] && [ -n "${2:-}" ]; then
+  config_dir="$2"
+fi
+# `${HOME:-}` and an explicit emptiness check, not a bare `$HOME`: `set -u` would
+# abort with status 1 under a stripped environment (a launchd job, a container),
+# and the picker would render "failed" for a machine that simply has no sessions.
+[ -n "$config_dir" ] || config_dir="${HOME:-}/.claude"
+[ "$config_dir" = "/.claude" ] && exit 0
+
 slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
-dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
+dir="$config_dir/projects/$slug"
 [ -d "$dir" ] || exit 0
 
 # `find`+`sort`, not `ls -t`: a directory with no matches makes `ls` write to

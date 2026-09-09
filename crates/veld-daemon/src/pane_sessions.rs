@@ -511,7 +511,8 @@ fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Par
     }
     if skipped > 0 {
         notes.push(format!(
-            "{skipped} line(s) were skipped — their first field is not a usable session id, or              repeats one already listed"
+            "{skipped} line(s) were skipped — their first field is not a usable session id, \
+             or repeats one already listed"
         ));
     }
     Parsed {

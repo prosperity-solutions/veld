@@ -1570,13 +1570,25 @@ async fn resolve_pane(
             (resume, recorded.token)
         }
         PaneMode::Adopt => {
-            // Declared, not merely present: a pane without `sessions` never
-            // offered a list, so a client asking to adopt into it is asking for a
-            // command path the project did not open. `ide::parse_terminal_pane`
-            // already refuses `sessions` without a `resume`, so the two checks
-            // agree by construction — but this one is the enforcing side, since
-            // the request arrives here and not there.
-            if terminal.sessions.is_none() {
+            // Declared, not merely present: a pane that never offered a list is
+            // one a client asking to adopt is asking for a command path the
+            // project did not open.
+            //
+            // **Asked of the DECLARING root, not of this worktree**, and that is
+            // the whole subtlety. Everything else in `resolve_pane` reads the
+            // worktree's own config, because a click is consent for whatever it
+            // declares. But the *list* was produced by `pane_sessions::list`, and
+            // that reads `resolve_declare_root` (main, by default) — so "did a
+            // list exist for this pane" is a question only that config can
+            // answer. Asking the worktree instead refuses every adopt on any
+            // branch that predates the picker's declaration, which on merge day
+            // is every branch there is: main declares `sessions`, the rows arrive
+            // from main's lister, and each pick 409s.
+            //
+            // The safety property is unaffected, because it was never about this
+            // check: what may run is still only the pane's own declared `resume`,
+            // read from the worktree, with a validated value substituted.
+            if !declares_sessions_at(db, worktree_id, spec_id) {
                 return Err(err(
                     StatusCode::CONFLICT,
                     format!(
@@ -1683,6 +1695,36 @@ async fn resolve_pane(
         ],
         token,
         record_token,
+    })
+}
+
+/// Whether the checkout that *declares* this worktree's pickers offers one for
+/// this pane.
+///
+/// The mirror of `pane_sessions::list`'s own lookup, and it has to be, or the
+/// surface that produced a row and the surface that acts on it disagree about
+/// whether that row could exist. Fails **closed**: an unresolvable declaring
+/// root, an unreadable config or a missing pane all mean "no list was offered",
+/// which refuses the adopt rather than allowing one nothing vouched for.
+fn declares_sessions_at(db: &veld_core::db::Db, worktree_id: i64, spec_id: &str) -> bool {
+    let Ok(Some(wt)) = db.get_worktree(worktree_id) else {
+        return false;
+    };
+    let source = db.extensions_source();
+    let Some(declare_root) =
+        crate::feedback_server::extensions::resolve_declare_root(db, &wt, source)
+    else {
+        return false;
+    };
+    let Some(path) = veld_core::config::root_config_in(FsPath::new(&declare_root)) else {
+        return false;
+    };
+    let Ok(config) = veld_core::config::parse_config(&path) else {
+        return false;
+    };
+    config.ide_section().pane(spec_id).is_some_and(|pane| {
+        let veld_core::ide::PaneBody::Terminal(terminal) = &pane.body;
+        terminal.sessions.is_some()
     })
 }
 

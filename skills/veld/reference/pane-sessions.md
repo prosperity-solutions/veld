@@ -185,6 +185,21 @@ Same shape as a badge adapter, and the same rules apply — `set -uo pipefail`
 (not `-e`, which turns a "nothing found" into a non-zero exit), fail soft, and
 write real messages to stderr. veld runs it from the worktree root.
 
+**Your lister does not run in your login shell.** The *pane* does
+(`$SHELL -l -i -c`), so it reads `.zshrc` and everything that exports. The lister
+does not: veld runs it directly with the daemon's environment plus a resolved
+`PATH`. Two consequences worth designing around:
+
+- **An environment variable you set in a shell rc is invisible here.** If your
+  tool's storage location comes from one — `CLAUDE_CONFIG_DIR` and friends — the
+  script and the pane will disagree about where sessions live, *silently*: the
+  script finds none, exits 0, and no picker appears. Pass it as an argument in
+  `veld.json` instead, where both halves can see it.
+- **`$HOME` may not be set at all** on a machine whose daemon runs from a
+  stripped environment. With `set -u` that aborts, and the picker renders as
+  failed for somebody who simply has no sessions. Write `"${HOME:-}"` and treat
+  empty as "nothing to list".
+
 **Prefer `find`/`stat` over `ls -t`.** With no matches, `ls` writes to stderr and
 exits non-zero, which the contract reads as *"this script is broken"* rather than
 *"there is nothing here"* — the difference between a red dialog and a pane that
@@ -332,6 +347,7 @@ the same posture and the same switch:
 - The user's machine-wide switch, **Settings → General → Let projects run their
   own status commands**, turns it off. The pane still works; the picker is not
   offered.
+- The **daemon's environment**, not your login shell's — see above.
 
 **Declarations come from whichever checkout `extensions.source` names — `main` by
 default**, exactly as a badge's do. Same reason: this is a repo-declared command
