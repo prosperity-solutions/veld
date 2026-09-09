@@ -27,7 +27,9 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   BrowserWindow,
+  Menu,
   WebContentsView,
+  clipboard,
   ipcMain,
   screen,
   session,
@@ -53,6 +55,9 @@ const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
 // The one pure rule in the safe-area applier, in its own module for the same
 // reason: nothing here can be unit-tested, and that rule can.
 const { safeAreaPayload } = require("./safeArea");
+// The right-click menu's item set, likewise pure and tested — this file keeps
+// only the mapping from an item id to the call that performs it.
+const { contextMenuItems, mailtoAddress } = require("./browserMenu");
 // The permission policy is likewise its own tested, Electron-free module.
 const permissions = require("./permissions");
 // Whether a focus a browser pane just took belongs to the page's load or to the
@@ -699,6 +704,328 @@ function handBackFocus(window, viewId) {
   if (!window.webContents.isDestroyed()) window.webContents.focus();
 }
 
+/**
+ * The right-click menu currently up, per `(window, view)` — see the retention
+ * note in [`popupContextMenu`] for the two states that need it.
+ *
+ * Module state rather than a field on `entry`, matching the browser-suspend flag
+ * in the renderer's own drag path: a menu outlives the thing that opened it by
+ * however long the user takes to read it, and the dispose path has to be able to
+ * reach it whether or not the entry is still in the map.
+ *
+ * @type {Map<string, import('electron').Menu>}
+ */
+const openMenus = new Map();
+
+const menuKey = (window, viewId) => `${window.id}:${viewId}`;
+
+/**
+ * Dismiss the right-click menu for one view, if it has one up.
+ *
+ * `Menu.closePopup` needs the window rather than the menu, and is a no-op when
+ * nothing is showing — so this is safe to call on every dispose path without
+ * asking first.
+ */
+function closeContextMenu(window, viewId) {
+  const menu = openMenus.get(menuKey(window, viewId));
+  if (!menu) return;
+  openMenus.delete(menuKey(window, viewId));
+  if (window.isDestroyed()) return;
+  try {
+    menu.closePopup(window);
+  } catch (error) {
+    // The menu or the window went away underneath us — which is the state we
+    // wanted. Warned rather than silent because this one is not expected.
+    console.warn("[veld] closing a browser pane context menu failed", error);
+  }
+}
+
+/**
+ * Perform one item of the right-click menu.
+ *
+ * **Every edit command is addressed to *this* `webContents`, never to a menu
+ * `role`.** A role acts on whatever holds the keyboard, and a right-click does not
+ * reliably move it — click into a terminal, right-click a link in the pane next
+ * to it, and `role: "copy"` copies the terminal's selection instead. Naming the
+ * target removes the question. The warning is repeated at the template site in
+ * [`popupContextMenu`], because that is where somebody would type it.
+ *
+ * **What the captured `params` actually freezes is the *item set*, and only four
+ * of the actions.** Worth stating precisely, because the shorter claim — "the
+ * params are frozen, so the target is" — is false: an OS menu runs a nested event
+ * loop and the renderer keeps running underneath it, so a page that scrolls or
+ * navigates itself while the menu is open has moved on by the time an item fires.
+ *
+ * Answered purely from the frozen `params`, and therefore exactly what was
+ * right-clicked: `open-link`, `copy-link`, `copy-email`, `copy-media-address` —
+ * all four read a URL out of the report and go to the clipboard or to the
+ * renderer.
+ *
+ * Everything else re-resolves against the *live* page: the editing commands
+ * (`undo`, `redo`, `cut`, `copy`, `paste`, `select-all`) act on its current
+ * selection, and the navigation ones on its current history. Two are the sharp
+ * edge, because they combine the two — `copy-image` and `inspect` address the
+ * *frozen* `p.x`/`p.y` in a page that may have scrolled, so a self-scrolling page
+ * can hand back a different image than the one under the cursor. Accepted: it is
+ * a sub-second window, every browser has it, and the alternative is a menu whose
+ * rows stop matching what it was opened on.
+ *
+ * What the frozen params do guarantee is that the rows you are looking at are the
+ * rows Chromium reported for the click — which is the part a user reads before
+ * choosing.
+ */
+function runContextMenuAction(window, viewId, entry, id, params) {
+  const wc = entry.view.webContents;
+  const p = params ?? {};
+  // The page can close itself, crash, or have its pane destroyed while the menu
+  // is open — an OS menu runs its own event loop, so that gap is real rather
+  // than theoretical. Every call below throws on a dead WebContents.
+  if (wc.isDestroyed()) return;
+  // **And `isDestroyed()` is not the whole gap.** A renderer that is *gone but
+  // not destroyed* — `render-process-gone` fires and the `WebContents` survives,
+  // which is exactly why the crash path can `reload()` it — still reports
+  // `false` here. A throw from an editing command on one would leave this
+  // function unguarded inside a native menu callback, and there is no
+  // `process.on("uncaughtException")` anywhere in `desktop/src`: Electron's
+  // default is a modal error box, so a right-click would raise a crash dialog
+  // instead of a menu item that did nothing. Swallowed with a warning, which is
+  // what every other risky call in this file does.
+  try {
+    dispatchContextMenuAction(window, viewId, entry, wc, id, p);
+  } catch (error) {
+    console.warn(`[veld] context menu action "${id}" failed`, error);
+  }
+}
+
+/**
+ * The item-id → `webContents` call mapping. Wrapped by [`runContextMenuAction`].
+ *
+ * **Keep this a literal `switch` with literal `case "<id>":` labels.** It is not
+ * a style preference: `browserMenu.test.js`'s drift gate slices this function out
+ * of the file as *text* and greps it, because `browserViews.js` requires
+ * `electron` and cannot be loaded under `node --test`. A lookup-table dispatch
+ * would be a perfectly good refactor and would turn that gate red with a message
+ * about a missing case, which is the wrong story. Rename the function or change
+ * its shape and you have to teach the gate the new one — the test says so too.
+ */
+function dispatchContextMenuAction(window, viewId, entry, wc, id, p) {
+  switch (id) {
+    case "open-link": {
+      // The same channel a `target=_blank` takes, so a middle-click, a
+      // `window.open` and this item all land in one place: a tab in this pane's
+      // dock, on this pane's session. Re-validated here rather than trusted from
+      // the menu, because `safeUrl` is the gate for anything that becomes a
+      // navigation and the menu builder is not a trust boundary.
+      const safe = safeUrl(p.linkURL);
+      if (safe) {
+        send(window, "veld:browser:open-request", { viewId, url: safe, profile: entry.profile });
+      }
+      break;
+    }
+    case "copy-link":
+      // Not through `safeUrl`: this is text going to the clipboard, not a
+      // navigation, and a `tel:` or a `sms:` is exactly the kind of link somebody
+      // right-clicks to copy. Chromium's `linkURL` is already an absolute,
+      // parsed URL.
+      clipboard.writeText(p.linkURL ?? "");
+      break;
+    case "copy-email":
+      // The *same* derivation the builder ran, kept local rather than carried on
+      // the item — the item holds only an id, so there was never a channel to
+      // tamper with and this closes no gap. What it does buy is that the guard in
+      // `mailtoAddress` (controls, bidi overrides, length) is the only way this
+      // string can reach the clipboard, in this file as well as in the builder.
+      // The fallbacks are unreachable by construction: `copy-email` is emitted
+      // only where `mailtoAddress` was already non-null on these same captured
+      // `params`, and it is pure. They are belt-and-braces for a future caller.
+      clipboard.writeText(mailtoAddress(p.linkURL) ?? p.linkURL ?? "");
+      break;
+    case "copy-image":
+      // The image bytes, not its address — `copyImageAt` puts a real bitmap on
+      // the clipboard, which is what pasting into a chat or a document wants.
+      // Addressed by the click point for the same reason the params are frozen.
+      wc.copyImageAt(p.x, p.y);
+      break;
+    case "copy-media-address":
+      // One id for an image, a video and an audio element — only the label
+      // differs, and `srcURL` is where Chromium puts all three.
+      clipboard.writeText(p.srcURL ?? "");
+      break;
+    case "undo":
+      wc.undo();
+      break;
+    case "redo":
+      wc.redo();
+      break;
+    case "cut":
+      wc.cut();
+      break;
+    case "copy":
+      // `wc.copy()`, never `clipboard.writeText(params.selectionText)`. Chromium
+      // truncates `selectionText` for a long selection, so writing it would
+      // silently copy a prefix of what the user highlighted — and the editing
+      // command also carries the selection's HTML flavour, which is what pasting
+      // a link-bearing paragraph into a rich editor needs.
+      wc.copy();
+      break;
+    case "paste":
+      wc.paste();
+      break;
+    case "select-all":
+      wc.selectAll();
+      break;
+    case "back":
+      wc.navigationHistory.goBack();
+      break;
+    case "forward":
+      wc.navigationHistory.goForward();
+      break;
+    case "reload":
+      wc.reload();
+      break;
+    case "inspect":
+      // **Opened explicitly, and detached, before inspecting.** `inspectElement`
+      // does open DevTools when none is open — but it takes no mode, so what it
+      // opens is whatever dock state Chromium last saved, and a docked inspector
+      // inside an embedded view's own box is the exact failure the pane's ⟨⟩
+      // button already avoids by passing `{ mode: "detach" }` (see the
+      // `veld:browser:devtools` handler). Same call, same options, same
+      // `isDevToolsOpened` gate, so a second Inspect on a pane that already has
+      // its window open does not re-open or re-activate it.
+      if (!wc.isDevToolsOpened()) wc.openDevTools({ mode: "detach", activate: true });
+      wc.inspectElement(p.x, p.y);
+      break;
+    default:
+      break;
+  }
+}
+
+/**
+ * Raise the pane's right-click menu.
+ *
+ * Native, because a DOM menu over a `WebContentsView` would have to go through
+ * `overlayGuard`'s freeze-and-hide dance — see `browserMenu.js`'s header for why
+ * that is the wrong trade for this particular surface.
+ *
+ * No `x`/`y` is passed to `popup`: Electron places an un-positioned menu at the
+ * current pointer, which is right for a mouse gesture and needs none of the
+ * CSS-pixel → DIP conversion that every *other* geometry in this file does.
+ *
+ * **The gap is any `menuSourceType` that is not `mouse`** — `keyboard` (the Menu
+ * key, Shift+F10), and the touch family (`touch`, `longPress`, `longTap`,
+ * `stylus`, …). All of those put the menu at wherever the mouse cursor happens to
+ * be sitting, possibly on another display, rather than at what was targeted.
+ *
+ * **It is not worth fixing, and that is a smaller claim than "hard to fix".** The
+ * reachable case is a Linux keyboard: macOS has no Menu key, and `electron-builder.yml`
+ * ships no Windows target at all. Converting is also not the arithmetic this file
+ * does elsewhere — `cssBoxToDip`/`emulationScale` map the CSS box of the `/ide`
+ * renderer to screen DIP for `setBounds`, which is a different space from
+ * `ContextMenuParams.x/y`. Those are guest-widget coordinates, in exactly the
+ * space `copyImageAt` and `inspectElement` consume, which is why they are passed
+ * straight through below and why omitting them here is not an inconsistency.
+ *
+ * `frame` and `sourceType` are forwarded because Electron asks for them: the
+ * frame is what makes macOS's Writing Tools work on a selection inside the page,
+ * and the source type is what tells the Views menu on Linux whether a touch or a
+ * keyboard raised it. `sourceType` is `@platform win32,linux`, so on macOS it is
+ * ignored rather than rejected — and its enum is identical to
+ * `params.menuSourceType`'s, so no value forwarded from the event can fall
+ * outside what the option accepts.
+ */
+function popupContextMenu(window, viewId, entry, params) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed() || window.isDestroyed()) return;
+  // **The `try` starts here, not at the `popup` call.** `canGoBack`,
+  // `canGoForward` and `contextMenuItems` are all inside it deliberately: the
+  // gone-but-not-destroyed renderer that [`runContextMenuAction`] argues about is
+  // exactly the state in which a `navigationHistory` read can throw, and it is
+  // the one this function reaches *first*. An earlier version guarded only the
+  // popup, which left the one path the reasoning was written for uncovered.
+  try {
+    const items = contextMenuItems(params, {
+      canGoBack: wc.navigationHistory.canGoBack(),
+      canGoForward: wc.navigationHistory.canGoForward(),
+      // Only where DevTools exists at all. It is the desktop shell, so it always
+      // does — stated as a capability rather than hardcoded in the builder so the
+      // pure module stays a description of the menu rather than of Electron.
+      canInspect: true,
+    });
+    // **Do not reach for a `role` here, and do not add an `accelerator`.** Two
+    // traps, both natural, both at this exact line rather than three screens
+    // away in the docblock that explains them:
+    //
+    //   * A `role: "copy"` acts on whatever holds the *keyboard*, and a
+    //     right-click does not reliably move it — click into a terminal pane,
+    //     right-click a link in the pane beside it, and the role copies the
+    //     terminal's selection. Every command goes through
+    //     [`runContextMenuAction`] to *this* `webContents` by name for that
+    //     reason, and no test would catch the regression: `browserMenu.test.js`
+    //     exercises the pure builder, never this template.
+    //   * `MenuItemConstructorOptions.registerAccelerator` defaults to **true**
+    //     on Linux (`@platform linux,win32`; Veld Desktop ships no Windows
+    //     target), so an `accelerator: "CmdOrCtrl+C"` added just to print "⌘C"
+    //     beside *Copy* also registers the key with the system. The
+    //     pane already forwards a small set of chords out of the guest page via
+    //     `before-input-event`, and this is a second, quieter way to take a key
+    //     away from it. The labels carry no accelerators on purpose.
+    const template = items.map((item) =>
+      item.separator
+        ? { type: "separator" }
+        : {
+            label: item.label,
+            enabled: item.enabled,
+            click: () => runContextMenuAction(window, viewId, entry, item.id, params),
+          },
+    );
+    const menu = Menu.buildFromTemplate(template);
+    // **Dismiss whatever was already up, and remember this one.** Two states need
+    // it, and neither is reachable without holding the reference: a second
+    // `context-menu` event (a right-click landing while a menu is open) would
+    // otherwise `popup()` a second menu over the first, and a pane or window
+    // disposed mid-menu would leave a live menu over a dead view — every row a
+    // silent no-op through the guard in [`runContextMenuAction`], which is safe
+    // but indistinguishable from broken. `disposeEntry` already closes DevTools
+    // and detaches the debugger for the same reason; this is the third thing a
+    // pane can leave on screen. Keyed per view, not per window, because two panes
+    // in one window are two independent menus.
+    closeContextMenu(window, viewId);
+    openMenus.set(menuKey(window, viewId), menu);
+    menu.once("menu-will-close", () => {
+      // Only if it is still *this* menu: a dismiss racing a re-popup would
+      // otherwise delete the newer one's entry and leak it.
+      if (openMenus.get(menuKey(window, viewId)) === menu) {
+        openMenus.delete(menuKey(window, viewId));
+      }
+    });
+    // Both options spread conditionally rather than passed as `null`/`undefined`:
+    // `params.frame` is documented as nullable (a menu raised on a frame that has
+    // since gone), and `popup` validates the option it is given rather than the
+    // one it isn't.
+    menu.popup({
+      window,
+      // `isDestroyed()` as well as truthy: a `WebFrameMain` whose frame navigated
+      // away between the event and this call is a live object pointing at nothing,
+      // and `popup` validating it would throw into the catch below — a right-click
+      // that raises no menu at all, reported only to `console.warn`.
+      ...(params?.frame && !params.frame.isDestroyed() ? { frame: params.frame } : {}),
+      ...(params?.menuSourceType ? { sourceType: params.menuSourceType } : {}),
+    });
+  } catch (error) {
+    // A throw *after* `openMenus.set` would leave an entry whose
+    // `menu-will-close` can never fire, since the menu never showed. It self-heals
+    // — the next right-click's `closeContextMenu`, or dispose, clears it — but
+    // until then `closeContextMenu` would call `closePopup` on a menu that was
+    // never up and warn about it. A no-op when nothing was set.
+    openMenus.delete(menuKey(window, viewId));
+    // Swallowed with a warning: this runs inside a `webContents` event handler in
+    // the main process, where an uncaught throw is Electron's modal error box
+    // rather than a stack trace nobody sees. No menu is worse than a menu; a
+    // crash dialog on right-click is worse than both.
+    console.warn("[veld] browser pane context menu failed to open", error);
+  }
+}
+
 function attachListeners(window, viewId, entry) {
   const wc = entry.view.webContents;
   trackHostFocus(window);
@@ -794,6 +1121,17 @@ function attachListeners(window, viewId, entry) {
   // closed: a target we cannot parse is blocked rather than followed.
   wc.on("will-navigate", (event, url) => {
     if (!safeUrl(url)) event.preventDefault();
+  });
+
+  // A right-click inside the page. Electron gives an embedded view **no** context
+  // menu of its own, so without this the gesture did nothing at all — and "copy
+  // this link" / "copy that address" is most of what a browser's is for.
+  //
+  // Chromium raises this event only where it would have shown its own menu, so a
+  // page that calls `preventDefault()` on `contextmenu` (an editor, a spreadsheet,
+  // anything with a menu of its own) is left alone rather than being overruled.
+  wc.on("context-menu", (_e, params) => {
+    popupContextMenu(window, viewId, entry, params);
   });
 
   // While a native view has keyboard focus the renderer sees no keys at all, so
@@ -1681,6 +2019,12 @@ function disposeEntry(window, entry, viewId) {
   // A prompt this pane raised can no longer be answered — its chrome is going
   // away — and the page behind it is blocked on the callback.
   if (viewId !== undefined) abandonPrompts({ windowId: window.id, viewId });
+  // And a right-click menu this pane raised is now a menu over a dead view: every
+  // row a silent no-op through the guard in `runContextMenuAction`, which is safe
+  // and looks broken. Same reasoning as the detached inspector below — this is
+  // the third thing a closing pane can leave on screen. Reached from
+  // `disposeWindow` too, since that disposes every entry.
+  if (viewId !== undefined) closeContextMenu(window, viewId);
   // A closed pane must not be handed the keyboard back later — the entry is about
   // to be unreachable and its `webContents` destroyed.
   if (focusOwner.get(window.id) === viewId) focusOwner.delete(window.id);
