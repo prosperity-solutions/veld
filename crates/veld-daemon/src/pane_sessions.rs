@@ -538,7 +538,11 @@ fn parse_sessions(stdout: &str, truncated: bool, taken: &HashSet<String>) -> Par
     // the same reason: a badge's payload is one indivisible object, a list's is
     // not, so refusing the lot would throw away rows that parsed perfectly.
     let mut lines: Vec<&str> = stdout.lines().collect();
-    if truncated {
+    // Only when the cut actually landed mid-line. `read_capped` stops at a byte
+    // count with no line awareness, so a cut that happened to fall on a newline
+    // left every line complete — and dropping one there loses a perfectly good
+    // row for nothing.
+    if truncated && !stdout.ends_with('\n') {
         lines.pop();
     }
 
@@ -755,6 +759,20 @@ mod tests {
             out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
             ["abc", "def"]
         );
+        assert!(out.note.as_deref().unwrap().contains("cut short"));
+    }
+
+    #[test]
+    fn a_cut_that_landed_on_a_newline_keeps_every_row() {
+        // The cap is a byte count with no line awareness, so it sometimes falls
+        // exactly on a boundary. There is no partial line to drop there, and
+        // dropping one anyway costs a good row.
+        let out = parsed("abc\ndef\n", true);
+        assert_eq!(
+            out.rows.iter().map(|r| &r.value).collect::<Vec<_>>(),
+            ["abc", "def"]
+        );
+        // Still says it was cut: rows the user cannot see were still lost.
         assert!(out.note.as_deref().unwrap().contains("cut short"));
     }
 

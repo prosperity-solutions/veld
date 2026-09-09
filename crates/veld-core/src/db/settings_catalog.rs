@@ -561,9 +561,9 @@ impl SettingKey {
                  click is you asking) and stops the unattended half: badges render nothing, and \
                  panes offer no earlier sessions. Veld bounds these commands either way: no \
                  terminal is attached, so a tool that would ask for credentials fails instead of \
-                 waiting; there is a hard timeout and an output limit; a minimum refresh interval \
-                 and a cap on how many a project may declare; and every command is written to the \
-                 daemon log with its full arguments.",
+                 waiting; there is a hard timeout and an output limit; a cap on how many a project \
+                 may declare, and a floor on how often the same one is re-run; and every command \
+                 is written to the daemon log with its full arguments.",
                 General,
             ),
             Self::ExtensionsSource => Spec {

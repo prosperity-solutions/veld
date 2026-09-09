@@ -2281,15 +2281,6 @@ function usePaneSessions(
 const NO_SESSIONS: Map<string, PaneSessionsView> = new Map();
 
 /**
- * The card that opens a pane's earlier-sessions picker, when there are any.
- *
- * Renders nothing for `empty` — which is both the common answer and the point:
- * a project whose lister finds no sessions in this worktree is not offered the
- * choice at all. A lister that *failed* is a different thing and does render,
- * disabled, with the reason: a broken script the author cannot see is a broken
- * script that stays broken.
- */
-/**
  * Pick one earlier session, and open the pane on it.
  *
  * A list of plain rows rather than a `Select`: each row carries two lines the
@@ -2371,6 +2362,17 @@ function PaneSessionsModal(props: {
   );
 }
 
+/**
+ * One declared pane, as a card in the chooser.
+ *
+ * Unchanged for a pane with nothing to offer, which is the overwhelmingly
+ * common case and must stay byte-identical to what it was before this feature.
+ * A pane whose lister found sessions has its **click** changed rather than its
+ * shape (`ask_first`, the default), and one whose author set `ask_first: false`
+ * grows a second half rather than a second card. A lister that *failed* still
+ * shows, with the reason: a broken script the author cannot see is a broken
+ * script that stays broken.
+ */
 function PaneButton(props: {
   spec: PaneSpec;
   onPick: (spec: PaneSpec) => void;

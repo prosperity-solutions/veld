@@ -1042,13 +1042,19 @@ first row, and picking a row runs **the pane's own `resume`** with
   optionally TAB a quieter detail. No tabs needed, so a pipeline ending in
   `basename` is a working picker.
 - **Exit 0 with no output means "none here", and the picker is not offered at
-  all** — the answer a fresh clone gives, and not an error. A non-zero exit shows
-  the card disabled with the stderr tail. A row whose value is not 1–128 chars of
-  `[A-Za-z0-9]` plus `._-:@/` (starting alphanumeric) is dropped, and the picker
-  says how many. At most 50 rows; ordering is the script's.
+  all** — the answer a fresh clone gives, and not an error. A non-zero exit still
+  opens the dialog, with *Start fresh* and the stderr tail (or, under
+  `ask_first: false` where there is no dialog, disables the card's button and puts
+  the message there). A row whose value is not 1–128 chars of `[A-Za-z0-9]` plus
+  `._-:@/` (starting alphanumeric, no `..`) is dropped, and the picker says how
+  many — and a run where *every* row was dropped reports as failed rather than as
+  "none here", so a broken script is never silent. At most 50 rows; ordering is
+  the script's.
 - **The value's charset is the security boundary**, not cosmetics: it has no
-  shell metacharacter (so a `shell` `resume` is safe with no special case) and
-  cannot start with `-` (so it cannot be read as a flag).
+  shell metacharacter (so a `shell` `resume` is safe with no special case),
+  cannot start with `-` (so it cannot be read as a flag), and cannot contain
+  `..` (so a tool that resolves the id against its own transcripts directory
+  cannot be walked out of it).
 - **An adopted session is written into the pane ledger like a minted token**, so
   `auto_resume` and the ordinary Resume button bring it back after a reboot.
 - **It runs when the pane chooser is on screen**, once, never on a timer and

@@ -418,8 +418,10 @@ pub const MAX_SESSION_LABEL_CHARS: usize = 160;
 /// far tighter than "what a session id looks like". The value travels from a
 /// project script's stdout, through the browser, back to the daemon, and is
 /// interpolated into the pane's declared `resume` command as `${veld.pane.token}`
-/// — the same slot a veld-minted token fills. Two distinct hazards, both closed
-/// here rather than downstream:
+/// — the same slot a veld-minted token fills. **Three** distinct hazards, all
+/// closed here rather than downstream, and the third is the one a future reader
+/// is most likely to "simplify" away, because unlike the other two it is not
+/// about veld at all:
 ///
 /// - **A `resume` declared with `shell` is a shell string.** `argv` is safe by
 ///   construction (the element count is fixed before interpolation), but `shell`
@@ -431,6 +433,15 @@ pub const MAX_SESSION_LABEL_CHARS: usize = 160;
 ///   `worktree_builtins` closes for a branch named `-foo`: the receiving
 ///   program's own flag parser reads it as an option. So the first character is
 ///   restricted further, to alphanumeric.
+///
+/// - **`..` is path traversal in the receiving tool.** The accepted set contains
+///   `/` and `.` — a session handle really can be path-shaped — so the value is
+///   inert as a *shell token* and would not be inert as a *path*. veld itself
+///   never treats it as one (it reaches an argv, `VELD_PANE_TOKEN`, and a TEXT
+///   column, and nothing else), which is exactly why this is easy to drop: the
+///   consumer is the **tool**, whose `resume` may well be
+///   `--transcript ~/.agent/${veld.pane.token}.jsonl`. Without this check,
+///   `a/../../../../etc/passwd` is a valid pick.
 ///
 /// What this does *not* try to be is a check that the session exists. It cannot
 /// be — only the tool knows — and the failure mode of a wrong-but-well-formed

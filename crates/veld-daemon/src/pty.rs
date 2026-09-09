@@ -5133,16 +5133,6 @@ mod tests {
         assert_eq!(names, veld_core::ide::PANE_BUILTINS.to_vec());
     }
 
-    /// The third of the same pair, for a pane's `sessions` lister.
-    ///
-    /// `PANE_SESSIONS_BUILTINS` is what `veld lint` accepts and
-    /// `pane_sessions::list` is what resolves them. It is `PANE_BUILTINS` minus
-    /// `pane.token` — the lister runs to decide *which* token there will be — so
-    /// it is neither of the two scopes above and needs its own gate. The failure
-    /// this catches actually happened during review: `${veld.pane.id}` was
-    /// accepted by lint, documented as usable in
-    /// `skills/veld/reference/pane-sessions.md`, and resolved by nothing, so
-    /// every declaring pane rendered "could not resolve the command".
     /// Every mode's answer to "does the ledger need this token", stated once.
     ///
     /// The regression this pins: `Adopt` returning false meant an adopted
@@ -5155,6 +5145,16 @@ mod tests {
         assert!(!mode_records_token(PaneMode::Resume));
     }
 
+    /// The third of the same pair, for a pane's `sessions` lister.
+    ///
+    /// `PANE_SESSIONS_BUILTINS` is what `veld lint` accepts and
+    /// `pane_sessions::list` is what resolves them. It is `PANE_BUILTINS` minus
+    /// `pane.token` — the lister runs to decide *which* token there will be — so
+    /// it is neither of the two scopes above and needs its own gate. The failure
+    /// this catches actually happened during review: `${veld.pane.id}` was
+    /// accepted by lint, documented as usable in
+    /// `skills/veld/reference/pane-sessions.md`, and resolved by nothing, so
+    /// every declaring pane rendered "could not resolve the command".
     #[test]
     fn sessions_commands_resolve_exactly_the_names_lint_accepts() {
         let cfg: veld_core::config::VeldConfig = serde_json::from_value(serde_json::json!({

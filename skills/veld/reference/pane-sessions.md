@@ -132,7 +132,8 @@ you already know this. They are not error handling; they are the interface.
 ### The value has a charset, and it is a security boundary
 
 A usable `value` is **1–128 characters** of letters, digits, `.`, `_`, `-`, `:`,
-`@` or `/`, **starting with a letter or digit**. Anything else is a dropped row.
+`@` or `/`, **starting with a letter or digit** and **containing no `..`**.
+Anything else is a dropped row.
 
 That is deliberately narrower than "what a session id looks like", because the
 value is interpolated into a command:
@@ -141,6 +142,10 @@ value is interpolated into a command:
   is safe with no special case. A row printing `$(id)` is dropped, not run.
 - It **cannot start with `-`**, so it cannot be read as a flag by whatever
   receives it. A row printing `--dangerously-skip-permissions` is dropped.
+- It **cannot contain `..`**, which is the one rule that is not about veld: the
+  set allows `/` and `.` because a handle can be path-shaped, and *your tool* may
+  well resolve the id against its own transcripts directory. Without it,
+  `a/../../../../etc/passwd` would be a valid pick.
 
 If your tool's ids do not fit that set, the fix is in your script: emit a handle
 that does, and translate it back in `resume`.

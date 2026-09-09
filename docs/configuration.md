@@ -2731,7 +2731,7 @@ has, for the same reason — an author who has written one already knows this on
 | prints a row whose value is unusable | That row is dropped and the picker says how many. One bad line never costs the other nineteen. |
 
 A usable value is 1–128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or
-`/`, starting with a letter or digit. That is deliberately narrower than "what a
+`/`, starting with a letter or digit, **and containing no `..`**. That is deliberately narrower than "what a
 session id looks like", because the value is interpolated into a command: the set
 contains no shell metacharacter (so a `resume` declared with `shell` is safe
 without a special case) and cannot start with `-` (so it cannot be read as a flag

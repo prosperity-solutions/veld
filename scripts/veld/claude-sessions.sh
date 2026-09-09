@@ -54,8 +54,13 @@ fi
 # `${HOME:-}` and an explicit emptiness check, not a bare `$HOME`: `set -u` would
 # abort with status 1 under a stripped environment (a launchd job, a container),
 # and the picker would render "failed" for a machine that simply has no sessions.
-[ -n "$config_dir" ] || config_dir="${HOME:-}/.claude"
-[ "$config_dir" = "/.claude" ] && exit 0
+if [ -z "$config_dir" ]; then
+  # Checked before it is used, not by string-matching the result: `HOME=/` (some
+  # containers set that for root) makes the naive join `//.claude`, which an
+  # equality test against `/.claude` misses.
+  [ -n "${HOME:-}" ] || exit 0
+  config_dir="$HOME/.claude"
+fi
 
 slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
 dir="$config_dir/projects/$slug"
