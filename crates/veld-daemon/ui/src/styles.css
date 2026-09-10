@@ -3155,7 +3155,12 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
      `--term-bg` rather than white: this is what shows through before a page paints and
      at the screen's rounded corners, and a white flash in a dark app is the one place
      this feature was visibly not part of it. Same token the terminal uses for "content
-     surface", so the two agree. */
+     surface", so the two agree.
+
+     Deliberately *not* kept in step with the native view's own base background,
+     which switches to white once a page commits — see `desktop/src/baseBackground.js`,
+     which records why matching it here would fix plain pages and break dark-styled
+     ones. The corner seam that leaves is older than that change. */
   background-color: var(--term-bg);
   box-shadow:
     0 0 0 1px var(--border2),

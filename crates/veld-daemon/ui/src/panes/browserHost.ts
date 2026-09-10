@@ -63,6 +63,32 @@ export interface BrowserState {
   loading: boolean;
   canGoBack: boolean;
   canGoForward: boolean;
+  /**
+   * Where a navigation is *heading*, while it is still in flight; `null` the rest
+   * of the time.
+   *
+   * The address bar shows this in preference to `url`, which is Chrome's
+   * behaviour and the reason this field exists: `url` is what the view has
+   * actually *committed*, and the shell reads it back off `webContents.getURL()`
+   * — which keeps returning the old page for the whole of a pending load. So
+   * typing an address and pressing Enter used to show the address you were
+   * leaving until the new one arrived, and pressing Stop had nothing to undo.
+   *
+   * Only the address bar reads it. Everything else — `paneCovers`, the
+   * permission prompt's origin, the watched-file path, the layout's stored URL —
+   * must keep answering for the page that is on screen, not for one that may
+   * never arrive.
+   *
+   * Cleared by [`settlePending`] the moment the load ends, however it ends
+   * (arrived, stopped, failed), and by the commit itself ([`isCommit`]) in the
+   * shell-event handler below.
+   *
+   * Named `pendingUrl` and not `pending` because `View` already has a `pending`
+   * (the size a resize drag is coalescing towards) one property access away, and
+   * `v.pending` / `v.state.pending` are both well-typed — so confusing them would
+   * be a silent bug rather than a compile error.
+   */
+  pendingUrl: string | null;
   /** Why the pane is blank, when we know. */
   error: BrowserError | null;
   /**
@@ -367,6 +393,11 @@ interface View {
    *  applied size relayouts the user's page. */
   pending: { width: number; height: number } | null;
   pendingFrame: number;
+  /** The last URL the *shell* reported for this view, which is what makes
+   *  [`isCommit`] able to tell a commit from a re-report of the page being left.
+   *  Not on `BrowserState`: nothing renders it, and a state field is a field the
+   *  next reader has to rule out. */
+  lastShellUrl: string;
 }
 
 const views = new Map<string, View>();
@@ -506,12 +537,75 @@ function notify(v: View): void {
 
 function patch(v: View, next: Partial<BrowserState>): void {
   const merged = { ...v.state, ...next };
-  const changed = (Object.keys(next) as Array<keyof BrowserState>).some(
+  // The one invariant `pending` has, applied here rather than at each of the
+  // half-dozen places a load can end. A stopped load, a failed create, a rejected
+  // bridge call and an arrival are all "loading went false", and any one of them
+  // left unhandled is an address bar stuck on a destination the pane never
+  // reached — the exact failure this field was added to fix, inverted.
+  merged.pendingUrl = settlePending(merged);
+  // Compared over the *merged* keys, not `next`'s: the clamp above can change a
+  // field the caller never mentioned, and a change nobody notices is a pane that
+  // does not re-render.
+  const changed = (Object.keys(merged) as Array<keyof BrowserState>).some(
     (k) => v.state[k] !== merged[k],
   );
   if (!changed) return;
   v.state = merged;
   notify(v);
+}
+
+/**
+ * What `pending` is worth once the rest of the state has been applied: a
+ * destination cannot outlive the load it belongs to.
+ *
+ * Exported for the test, and pure so that it can be one — `patch` itself needs a
+ * live `View`.
+ */
+export function settlePending(state: BrowserState): string | null {
+  return state.loading ? state.pendingUrl : null;
+}
+
+/**
+ * Whether a shell state event carries a **commit** — the moment the view's own
+ * URL becomes the new page's.
+ *
+ * Two tempting shortcuts, both wrong, both paid for in review:
+ *
+ * - *"the reported URL is the one we asked for"* misses every redirect. A bare
+ *   domain bouncing to `www`, an `http`→`https` upgrade, an auth gate: all commit
+ *   a different URL from the one typed, so an equality test never fires and the
+ *   bar keeps the pre-redirect address for the whole resource-loading tail.
+ * - *"the reported URL differs from `state.url`"* fires on the first event of
+ *   every navigation, because `navigateBrowser` writes the target into
+ *   `state.url` optimistically before anything has loaded.
+ *
+ * So it is compared against the last URL the **shell** reported, which moves only
+ * when a page actually commits. `did-start-loading` re-reports the page being
+ * left — equal, correctly not a commit — and `did-navigate` reports whatever
+ * arrived, redirects included.
+ */
+export function isCommit(reported: string | undefined, lastReported: string): boolean {
+  return reported !== undefined && reported !== lastReported;
+}
+
+/**
+ * What the address bar shows.
+ *
+ * Shared with the pane rather than restated there, for the same reason
+ * [`paneCovers`] is: two expressions of one rule drift, and the drift here is a
+ * bar that disagrees with the Stop button beside it. `fallbackUrl` is the tab's
+ * stored URL, which the pane knows before any view exists.
+ *
+ * The **error** rung is there because a failed load never commits, so `url` is
+ * still the page being left — and the error screen right below the bar prints
+ * the URL that failed. Falling through to `url` put two different addresses on
+ * screen at once, one of them naming a page the pane is not showing. Chrome
+ * keeps the failed URL in the omnibox for the same reason, and it is the one you
+ * want to edit and retry. Only when the error names a URL: a crashed renderer
+ * and a locally-raised failure both carry `url: ""` and fall through.
+ */
+export function addressFor(state: BrowserState, fallbackUrl?: string): string {
+  return state.pendingUrl || state.error?.url || state.url || fallbackUrl || "";
 }
 
 /**
@@ -735,6 +829,7 @@ export function browserStatus(id: string): BrowserState {
       loading: false,
       canGoBack: false,
       canGoForward: false,
+      pendingUrl: null,
       error: null,
       nested: null,
       profile: "default",
@@ -816,6 +911,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
       loading: Boolean(url) && !nested,
       canGoBack: false,
       canGoForward: false,
+      pendingUrl: null,
       error: null,
       nested,
       profile,
@@ -831,6 +927,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
       safeAreaActive: false,
       devToolsOpen: false,
     },
+    lastShellUrl: "",
     listeners: new Set(),
     observer: null,
     mounted: false,
@@ -958,7 +1055,11 @@ export function navigateBrowser(
     applyVisibility(v);
     return url;
   }
-  patch(v, { url, loading: true, error: null, nested: null });
+  // `url` optimistically *and* `pending`: the two answer different questions and
+  // both are needed. `url` is what the rest of the pane reasons about (and, under
+  // the iframe backend, the only URL there will ever be); `pending` is what the
+  // address bar shows until this load resolves one way or the other.
+  patch(v, { url, loading: true, pendingUrl: url, error: null, nested: null });
   applyVisibility(v);
   if (desktop) {
     void (async () => {
@@ -993,7 +1094,11 @@ export function reloadBrowser(id: string): void {
   // to clear the flag, so an unconditional `true` left a live spinner and an
   // enabled Stop over the URL launcher — a state a freshly opened blank pane
   // never shows.
-  patch(v, { loading: Boolean(v.state.url), error: null });
+  // `pendingUrl: null` because a reload's destination is the page already here. A
+  // reload fired while another navigation was in flight supersedes it, and
+  // leaving the old destination up would name a page this pane is no longer
+  // going to.
+  patch(v, { loading: Boolean(v.state.url), pendingUrl: null, error: null });
   applyVisibility(v);
   if (desktop) {
     void (async () => {
@@ -1667,6 +1772,11 @@ if (desktop) {
     // A committed page is what makes a reload keep showing the old one rather
     // than a spinner over nothing.
     if (next.url) next.loaded = true;
+    // A commit retires the destination: the page is here, so the bar shows what
+    // arrived rather than what was asked for. Checked before `lastShellUrl` is
+    // advanced, because the comparison *is* the check.
+    if (isCommit(next.url, v.lastShellUrl)) next.pendingUrl = null;
+    if (next.url) v.lastShellUrl = next.url;
     patch(v, next);
     // Visibility follows the state: an error or a first load means the pane has
     // its own screen to show, and the view has to be out of the way for it.

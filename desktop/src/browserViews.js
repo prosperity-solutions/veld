@@ -54,6 +54,7 @@ const {
 const { cssBoxToDip, emulationScale, zoomFactor } = require("./windowState");
 // The one pure rule in the safe-area applier, in its own module for the same
 // reason: nothing here can be unit-tested, and that rule can.
+const { baseBackground } = require("./baseBackground");
 const { safeAreaPayload } = require("./safeArea");
 // The right-click menu's item set, likewise pure and tested — this file keeps
 // only the mapping from an item id to the call that performs it.
@@ -208,6 +209,20 @@ function send(window, channel, payload) {
 
 function pushState(window, viewId, entry) {
   send(window, "veld:browser:state", stateOf(viewId, entry));
+}
+
+/**
+ * Force this view's base background back in line with whether a page has
+ * committed in it.
+ *
+ * The decision itself is [`baseBackground`] in `baseBackground.js`, pulled out
+ * because it is the only pure part of this and this file needs an Electron
+ * runtime to require at all. Called at exactly the three moments its answer can
+ * change: the first commit, a renderer death, and a theme switch.
+ */
+function applyBaseBackground(entry) {
+  if (entry.view.webContents.isDestroyed()) return;
+  entry.view.setBackgroundColor(baseBackground(entry));
 }
 
 // ---------------------------------------------------------------------------
@@ -1423,8 +1438,10 @@ function attachListeners(window, viewId, entry) {
     applyMetrics(entry);
     applyZoom(entry);
     void applyTouch(window, viewId, entry);
-    // The scale is part of what the pane renders, and on the first navigation it
-    // has just gone from "asked for" to "in force".
+    // Both gated on the *first* commit, because that is the only navigation at
+    // which either answer changes: the base colour is a function of `frameReady`
+    // alone, and the scale has just gone from "asked for" to "in force".
+    if (first) applyBaseBackground(entry);
     if (first) push();
   };
   // **`did-navigate` only**, deliberately. A `did-fail-load` listener used to open
@@ -1445,6 +1462,9 @@ function attachListeners(window, viewId, entry) {
   wc.on("render-process-gone", () => {
     entry.frameReady = false;
     entry.emulated = false;
+    // An empty rectangle again, so back to the theme surface — see
+    // [`baseBackground`]. After `frameReady`, not before: it reads the flag.
+    applyBaseBackground(entry);
     // **Not unconditional.** "A new renderer starts with no overrides" is only true
     // when no debugger is attached to carry one across — measured otherwise: with
     // the session attached, a forced crash produced a new renderer process that
@@ -2163,7 +2183,11 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     // and at the screen's rounded corners, and a white flash in a dark app is exactly
     // where an embedded view stops looking embedded. Falls back to white, which is what
     // every browser does with no better answer.
-    view.setBackgroundColor(safeColor(args?.background) ?? "#ffffff");
+    //
+    // Only until a page **commits**, though — see [`baseBackground`]. Nothing has
+    // committed in a view this new, so it starts on the surface.
+    const surface = safeColor(args?.background) ?? "#ffffff";
+    view.setBackgroundColor(surface);
     // Created **visible**, and only hidden when the renderer says so. A hidden
     // WebContents is background-throttled by Chromium, and a view created hidden
     // and loaded in the same tick sometimes never rendered its first page — blank
@@ -2187,6 +2211,10 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
       // The session's own UA, captured before anything overrides it — what
       // "no emulated device" has to restore.
       defaultUserAgent: view.webContents.getUserAgent(),
+      // The app's theme surface, kept rather than applied and forgotten: a view
+      // whose renderer dies goes back to it (see [`baseBackground`]), and a theme
+      // switch has to be able to update it without a navigation.
+      surface,
       scale: 1,
       radius: 0,
       // The /ide page's own zoom factor, which converts everything the renderer
@@ -2397,7 +2425,13 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     const color = safeColor(args?.background);
     if (!color) return;
     for (const entry of byWindow.get(window.id)?.values() ?? []) {
-      if (!entry.view.webContents.isDestroyed()) entry.view.setBackgroundColor(color);
+      if (entry.view.webContents.isDestroyed()) continue;
+      // Recorded as well as applied. `baseBackground` re-reads it — a view that
+      // has not committed yet is *on* this colour, and one whose renderer later
+      // dies comes back to it — so a view that only had the new colour pushed at
+      // it would revert to the pre-switch surface the next time either happened.
+      entry.surface = color;
+      applyBaseBackground(entry);
     }
   });
 
