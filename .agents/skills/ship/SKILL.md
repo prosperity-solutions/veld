@@ -4,8 +4,9 @@ description: >
   Carry a change to the veld repo from empty diff to merged PR the way this
   project expects — autonomous implementation, adversarial review rounds, draft
   PR, mark ready only once the local review is done (CI does not run on drafts),
-  wait for green CI, and (when authorized) bypass-merge. Opens with a short
-  kickoff questionnaire that sets review depth, merge policy, and hands-on test
+  wait for green CI, and (when authorized) bypass-merge. For a reported bug it
+  first measures whether the reported gap is real, then opens a short kickoff
+  questionnaire that sets review depth, merge policy, and hands-on test
   checkpoints for the rest of the run. Use when the maintainer says "ship this", "build and merge X",
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
@@ -100,6 +101,11 @@ which you cannot manufacture alone:
   not write `.veld-ship.json` with guessed defaults, because Step 5 renders that
   file as the PR's settings table and the maintainer reads it as their own answer.
 - **Icon choice** (Step 2). A taste call, same rule.
+- **A report Step 0.1 finds is *not a gap at all*.** If the mechanism already
+  does what the report says it does not, the ask as written would change working
+  code. Say what you measured and stop. This is the third of 0.1's outcomes
+  only — a report whose *cause* is wrong but whose symptom is real is **not** a
+  stop, it is a fix for what you measured.
 
 **Some steps genuinely do not apply to you.** *Drive it yourself against a running
 stack* needs an installed veld, which a fresh clone does not have; if you cannot
@@ -108,7 +114,81 @@ not have. Everything else still applies — Step 1's core/customization verdict,
 Step 3's docs checklist, the website question and the promotion call are reading
 and judgement, not tooling, and you can do all of them.
 
-## Step 0 — Kickoff questionnaire (ask once, up front)
+## Step 0 — Kickoff: evidence first, then the questionnaire
+
+### 0.1 If the task is a fix, find the evidence before you ask anything
+
+Two kinds of request arrive here. *Build X* states a goal. *Fix Y* states a
+goal **and a diagnosis** — and the diagnosis was written by somebody who hit a
+symptom, not by somebody who read the call sites. It is a hypothesis wearing the
+clothes of a finding, and it is wrong often enough that acting on it directly is
+how a PR ends up fixing a mechanism that was never broken while the real cause
+ships untouched.
+
+So when the task names a bug, a leak, a regression, a hang, or anything
+already-broken, **spend a few minutes on evidence before the questionnaire.**
+This is reading, not a review loop: `git grep` the field, function, or status the
+report names, read every call site, and check each path the report claims is
+unwired. A read-only investigator (`Explore`) is the right tool; the verdict is
+yours, not its.
+
+Do not edit anything here. Ordering matters and it is the whole point of this
+sub-step: an answer to *"how deep should the review be"* is worth little before
+you know whether the change is a one-line rewiring or a cross-process protocol,
+and the maintainer should not be asked to price a fix whose shape nobody has
+measured yet.
+
+Three outcomes, and each one changes what you ask next:
+
+- **Confirmed as reported.** Say so in one sentence, naming the file and line
+  that proves it, then run the questionnaire normally.
+- **Confirmed, different shape.** The common case. The report names one leaking
+  path and there are five; or it names five and four already work. State the
+  corrected scope *before* the questionnaire, because the scope is what the
+  review-depth and checkpoint answers are being chosen for.
+- **Not a gap.** The mechanism already does what the report says it does not.
+  Then the symptom has another cause and the ask, as written, would change
+  working code. Do **not** quietly build it anyway, and do not quietly drop it
+  either: say what you measured, say what you think the real cause is, and ask
+  before going further. This is one of the few genuine stops in this workflow.
+
+Two things the evidence pass is *not* allowed to hand back. A report that says
+"please decide and state explicitly: …" is usually asking you to make the call
+with the code in front of you — so answer it from the evidence, in the PR body,
+rather than returning it as a question. And a report that got its cause wrong
+but its symptom right is still a real bug: the deliverable is the fix for what
+you measured, not a note saying the report was inaccurate.
+
+**The line between answering and asking is what the reading settles, not who
+asked.** If the code makes one option wrong — a semantics that contradicts a
+documented promise, a tested invariant, an existing call site — you have your
+answer and it goes in the PR body; a maintainer who asked to be told does not
+want to be consulted about a question the repo already answers. If both options
+survive the reading, and picking sets a precedent or changes what users see, it
+goes in the questionnaire below — *including* when the report asked you to
+decide it, because "decide this" was written before anyone knew the choice was
+genuinely open. State which of the two happened for every question the report
+raised, so a reader can tell a decision from an omission.
+
+**Then let the evidence add to the questionnaire.** Whatever the reading turned
+up that only the maintainer can settle — a behaviour that is arguably correct
+today, two defensible semantics for the fixed path, a neighbouring leak the
+report did not mention and that you could fix in the same diff or leave — belongs
+in the same `AskUserQuestion` batch as the settings below, not in a second round
+of questions later. One interview is the contract; the evidence is what makes it
+worth answering.
+
+Keep what you checked. The PR body's root-cause section is the evidence pass
+written down, and it is the section a reviewer reads first on a fix.
+
+For a *feature* request with no broken-thing claim, skip 0.1 — Step 1's
+investigation covers the same ground once the settings are known. Say so **in
+the PR body**, in the same section the confirmed case's evidence goes: chat is
+not the pull request, and a reviewer cannot tell a skipped evidence pass from a
+forgotten one. Same rule as the review depth in Step 5's settings table — the
+row that records a skip is the one worth keeping.
+
+### 0.2 Kickoff questionnaire (ask once, up front)
 
 Before writing code, run a short interview so the rest of the run is unattended.
 State the feature/scope in your own words if it isn't already clear, then use
