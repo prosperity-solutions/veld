@@ -9,6 +9,7 @@ import {
   isFileDrop,
   isPastable,
   pathPayload,
+  promptPayload,
   shouldSwallowDrop,
   TAB_MIME,
 } from "./terminalPaste";
@@ -259,5 +260,56 @@ describe("a restart's presentation flag", () => {
     const body = /function setState\([\s\S]*?\n}/.exec(TERMINAL_HOST)?.[0];
     expect(body, "setState not found — update this test with it").toBeTruthy();
     expect(body).toContain("s.restarting = null");
+  });
+});
+
+describe("promptPayload", () => {
+  it("keeps ordinary prose exactly as it was typed", () => {
+    expect(promptPayload("Fix the login redirect loop")).toBe(
+      "Fix the login redirect loop",
+    );
+    // A multi-line prompt is the case bracketed paste exists for, and a tab is
+    // legitimate inside pasted prose.
+    expect(promptPayload("Do this:\n\t- and this")).toBe("Do this:\n\t- and this");
+  });
+
+  it("removes a literal bracketed-paste terminator", () => {
+    // **The one that matters.** xterm wraps the payload in ESC[200~/ESC[201~ and
+    // does nothing else to it, so an ESC[201~ inside a prompt ends the bracket
+    // early and the program reads the rest as keystrokes — for an agent
+    // composer, as commands.
+    expect(promptPayload("safe\u001b[201~rm -rf /")).toBe("saferm -rf /");
+    expect(promptPayload("a\u001b[200~b")).toBe("ab");
+  });
+
+  it("normalises every line ending to \\n rather than dropping it", () => {
+    // A prompt pasted from a Windows editor means its line breaks. `\r` is also
+    // the one control byte that means "submit", so it must not survive as
+    // itself: xterm's own paste collapses `\r\n` to `\r`, which inside the
+    // bracket is a line break and outside it is a keypress.
+    expect(promptPayload("one\r\ntwo")).toBe("one\ntwo");
+    expect(promptPayload("one\rtwo")).toBe("one\ntwo");
+    expect(promptPayload("one\r\ntwo").includes("\r")).toBe(false);
+  });
+
+  it("removes control bytes a pasted terminal capture carries", () => {
+    // An ESC from an ANSI colour run starts an escape sequence in the TUI; a
+    // stray \x03 is Ctrl-C.
+    expect(promptPayload("\u001b[31mred\u001b[0m text")).toBe("[31mred[0m text");
+    expect(promptPayload("a\u0003b\u007fc")).toBe("abc");
+  });
+
+  it("removes every character that reorders or hides what you read", () => {
+    // The claim in the doc comment is that this is `is_forbidden` exactly, so
+    // the test is the whole set: bidi overrides and isolates, the line and
+    // paragraph separators, the BOM, and the interlinear annotation marks.
+    expect(promptPayload("a\u202eb\u2066c")).toBe("abc");
+    expect(promptPayload("a\u2028b\u2029c\ufeffd\ufff9e\ufffbf")).toBe("abcdef");
+  });
+
+  it("can empty a prompt that was nothing but control bytes", () => {
+    // `queueInitialPrompt` trims and drops an empty payload, so this is the
+    // signal that there was never a prompt to send.
+    expect(promptPayload("\u001b\u0003\u007f").trim()).toBe("");
   });
 });

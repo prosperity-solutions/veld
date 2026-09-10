@@ -149,7 +149,7 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Seven keys under `ide`
+  there. (This is the rule the removed converter broke.) Eight keys under `ide`
   are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`,
   `extensions`, `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
   [configuration.md](configuration.md#ide-the-projects-own-ide-surfaces) — but they are additions
@@ -496,6 +496,28 @@ the pane exactly as before. What it launches is the pane's existing `resume` wit
 `ide.panes` that runs a command *before you click a pane*; it happens once while
 the pane chooser is on screen, under the same bounds and the same
 `extensions.autoRefresh` off switch as `ide.extensions`.
+
+`ide.panes[]` also gained `agent` — whether the pane is a coding agent, i.e.
+whether the IDE's *New worktree…* dialog offers it and types the prompt you typed
+into it. Additive and usually unnecessary: with the key absent the answer is
+inferred from `resume`, so an agent pane written the way this guide already
+describes is offered without any change. Set it where the inference is wrong —
+`true` for an agent with no resume flag, `false` to keep a resumable pane (a
+`psql`, a `git log` with a paging resume) out of a picker that would otherwise
+type a sentence into it. One caveat on the forward direction: a veld older than
+this release does not know the key, so it lints the pane with an
+`unknown pane key(s) "agent"` problem — the pane itself still loads and still
+works, which is the same additive path every other new pane field took. See
+[configuration.md](configuration.md#idepanes-the-projects-own-panes).
+
+`ide.worktreeName` is new and additive: one `argv`/`shell` command that names a
+new worktree from the prompt the IDE's create dialog was given. Absent — the
+default — nothing changes; the dialog names checkouts from the prompt's first
+clause as it does without it. The prompt is written to the command's **stdin**,
+so there is no new interpolation name to learn and nothing new in any argument
+list. It runs after the create has already answered and only ever sets
+`display_name`, so it cannot fail a create or move a checkout. See
+[configuration.md](configuration.md#ideworktreename-naming-a-new-worktree-from-its-prompt).
 
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld

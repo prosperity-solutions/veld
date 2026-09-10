@@ -113,6 +113,51 @@ export function isFileDrop(types: readonly string[]): boolean {
   return types.includes("Files") && !types.includes(TAB_MIME);
 }
 
+/**
+ * The bytes a queued prompt may actually be pasted as.
+ *
+ * **A prompt is not inert text, and `Terminal.paste` does not make it so.** The
+ * installed xterm rewrites `\r?\n` to `\r` and wraps the result in
+ * `ESC[200~`/`ESC[201~` — and that is all it does. So a prompt pasted out of
+ * terminal output carries whatever was in it:
+ *
+ * - **A literal `ESC[201~`** ends the bracket early, and everything after it is
+ *   read by the program as ordinary keystrokes rather than as pasted text —
+ *   which for an agent composer means the tail of the prompt is interpreted as
+ *   commands. `ESC[200~` is dropped for the same reason from the other side.
+ * - **Any other C0 control** reaches the program as the key it encodes: an
+ *   `ESC` from an ANSI colour run starts an escape sequence in the TUI, and a
+ *   stray `\x03` is Ctrl-C.
+ *
+ * `\n` and `\t` survive, and **`\r\n` and a lone `\r` become `\n`** — a
+ * multi-line prompt is the case bracketed paste exists for, a tab is legitimate
+ * inside pasted prose, and a prompt pasted from a Windows editor or an old
+ * terminal capture means its line breaks. Everything else in `Cc` goes, along
+ * with the characters that reorder or hide what the composer renders: the bidi
+ * embeddings, overrides and isolates, the line and paragraph separators, the BOM
+ * and the interlinear annotation marks. That is `is_forbidden` in
+ * `crates/veld-daemon/src/desktop.rs` exactly, which refuses the same set in a
+ * worktree name for the same reason — and the equivalence is worth keeping
+ * literal, because the next reader will act on it.
+ *
+ * The line-ending pass runs *before* the control strip, which is why the strip
+ * class can name `\r` without eating a line break: by then there are none left.
+ * Leaving `\r` out of the class instead is what the first version did, and it
+ * left the one control byte that means "submit" in the payload while the comment
+ * above claimed everything in `Cc` was gone.
+ *
+ * Stripped rather than refused, unlike a name: the user's words are the point,
+ * and losing an escape byte out of the middle of a pasted paragraph costs them
+ * nothing they meant to say.
+ */
+export function promptPayload(prompt: string): string {
+  return prompt
+    .replace(/\u001b\[20[01]~/g, "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/[\u0000-\u0008\u000b-\u000d\u000e-\u001f\u007f-\u009f]/g, "")
+    .replace(/[\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff\ufff9-\ufffb]/g, "");
+}
+
 /** Extension for an image the clipboard handed us as bytes and no name. */
 const IMAGE_EXTENSIONS: Record<string, string> = {
   "image/png": "png",

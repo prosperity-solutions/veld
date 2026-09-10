@@ -7,6 +7,23 @@
   // and how to hand it a stable token, and the config decides what that
   // command is.
   "ide": {
+    // A command that names a new worktree from the prompt the IDE's New
+    // worktree dialog was given. The prompt arrives on **stdin**, not in the
+    // argument list — which is both how `claude -p` and `codex exec` already
+    // take one, and why a prompt (the user's own prose, about whatever they are
+    // working on) never reaches the world-readable process table.
+    //
+    // It runs after the checkout exists, so nothing waits on it: the dialog has
+    // already named the worktree from the prompt's first clause, and this
+    // replaces that label a few seconds later if it answers. Every failure is
+    // silent on purpose — the name the dialog chose stands.
+    "worktreeName": {
+      "argv": [
+        "claude",
+        "-p",
+        "Reply with a 2-4 word title for this task, in sentence case, and nothing else"
+      ]
+    },
     "panes": [
       {
         // The worked example. `claude --session-id <uuid>` starts a
@@ -81,7 +98,14 @@
         "icon": "robot",
         "requires_bin": ["codex"],
         "argv": ["codex"],
-        "resume": { "argv": ["codex", "resume", "--last"] }
+        "resume": { "argv": ["codex", "resume", "--last"] },
+        // Stated rather than left to be inferred. The panes above rely on the
+        // inference — they declare a `resume`, so the New worktree dialog reads
+        // them as agents and offers them its prompt — and it would get this one
+        // right too. It is spelled out here because that is the field's whole
+        // job: to be the answer when "does this pane declare a resume command"
+        // and "is this pane a coding agent" come apart.
+        "agent": true
       },
       {
         // A pane needs neither a resume command nor a session id. This one is
@@ -91,7 +115,12 @@
         "type": "terminal",
         "label": "Tail the dev log",
         "icon": "📜",
-        "shell": "tail -f \"${veld.root}/tmp/dev.log\""
+        "shell": "tail -f \"${veld.root}/tmp/dev.log\"",
+        // The other direction, and redundant here — a pane with no `resume` is
+        // not offered a prompt anyway. Worth writing when a pane *is* resumable
+        // and still is not an agent, which is how a `psql` or a `git log` pane
+        // stays out of a picker that would otherwise type a sentence into it.
+        "agent": false
       }
     ]
   },

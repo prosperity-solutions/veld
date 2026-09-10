@@ -224,6 +224,7 @@ pub const MAX_NEWS_ITEMS: usize = 5;
 /// (`auto_resume` false, `close_on_exit` true, `fixed_label` false), which is
 /// the worst shape for a silent one.
 pub const TERMINAL_PANE_KEYS: &[&str] = &[
+    "agent",
     "argv",
     "auto_resume",
     "close_on_exit",
@@ -293,6 +294,25 @@ pub const EXTENSION_BUILTINS: &[&str] = &[
     "username",
     "worktree",
 ];
+
+/// The scope of `ide.worktreeName`'s command — [`EXTENSION_BUILTINS`] exactly.
+///
+/// Same reasoning: it runs against a *worktree*, not while a pane is launching.
+/// Named separately so the error message says `worktree-name` rather than
+/// `extension` — and it is a genuine alias, not a copy: a name added to
+/// [`EXTENSION_BUILTINS`] is accepted here too. That is the intended coupling
+/// rather than an oversight, because the two scopes answer the same question
+/// ("what does a command running against a checkout get to know"), and a name
+/// that made sense for one and not the other would be the surprise.
+///
+/// **There is deliberately no `${veld.prompt}`.** The user's prompt arrives on
+/// the command's **stdin**, never in its argument list. A prompt is the user's
+/// own prose about whatever they are working on, and an argument list is
+/// world-readable through the process table — the same reason this repo's
+/// config rules forbid putting a secret on a command line. It is also the shape
+/// the tools this exists for already take a prompt in (`claude -p` and
+/// `codex exec` both read one from stdin), so the honest contract costs nothing.
+pub const WORKTREE_NAME_BUILTINS: &[&str] = EXTENSION_BUILTINS;
 
 /// `${veld.*}` names permitted only in `argv`, refused in `shell`.
 ///
@@ -526,6 +546,21 @@ pub struct IdeSection {
     /// have a home rather than each squatting at the top of `ide`.
     #[serde(default = "default_staleness_sensitivity")]
     pub staleness_sensitivity: f64,
+    /// A command that names a new worktree from the prompt that created it.
+    ///
+    /// Absent means the dialog's own derivation stands (the prompt's first
+    /// clause, or a numbered fallback). Present, the daemon runs it *after* the
+    /// checkout exists — the create never waits on it — and applies what it
+    /// prints as the worktree's `display_name`.
+    ///
+    /// **`display_name` only, never the alias.** The alias is the identifier: it
+    /// defaults the run name, becomes a hostname, and picked the directory the
+    /// checkout already lives in. Renaming it afterwards would leave the
+    /// directory under the old name and change every future URL — so what a
+    /// generated name changes is the label, which is what `display_name` exists
+    /// for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_name: Option<crate::config::CommandSpec>,
     /// Top-level keys under `ide` that this version still does not interpret, in
     /// sorted order. F8 names them so an author can tell "reserved" from "typo".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -546,6 +581,7 @@ impl IdeSection {
             && self.panes.is_empty()
             && self.news.is_empty()
             && self.extensions.is_empty()
+            && self.worktree_name.is_none()
     }
 
     /// The staleness-sensitivity multiplier, floored at `0.1`. Always at least
@@ -827,6 +863,25 @@ pub struct TerminalPane {
     /// adopted. Absent means the pane only ever resumes *its own* session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sessions: Option<SessionsPicker>,
+    /// Whether this pane is a **coding agent** — a program that takes a prompt
+    /// and works on it.
+    ///
+    /// Read by the IDE's *New worktree…* dialog, which offers the project's
+    /// agents and hands the one you pick the prompt you typed. Nothing else
+    /// consults it: an agent pane is opened, launched and resumed exactly like
+    /// any other terminal pane.
+    ///
+    /// **Three states, and the absent one is the useful one.** Left unset, the
+    /// answer is inferred from [`Self::resume`]: a pane that declares how to
+    /// pick its session up again is a pane holding a *conversation*, which is
+    /// what a prompt is a turn in — and a pane that does not (`git log`, a
+    /// build, a `tail -f`) is one where a typed prompt would be run as a
+    /// command or dropped on the floor. That inference is right for every agent
+    /// pane written the way the docs already ask for, so the feature works
+    /// without a config change; `true` and `false` are how a project says
+    /// otherwise for one pane without affecting the rest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<bool>,
     /// Whether veld may run `resume` without being asked. Only ever consulted
     /// when a pane is restored with its shell already gone, never while the user
     /// is watching it — see `crates/veld-daemon/ui/src/panes/terminalHost.ts`.
@@ -1080,6 +1135,38 @@ fn parse_git(value: &serde_json::Value, out: &mut IdeSection) {
     }
 }
 
+/// Parse `ide.worktreeName` — one command, in the [`WORKTREE_NAME_BUILTINS`]
+/// scope.
+///
+/// Lenient like every other `ide` field: a malformed command is a problem and
+/// the key is dropped, never a load error. Dropping it means the dialog's own
+/// name derivation stands, which is a working outcome rather than a broken one —
+/// nothing here should ever be able to stop a checkout being created.
+fn parse_worktree_name(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(map) = value.as_object() else {
+        out.problems.push(IdeProblem {
+            location: "ide.worktreeName".to_owned(),
+            message: "must be an object with an `argv` or a `shell`; it was ignored".to_owned(),
+        });
+        return;
+    };
+    // Unknown children are reserved rather than errors, matching `ide.git` — and
+    // named with their parent so an author can tell a typo from a key a newer
+    // veld will read.
+    for key in map.keys() {
+        if key != "argv" && key != "shell" {
+            out.uninterpreted.push(format!("worktreeName.{key}"));
+        }
+    }
+    out.worktree_name = parse_command_in_scope(
+        map,
+        "ide.worktreeName",
+        "worktree-name",
+        WORKTREE_NAME_BUILTINS,
+        out,
+    );
+}
+
 /// Parse `ide.git.stalenessSensitivity` — a non-negative multiplier, clamped to
 /// `[0.1, 10]`. Lenient like every other `ide` field: an unparseable value
 /// reports a problem and keeps the default, never a load error.
@@ -1129,6 +1216,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "extensions" => parse_extensions(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
             "git" => parse_git(child, &mut section),
+            "worktreeName" => parse_worktree_name(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
         }
     }
@@ -2005,6 +2093,23 @@ fn parse_terminal_pane(
         }
     };
 
+    // Absent stays absent rather than resolving to the inferred value here: the
+    // inference belongs to the one client that acts on it, and baking it into
+    // the parsed config would make a pane that never said anything indistinguishable
+    // from one that said `true` — so a later change to the inference would silently
+    // disagree with a `veld.json` a user is reading.
+    let agent = match entry.get("agent") {
+        None => None,
+        Some(serde_json::Value::Bool(b)) => Some(*b),
+        Some(_) => {
+            out.problems.push(IdeProblem {
+                location: format!("{at}.agent"),
+                message: "must be true or false".to_owned(),
+            });
+            return None;
+        }
+    };
+
     let fixed_label = match entry.get("fixed_label") {
         None => false,
         Some(serde_json::Value::Bool(b)) => *b,
@@ -2064,6 +2169,7 @@ fn parse_terminal_pane(
         launch,
         resume,
         sessions,
+        agent,
         auto_resume,
         close_on_exit,
         fixed_label,
@@ -3533,6 +3639,87 @@ mod tests {
         assert_eq!(parsed.uninterpreted, vec!["git.autoUpdate"]);
     }
 
+    /// `ide.worktreeName` is one command, in the worktree scope, and lenient.
+    #[test]
+    fn worktree_name_is_parsed_scoped_and_lenient() {
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["claude", "-p", "Name this in three words"] }
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert!(
+            parsed.uninterpreted.is_empty(),
+            "{:?}",
+            parsed.uninterpreted
+        );
+        assert!(
+            !parsed.is_empty(),
+            "a naming command is worth sending to a UI"
+        );
+        assert_eq!(
+            parsed.worktree_name,
+            Some(crate::config::CommandSpec::Argv(vec![
+                "claude".to_owned(),
+                "-p".to_owned(),
+                "Name this in three words".to_owned(),
+            ]))
+        );
+
+        // The worktree scope: `${veld.worktree}` is in it, and the pane family
+        // is not — a naming command runs against a checkout, not a launching pane.
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name", "${veld.worktree}", "${veld.root}"] }
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name", "${veld.pane.token}"] }
+        }));
+        assert!(parsed.worktree_name.is_none());
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.message.contains("worktree-name")),
+            "the error must name this scope, not `pane`: {:?}",
+            parsed.problems
+        );
+
+        // **No `${veld.prompt}`.** The prompt arrives on stdin; a name for it in
+        // an argument list is what this scope exists to refuse.
+        let parsed = section(json!({ "worktreeName": { "argv": ["name", "${veld.prompt}"] } }));
+        assert!(parsed.worktree_name.is_none());
+        assert!(!parsed.problems.is_empty());
+
+        // Malformed is a problem and a dropped key, never a load error: the
+        // dialog's own derivation still names the checkout.
+        for bad in [
+            json!({ "worktreeName": "claude -p name" }),
+            json!({ "worktreeName": { "argv": ["a"], "shell": "b" } }),
+            json!({ "worktreeName": {} }),
+        ] {
+            let parsed = section(bad.clone());
+            assert!(parsed.worktree_name.is_none(), "{bad:?}");
+            assert!(!parsed.problems.is_empty(), "{bad:?}");
+        }
+
+        // An unknown child is reserved, not an error — as under `ide.git`.
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name"], "timeoutSeconds": 5 }
+        }));
+        assert_eq!(parsed.uninterpreted, vec!["worktreeName.timeoutSeconds"]);
+        assert!(parsed.worktree_name.is_some());
+    }
+
+    /// It had a meaning added, so it must stop being reported as reserved.
+    #[test]
+    fn worktree_name_is_no_longer_reported_as_uninterpreted() {
+        let parsed = section(json!({ "worktreeName": { "argv": ["name"] } }));
+        assert!(
+            !parsed.uninterpreted.iter().any(|k| k == "worktreeName"),
+            "{:?}",
+            parsed.uninterpreted
+        );
+    }
+
     #[test]
     fn unknown_keys_stay_uninterpreted_rather_than_becoming_problems() {
         let parsed = section(json!({
@@ -4359,6 +4546,46 @@ mod tests {
                 parsed.problems
             );
         }
+    }
+
+    /// `agent` is three states, and the parser must keep them three.
+    ///
+    /// Resolving the absent case here — to `resume.is_some()`, which is what the
+    /// client infers — would make a pane that said nothing indistinguishable
+    /// from one that said `true`, and a later change to the inference would then
+    /// silently disagree with a `veld.json` somebody is reading.
+    #[test]
+    fn agent_stays_unanswered_when_a_pane_does_not_answer_it() {
+        let parsed = one_pane(json!({
+            "id": "claude", "type": "terminal", "argv": ["claude"],
+            "resume": { "argv": ["claude", "--resume"] },
+        }));
+        let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+        assert_eq!(terminal.agent, None, "a resume command is not an answer");
+
+        for answer in [true, false] {
+            let parsed = one_pane(json!({
+                "id": "claude", "type": "terminal", "argv": ["claude"], "agent": answer,
+            }));
+            assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+            let PaneBody::Terminal(terminal) = &parsed.panes[0].body;
+            assert_eq!(terminal.agent, Some(answer));
+        }
+
+        // A non-boolean is a problem, not a silent default — same bar as every
+        // other flag on a pane.
+        let parsed = one_pane(
+            json!({ "id": "claude", "type": "terminal", "argv": ["claude"], "agent": "yes" }),
+        );
+        assert_eq!(parsed.panes.len(), 0);
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.location.ends_with("agent")),
+            "{:?}",
+            parsed.problems
+        );
     }
 
     #[test]

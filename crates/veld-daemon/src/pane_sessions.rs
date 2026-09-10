@@ -450,6 +450,10 @@ async fn run_one(
         declare_root,
         builtins,
         SESSIONS_TIMEOUT,
+        // No stdin: a session lister is asked what exists, it is not handed
+        // anything. Only `ide.worktreeName` writes to a project command's
+        // stdin — see `spawn_command`.
+        None,
     )
     .await
     {
@@ -707,6 +711,7 @@ mod tests {
                 launch: veld_core::config::CommandSpec::Argv(vec!["x".to_owned()]),
                 resume: None,
                 sessions: None,
+                agent: None,
                 auto_resume: false,
                 close_on_exit: true,
                 fixed_label: false,

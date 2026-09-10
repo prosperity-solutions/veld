@@ -344,6 +344,19 @@ user action**. Everything else needs a deliberate act: `veld start` for
 `setup`/nodes/probes, a click for a pane or a node action. That difference is
 real and it is the reason this section exists.
 
+**`ide.worktreeName` is a second command position, and it sits on the other side
+of that line.** It runs the new checkout's own declared command — so, like a
+pane, a branch can change what runs — but only as part of a create the user
+asked for, with a prompt they typed, in a dialog that says a name will be
+generated. That is a deliberate act, which is why it has no `source` setting and
+no off switch: the act *is* the lever, exactly as it is for a pane's `argv`. What
+it does share with a badge is that nobody is watching it finish, so it takes the
+same bounds — its own deadline, the process-group kill, the output cap — and it
+can only ever change a label. Its one asymmetry worth stating: a pane's command
+is chosen from a menu by name, while this one is whatever the config says, so a
+project adopting it is choosing to spend whatever that command costs on every
+prompted create.
+
 **There is no consent prompt, and that is a decision, not an omission.** The
 provenance rule is satisfied — the command is declared *here*, in the repo's own
 config, which is exactly what AGENTS.md requires. What is new is that execution is

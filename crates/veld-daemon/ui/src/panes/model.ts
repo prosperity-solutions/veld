@@ -1205,6 +1205,132 @@ export function configPaneTab(
   return { id, kind: "terminal", title: spec.label, spec: spec.id };
 }
 
+/**
+ * Whether this pane can be handed a prompt — i.e. whether it is a coding agent.
+ *
+ * The New worktree dialog offers these and types the user's prompt into the one
+ * they pick, so getting it wrong is not cosmetic: a pane that runs `git log`
+ * exits the moment it is done, taking the prompt (and the pane) with it, and one
+ * that runs a shell script would have the prompt *executed*. Both shipped once,
+ * which is why this is a named predicate with tests rather than a filter
+ * expression at the call site.
+ *
+ * Three inputs, in order:
+ *
+ * - **`kind`/`available`** — a pane that cannot run cannot be offered. The
+ *   refusal would otherwise arrive after the checkout exists.
+ * - **`agent`** — the project's explicit answer, and it wins. `false` keeps a
+ *   resumable pane out of the picker; `true` puts a pane in that the inference
+ *   below would miss.
+ * - **`can_resume`**, when `agent` is absent. A pane that declares how to pick
+ *   its session up again is one holding a *conversation* — which is what a
+ *   prompt is a turn in — and the agent panes in this repo's own `veld.json`
+ *   (Claude, Codex, Pi) all declare one while `git-log` does not. So the
+ *   feature works with no config change, and the flag is there for the cases
+ *   where the inference is wrong rather than being the price of admission.
+ */
+export function paneTakesPrompt(spec: {
+  kind: string;
+  available: boolean;
+  agent?: boolean;
+  can_resume: boolean;
+}): boolean {
+  if (spec.kind !== "terminal" || !spec.available) return false;
+  return spec.agent ?? spec.can_resume;
+}
+
+/**
+ * What a queued prompt should do about this terminal, right now.
+ *
+ * **Pure, exported and tested, because it is the entire safety argument for
+ * writing bytes into a pty from a browser.** Left inline in
+ * [`armInitialPrompt`] the two invariants that matter — a plain terminal's
+ * shell is never handed a prompt, and a prompt is never written into something
+ * that is not a program waiting for input — were three `if`s a later reorder
+ * could quietly break, in a module with no test file at all. As a predicate
+ * they read like `paneTakesPrompt` and `createBlockers`, which is the idiom
+ * this repo already uses for exactly this reason.
+ *
+ * It lives here rather than in `terminalHost` for the reason [`startPlanFor`]
+ * does: the decisions that consume it are pure, and the pure ones are the ones
+ * worth testing — `terminalHost` cannot even be imported without a DOM, because
+ * xterm's fit addon touches `self` at module scope.
+ *
+ * What it deliberately does *not* own: the once-only property. That is the
+ * `INITIAL_PROMPTS` delete in `armInitialPrompt`, because it is a fact about a
+ * shared map rather than about a terminal.
+ *
+ *  - `"no-pane"` — not a config-declared pane. A plain terminal *is* an
+ *    interactive shell with bracketed paste on, so the gate below says nothing
+ *    there and a newline would run the prompt as a command. Drop it and never
+ *    ask again.
+ *  - `"send"` — a program has the keyboard and the socket can carry a
+ *    keystroke. Re-evaluated before the paste and again before the newline: the
+ *    mode is mutable terminal state and `Terminal.paste` reads it at call time.
+ *    (Measured in the installed build: `paste` wraps the text in
+ *    `ESC[200~`/`ESC[201~` only while the mode is on, and rewrites every `\n`
+ *    to `\r` either way — so a mode that dropped turns a multi-line prompt into
+ *    one self-submitting line per line of it.)
+ *  - `"give-up"` — the command exited or another window took the session over.
+ *    Neither is going to open an input.
+ *  - `"expired"` — the deadline passed with the gate never opening.
+ *  - `"wait"` — none of the above yet; poll again.
+ */
+export type PromptStep = "no-pane" | "send" | "wait" | "give-up" | "expired";
+
+export function promptStep(t: {
+  /** The `ide.panes[].id` this session runs, or absent for a login shell. */
+  spec?: string;
+  /** Whether this session is still the registered owner of its tab id. */
+  registered: boolean;
+  wsOpen: boolean;
+  replaying: boolean;
+  /** DECSET 2004 — see the type doc, and [`armInitialPrompt`]. */
+  bracketedPaste: boolean;
+  /** Whether the command has exited or another window took the session over. */
+  ended: boolean;
+  /** Whether the wait deadline has passed. */
+  expired: boolean;
+}): PromptStep {
+  if (t.spec === undefined) return "no-pane";
+  if (!t.registered) return "give-up";
+  if (t.wsOpen && !t.replaying && t.bracketedPaste) return "send";
+  // Checked after `send`, not before: a program that enabled bracketed paste
+  // and exited in the same breath still had an input, and the queued text is
+  // better spent on it than on a toast. Only reachable when the gate is shut.
+  if (t.ended) return "give-up";
+  return t.expired ? "expired" : "wait";
+}
+
+/**
+ * Put a pane into a layout that was *just* seeded for a worktree.
+ *
+ * A new worktree's layout is one undecided pane ([`defaultLayout`]) — the
+ * chooser — and a pane arriving with the worktree (the agent the create dialog
+ * was asked to start) should *be* that pane rather than open beside it. Landing
+ * next to it leaves a stale "new pane" tab the user has to close, which is the
+ * same reason `PaneArea`'s `+` menu converts rather than adds.
+ *
+ * The first chooser anywhere, not the focused dock's: a restored layout can
+ * carry one in either dock, and a seeded pane belongs wherever the undecided
+ * slot already is. With no chooser at all — a worktree whose stored layout is
+ * full of real panes — it is simply added, because there is nothing to consume.
+ *
+ * **Activated, always.** `replaceTab` keeps the dock's `activeId` when the tab
+ * it replaced was not the active one, and `PaneArea` mounts only the active
+ * tab's body — so a pane seeded into a dock whose second tab was showing never
+ * mounted, never connected, and never ran the prompt queued against it. There
+ * is no version of "the user asked for this pane" that means "put it behind
+ * another tab".
+ */
+export function seedPane(layout: PaneLayout, tab: PaneTab): PaneLayout {
+  const chooser = allTabs(layout).find((t) => t.kind === "new");
+  const next = chooser
+    ? replaceTab(layout, chooser.id, tab)
+    : addTabToFocused(layout, tab);
+  return activateTab(next, tab.id);
+}
+
 /** How a session should start. */
 export type StartPlan = "shell" | "reattach" | PaneLaunchMode;
 

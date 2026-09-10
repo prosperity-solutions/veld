@@ -416,6 +416,19 @@ pub(super) const CURSOR_STYLES: &[Choice] = &[
 
 pub(super) const MARKER_STYLES: &[Choice] = &[choice("color", "Colour"), choice("emoji", "Emoji")];
 
+/// How the New worktree dialog opens.
+///
+/// `ask` is the default and is not a missing answer — it is the state in which
+/// the dialog shows the two modes side by side with what each one does, so the
+/// first choice is an informed one rather than whichever happened to be wired
+/// first. Choosing either mode there records it here, and setting this back to
+/// `ask` is how somebody gets the explanation again.
+pub(super) const WORKTREE_NEW_MODES: &[Choice] = &[
+    choice("ask", "Ask the first time"),
+    choice("prompt", "Start with a prompt"),
+    choice("manual", "Start with a name"),
+];
+
 pub(super) const GIT_CREATE_SOURCES: &[Choice] = &[
     choice("origin", "Latest origin"),
     choice("local", "Local main"),
@@ -804,6 +817,21 @@ impl SettingKey {
             },
 
             // ── Git ──────────────────────────────────────────────────────────
+            Self::WorktreeNewMode => Spec {
+                title: "New worktree dialog opens on",
+                help: "Start with a prompt: type what needs doing and one of the project's \
+                       agents starts on it in the new checkout, with the name, branch and marker \
+                       chosen for you. Start with a name: name it, pick where it starts from and \
+                       choose its marker, and nothing is run. Ask the first time shows both with \
+                       what each does, and records whichever you pick.",
+                group: Git,
+                section: None,
+                shape: ValueShape::Text,
+                choices: Choices::Static {
+                    options: WORKTREE_NEW_MODES,
+                },
+                requires: None,
+            },
             Self::GitCreateFrom => Spec {
                 title: "Create worktrees from",
                 help: "Origin (recommended): fetching the remote and cutting the new branch from \

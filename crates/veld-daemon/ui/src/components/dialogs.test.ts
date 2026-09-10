@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   branchForMode,
+  chooseAgent,
+  effectiveMode,
+  effectiveName,
   createBlockers,
   sourceForMode,
   spinOffSource,
@@ -290,5 +293,125 @@ describe("spinOffSource", () => {
     const after = [wt(1, "/repo"), impostor];
     expect(spinOffSource(after, picked.path)).toBeNull();
     expect(spinOffSource(after, picked.path)).not.toEqual(impostor);
+  });
+});
+
+describe("effectiveName", () => {
+  const free = () => true;
+
+  it("returns a typed name untouched", () => {
+    // Not trimmed, not slugged, not renumbered: the derivations downstream own
+    // all three, and a collision in a name somebody chose is theirs to see.
+    expect(effectiveName({ typed: "  Checkout V2 ", prompt: "", isFree: free })).toEqual({
+      name: "  Checkout V2 ",
+      auto: false,
+    });
+    // A typed name wins over a prompt that could have supplied one.
+    expect(
+      effectiveName({ typed: "Checkout V2", prompt: "Fix the redirect", isFree: free }),
+    ).toEqual({ name: "Checkout V2", auto: false });
+  });
+
+  it("borrows from the prompt when the name is empty", () => {
+    expect(
+      effectiveName({
+        typed: "",
+        prompt: "Fix the login redirect loop so that sessions expire",
+        isFree: free,
+      }),
+    ).toEqual({ name: "Fix the login redirect loop", auto: true });
+    // Whitespace is not a name.
+    expect(effectiveName({ typed: "   ", prompt: "Rewrite the parser", isFree: free })).toEqual(
+      { name: "Rewrite the parser", auto: true },
+    );
+  });
+
+  it("falls back when there is no prompt", () => {
+    expect(effectiveName({ typed: "", prompt: "", isFree: free })).toEqual({
+      name: "Workspace",
+      auto: true,
+    });
+  });
+
+  it("falls back when the prompt cannot supply an alias", () => {
+    // The name would be perfectly readable and `deriveAlias` slugs it to `""`,
+    // which would disable Create on a field the user was told to leave alone.
+    expect(effectiveName({ typed: "", prompt: "Исправь редирект", isFree: free })).toEqual({
+      name: "Workspace",
+      auto: true,
+    });
+  });
+
+  it("moves a generated name out of the way rather than colliding", () => {
+    const taken = new Set(["Workspace", "Fix the redirect"]);
+    expect(
+      effectiveName({ typed: "", prompt: "", isFree: (n) => !taken.has(n) }),
+    ).toEqual({ name: "Workspace 2", auto: true });
+    expect(
+      effectiveName({
+        typed: "",
+        prompt: "Fix the redirect",
+        isFree: (n) => !taken.has(n),
+      }),
+    ).toEqual({ name: "Fix the redirect 2", auto: true });
+  });
+
+  it("never renumbers a typed name", () => {
+    // The dialog reports that collision instead, next to the field it is about.
+    expect(
+      effectiveName({ typed: "Workspace", prompt: "", isFree: () => false }),
+    ).toEqual({ name: "Workspace", auto: false });
+  });
+});
+
+describe("chooseAgent", () => {
+  const panes = [{ id: "claude" }, { id: "codex" }];
+
+  it("defaults to the project's first pane before anything is picked", () => {
+    // The order is `ide.panes`' own, which is the order the project wrote them
+    // in — so the default is the project's stated preference, not a guess.
+    expect(chooseAgent(panes, null)).toBe("claude");
+  });
+
+  it("keeps the user's pick", () => {
+    expect(chooseAgent(panes, "codex")).toBe("codex");
+  });
+
+  it("falls back to the first pane when the pick has left the list", () => {
+    // A `veld.json` edit or a lost `requires_bin` can remove a pane under an
+    // open dialog. Returning the dead id would blank the Select and send a pane
+    // name nothing will open.
+    expect(chooseAgent(panes, "aider")).toBe("claude");
+  });
+
+  it("is null only when there is nothing to offer", () => {
+    // Which is also the state in which the dialog renders no prompt at all, so
+    // `launch` can never name a pane that does not exist.
+    expect(chooseAgent([], null)).toBe(null);
+    expect(chooseAgent([], "claude")).toBe(null);
+  });
+});
+
+describe("effectiveMode", () => {
+  it("is the chooser until something is chosen", () => {
+    expect(effectiveMode({ chosen: null, hasAgents: true })).toBe("ask");
+    expect(effectiveMode({ chosen: null, hasAgents: false })).toBe("ask");
+  });
+
+  it("renders the chosen mode when the project can honour it", () => {
+    expect(effectiveMode({ chosen: "prompt", hasAgents: true })).toBe("prompt");
+    expect(effectiveMode({ chosen: "manual", hasAgents: true })).toBe("manual");
+  });
+
+  it("falls through to manual when there is nothing to prompt", () => {
+    // **The empty dialog.** The mode is a user preference and the agents are a
+    // project fact, so they disagree for anyone who picked "Start with a prompt"
+    // and then opened this in a repo with no agent panes — most repos. Rendering
+    // `prompt` there gave a dialog with a mode switch, a Create button and an
+    // empty body: the prompt column is gated on agents and the fields only
+    // render under `manual`.
+    expect(effectiveMode({ chosen: "prompt", hasAgents: false })).toBe("manual");
+    // `manual` never needs an agent, so it is never redirected.
+    expect(effectiveMode({ chosen: "manual", hasAgents: false })).toBe("manual");
   });
 });
