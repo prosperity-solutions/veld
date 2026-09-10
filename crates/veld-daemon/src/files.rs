@@ -324,6 +324,24 @@ async fn list_viewable(
 /// Ordering is by modification time descending, which is the whole reason the list
 /// exists: the file somebody wants is the one an agent wrote a moment ago.
 fn scan(root: &Path, policy: &files::ViewPolicy) -> Vec<(String, i64)> {
+    scan_within(root, policy, SCAN_BUDGET)
+}
+
+/// [`scan`], with the wall-clock bound passed in.
+///
+/// Separate from `scan` for one reason: a test that pins *walk* behaviour must not
+/// also be racing a 1500ms clock. `one_branch_being_too_deep_does_not_truncate_the_walk`
+/// asserts an exact sibling count, which a time-bounded walk cannot promise — it was
+/// green run alone and failed under a loaded full-suite run, where the budget expired
+/// mid-walk and the walk correctly returned what it had. That is a flaky test, not a
+/// flaky `scan`: production wants the clock, and the test wants the walk. Handing the
+/// budget in lets each have what it needs, with no `cfg(test)` divergence in the
+/// code that actually ships.
+fn scan_within(
+    root: &Path,
+    policy: &files::ViewPolicy,
+    budget: std::time::Duration,
+) -> Vec<(String, i64)> {
     let started = std::time::Instant::now();
     let mut seen = 0usize;
     let mut out: Vec<(String, i64)> = Vec::new();
@@ -339,7 +357,7 @@ fn scan(root: &Path, policy: &files::ViewPolicy) -> Vec<(String, i64)> {
         // truncating the list for the whole worktree. Running out of time or entries is
         // a reason to stop walking; one branch being too deep is a reason to skip that
         // branch.
-        if seen >= MAX_SCAN_ENTRIES || started.elapsed() > SCAN_BUDGET {
+        if seen >= MAX_SCAN_ENTRIES || started.elapsed() > budget {
             break;
         }
         if depth > MAX_SCAN_DEPTH {
@@ -350,7 +368,7 @@ fn scan(root: &Path, policy: &files::ViewPolicy) -> Vec<(String, i64)> {
         };
         for entry in entries.flatten() {
             seen += 1;
-            if seen >= MAX_SCAN_ENTRIES || started.elapsed() > SCAN_BUDGET {
+            if seen >= MAX_SCAN_ENTRIES || started.elapsed() > budget {
                 break;
             }
             let name = entry.file_name();
@@ -844,7 +862,11 @@ mod tests {
             web_pages: true,
             ..Default::default()
         };
-        let found = scan(root.path(), &policy);
+        // A budget this walk cannot plausibly exhaust: the assertion below is about
+        // which entries the *walk* keeps, and under a loaded full-suite run the real
+        // 1500ms bound expired mid-walk and dropped siblings for a reason that has
+        // nothing to do with the bug being pinned.
+        let found = scan_within(root.path(), &policy, std::time::Duration::from_secs(120));
         let names: Vec<&str> = found.iter().map(|(rel, _)| rel.as_str()).collect();
         assert_eq!(
             names.iter().filter(|n| n.ends_with("page.html")).count(),

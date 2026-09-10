@@ -350,18 +350,52 @@ mod tests {
         // Find a port that is genuinely free, then forget it: `allocate` records
         // the port in the allocator's own set, and asking the *same* allocator for
         // it again is legitimately "already in use".
-        let free_port = {
-            let scout = PortAllocator::new();
-            let reservation = scout.allocate().expect("a port is free");
-            reservation.release()
-        };
-
-        let allocator = PortAllocator::new();
-        let reservation = allocator
-            .reserve_fixed(free_port)
-            .expect("a free fixed port is reserved");
-        assert_eq!(reservation.port, free_port, "never a different port");
-        let taken = free_port;
+        //
+        // **Retried, because scouting-then-reserving is a race this test cannot
+        // close.** `reserve_fixed` needs the port *free*, so the scout must let go
+        // of it first, and anything else on the machine may take it in the gap;
+        // `port_guard` only serialises this crate's own tests. Seen for real: a dev
+        // server in another worktree took the scouted port and failed a suite that
+        // had nothing to do with ports. Losing every attempt still fails, so the
+        // property is pinned as strictly as before — and each attempt only
+        // retries once the OS has confirmed the port really went away, so the
+        // loop cannot absorb a reservation bug either. Only the coin flip is
+        // gone.
+        let mut won = None;
+        for _ in 0..16 {
+            let candidate = {
+                let scout = PortAllocator::new();
+                let reservation = scout.allocate().expect("a port is free");
+                reservation.release()
+            };
+            let allocator = PortAllocator::new();
+            match allocator.reserve_fixed(candidate) {
+                Ok(reservation) => {
+                    assert_eq!(reservation.port, candidate, "never a different port");
+                    won = Some((allocator, reservation, candidate));
+                    break;
+                }
+                Err(e) => {
+                    // **Retry only on evidence, never blindly.** `reserve_fixed`
+                    // answers `AlreadyInUse` both for "the OS says this port is
+                    // taken" and for any other bind failure, so a bare retry
+                    // would also absorb a genuine regression in the reservation
+                    // logic — an intermittent one would pass within sixteen
+                    // fresh-state attempts and leave the test green on a broken
+                    // allocator. Asking the OS directly separates the two: if
+                    // the port really is gone, somebody else took it and
+                    // retrying is the point; if it is still free, this is our
+                    // bug and the test must fail on it here.
+                    assert!(
+                        !is_port_available(candidate),
+                        "reserve_fixed refused port {candidate} while the OS still \
+                         reports it free — a reservation bug, not contention: {e}"
+                    );
+                }
+            }
+        }
+        let (allocator, reservation, taken) = won
+            .expect("every scouted port was taken by another process before we could reserve it");
 
         // Asking again while it is held fails, naming the port.
         let err = allocator.reserve_fixed(taken).unwrap_err();
