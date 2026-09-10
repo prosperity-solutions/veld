@@ -84,6 +84,16 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
+**A shipped skill is a pointer, and the documentation lives in the binary.** The thirteen topics `veld skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld skills`. Three reasons, and the first is the one that decided it:
+
+- **An installed skill is a copy, frozen the day somebody ran `npx skills add`.** Documentation for a CLI, living in that copy, describes whichever veld they had then. The same text inside the binary describes the veld they are running, which is the only version whose behaviour makes the answer right or wrong. It also means the shells never need re-adding, and `.releaserc.json` no longer touches `skills/veld/SKILL.md` at all: the `compatibility:` pin is gone (pinning the current release made every user on a slightly older build read a false "your veld is too old"), and so is the release-time rewrite of `metadata.version`, which now belongs to the *shell* and is bumped by hand on the rare occasion the pointer itself changes. A release that rewrote the shell would contradict the claim on the website that it never changes.
+- **A skill's whole body enters context the moment the skill matches**, needed or not. The previous `skills/veld/SKILL.md` was 100KB, its `reference/` another 136KB, and six `!`-prefixed shell invocations in the body ran `veld -V`, `veld config`, `veld nodes`, `veld presets`, `veld runs` and `veld --help` at load time — in this repo `veld config` alone is 35KB of JSONC. An index plus the one topic a task reaches is the same information for a fraction of it, and the *state* half is better fetched when the question is asked, since by then it is also current. **Do not reintroduce a `!`-prefixed command in a shipped skill**; `commands/skills.rs`'s `the_installed_skill_shells_stay_shells` test fails on one, and on a shell over 6KB.
+- **Drift becomes reviewable.** A topic naming a flag sits in the same crate and the same pull request as the clap definition of that flag, and `tests/validate-doc-commands.py` reads every documented `veld …` invocation with the real binary's `--help`.
+
+A topic body is printed as plain text to a reader with no filesystem, so **a topic may not carry a relative Markdown link** — point at another topic in prose (`` see `veld skills config` ``) instead. `no_document_links_to_a_file_that_only_existed_in_the_repo` enforces that, and checks that an in-document `#anchor` still matches a heading in the same body.
+
+The class of error the gate *cannot* catch is a well-formed command with a wrong argument — `veld start dev-headless` names a preset where a `node:variant` goes, and no help text distinguishes that from a node veld has not heard of. That one is answered in the binary: `start.rs`'s `with_preset_hint` appends the `--preset` correction when a rejected selection token is a preset of the project. Documentation cannot reach an agent that never had the question; an error message arrives exactly when the belief is wrong.
+
 For **contributors** working on this repo, the ship workflow is the required path for every change — measure a reported bug before designing a fix → kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
 
 **One document, three paths, so no agent has to be told which one it is.** The file lives at `.agents/skills/ship/SKILL.md` — the cross-agent [Agent Skills](https://agentskills.io/specification) location, loaded as a real skill by Codex, Pi, Copilot, Gemini CLI, OpenCode, goose and Amp. `.claude/skills/ship` is a symlink to it (Claude Code reads only `.claude/skills/`), as is [`docs/ship.md`](docs/ship.md) for anything that reads neither. Because the same text is reached from three depths, **its internal links are repo-root-relative, not `../`-relative** — a `../../../AGENTS.md` would be correct from at most one of them. Both `.claude/skills/ship` and `docs/ship.md` are tracked symlinks, so a Windows checkout without `core.symlinks` turns them into one-line text files; the real path, `.agents/skills/ship/SKILL.md`, is the fallback worth knowing.
@@ -142,8 +152,8 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 |------|----------------|
 | `README.md` | Features list, CLI reference table, Configuration section |
 | `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
-| `skills/veld/SKILL.md` | Agent-facing skill (quick reference, gotchas) |
-| `skills/veld/reference/config.md` | Agent-facing config reference |
+| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld skills`.** Thirteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
+| `skills/*/SKILL.md` | The shipped skill **shells**. Rarely — they say to run `veld skills` and little else, and a change here is a change to the pointer, not to the documentation. Keep them under 6KB and free of `!`-prefixed commands; a test enforces both |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
 | `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
@@ -223,7 +233,8 @@ and several were paid for in this codebase already.
 - **RFCs and working documents are never tracked in git.** Drafts, RFCs, PRDs,
   plans, and any other working document live in `notes/` (gitignored) — never
   commit them. The repo's tracked Markdown is user/contributor documentation
-  only (`README.md`, `docs/`, `skills/`, `AGENTS.md`, `CONTRIBUTING.md`).
+  only (`README.md`, `docs/`, `skills/`, `crates/veld/src/commands/skills/`,
+  `AGENTS.md`, `CONTRIBUTING.md`).
   Design context that must outlive a working document belongs in the PR
   description, commit messages, or `docs/` — don't cite `notes/` files from
   code comments, since readers of the repo can't see them.

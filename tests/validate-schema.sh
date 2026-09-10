@@ -265,6 +265,24 @@ else
 fi
 
 echo
+echo "6) Doc command gate: every documented \`veld …\` invocation exists in the CLI"
+echo
+# The sibling of gate 5, for commands rather than configs, and reusing the binary
+# resolved above under the same skip-not-fail rule. The self-test runs first: a
+# gate that has stopped detecting anything prints the same "0 failing" as a clean
+# corpus, so the only way to tell them apart is to hand it known-bad input.
+if [[ -x "$VELD_BIN" ]]; then
+  if python3 "$REPO_ROOT/tests/validate-doc-commands.py" "$VELD_BIN" --selftest \
+     && python3 "$REPO_ROOT/tests/validate-doc-commands.py" "$VELD_BIN"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  SKIP (no veld binary here — ci.yml runs this gate in the integration job)"
+fi
+
+echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ $FAIL -gt 0 ]]; then

@@ -1,4 +1,4 @@
-# Installing Veld
+# Installing and updating veld
 
 ## Quick Install
 
@@ -13,10 +13,10 @@ This installs the `veld` binary, `veld-daemon`, `veld-helper`, and Caddy to `~/.
 After installing, run setup to configure HTTPS and the background services:
 
 ```bash
-# Unprivileged mode — no sudo, uses port 18443 for HTTPS
+## Unprivileged mode — no sudo, uses port 18443 for HTTPS
 veld setup unprivileged
 
-# OR: Privileged mode — one-time sudo, uses port 443 for clean URLs
+## OR: Privileged mode — one-time sudo, uses port 443 for clean URLs
 veld setup privileged
 ```
 
@@ -275,3 +275,7 @@ veld uninstall
 - **HTTPS certificate warnings** — run `veld setup unprivileged` (or `privileged`) to trust the local CA
 - **Port conflicts** — veld uses ports 18080/18443 (unprivileged) or 80/443 (privileged) and 19000-29999 for services
 - **Where the service logs are** — macOS: the daemon logs to `~/.veld/veld-daemon.log` (owner-only; in the user's directory because launchd will not run a user agent whose log file it cannot create, and a `/usr/local` lib dir is root-owned), and the *privileged* helper beside its own binary in the root-owned directory it is served from — `/var/db/veld-helper/veld-helper.log` (world-readable, so no `sudo` to read it); on an install still awaiting that move it is `<lib dir>/veld-helper.log`. **Linux has no helper log file** — the privileged helper is a systemd service, so its output is in `journalctl -u veld-helper`. The unprivileged helper has no log file. **Caddy** logs to `~/.local/lib/veld/caddy-data/caddy.log` (rolling, 0644) — in its data directory rather than beside the other logs because in privileged mode Caddy is root and that directory is root-owned, and it is the only place certificate issuance and renewal are ever reported. Linux: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location under `Installation`, read from the service definition itself; "not captured" means the install predates it — `veld setup unprivileged` (or `privileged`) rewrites the definition
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

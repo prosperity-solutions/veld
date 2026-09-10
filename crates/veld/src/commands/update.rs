@@ -659,7 +659,7 @@ fn refuse_busy(
 
 /// The `--status --json` payload.
 ///
-/// Split out because `skills/veld/SKILL.md` tells coding agents to read
+/// Split out because the `gotchas` skill topic tells coding agents to read
 /// `in_progress`, `phase` and friends — which makes these key names a contract,
 /// and a contract with no test is a contract one rename silently breaks.
 ///

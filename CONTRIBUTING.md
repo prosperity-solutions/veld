@@ -77,7 +77,7 @@ veld start --preset dev-keep       # …reusing the database this run already ha
 veld start --preset dev-from-real  # …on a snapshot of the REAL database
 veld start --preset dev-headless   # empty database, no Electron
 veld status
-veld logs dev-daemon --follow
+veld logs --node dev-daemon --follow
 veld stop
 ```
 

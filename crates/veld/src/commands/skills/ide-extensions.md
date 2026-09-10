@@ -1,7 +1,137 @@
-# Customizing the Veld IDE: `ide.extensions`
+# Customizing the IDE top bar (`ide.extensions`)
+
+**A capability worth knowing you have.** A project can put its own badges, buttons
+and menus in the Veld IDE's top bar: the state of this branch's pull request, a
+button that opens the worktree in the user's editor, the deploy tag currently live.
+Each one is backed by a command veld runs in that worktree, and **veld never learns
+your code host's name** — the command prints a small contract and veld renders it,
+so the provider-specific half stays in the repo. A GitHub project ships a script
+calling `gh`; a GitLab project ships the same declaration with `glab` behind it.
+
+**Read this before writing one.** The bar already carries around sixteen controls,
+and a badge is *permanently* on screen — unlike a notification it never goes away,
+so one nobody reads is worse than none: it teaches people to ignore that row. Add a
+badge only when somebody looks the thing up several times a day, the answer is short
+enough to read without stopping, and it is about *this worktree* (a project-wide
+fact belongs in the README). An `action` is much cheaper — it costs nothing when
+idle — and inside a `menu` it costs almost nothing, so prefer actions and menus when
+in doubt. **Ask the user before adding extensions they did not request**: these are
+committed to a shared repo and show up in every teammate's IDE.
+
+Once that is settled:
+
+```jsonc
+// veld.json, or veld.d/*.jsonc — `ide` may be split across include files
+"ide": {
+  "extensions": [
+    // A badge. Its command prints one JSON object; veld renders it.
+    { "id": "pr", "slot": "topBar", "type": "status", "label": "PR",
+      "icon": "git-pull-request",
+      "argv": ["scripts/veld/pr-badge.sh"],
+      "refresh_seconds": 60,              // default 60, floored at 15
+      "requires_bin": ["gh"],             // names on PATH — never for a GUI app
+      "when_missing": "hint",             // hint (default) | disable | hide
+      "hint": { "text": "Install the GitHub CLI to see this branch's pull request.",
+                "href": "https://cli.github.com" } },
+
+    // One control instead of one button per editor. Group at three.
+    { "id": "open-in", "slot": "topBar", "type": "menu",
+      "label": "Open this worktree in", "icon": "external-link",
+      "items": ["vscode", "webstorm"] },
+
+    // No `slot`: declared to be *referenced* — by the menu above, or by a
+    // badge's own output. This is how three editors cost one control.
+    { "id": "vscode", "type": "action", "label": "VS Code",
+      "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\"" }
+  ]
+}
+```
+
+The four things that decide whether it works:
+
+1. **The badge's stdout is the contract**, and its tolerances do most of the work:
+   non-contract output becomes the text (so `git rev-parse --short HEAD` needs no
+   adapter), **exit 0 with no output hides the badge** — use that for "not
+   applicable to this worktree" instead of printing `n/a` — and a non-zero exit
+   renders it red with your **last stderr line** as the tooltip, so write a real
+   message there.
+2. **`actions` in the output are ids of declared `action` entries, never commands.**
+   Veld resolves them against the config, so a command can *choose* among your
+   commands and never contribute one. This is what makes the empty state useful: no
+   pull request yet → `{"text":"No PR","actions":[{"id":"create-pr"}]}`.
+3. **`open_in` is a question about whose session the page belongs to.** Behind a
+   login the developer holds (code host, CI, cloud console, error tracker) →
+   `system`, the default, because a pane has its own cookie jar and lands them on a
+   sign-in page. Served by the run itself (localhost, staging on the same session, a
+   local report) → `pane`. In doubt: are they already signed in to it elsewhere?
+4. **`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` arrives as
+   `feat-foo`. `gh pr view "${veld.branch}"` is therefore not an error but a *wrong
+   answer* — on any branch with a `/`, a `.` or a capital it reports no pull request
+   and offers to create a second one. Use `${veld.branch_raw}` in `argv` instead
+   (`"argv": ["gh", "pr", "view", "${veld.branch_raw}"]`). The slugging on
+   `${veld.branch}` is deliberate: the branch name belongs to whoever opened the
+   pull request you checked out, so a `shell` command interpolating it raw would be
+   running their string — and `veld lint` refuses `${veld.branch_raw}` in `shell`
+   for the same reason (`git check-ref-format --branch` accepts `foo$(id)` and
+   `foo'bar`, so no quoting closes that hole; `argv` closes it because the element
+   count is fixed before substitution). A branch starting with `-` is different:
+   `argv` has no shell hole there, but the name is still text a flag parser can
+   read as an option, so veld omits `${veld.branch_raw}` entirely for one rather
+   than hand a command a flag. The scope is otherwise the pane one minus
+   `pane.*`: `${veld.root}`, `${veld.worktree}`, `${veld.project}`,
+   `${veld.username}`.
+5. **`requires_bin` asks `PATH`, so never use it for a GUI application.** `code`,
+   `webstorm` and `idea` are launchers installed *separately* from the editor, so
+   the check hides the option on a machine where the app is right there. Leave it
+   off and let the command fall back to the bundle, as the `vscode` entry above
+   does.
+
+A `status` badge can also add `"display": "icon"` to render its glyph **alone**,
+with the label kept as the accessible name (a badge is a real `<button>`) and the
+tooltip's fallback. Falls back to `text` if there is no glyph to show. Overridable
+per value the same way `open_in` is.
+
+Then verify — `veld lint` is the **only** check that a declaration took, because
+everything under `ide` is lenient by design (a malformed entry is a warning and a
+dropped entry, never a load error):
+
+```sh
+veld lint                       # unknown key, dangling reference, bad variable, clamped interval
+./scripts/veld/pr-badge.sh      # run it yourself: is stdout one JSON object?
+```
+
+**Full authoring guide — worked adapters, the tone and icon vocabularies, grouping,
+and the bounds veld enforces (only the visible worktree, one child process across
+windows, 20s deadline, 24 extensions max, the `extensions.autoRefresh` switch) — follows below.** Field table: `veld skills config`.
+
+### Letting a pane resume an earlier session
+
+A pane's `resume` reopens the session *that pane* started. `ide.panes[].sessions`
+is how a project offers the ones it did not — a coding agent's earlier
+conversations, found by a script the project writes:
+
+```jsonc
+"sessions": { "label": "Resume an earlier Claude session",
+              "argv": ["scripts/veld/claude-sessions.sh"] }
+```
+
+The script prints one row per line (`value`, optionally TAB a label, optionally
+TAB a detail); clicking the pane then asks which session, with *Start fresh* as
+the first row, and the pick fills `${veld.pane.token}` in the pane's **own**
+`resume`. Print nothing and no dialog appears at all.
+
+**Before writing one, check whether the tool already has a picker** — `claude
+--resume` with no argument and `codex resume` both open their own, and a plain
+pane running that is less to maintain. **Full guide, worked adapters for Claude
+Code and Codex, the stdout contract, the value charset and the bounds veld
+enforces — is in `veld skills ide-panes`.**
+Field table: `veld skills config`.
+
+
+## Customizing the Veld IDE: `ide.extensions`
 
 Authoring reference for the badges, buttons and menus a project contributes to the
-Veld IDE's top bar. The field table is in [config.md](config.md#ideextensions); this
+Veld IDE's top bar. The field table is in `veld skills config`; this
 page is how to **decide what to write**, plus adapters you can copy.
 
 Read [Before you add one](#before-you-add-one) first. The commonest mistake is not a
@@ -171,7 +301,7 @@ while green and a number while red, or vice versa.
 
 Tooltip text this badge relies on more than a `text`-mode one is worth writing
 with line breaks (`tooltip` allows up to 400 characters and preserves `\n`) —
-see [config.md](config.md#ideextensions) for the field limits.
+see `veld skills config` for the field limits.
 
 ### `requires_bin` — and when not to use it
 
@@ -281,7 +411,7 @@ knows your provider.
 set -uo pipefail
 
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null) || branch=""
-# No branch to have a PR for. Not an error — nothing to show.
+## No branch to have a PR for. Not an error — nothing to show.
 [ -z "$branch" ] || [ "$branch" = "HEAD" ] && exit 0
 
 if ! payload=$(gh pr view "$branch" --json number,state,isDraft,url,statusCheckRollup 2>&1); then
@@ -294,7 +424,7 @@ if ! payload=$(gh pr view "$branch" --json number,state,isDraft,url,statusCheckR
   esac
 fi
 
-# …derive text/tone/href from $payload and print one JSON object.
+## …derive text/tone/href from $payload and print one JSON object.
 ```
 
 **For GitLab**, the declaration is unchanged — swap `gh` for `glab` inside the
@@ -352,7 +482,7 @@ looks like a bug:
 - The user's **`extensions.autoRefresh`** setting (default on) turns the unattended
   half off machine-wide. Actions and menus keep working — a click is the user
   asking. **There is no consent prompt**; the reasoning is in
-  `docs/extensions-vision.md`.
+  <https://github.com/prosperity-solutions/veld/blob/main/docs/extensions-vision.md>.
 
 ---
 
@@ -374,3 +504,7 @@ Two failure modes worth reproducing on purpose before you commit:
    `when_missing` rendering says something useful.
 2. **Make the script exit 1** and confirm the tooltip carries a message a colleague
    could act on.
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

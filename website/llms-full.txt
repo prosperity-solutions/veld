@@ -166,7 +166,7 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached). Given nothing to start: prompts with the preset list (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
+| `veld start [NODE:VARIANT...] --name <n> [-a]` | Start an environment. Detached by default — it returns once everything is healthy; `-a`/`--attach` stays in the foreground and streams logs (there is no `-d`). Given nothing to start: prompts with the preset list (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
 | `veld start --preset <NAME-OR-KEY>` | Start a preset by name, or by the stable key `veld presets` shows. A bare preset name as a positional does **not** work — positionals are `node:variant` selections |
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. The e2e-test / CI pattern (like `docker compose run --rm --abort-on-container-exit`). Only the terminal node's output goes to stdout unless `--all-logs`. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
@@ -183,8 +183,8 @@ veld stop --name dev
 | `veld runs [--name <n>] [--json]` | Run history: one row per execution instance (short id, started/ended, duration, outcome) |
 | `veld runs show <id> [--json]` | One run in full: outcome, what it was started from (preset or explicit selections), node exit codes, and the graph snapshot it was started with |
 | `veld runs diff <old> <new> [--json]` | Config diff between two runs (nodes added/removed, command/cwd/env/url changes); one id diffs against its predecessor |
-| `veld feedback [--name <n>]` | Open feedback UI for a run |
-| `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
+| `veld feedback threads [--name <n>]` | List this run's feedback threads |
+| `veld feedback next [--wait] [--timeout <s>] [--name <n>] [--json]` | The next item to work on (agent-facing, no cursor). `--wait` blocks up to `--timeout` (240s) and then returns `result: "timeout"` — call it again; `"ended"` means the reviewer clicked Done |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command). `--web`: publish via the configured gateway and print public URLs (password-protected by default) |
 | `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved). `--no-remember`: don't cache a relay auth token entered at the prompt |
 | `veld shares [--json]` | List active shares, joins, and pending join requests; each live tunnel shows its transport (`direct`, or `relayed via <relay>` + RTT) |
@@ -205,8 +205,9 @@ veld stop --name dev
 | `veld backup now [--dir D] [--json]` | Take a copy immediately, outside the daemon's schedule. Retention still applies |
 | `veld backup restore [PATH] [--dir D] [--force] [-y] [--json]` | Put a copy back. With no `PATH`, the newest **usable** one rather than simply the newest file. The database being replaced is renamed, never deleted. Refuses while the daemon is running unless `--force` |
 | `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
+| `veld skills [TOPIC] [--json]` | Veld's own agent documentation, carried by the binary. No topic lists the thirteen; a topic prints it. Works with no project, no config and no daemon |
 
-All commands support `--json` for structured output, making veld scriptable and CI/agent-friendly.
+Most commands take `--json` for structured output, making veld scriptable and CI/agent-friendly. The exceptions are the ones with nothing to serialise (`graph`, `init`, `gc`, `ui`, `version`, `uninstall`, `open-url`); `veld update --json` needs `--status` alongside it.
 
 ---
 
@@ -267,8 +268,8 @@ veld includes a built-in feedback overlay for human-AI collaboration. When an AI
 
 | Command | Description |
 |---------|-------------|
-| `veld feedback [--name <n>]` | Open feedback UI for a run |
-| `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (designed for agent tool-use loops) |
+| `veld feedback threads [--name <n>]` | List this run's feedback threads |
+| `veld feedback next [--wait] [--timeout <s>] [--name <n>] [--json]` | The next item to work on (agent-facing, no cursor). `--wait` blocks up to `--timeout` (240s) and then returns `result: "timeout"` — call it again; `"ended"` means the reviewer clicked Done |
 
 ### Feedback API
 
@@ -854,11 +855,22 @@ Veld ships skills for AI coding agents. Install them so your agent knows how to 
 npx skills add prosperity-solutions/veld
 ```
 
-This installs three skills:
+This installs two skills:
 
-- **veld-config** — Write and edit `veld.json` configuration files (nodes, health checks, dependencies, URL templates, presets)
-- **veld-feedback** — Human-in-the-loop feedback workflow (request reviews, read structured comments with element selectors and component traces, iterate)
-- **veld-usage** — CLI reference for agents (start, stop, logs, status, feedback, and all other commands)
+- **veld** — the general one: CLI usage, `veld.json` configuration, IDE customization, and the human-in-the-loop feedback workflow
+- **veld-launch-feedback-loop** — parks an agent on `veld feedback next` to work in-browser review comments one at a time
+
+Both are **pointers, a few kilobytes each**. The documentation lives in the veld binary and is served by `veld skills`, so an agent reads the docs for the veld actually installed rather than for whichever version was current when the skill was added — which is also why the skills never need re-adding.
+
+```sh
+veld skills              # the index: thirteen topics, one line each
+veld skills basics       # the command surface and the traps
+veld skills config       # the full veld.json reference, when authoring one
+```
+
+Nothing loads up front. Project state is fetched the same way, when a question needs it: `veld presets`, `veld nodes`, `veld status`.
+
+Reading this without a veld installed? The thirteen topic documents are in the repository at `crates/veld/src/commands/skills/` — `basics.md` is the one to start with. They describe whatever veld is on `main`, which is the caveat `veld skills` exists to remove.
 
 Works with Claude Code, Cursor, Codex, Windsurf, Cline, GitHub Copilot, and [40+ more agents](https://github.com/vercel-labs/skills#supported-agents).
 

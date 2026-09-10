@@ -564,7 +564,7 @@ fn print_json(
             });
             if include_processes {
                 // Always an array once `--processes` was passed, even when empty:
-                // the agent-facing contract in skills/veld/SKILL.md says the key
+                // the agent-facing contract in the `outputs` skill topic says the key
                 // is there, and a node whose per-process rows aged out of the
                 // shorter retention window would otherwise make
                 // `node.processes.length` throw rather than read 0.

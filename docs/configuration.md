@@ -4050,26 +4050,26 @@ veld start --preset fullstack --name my-feature
 3. `backend:local` starts next -- Veld allocates a port, injects `${nodes.database.DATABASE_URL}` into the env, and waits for `/health` to return 200.
 4. `frontend:local` and `admin:local` start in parallel -- both depend only on `backend:local`, which is now healthy.
 5. Each service gets a stable HTTPS URL like `https://frontend.my-feature.my-project.localhost`.
-6. In a terminal (TTY), logs from all services stream in real-time. Press Ctrl+C to stop all services.
+6. `veld start` returns once everything is healthy; the environment keeps running. Add `--attach` from a terminal to stay in the foreground and stream every node's logs, with Ctrl+C stopping the lot.
 
-### Foreground vs Detached Mode
+### Detached vs Foreground Mode
 
-By default, `veld start` runs in **foreground mode** when invoked from a terminal: after starting all services, it streams logs from all nodes (like `docker compose up`) and stops the environment on Ctrl+C.
+**`veld start` detaches.** It brings the environment up, prints where to find it, and exits, leaving the services running (like `docker compose up -d`). There is no `--detach` / `-d` flag, because there is nothing to opt into.
 
-Use `--detach` / `-d` to start in the background (like `docker compose up -d`):
+Use `--attach` / `-a` for the other behaviour — stay in the foreground, stream every node's logs, and stop the environment on Ctrl+C:
 
 ```sh
-# Foreground (default in TTY) — streams logs, Ctrl+C stops everything
+# Detached (the default) — starts and exits, services keep running
 veld start --preset fullstack --name my-feature
 
-# Detached — starts and exits immediately
-veld start --preset fullstack --name my-feature -d
+# Foreground — streams logs, Ctrl+C stops everything
+veld start --preset fullstack --name my-feature --attach
 
-# View logs later
+# View logs later, either way
 veld logs -f
 ```
 
-When not running in a terminal (e.g. piped or in a script), `veld start` always detaches automatically.
+`--attach` needs a terminal. Piped or in a script it is ignored and the run detaches as usual, so a CI job never hangs waiting on a stream nobody reads.
 
 ### One-off runs (`--oneshot`)
 

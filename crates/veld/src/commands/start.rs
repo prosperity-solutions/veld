@@ -63,12 +63,18 @@ pub async fn run(
                 // absence is meaningful — this run did not come from a preset.
                 Ok(resolved) => (resolved, None),
                 Err(e) => {
-                    output::print_error(&format!("{e}"), false);
+                    output::print_error(
+                        &with_preset_hint(&format!("{e}"), &selections, &config),
+                        false,
+                    );
                     return 1;
                 }
             },
             Err(e) => {
-                output::print_error(&format!("{e}"), false);
+                output::print_error(
+                    &with_preset_hint(&format!("{e}"), &selections, &config),
+                    false,
+                );
                 return 1;
             }
         }
@@ -1018,6 +1024,61 @@ fn expand_and_resolve(name: &str, config: &VeldConfig) -> Option<Vec<NodeSelecti
 /// What to say when `--preset` names nothing. Lists what *is* available, keys
 /// included, because the next thing the reader needs is the thing they should
 /// have typed.
+/// Append the `--preset` correction when a rejected selection token is in fact a
+/// preset of this project.
+///
+/// This is the single most common thing a coding agent gets wrong about veld, and
+/// the docs are not the reason: every example in the repo already writes
+/// `--preset`. The failure is a prior — `docker compose up <service>`,
+/// `npm run <script>`, `just <recipe>` all take the thing you want as a
+/// positional — and no amount of documentation reaches an agent that never had
+/// the question. The error message does, because it arrives exactly when the
+/// belief is wrong and nowhere else.
+///
+/// It matches by **name only**, never by the printed key: a key is a small
+/// integer, `veld start 2` is not a plausible thing to have meant, and a node
+/// legitimately called `1` would otherwise be told it is a preset.
+///
+/// **The rejected alternative is accepting it** — resolving a bare token as a
+/// preset when no node bears the name. It costs one fewer round trip and it was
+/// not chosen, for two reasons worth keeping. Node and preset are separate
+/// namespaces that veld does not otherwise merge, so a project that later adds a
+/// node named after a preset would silently change what an existing command
+/// starts. And the run records *what it was started from* (`origin_preset`,
+/// above): a preset reached through the positional path would have to either
+/// lose that provenance or acquire it by a second guess, and `veld runs show`
+/// exists to answer exactly that question. One failed invocation, once, is the
+/// cheaper side of that trade.
+fn with_preset_hint(message: &str, selections: &[String], config: &VeldConfig) -> String {
+    let presets = veld_core::presets::resolve(config);
+    // The node half of `node:variant`, so `dev-headless:local` is caught too — a
+    // preset name with a variant appended is the same misunderstanding one step on.
+    //
+    // **A token that names a real node is skipped, even if a preset shares the
+    // name.** Nothing forbids that overlap and `veld lint` passes a config with
+    // both; without this guard, `veld start api web:nosuchvariant` — which fails
+    // on `web` — would accuse `api` of being a preset and point at a command that
+    // starts something else entirely. The hint scans every selection because the
+    // error does not say which token it came from, so the node check is what keeps
+    // that scan from convicting the innocent one.
+    let hit = selections.iter().find_map(|token| {
+        let node = token.split(':').next().unwrap_or(token);
+        if config.nodes.contains_key(node) {
+            return None;
+        }
+        presets.iter().find(|p| p.name == node)
+    });
+    match hit {
+        Some(p) => format!(
+            "{message}\n\n  `{}` is a preset, not a node. Presets go behind the flag:\n    \
+             veld start --preset {}",
+            output::one_line(&p.name),
+            output::one_line(&p.name),
+        ),
+        None => message.to_owned(),
+    }
+}
+
 fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
     let available = veld_core::presets::resolve(config);
     if available.is_empty() {
@@ -1720,4 +1781,113 @@ fn find_non_localhost_domains(
     }
 
     offenders
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_preset_hint;
+    use std::io::Write;
+
+    fn config_with_a_preset() -> veld_core::config::VeldConfig {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("veld.json");
+        let mut f = std::fs::File::create(&path).expect("create");
+        f.write_all(
+            br#"{
+              "schemaVersion": "3",
+              "name": "hinted",
+              "nodes": {
+                "api": {
+                  "default_variant": "local",
+                  "variants": { "local": { "type": "command", "shell": "true" } }
+                }
+              },
+              "presets": { "dev-headless": { "selections": ["api:local"] } }
+            }"#,
+        )
+        .expect("write");
+        // The parse has to happen before `dir` goes out of scope — a `TempDir`
+        // deletes its tree on drop, and the failure that produces is a
+        // file-not-found from a path the test can see right there in the source.
+        let config = veld_core::config::parse_config(&path).expect("parse");
+        drop(dir);
+        config
+    }
+
+    /// The correction is the whole point of the function — an agent that reached
+    /// here believes presets are positional, and only this message is in front of
+    /// it at the moment the belief is wrong.
+    #[test]
+    fn a_preset_used_as_a_positional_is_named_as_one() {
+        let config = config_with_a_preset();
+        let out = with_preset_hint(
+            "unknown node \"dev-headless\"",
+            &["dev-headless".to_owned()],
+            &config,
+        );
+        assert!(out.contains("is a preset, not a node"), "{out}");
+        assert!(out.contains("veld start --preset dev-headless"), "{out}");
+        // The original diagnostic survives: the hint adds, it does not replace.
+        assert!(out.contains("unknown node"), "{out}");
+    }
+
+    /// `dev-headless:local` is the same misunderstanding one step further on, and
+    /// the node half is what has to be matched.
+    #[test]
+    fn a_preset_with_a_variant_appended_is_caught_too() {
+        let config = config_with_a_preset();
+        let out = with_preset_hint("boom", &["dev-headless:local".to_owned()], &config);
+        assert!(out.contains("is a preset, not a node"), "{out}");
+    }
+
+    /// A node and a preset may legally share a name, and then the node wins: the
+    /// token was used correctly and the failure is about some other selection.
+    #[test]
+    fn a_real_node_is_never_accused_of_being_a_preset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            br#"{
+              "schemaVersion": "3",
+              "name": "collide",
+              "nodes": {
+                "api": {
+                  "default_variant": "local",
+                  "variants": { "local": { "type": "command", "shell": "true" } }
+                },
+                "web": {
+                  "default_variant": "local",
+                  "variants": { "local": { "type": "command", "shell": "true" } }
+                }
+              },
+              "presets": { "api": { "selections": ["web:local"] } }
+            }"#,
+        )
+        .expect("write");
+        let config = veld_core::config::parse_config(&path).expect("parse");
+        drop(dir);
+
+        // `web:nosuchvariant` is what failed; `api` is a node used correctly and
+        // must not be rewritten into `veld start --preset api`, which starts
+        // something else.
+        let out = with_preset_hint(
+            "unknown variant \"nosuchvariant\"",
+            &["api".to_owned(), "web:nosuchvariant".to_owned()],
+            &config,
+        );
+        assert_eq!(out, "unknown variant \"nosuchvariant\"", "{out}");
+    }
+
+    /// A genuinely unknown node must not be told it is a preset, and a numeric
+    /// token must not match a preset's printed key — `veld start 2` is not a
+    /// plausible thing to have meant, and a node called `1` would be slandered.
+    #[test]
+    fn an_unrelated_token_is_left_alone() {
+        let config = config_with_a_preset();
+        for token in ["typo", "1", "api"] {
+            let out = with_preset_hint("boom", &[token.to_owned()], &config);
+            assert_eq!(out, "boom", "token `{token}` should not produce a hint");
+        }
+    }
 }
