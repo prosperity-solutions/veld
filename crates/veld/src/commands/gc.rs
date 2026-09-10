@@ -89,10 +89,31 @@ pub async fn run() -> i32 {
                 // crashed (no-ops if an ender moved it to `stopping` first).
                 let mut dead_node: Option<String> = None;
                 for (key, node) in run.nodes.iter_mut() {
-                    if node.pid.take().is_some() && dead_node.is_none() {
-                        dead_node = Some(key.clone());
+                    // Only a node that actually spawned gets relabelled, which
+                    // is a change from the unconditional write this replaces.
+                    // Two reasons, and the second is the load-bearing one.
+                    //
+                    // `Failed`, not `Stopped`: `Stopped` is the per-node
+                    // teardown ledger (`orchestrator::teardown_pending`) and
+                    // this sweep runs no `on_stop` hook. Writing it here would
+                    // tell the next `veld start`'s sweep that a teardown which
+                    // never happened already had, stranding the container the
+                    // hook exists to remove. Hooks for a run reaped here run on
+                    // the next `veld start` for its project.
+                    //
+                    // And *only* the spawned ones, because the same ledger reads
+                    // `Failed` as "owes a hook". Relabelling a `Pending` node —
+                    // one that never ran anything — would have that sweep run a
+                    // teardown for a resource no process ever created. The old
+                    // unconditional `Stopped` was harmless precisely because
+                    // nothing read the value; now something does. This matches
+                    // the daemon's own orphan sweep (`veld-daemon/src/gc.rs`).
+                    if node.pid.take().is_some() {
+                        if dead_node.is_none() {
+                            dead_node = Some(key.clone());
+                        }
+                        node.status = NodeStatus::Failed;
                     }
-                    node.status = NodeStatus::Stopped;
                 }
                 let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
                 let detail = veld_core::state::EndDetail {

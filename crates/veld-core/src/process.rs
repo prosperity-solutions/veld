@@ -950,6 +950,21 @@ pub async fn run_command(
 /// number is eligible for reuse. Record measurements against it — never store
 /// it, never signal it, and never persist it as node state (see
 /// [`crate::stats::StepObserver`] for why that distinction is load-bearing).
+///
+/// **One carve-out: a caller that abandons this future may signal the PID.**
+/// The teardown-hook paths in `orchestrator` wrap this call in
+/// `tokio::time::timeout` and, on expiry, kill what the callback handed them.
+/// That is sound for the one reason that makes it sound: the timeout *drops*
+/// this future rather than letting it return, so the child is never awaited and
+/// never reaped, and the number therefore cannot have been recycled. A caller
+/// that lets this function return and *then* signals the PID is doing the thing
+/// the paragraph above forbids.
+///
+/// Note also that the child is spawned in **veld's own process group**, so a
+/// `kill` against that PID reaches the direct child only — for a `shell` hook,
+/// the `sh` and not the `docker` it launched. Enough to unblock teardown, which
+/// is what the timeout is for; not a guarantee that everything the hook started
+/// is gone.
 pub async fn run_command_observed(
     command: &CommandSpec,
     working_dir: &Path,

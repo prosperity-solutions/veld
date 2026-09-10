@@ -222,7 +222,12 @@ pub(crate) async fn run_gc_pass(
                         if dead_node.is_none() {
                             dead_node = Some(key.clone());
                         }
-                        node.status = veld_core::state::NodeStatus::Stopped;
+                        // `Failed`, not `Stopped` — same reason as the monitor's
+                        // confirm pass. `Stopped` is the per-node teardown
+                        // ledger (`orchestrator::teardown_pending`), and this
+                        // sweep runs no hook; claiming otherwise would strand
+                        // the container the hook exists to remove.
+                        node.status = veld_core::state::NodeStatus::Failed;
                     }
                 }
 
@@ -236,8 +241,19 @@ pub(crate) async fn run_gc_pass(
                     failed_node: dead_node,
                     ..Default::default()
                 };
-                let _ = db.finalize_crashed(&run.run_id, Some(&detail));
+                let crashed = db
+                    .finalize_crashed(&run.run_id, Some(&detail))
+                    .unwrap_or(false);
                 summary.orphans_killed += 1;
+
+                // Delegate the teardown, exactly as the monitor does — see the
+                // long note there for why it is delegated rather than run
+                // in-process, and why the guarded finalize is what stops two
+                // detectors both spawning one.
+                if crashed {
+                    crate::feedback_server::management::delegate_teardown(&project_root, run_name)
+                        .await;
+                }
             }
         }
     }
@@ -248,7 +264,7 @@ pub(crate) async fn run_gc_pass(
     // alive, then finalize with the intent `begin_ending` stored.
     let stopping_cutoff = chrono::Utc::now() - chrono::Duration::seconds(STOPPING_GRACE_SECS);
     if let Ok(stale) = db.stale_stopping_runs(stopping_cutoff) {
-        for (_project_root, _project_name, run) in stale {
+        for (project_root, _project_name, run) in stale {
             let run_name = run.name.clone();
             info!("finalizing stale 'stopping' run '{run_name}' (ender gone)");
             for (key, node) in &run.nodes {
@@ -272,6 +288,15 @@ pub(crate) async fn run_gc_pass(
             if db.finalize_run(&run.run_id).unwrap_or(false) {
                 summary.orphaned_runs.push(run.run_id);
                 summary.stale_removed += 1;
+                // This is the "ender died mid-teardown" case, so *some* of this
+                // run's nodes may already have run their hooks and some may
+                // not. Delegating is safe precisely because the ledger is per
+                // node and was persisted as each hook returned: the delegate
+                // resumes where the dead stopper stopped instead of starting
+                // over. Guarded by `finalize_run` returning true, so a second
+                // GC pass over the same run spawns nothing.
+                crate::feedback_server::management::delegate_teardown(&project_root, &run_name)
+                    .await;
             }
         }
     }

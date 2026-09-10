@@ -1750,7 +1750,7 @@
               "type": "null"
             }
           ],
-          "description": "Default teardown hook for every variant of this node, run in reverse dependency order during `veld stop`. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine. It receives every ${veld.*} the node itself had, the URL family and named ports included, so a resource named after the same built-ins in argv and here cannot drift."
+          "description": "Default teardown hook for every variant of this node, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine. It receives every ${veld.*} the node itself had, the URL family and named ports included, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"
@@ -1843,7 +1843,7 @@
               "type": "null"
             }
           ],
-          "description": "Teardown, run in reverse dependency order during `veld stop`. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it. It receives every ${veld.*} this variant had at start — for a start_server that includes ${veld.url}, ${veld.url.*} and ${veld.ports.*} — plus ${output.KEY} and ${vars.*}, so a resource named after the same built-ins in argv and here cannot drift."
+          "description": "Teardown, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it. It receives every ${veld.*} this variant had at start — for a start_server that includes ${veld.url}, ${veld.url.*} and ${veld.ports.*} — plus ${output.KEY} and ${vars.*}, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"

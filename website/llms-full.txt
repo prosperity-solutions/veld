@@ -467,7 +467,7 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 
 Project-level lifecycle steps that run outside the dependency graph. Not nodes — no variants, no health checks, no outputs.
 
-**Setup** runs sequentially before any node. Non-zero exit aborts startup. **Teardown** runs after all nodes stop (after per-node `on_stop` hooks). Best-effort.
+**Setup** runs sequentially before any node. Non-zero exit aborts startup. **Teardown** runs after all nodes stop (after per-node `on_stop` hooks), whenever the run ends and not only on `veld stop`. Best-effort, and a step is killed after 30s so a hang cannot hold the run open either.
 
 ```json
 "setup": [
@@ -774,7 +774,7 @@ selections provided".
 | Field | Type | Applies To | Description |
 |-------|------|------------|-------------|
 | `argv` / `shell` | array / string | All | What to run — exactly one. `argv` is spawned directly (no shell, no word splitting); `shell` runs via `sh -c`. Interpolation in an `argv` runs per element after the array is fixed, so a value containing spaces can never change the argument count |
-| `on_stop` | object | All | Teardown command (`{"argv": …}` / `{"shell": …}`) on `veld stop`. Declarable at node level; a variant erases an inherited hook with `"on_stop": null` |
+| `on_stop` | object | All | Teardown command (`{"argv": …}` / `{"shell": …}`) run whenever the run ends — `veld stop`, a node crash, a start that aborted, a run replaced by a new start, or (when veld itself was killed) the next `veld start` for that project. At most once per teardown pass (passes can overlap, so keep it idempotent); a failure or timeout is not retried; killed after 30s if it hangs. Declarable at node level; a variant erases an inherited hook with `"on_stop": null` |
 | `skip_if` | object | `command` only | Idempotency check (exit 0 = skip), as `{"argv": …}` / `{"shell": …}`. Alias: `verify` |
 | `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |

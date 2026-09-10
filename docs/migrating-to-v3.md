@@ -428,6 +428,31 @@ ports at all, `protocol` and `host` on a named port, the `settle` readiness prob
 and per-port sharing consent. All of it is additive *within* `schemaVersion: "3"`:
 there is no v4, and no config that loads today stops loading tomorrow.
 
+### `on_stop` now runs when a run *ends*, not only when it is stopped
+
+Not a migration, and it applies to a v1 or v2 config exactly as it does to v3 —
+worth reading anyway if you have a container node, because it changes what your
+existing hook does. `on_stop` used to be wired to `veld stop` alone: a run that
+crashed, a start that failed and aborted, and a run replaced by a new start all
+killed processes and cleaned up routes without running a single hook. So the
+container a node started outlived its run, and because the name usually
+interpolates `${veld.run}` — the *environment* name, not a per-run id — the next
+`veld start` failed with `container … already exists` until somebody removed it
+by hand.
+
+All of those paths now run the hook, and when veld itself was killed outright
+(so nothing could run anything at the time) the next `veld start` for that
+project runs it before creating anything of its own. A node's hook runs at most
+once per teardown pass: an interrupted teardown is resumed, not restarted,
+though two passes of one run can overlap, so keep hooks idempotent. Two smaller
+changes ride along — a node that never became *healthy* still runs its hook if it
+got as far as spawning, since that is the node whose container is left behind;
+and a hook or `teardown` step that hangs is killed after 30 seconds instead of
+holding the run open forever.
+
+Nothing to do. If your hook was written defensively (`rm --force`, errors
+swallowed) it will now simply be called in the cases it was always meant for.
+
 ### Telling your team something changed
 
 `ide.news[]` is new: a short card your project shows its own team in the Veld IDE,
