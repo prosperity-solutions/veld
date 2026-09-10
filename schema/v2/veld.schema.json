@@ -76,7 +76,7 @@
     },
     "teardown": {
       "type": "array",
-      "description": "Steps that run sequentially after all nodes stop (after per-node on_stop hooks). Best-effort: failures are logged but do not block the stop operation. Commands should be idempotent.",
+      "description": "Steps that run sequentially after all nodes stop (after per-node on_stop hooks). Best-effort: failures are logged but do not block the stop operation, and a step is killed after 30s so a hang cannot either. Commands should be idempotent.",
       "items": {
         "$ref": "#/$defs/SetupStep"
       }
@@ -260,7 +260,7 @@
         },
         "on_stop": {
           "type": "string",
-          "description": "Teardown command to run when the environment is stopped. Executed in reverse dependency order. Supports Veld variable substitution."
+          "description": "Teardown command, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. Supports Veld variable substitution."
         },
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",

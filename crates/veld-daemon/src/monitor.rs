@@ -207,10 +207,20 @@ async fn scan_and_update(
                 }
                 // Confirm pass; unconfirmed PIDs stay recorded so the GC
                 // straggler sweep keeps covering them.
+                //
+                // `Failed`, **not** `Stopped`. `Stopped` is the per-node
+                // teardown ledger (`orchestrator::teardown_pending`): it says
+                // the node's `on_stop` hook has run. This detector runs no
+                // hook — it labels a run and delegates the teardown below — so
+                // writing `Stopped` here would tell the delegate, and every
+                // later sweep, that a teardown which never happened already
+                // had, and the container the hook exists to remove would be
+                // left behind for good. `Failed` is also the more honest label
+                // for a node whose process died under it.
                 for node in run.nodes.values_mut() {
                     if let Some(pid) = node.pid {
                         if !is_process_alive(pid) {
-                            node.status = veld_core::state::NodeStatus::Stopped;
+                            node.status = veld_core::state::NodeStatus::Failed;
                             node.pid = None;
                         }
                     }
@@ -239,6 +249,13 @@ async fn scan_and_update(
                     });
                     broadcaster.broadcast(&event).await;
                     changes += 1;
+
+                    // Delegate the teardown — see
+                    // `management::delegate_teardown` for why it is a delegate
+                    // and not an in-process hook run. `finalize_crashed` above
+                    // is the election that keeps it to one spawn per crash.
+                    crate::feedback_server::management::delegate_teardown(project_root, run_name)
+                        .await;
                 }
                 continue; // Skip liveness checks for a run that just ended.
             }

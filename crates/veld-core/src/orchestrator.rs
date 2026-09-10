@@ -174,6 +174,109 @@ fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -
     }
 }
 
+/// How long one `on_stop` hook — or one project `teardown` step — may run
+/// before teardown gives up on it, kills it, and ends the run anyway.
+///
+/// A teardown hook is the last thing between a run and history, so a hook that
+/// never returns is a run that never *ends*: it sits in `stopping` with its
+/// PIDs already dead, `veld start` refuses the name, and the user's only way
+/// out is to SIGKILL the stopper — which then loses every hook the loop had
+/// not reached yet. `process::run_command` waits for the child unconditionally,
+/// so before this bound the failure was reachable from an ordinary `veld stop`
+/// against a container runtime that had stopped answering.
+///
+/// 30s is measured against the slow-but-real case this exists for — a
+/// `docker rm --force` / `container rm --force` against a runtime that is
+/// itself still starting — not against a hook doing real work. Teardown is not
+/// where a long job belongs.
+///
+/// One budget covers both a node hook and a project `teardown` step, so there
+/// is deliberately **no** escape hatch for a slower one: a step is bounded by
+/// this same constant. If a real runtime turns out to need longer, the answer
+/// is a config field and a docs pass, not a second constant that only one of
+/// the two paths reads.
+///
+/// Shortened under `cfg(test)` so the hang is testable at all: the property
+/// worth pinning is "teardown gives up and keeps going", and a suite that had
+/// to wait the production budget to observe it would not pin it. Still far
+/// longer than any hook a test actually runs (a `printf`, in milliseconds), so
+/// no other test can be made flaky by it.
+#[cfg(not(test))]
+const TEARDOWN_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[cfg(test)]
+const TEARDOWN_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a node still owes its `on_stop` hook.
+///
+/// **This is the per-node teardown ledger, and `NodeStatus::Stopped` is the
+/// record.** `Stopped` means "this node's teardown has been *attempted*"; it is
+/// persisted the moment each hook returns (by [`Db::mark_node_torn_down`],
+/// which writes that column and nothing else) rather than with the rest of the
+/// run once the loop finishes.
+///
+/// **Attempted, not necessarily succeeded, and that is deliberate.** A hook
+/// that exits non-zero, or that hangs and is killed at
+/// `TEARDOWN_HOOK_TIMEOUT`, is still recorded — so nothing retries it. The
+/// alternative is worse: a hook against a permanently wedged runtime would be
+/// retried by every later `veld start` for the project, taxing each one by the
+/// full timeout and never succeeding. Teardown is best-effort, and veld says so
+/// loudly on the stream the user reads when a hook is skipped or killed; what a
+/// failed hook left behind is the user's to remove. Retry-on-failure would be a
+/// design change, not a bug fix, and it needs somewhere to record *why* a hook
+/// failed before it could decide whether retrying is sane. That timing is the whole point: a
+/// ledger written only at the end records nothing about a teardown that died in
+/// the middle, which is precisely the case it exists for — a stopper SIGKILLed
+/// after tearing down two of five nodes, resumed later by the daemon's
+/// stale-`stopping` reaper or by the next `veld stop`.
+///
+/// `Pending` is skipped because it never ran and has nothing to tear down.
+/// Everything else owes a hook — `Failed` included, since a node that spawned a
+/// container and *then* failed its health check is exactly the node whose
+/// container is left behind. `Skipped` is left in deliberately: it was already
+/// covered by the `!= Pending` rule this replaces, and narrowing it here would
+/// be an unrelated behaviour change smuggled into a leak fix.
+fn teardown_pending(node_state: &NodeState) -> bool {
+    !matches!(node_state.status, NodeStatus::Pending | NodeStatus::Stopped)
+}
+
+/// Every node's recorded outputs, keyed by node name, rebuilt so a stop-time
+/// `${nodes.<node>.<field>}` reference resolves from persisted state.
+///
+/// `NodeState.outputs` alone holds only `ports.<name>`, so the bare
+/// `${nodes.X.port}` a teardown is most likely to reference — plus the `url`
+/// pieces, `hosts.<name>` and `urls.<name>` families — has to be rebuilt here
+/// from the same accessors the start path published per node. The node a hook
+/// names may already be torn down by the time the hook runs; its recorded
+/// outputs are exactly what teardown needs.
+fn rehydrated_node_outputs(run: &RunState) -> HashMap<String, HashMap<String, String>> {
+    run.nodes
+        .values()
+        .map(|ns| {
+            let mut out = ns.outputs.clone();
+            if let Some(port) = ns.port {
+                out.insert("port".to_owned(), port.to_string());
+            }
+            if let Some(url) = &ns.url {
+                for (key, value) in url_builtins(url) {
+                    out.insert(key.to_owned(), value);
+                }
+            }
+            for (name, endpoint) in ns.endpoints_or_legacy() {
+                out.insert(
+                    format!("hosts.{name}"),
+                    url::hostname_of_url(&endpoint.hostname).to_owned(),
+                );
+                if let Some(url) = &endpoint.url {
+                    for (key, value) in port_url_builtins(&name, url) {
+                        out.insert(key, value);
+                    }
+                }
+            }
+            (ns.node_name.clone(), out)
+        })
+        .collect()
+}
+
 /// Context values every URL template can interpolate, gathered once per start.
 ///
 /// Gathered before anything is torn down, because the hostnames derived from it
@@ -1314,7 +1417,7 @@ impl Orchestrator {
 
         // Clean up any runs whose processes have all died. This catches
         // orphaned runs from previous sessions (crash, kill -9, etc.).
-        self.cleanup_dead_runs().await;
+        self.cleanup_dead_runs(run_name).await;
 
         // Clean up any stale run with the same name (kills processes, removes
         // DNS/Caddy routes, clears state). This handles the case where a
@@ -1422,18 +1525,36 @@ impl Orchestrator {
         // Run project-level setup steps before the graph executes. A setup
         // failure happens before the run is persisted, so record it as
         // `failed` history directly — this run never held the live slot.
+        //
+        // Seeded with whatever the pre-start teardown sweeps already resolved
+        // for *this* run name, rather than an empty map. `cleanup_dead_runs`
+        // and `cleanup_stale_run` run above and now execute `on_stop` hooks, so
+        // a `${vars.*}` those hooks named has already been resolved once in
+        // this process. Passing it in is what keeps the rule this cache exists
+        // for — "a var is resolved once per run, because two readings of a
+        // rotating credential would disagree" — true across the new teardown
+        // work, and stops a side-effecting `command` source running twice in
+        // one `veld start`.
+        let already: HashMap<String, String> =
+            if self.resolved_vars_run.as_deref() == Some(run_name) {
+                self.resolved_vars.as_deref().cloned().unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
         let setup_result = match crate::values::resolve_vars(
             self.config.vars.as_ref(),
             &self.var_overrides,
             Some(&self.project_root),
             &vars_ctx,
             &config::vars_for_setup(&self.config),
-            &HashMap::new(),
+            &already,
         )
         .await
         {
             Ok(vars) => {
-                self.resolved_vars = Some(Arc::new(vars));
+                let mut merged = already;
+                merged.extend(vars);
+                self.resolved_vars = Some(Arc::new(merged));
                 self.resolved_vars_run = Some(run_name.to_owned());
                 self.run_setup_steps(run_name, Some(run.run_id)).await
             }
@@ -1783,16 +1904,45 @@ impl Orchestrator {
             // stale-`stopping` reaper re-kills and finalizes it later, so
             // leak-freedom never depends on the label.
             let detail = end_detail_for_error(&e);
-            if let Ok(Some(persisted)) = self.db.get_run(&self.project_root, run_name) {
+            if let Ok(Some(mut persisted)) = self.db.get_run(&self.project_root, run_name) {
                 if persisted.run_id == run.run_id {
                     let _ = self
                         .db
                         .begin_ending(&run.run_id, EndReason::Failed, Some(&detail));
                     let pids: Vec<u32> = persisted.nodes.values().filter_map(|ns| ns.pid).collect();
                     let confirmed = pids.is_empty() || kill_and_confirm(&pids).await;
-                    // Routes for anything that spawned far enough to get one.
-                    for (key, ns) in &persisted.nodes {
+                    // Routes for anything that spawned far enough to get one,
+                    // before the hooks, matching the order `stop` uses.
+                    for ns in persisted.nodes.values() {
                         self.remove_node_routes(run_name, ns).await;
+                    }
+
+                    // Then the hooks the nodes that *did* come up still owe.
+                    // A failed start is the leak's worst shape: the node whose
+                    // container came up is often the one whose sibling then
+                    // failed its health check, so aborting here without a
+                    // teardown leaves the container behind and makes the retry
+                    // — the very next thing the user types — fail on the name.
+                    //
+                    // **Before the `clear_node_pid` loop below**, and that
+                    // ordering is load-bearing rather than tidy. A recorded PID
+                    // is the only evidence that a node had a process at all, and
+                    // `reap_pending_teardown` reads it to decide whether this
+                    // node's process outlived its kill — the one case where the
+                    // PID must stay recorded so the GC straggler sweep keeps
+                    // covering it. Clear it first and that decision is made
+                    // against a node that looks like it never spawned, so a
+                    // survivor stops being anybody's job.
+                    //
+                    // (Until earlier in this same change, `clear_node_pid` also
+                    // wrote `status = 'stopped'` — the teardown ledger — which
+                    // made the ordering critical for a second reason: clearing
+                    // first claimed a teardown that had not happened. It writes
+                    // only the PID now, and `Db::mark_node_torn_down` is the
+                    // ledger's sole writer.)
+                    self.reap_pending_teardown(run_name, &mut persisted).await;
+
+                    for (key, ns) in &persisted.nodes {
                         if confirmed && ns.pid.is_some() {
                             // Confirmed dead — a recorded PID under an ended
                             // run means "possibly alive" to the GC straggler
@@ -2302,6 +2452,23 @@ impl Orchestrator {
 
         if !run.is_live() {
             // Latest run already ended — it is history now, never deleted here.
+            //
+            // But a run that ended *abnormally* still owes its `on_stop` hooks:
+            // every crash detector labels the run and cleans up routes, and
+            // none of them run a hook. Until this branch did, `veld stop` on a
+            // crashed environment removed its routes and left every container
+            // it had started running — so the reported symptom was an
+            // environment that stayed unstartable with no veld command that
+            // could fix it. Reaping here is what makes `veld stop` the cleanup
+            // tool it already claims to be, and it is the entry point the
+            // daemon's detectors delegate into.
+            //
+            // Safe on a terminal run because the ledger is per node and
+            // persisted by a write that does not go through `save_run` (which
+            // refuses terminal runs): a node whose hook already ran is
+            // `Stopped` and is skipped, so this resumes a teardown rather than
+            // repeating one.
+            self.reap_pending_teardown(run_name, &mut run).await;
             // Teardown steps still run so a re-stop stays a cleanup tool.
             self.ensure_stop_vars(run_name, Some(run.run_id), &[]).await;
             self.run_teardown_steps(run_name, Some(run.run_id)).await;
@@ -2347,47 +2514,10 @@ impl Orchestrator {
             run.execution_order.clone()
         };
 
-        // Snapshot every node's recorded outputs so a stop-time
+        // Every node's recorded outputs, so a stop-time
         // `${nodes.<node>.<field>}` reference — e.g. the dev-daemon's port a
-        // wrapper hook must forget — resolves from persisted state. The node it
-        // names may already be stopped by the time the referencing hook runs,
-        // but its recorded outputs are exactly what teardown needs.
-        //
-        // Rebuild the same accessors the start path published per node
-        // (`port`, `ports.<name>`, `url` + pieces, `hosts.<name>`, `urls.<name>`)
-        // from each persisted state, because `NodeState.outputs` alone holds
-        // only `ports.<name>` — the bare `${nodes.X.port}` a teardown is most
-        // likely to reference is a separate field.
-        let all_node_outputs: std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, String>,
-        > = run
-            .nodes
-            .values()
-            .map(|ns| {
-                let mut out = ns.outputs.clone();
-                if let Some(port) = ns.port {
-                    out.insert("port".to_owned(), port.to_string());
-                }
-                if let Some(url) = &ns.url {
-                    for (key, value) in url_builtins(url) {
-                        out.insert(key.to_owned(), value);
-                    }
-                }
-                for (name, endpoint) in ns.endpoints_or_legacy() {
-                    out.insert(
-                        format!("hosts.{name}"),
-                        url::hostname_of_url(&endpoint.hostname).to_owned(),
-                    );
-                    if let Some(url) = &endpoint.url {
-                        for (key, value) in port_url_builtins(&name, url) {
-                            out.insert(key, value);
-                        }
-                    }
-                }
-                (ns.node_name.clone(), out)
-            })
-            .collect();
+        // wrapper hook must forget — resolves from persisted state.
+        let all_node_outputs = rehydrated_node_outputs(&run);
 
         for key in node_keys.iter().rev() {
             if let Some(node_state) = run.nodes.get_mut(key) {
@@ -2405,12 +2535,23 @@ impl Orchestrator {
                         }
                     }
                 }
+                // Sampled here, between the kill and the hook, for the same
+                // reason `reap_pending_teardown` samples before its hook: a
+                // process that survived an escalating SIGTERM→SIGKILL must keep
+                // its recorded PID, because that record is the only thing the
+                // GC straggler sweep covers. This loop used to clear it
+                // unconditionally, which quietly stopped covering exactly the
+                // node that needed it.
+                let outlived_its_kill = node_state.pid.is_some_and(process::is_alive);
 
                 // Remove DNS + Caddy routes — one per routed http port.
                 self.remove_node_routes(run_name, node_state).await;
 
-                // Run on_stop hook if defined (skip nodes that never ran).
-                if node_state.status != NodeStatus::Pending {
+                // Run on_stop hook if this node still owes one. `Pending`
+                // never ran; `Stopped` already tore down — see
+                // `teardown_pending`, which is the ledger that makes an
+                // interrupted teardown resumable without running a hook twice.
+                if teardown_pending(node_state) {
                     self.run_on_stop_hook(
                         run_name,
                         Some(run_id),
@@ -2422,7 +2563,20 @@ impl Orchestrator {
                 }
 
                 node_state.status = NodeStatus::Stopped;
-                node_state.pid = None;
+                // Persist this node's teardown **now**, not with the rest of
+                // the run after the loop. Two writes, because they say two
+                // different things: `mark_node_torn_down` is the ledger (this
+                // node's hook has been attempted) and `clear_node_pid` is the
+                // liveness record (its process is gone). Both are per-node
+                // writes that work on a run another ender has already
+                // finalized, which is what the already-ended branch above and
+                // the daemon's crash detectors need — `save_run` refuses a
+                // terminal run.
+                let _ = self.db.mark_node_torn_down(&run_id, key);
+                if !outlived_its_kill {
+                    node_state.pid = None;
+                    let _ = self.db.clear_node_pid(&run_id, key);
+                }
             }
 
             // Remove child handle.
@@ -2442,6 +2596,117 @@ impl Orchestrator {
             .await;
 
         Ok(StopResult::Stopped)
+    }
+
+    /// Run the `on_stop` hooks a run still owes, in reverse execution order,
+    /// persisting each node as torn down as it goes.
+    ///
+    /// **The abnormal-termination counterpart to [`Self::stop`]'s own loop.**
+    /// Every path that ends a run *without* going through a deliberate stop — a
+    /// failed start aborting the run, a live run replaced by a new `veld start`,
+    /// the reap-before-create sweep finding a run whose processes all died, and
+    /// (by delegation) the daemon's crash detectors — used to kill PIDs and
+    /// remove routes and then finalize, running no hook at all. That is a leak
+    /// with no collector: `veld gc` reaps veld's own state and logs, never the
+    /// container runtime's, and a container node's `on_stop` is the only thing
+    /// that removes its container.
+    ///
+    /// It is a hard blocker rather than clutter because a container name
+    /// interpolates `${veld.run}` — the *environment* name, not a per-run id —
+    /// so the name is identical on every run of that environment and one
+    /// survivor makes `veld start` fail with `container ... already exists`
+    /// forever. (Which is also why the fix is not a per-run id in the name:
+    /// that trades a hard blocker for orphans nothing ever collects.)
+    ///
+    /// Idempotent per node via [`teardown_pending`], so calling it on a run
+    /// another ender already partly tore down resumes rather than repeats.
+    async fn reap_pending_teardown(&mut self, run_name: &str, run: &mut RunState) {
+        // Only the still-owing nodes, so `${vars.*}` resolution stays as
+        // selective here as `stop` makes it: reaping a crashed run must not run
+        // a credential helper for a var no pending hook mentions.
+        let selections: Vec<graph::NodeSelection> = run
+            .nodes
+            .values()
+            .filter(|ns| teardown_pending(ns))
+            .map(|ns| graph::NodeSelection {
+                node: ns.node_name.clone(),
+                variant: ns.variant.clone(),
+            })
+            .collect();
+        if selections.is_empty() {
+            return;
+        }
+
+        let run_id = run.run_id;
+        // Whether *this* call is the run's ender — the caller has just killed
+        // its processes (or confirmed them dead) and the run has not been
+        // finalized yet. Only an ender may touch a recorded PID: on the two
+        // terminal-run paths (`stop`'s already-ended branch, the owed-teardown
+        // sweep) nobody killed anything, the run may have ended days ago, and
+        // `process::is_alive` answers *true* on `EPERM` — so a PID the OS has
+        // since handed to an unrelated, possibly root-owned process would read
+        // as this run's straggler, be kept on that basis, and then be SIGKILLed
+        // by the daemon's straggler sweep. Those paths have no new information
+        // about the PID, so they leave the field exactly as they found it.
+        let is_the_ender = run.status.is_live();
+        let stop_vars = self
+            .ensure_stop_vars(run_name, Some(run_id), &selections)
+            .await;
+        let all_node_outputs = rehydrated_node_outputs(run);
+
+        // Reverse execution order (dependencies torn down last), with the
+        // HashMap-keys fallback `stop` uses for runs created before
+        // `execution_order` was tracked.
+        let node_keys: Vec<String> = if run.execution_order.is_empty() {
+            run.nodes.keys().cloned().collect()
+        } else {
+            run.execution_order.clone()
+        };
+
+        let mut reaped = 0usize;
+        for key in node_keys.iter().rev() {
+            let Some(node_state) = run.nodes.get_mut(key) else {
+                continue;
+            };
+            if !teardown_pending(node_state) {
+                continue;
+            }
+            // Sampled *before* the hook, and only where this call is the
+            // ender. The hook may take up to `TEARDOWN_HOOK_TIMEOUT`, so asking
+            // afterwards asks about a PID the OS may since have recycled; and
+            // an ender has just killed this node's process, which is what makes
+            // the pre-hook sample the accurate one.
+            let outlived_its_kill = is_the_ender && node_state.pid.is_some_and(process::is_alive);
+
+            self.run_on_stop_hook(
+                run_name,
+                Some(run_id),
+                &stop_vars,
+                &all_node_outputs,
+                node_state,
+            )
+            .await;
+            node_state.status = NodeStatus::Stopped;
+            reaped += 1;
+
+            // The ledger always — the hook has been attempted, and a later
+            // reaper must not attempt it again. The PID only when this call is
+            // the ender and the process is confirmed gone: one that outlived
+            // its kill keeps its record, which is what the GC straggler sweep
+            // covers, and on a terminal run this call has no standing to
+            // change the field at all (see `is_the_ender`).
+            let _ = self.db.mark_node_torn_down(&run_id, key);
+            if is_the_ender && !outlived_its_kill {
+                node_state.pid = None;
+                let _ = self.db.clear_node_pid(&run_id, key);
+            }
+        }
+        // Logged rather than returned: no caller has a decision to make on the
+        // count, but somebody chasing a container that outlived its run wants to
+        // know whether teardown ran here and for how many nodes.
+        if reaped > 0 {
+            tracing::info!(run_name, reaped, "ran the teardown hooks a run still owed");
+        }
     }
 
     /// Refuse to start when another *project's* running run already serves one
@@ -2519,8 +2784,24 @@ impl Orchestrator {
         let pids: Vec<u32> = run.nodes.values().filter_map(|ns| ns.pid).collect();
         let confirmed = pids.is_empty() || kill_and_confirm(&pids).await;
 
-        for (key, ns) in &run.nodes {
+        for ns in run.nodes.values() {
             self.remove_node_routes(run_name, ns).await;
+        }
+
+        // The replaced run's teardown, before the new one starts. This is the
+        // one abnormal path where skipping the hooks was *guaranteed* to break
+        // the next step rather than merely risk it: the replacement is about to
+        // create a container under the name the old run is still holding, so a
+        // replace without a teardown fails the very start that triggered it.
+        //
+        // Before the `clear_node_pid` loop below for the reason spelled out on
+        // the failed-start path: the reap reads each node's recorded PID to tell
+        // a process that outlived its kill from one that never spawned, and
+        // clearing first erases that distinction.
+        let mut ending = run.clone();
+        self.reap_pending_teardown(run_name, &mut ending).await;
+
+        for (key, ns) in &run.nodes {
             if confirmed && ns.pid.is_some() {
                 let _ = self.db.clear_node_pid(&run.run_id, key);
             }
@@ -2598,7 +2879,7 @@ impl Orchestrator {
     /// Clean up ALL runs in the project whose processes have died.
     /// This catches orphaned runs from previous sessions that were not
     /// properly stopped (e.g., due to a crash or `kill -9`).
-    async fn cleanup_dead_runs(&mut self) {
+    async fn cleanup_dead_runs(&mut self, starting_run: &str) {
         let project_state = match self.db.load_project_state(&self.project_root) {
             Ok(s) => s,
             Err(_) => return,
@@ -2643,21 +2924,154 @@ impl Orchestrator {
                 self.remove_node_routes(run_name, ns).await;
             }
 
-            // Record the final node states while the run is still live in the
-            // DB, then finalize as crashed (one-step: PIDs are already dead;
-            // the guard no-ops if an ender got here first).
+            // **Persist the ending intent BEFORE running any hook**, and take
+            // the two-step protocol its siblings use rather than the one-step
+            // `finalize_crashed` this path used to. Not tidiness — a hook can
+            // take up to `TEARDOWN_HOOK_TIMEOUT`, and while it runs this row
+            // still reads `Running`/`Starting` with every PID dead, which is
+            // *exactly* the orphan predicate all three crash detectors scan
+            // for. Within 5s the health monitor would: save a whole-run
+            // snapshot taken before the sweep began, overwriting the ledger
+            // rows already written; win `finalize_crashed`, because this path
+            // had not finalized yet; and then delegate `veld stop`, which
+            // reaps the same run concurrently with the sweep still in flight.
+            // Every pending hook would run twice, at once, with the ledger no
+            // longer able to stop it. `begin_ending` moves the run out of the
+            // detectors' scan set and is itself the single-winner election the
+            // reap otherwise had none of — the same reason `cleanup_stale_run`
+            // and the failed-start path both persist the intent before they
+            // kill anything.
+            let detail = EndDetail {
+                failed_node: dead_node,
+                ..Default::default()
+            };
+            let won = self
+                .db
+                .begin_ending(&run_state.run_id, EndReason::Crashed, Some(&detail))
+                .unwrap_or(false);
+            if !won {
+                // Another ender got here first and owns this run's teardown.
+                continue;
+            }
+
+            // The reap-before-create sweep's teardown. This is the answer to
+            // the case with no shutdown path at all — veld itself SIGKILLed, or
+            // the machine rebooted, leaving a `running` run whose processes are
+            // gone and whose containers are not. Nothing was in a position to
+            // run a hook at the time, so the next `veld start` for the project
+            // runs them here, before it creates anything of its own. Worth
+            // having *in addition to* the crash-path hooks rather than instead
+            // of them: those remove the container within seconds, this one is
+            // the floor that holds when no veld process survived to do it.
+            //
+            // Before the node states are marked below, because `Stopped` is the
+            // ledger — marking first would tell this sweep, and every later
+            // one, that a teardown which never happened already had.
             let mut ended = run_state.clone();
+            ended.status = RunStatus::Stopping;
+            self.reap_pending_teardown(run_name, &mut ended).await;
             for node in ended.nodes.values_mut() {
                 if node.pid.take().is_some() {
                     node.status = NodeStatus::Stopped;
                 }
             }
             let _ = self.save_state(&ended);
-            let detail = EndDetail {
-                failed_node: dead_node,
-                ..Default::default()
+            // Finalizes with the intent stored above, so history still reads
+            // `crashed`; if this process dies mid-reap the run stays `stopping`
+            // and the daemon's grace-gated stale-`stopping` reaper picks up
+            // what is left.
+            let _ = self.db.finalize_run(&run_state.run_id);
+        }
+
+        // Second sweep: a run that has **already ended** and still owes
+        // teardown. Reaching it needs no live run at all, which is the point —
+        // the first sweep only sees a run whose status is still live, so on its
+        // own it misses every case where something else labelled the run before
+        // a hook could run:
+        //
+        // - the daemon's crash detector finalized the run and then could not
+        //   delegate the teardown (no `veld` binary beside it, or an update
+        //   holding the lock);
+        // - veld was SIGKILLed *during* teardown and the daemon's grace-gated
+        //   stale-`stopping` reaper finalized what was left;
+        // - the run crashed on a build that predates any of this, so its
+        //   containers were never anybody's job.
+        //
+        // Costs nothing on the normal path: a run whose nodes are all `Stopped`
+        // owes nothing and never enters the loop. Runs the first sweep just
+        // handled are excluded by name rather than by re-reading their state —
+        // `project_state` is a snapshot taken before those hooks ran, so
+        // trusting it here would run every one of them a second time.
+        // Grace-gated, for every environment except the one being started.
+        // A run that ended seconds ago most likely has a teardown already in
+        // flight: the daemon notices a crash within 5s and delegates
+        // `veld stop`, whose hooks only write the ledger once each *returns*.
+        // Sweeping inside that window is how the same hook comes to run twice
+        // concurrently. Past the grace the delegate has either finished or hit
+        // its own timeout, so there is nothing left to collide with. The
+        // environment being started is exempt because for it this sweep is not
+        // a floor but a last chance — see the ordering below.
+        let owed_grace = TEARDOWN_HOOK_TIMEOUT * 2;
+        let now = chrono::Utc::now();
+        let owing: Vec<String> = project_state
+            .runs
+            .iter()
+            .filter(|(name, run)| {
+                let settled = name.as_str() == starting_run
+                    || run
+                        .ended_at
+                        .is_none_or(|t| (now - t).to_std().is_ok_and(|d| d > owed_grace));
+                !dead_run_names.contains(name)
+                    && !run.is_live()
+                    && settled
+                    && run.nodes.values().any(teardown_pending)
+            })
+            .map(|(name, _)| name.clone())
+            .collect();
+        // **The environment being started goes first, and is exempt from the
+        // budget below.** This is its last chance: `load_project_state` returns
+        // only the newest run per environment, and this start is about to create
+        // a new run under exactly this name — so an owing row skipped here stops
+        // being the latest run of its environment, becomes unreachable from
+        // every path in this feature, and is eventually deleted by retention
+        // with its containers still up. `ProjectState::runs` is a `HashMap`, so
+        // without this ordering the iteration order alone decided whether the
+        // one run that cannot wait got reaped.
+        let mut ordered: Vec<&String> = owing.iter().collect();
+        ordered.sort_by_key(|name| name.as_str() != starting_run);
+
+        // Bounded as a whole, not just per hook. This sweep is project-wide and
+        // runs *before* the new run is created, so without a total budget one
+        // unrelated crashed environment with a wedged container runtime would
+        // tax every later `veld start` in the project by
+        // `TEARDOWN_HOOK_TIMEOUT` per owing node — and a wedged runtime is
+        // exactly the case that constant exists for, so it is not a
+        // hypothetical. Past the budget the rest waits for the next start: for
+        // any environment other than the one being started this is the floor
+        // rather than the primary path, and it is allowed to make progress
+        // across several starts rather than hold one open.
+        let sweep_budget = TEARDOWN_HOOK_TIMEOUT * 2;
+        let sweep_started = std::time::Instant::now();
+        for (i, run_name) in ordered.iter().enumerate() {
+            let exempt = run_name.as_str() == starting_run;
+            if !exempt && sweep_started.elapsed() > sweep_budget {
+                tracing::warn!(
+                    remaining = ordered.len() - i,
+                    budget_secs = sweep_budget.as_secs(),
+                    "stopping the owed-teardown sweep so this start can proceed; \
+                     the rest runs on the next `veld start` for this project"
+                );
+                break;
+            }
+            let Some(run_state) = project_state.runs.get(*run_name) else {
+                continue;
             };
-            let _ = self.db.finalize_crashed(&run_state.run_id, Some(&detail));
+            tracing::info!(
+                run_name = run_name.as_str(),
+                "running the teardown hooks an ended run still owes"
+            );
+            let mut ended = run_state.clone();
+            self.reap_pending_teardown(run_name, &mut ended).await;
         }
     }
 
@@ -2929,8 +3343,25 @@ impl Orchestrator {
             &self.progress_tx,
             (node_state.node_name.clone(), node_state.variant.clone()),
         );
-        match process::run_command(&resolved_cmd, &working_dir, &env, None, Some(sink)).await {
-            Ok(result) => {
+        // Bounded, and the PID is captured so the bound can actually be
+        // enforced: `run_command` waits for its child unconditionally, so
+        // without both halves a hook that never returns holds the run in
+        // `stopping` forever, and a timeout that only stopped *waiting* would
+        // leak the process it gave up on. See `TEARDOWN_HOOK_TIMEOUT`.
+        let hook_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let observed = Arc::clone(&hook_pid);
+        let hook = process::run_command_observed(
+            &resolved_cmd,
+            &working_dir,
+            &env,
+            None,
+            Some(sink),
+            Some(Box::new(move |pid| {
+                observed.store(pid, std::sync::atomic::Ordering::SeqCst);
+            })),
+        );
+        match tokio::time::timeout(TEARDOWN_HOOK_TIMEOUT, hook).await {
+            Ok(Ok(result)) => {
                 if result.exit_code != 0 {
                     tracing::warn!(
                         node = node_state.node_name,
@@ -2939,11 +3370,45 @@ impl Orchestrator {
                     );
                 }
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
                     "on_stop hook failed to execute"
+                );
+            }
+            Err(_) => {
+                let pid = hook_pid.load(std::sync::atomic::Ordering::SeqCst);
+                if pid != 0 {
+                    // Escalating SIGTERM → SIGKILL, the same primitive the stop
+                    // path uses on a node: giving up on a hook must not leave
+                    // its process running. The hook child is in veld's own
+                    // process group, so this reaches the direct child only —
+                    // for a `shell` hook, the `sh` and not the `docker` it
+                    // launched. That unblocks teardown, which is the point; it
+                    // is not a promise that everything the hook started is
+                    // gone, hence the "may have been left behind" wording
+                    // below rather than "has been".
+                    let _ = process::kill_process(pid).await;
+                }
+                // Said on the stream the user reads, for the same reason a
+                // resolution failure is: they are about to be told the
+                // environment stopped, and whatever the hook was removing is
+                // still there.
+                eprintln!(
+                    "  ! teardown hook for {}:{} TIMED OUT after {}s and was killed\n    \
+                     The command was: {}\n    \
+                     Anything it was meant to clean up (containers, volumes, \
+                     temp state) may have been left behind.",
+                    node_state.node_name,
+                    node_state.variant,
+                    TEARDOWN_HOOK_TIMEOUT.as_secs(),
+                    on_stop_cmd.display(),
+                );
+                tracing::warn!(
+                    node = node_state.node_name,
+                    timeout_secs = TEARDOWN_HOOK_TIMEOUT.as_secs(),
+                    "on_stop hook timed out and was killed"
                 );
             }
         }
@@ -3257,10 +3722,26 @@ impl Orchestrator {
 
             let env = HashMap::new();
             let sink = self.project_step_sink(run_name, run_id, "teardown", &step.name);
-            match process::run_command(&resolved_cmd, &self.project_root, &env, None, Some(sink))
-                .await
-            {
-                Ok(result) => {
+            // Bounded on the same budget as an `on_stop` hook, and for the same
+            // reason: a teardown step is documented as best-effort — "failures
+            // are logged but never block the stop operation" — and a step that
+            // *hangs* broke that promise, because it blocks by not failing.
+            // Teardown runs after every node hook, so it is the last thing
+            // holding the run out of history.
+            let step_pid = Arc::new(std::sync::atomic::AtomicU32::new(0));
+            let observed = Arc::clone(&step_pid);
+            let running = process::run_command_observed(
+                &resolved_cmd,
+                &self.project_root,
+                &env,
+                None,
+                Some(sink),
+                Some(Box::new(move |pid| {
+                    observed.store(pid, std::sync::atomic::Ordering::SeqCst);
+                })),
+            );
+            match tokio::time::timeout(TEARDOWN_HOOK_TIMEOUT, running).await {
+                Ok(Ok(result)) => {
                     if result.exit_code != 0 {
                         tracing::warn!(
                             step = step.name,
@@ -3273,11 +3754,27 @@ impl Orchestrator {
                         });
                     }
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!(
                         step = step.name,
                         error = %e,
                         "teardown step failed to execute"
+                    );
+                }
+                Err(_) => {
+                    let pid = step_pid.load(std::sync::atomic::Ordering::SeqCst);
+                    if pid != 0 {
+                        let _ = process::kill_process(pid).await;
+                    }
+                    eprintln!(
+                        "  ! teardown step '{}' TIMED OUT after {}s and was killed",
+                        step.name,
+                        TEARDOWN_HOOK_TIMEOUT.as_secs(),
+                    );
+                    tracing::warn!(
+                        step = step.name,
+                        timeout_secs = TEARDOWN_HOOK_TIMEOUT.as_secs(),
+                        "teardown step timed out and was killed"
                     );
                 }
             }
@@ -6007,6 +6504,276 @@ mod tests {
         assert!(
             marker.exists(),
             "the on_stop hook must still run for an invalid config"
+        );
+    }
+
+    /// Spawn a real process, then kill it and wait until the OS agrees it is
+    /// gone. Returns its PID — a PID that genuinely existed and genuinely does
+    /// not now, which is what the crash paths key on.
+    async fn spawned_then_killed_pid() -> u32 {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        process::kill_process(pid).await.expect("kill");
+        for _ in 0..200 {
+            if !process::is_alive(pid) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        // Reap, so the PID is not left as a zombie this process still owns.
+        let _ = child.wait();
+        assert!(!process::is_alive(pid), "the node's process must be dead");
+        pid
+    }
+
+    /// **The regression test for the reported bug.** A node's process dies
+    /// mid-run; nothing calls `veld stop`; the containers its `on_stop` would
+    /// have removed used to survive, and because a container name interpolates
+    /// `${veld.run}` — the *environment* name, not a per-run id — one survivor
+    /// blocked every later `veld start` of that environment with
+    /// `container ... already exists`.
+    ///
+    /// The marker file stands in for the container: the hook is the only thing
+    /// that creates it, so its absence is the leak.
+    #[tokio::test]
+    async fn on_stop_runs_when_a_node_dies_mid_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("container-removed");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "redis": {{ "default_variant": "docker", "variants": {{
+                        "docker": {{
+                            "type": "start_server",
+                            "shell": "sleep 30",
+                            "on_stop": "printf '%s' \"${{veld.node}}-${{veld.run}}\" > {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let key = RunState::node_key("redis", "docker");
+        let mut run = RunState::new("dev", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new("redis", "docker");
+        ns.status = NodeStatus::Healthy;
+        // Spelled through a local binding so the
+        // `only_one_site_in_this_module_persists_a_live_node_pid` tripwire keeps
+        // counting production sites only. This PID is recorded *because* it is
+        // dead — the opposite of the live-PID persistence that guard is about —
+        // and widening the guard to permit a second `.pid = Some(` would cost
+        // the detection it exists for.
+        let dead_node_pid = Some(spawned_then_killed_pid().await);
+        ns.pid = dead_node_pid;
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key.clone());
+        orch.save_state(&run).unwrap();
+
+        // What the next `veld start` does before it creates anything.
+        orch.cleanup_dead_runs("dev").await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).expect("on_stop must have run for the dead node"),
+            "redis-dev",
+            "the hook must resolve the same `${{veld.*}}` it did at start, so the \
+             name it removes is the name that was created"
+        );
+        let after = orch.db.get_run(project_root, "dev").unwrap().unwrap();
+        assert_eq!(
+            after.status,
+            RunStatus::Crashed,
+            "still recorded as a crash"
+        );
+        assert_eq!(
+            after.nodes[&key].status,
+            NodeStatus::Stopped,
+            "and the node is now marked torn down — the ledger a resumed \
+             teardown reads to avoid running this hook twice"
+        );
+    }
+
+    /// Exactly-once, per node. A crash *during* a shutdown must not run a hook
+    /// the shutdown already ran — so the appending hook must see exactly one
+    /// write across a `stop` followed by the sweep that reaps ended runs.
+    ///
+    /// The run-level guards (`begin_ending` / `finalize_crashed`) cannot supply
+    /// this: they elect one *ender* per run, while a teardown interrupted
+    /// halfway leaves some nodes torn down and some not. Hence the per-node
+    /// ledger this asserts.
+    #[tokio::test]
+    async fn a_teardown_hook_runs_once_even_when_teardown_is_retried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("hook-log");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "db": {{ "default_variant": "docker", "variants": {{
+                        "docker": {{
+                            "type": "start_server",
+                            "shell": "sleep 30",
+                            "on_stop": "printf 'x' >> {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let key = RunState::node_key("db", "docker");
+        let mut run = RunState::new("dev", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new("db", "docker");
+        ns.status = NodeStatus::Healthy;
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key);
+        orch.save_state(&run).unwrap();
+
+        orch.stop("dev").await.expect("stop");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "x");
+
+        // Every later path that could reach this run's teardown.
+        orch.cleanup_dead_runs("dev").await;
+        orch.stop("dev").await.expect("re-stop");
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "x",
+            "the hook ran once; `Stopped` is the ledger and a retry must resume, \
+             not repeat"
+        );
+    }
+
+    /// A node that never became *ready* still owes its hook. `Failed` is the
+    /// status of a node that spawned its container and then failed its health
+    /// check, which is exactly the node whose container is left behind — so the
+    /// rule is "anything past `Pending`", not "anything that reached healthy".
+    #[tokio::test]
+    async fn a_node_that_never_became_ready_still_runs_its_hook() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("removed");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "up": {{ "default_variant": "d", "variants": {{
+                        "d": {{ "type": "start_server", "shell": "sleep 30",
+                                "on_stop": "printf 'failed ' >> {m}" }}
+                    }}}},
+                    "never": {{ "default_variant": "d", "variants": {{
+                        "d": {{ "type": "start_server", "shell": "sleep 30",
+                                "on_stop": "printf 'pending ' >> {m}" }}
+                    }}}}
+                }}
+            }}"#,
+            m = marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let mut run = RunState::new("dev", &config.name);
+        run.status = RunStatus::Running;
+        for (node, status) in [("up", NodeStatus::Failed), ("never", NodeStatus::Pending)] {
+            let key = RunState::node_key(node, "d");
+            let mut ns = NodeState::new(node, "d");
+            ns.status = status;
+            run.nodes.insert(key.clone(), ns);
+            run.execution_order.push(key);
+        }
+        orch.save_state(&run).unwrap();
+
+        orch.reap_pending_teardown("dev", &mut run).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap(),
+            "failed ",
+            "the failed node's hook runs (its container exists); the pending \
+             node's does not (it never spawned anything)"
+        );
+    }
+
+    /// A hook that never returns must not hold the run open. `run_command`
+    /// waits for its child unconditionally, so before the bound an ordinary
+    /// `veld stop` against a wedged container runtime parked forever with the
+    /// run stuck in `stopping`.
+    ///
+    /// Asserts both halves: the stop returns, and the *next* node's hook still
+    /// runs — giving up on one hook must not abandon the rest of teardown.
+    #[tokio::test]
+    async fn a_hanging_teardown_hook_is_killed_and_teardown_continues() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("second-ran");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "first": {{ "default_variant": "d", "variants": {{
+                        "d": {{ "type": "start_server", "shell": "sleep 30",
+                                "on_stop": "touch {m}" }}
+                    }}}},
+                    "wedged": {{ "default_variant": "d", "variants": {{
+                        "d": {{ "type": "start_server", "shell": "sleep 30",
+                                "on_stop": "sleep 600" }}
+                    }}}}
+                }}
+            }}"#,
+            m = marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let mut run = RunState::new("dev", &config.name);
+        run.status = RunStatus::Running;
+        // `first` before `wedged` in execution order, so reverse-order teardown
+        // hits the hanging hook *first* and `first`'s hook only runs if the
+        // timeout let teardown continue.
+        for node in ["first", "wedged"] {
+            let key = RunState::node_key(node, "d");
+            let mut ns = NodeState::new(node, "d");
+            ns.status = NodeStatus::Healthy;
+            run.nodes.insert(key.clone(), ns);
+            run.execution_order.push(key);
+        }
+        orch.save_state(&run).unwrap();
+
+        let started = std::time::Instant::now();
+        orch.stop("dev").await.expect("stop must return");
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < TEARDOWN_HOOK_TIMEOUT * 3,
+            "the stop must be bounded by the hook timeout, not by the hook: {elapsed:?}"
+        );
+        assert!(
+            marker.exists(),
+            "giving up on one hook must not abandon the remaining nodes' teardown"
+        );
+        let after = orch.db.get_run(project_root, "dev").unwrap().unwrap();
+        assert!(
+            !after.status.is_live(),
+            "and the run must actually reach history"
         );
     }
 

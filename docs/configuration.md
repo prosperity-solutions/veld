@@ -324,7 +324,7 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 
 **Setup** steps run sequentially (top to bottom) before any node starts. If any step exits non-zero, startup is aborted immediately. Use setup for prerequisite checks (is Docker running? is Node >= 20?) and environment preparation (create Docker networks, generate `.env` files, seed directories).
 
-**Teardown** steps run sequentially after all nodes stop (after all per-node `on_stop` hooks complete). Teardown is best-effort — failures are logged but never block the stop operation. Commands should be written idempotently (e.g. `|| true` suffixes).
+**Teardown** steps run sequentially after all nodes stop (after all per-node `on_stop` hooks complete). Teardown is best-effort — failures are logged but never block the stop operation, and a step that hangs is killed after 30 seconds so it cannot block it either. Commands should be written idempotently (e.g. `|| true` suffixes).
 
 ```json
 {
@@ -400,6 +400,9 @@ The full execution lifecycle with setup and teardown is:
 3. _(environment running)_
 4. **Per-node `on_stop`** — runs in reverse dependency order
 5. **Teardown** — runs sequentially, best-effort
+
+Steps 4 and 5 are reached by **every** way a run can end, not only `veld stop` —
+see [When `on_stop` runs](#when-on_stop-runs).
 
 If setup fails, Veld runs teardown steps to clean up anything that earlier setup steps may have created.
 
@@ -517,7 +520,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `long_running` | URL template override for this variant                |
-| `on_stop`           | object           | No       | All            | Teardown command (`{ "argv": … }` / `{ "shell": … }`) run when the environment is stopped |
+| `on_stop`           | object           | No       | All            | Teardown command (`{ "argv": … }` / `{ "shell": … }`) run when the run ends — a stop, a crash, a failed start, or a replacement |
 | `skip_if`           | object           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `long_running` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `long_running` | Feature toggles override for this variant             |
@@ -1001,7 +1004,7 @@ The `skip_if` command receives the previous run's output variables as environmen
 
 ### `on_stop`
 
-A teardown command that runs when `veld stop` is called. Executed in reverse dependency order, after the process is killed (for `long_running` nodes) but before state is cleaned up.
+A teardown command that runs when the run ends. Executed in reverse dependency order, after the process is killed (for `long_running` nodes) but before state is cleaned up.
 
 This is especially useful for `command` nodes that provision external resources during start — databases, Docker containers, temporary credentials — that need explicit cleanup.
 
@@ -1057,7 +1060,64 @@ container survives a `veld stop`.
 > `${veld.*}` name that is not a built-in, so this is caught before a run starts rather
 > than at teardown.
 
+#### When `on_stop` runs
+
+Every way a run can end, not just `veld stop`:
+
+| The run ends because… | `on_stop` runs |
+|---|---|
+| `veld stop` | immediately, in reverse dependency order |
+| a node's process died (crash, `kill -9`, OOM) | within seconds *while the Veld daemon is running* — it notices and hands the teardown to `veld stop`; with the daemon stopped, on the next `veld start` for that project |
+| a start failed and the run was aborted | immediately, for the nodes that had come up |
+| a new `veld start` replaced a live run of the same name | immediately, before the replacement creates anything |
+| Veld itself was killed, or the machine rebooted | on the next `veld start` for that project, before it creates anything |
+
+This matters most for a container node, because `on_stop` is the only thing that
+removes its container: killing the `docker run` / `container run` client does not
+stop the container, and `--rm` only fires when the container itself exits. And
+because a container name usually interpolates `${veld.run}` — the *environment*
+name, not a per-run id — the name is identical on every run, so one survivor
+makes the next `veld start` fail with `container … already exists`. (`veld gc`
+does not help: it collects Veld's own state and logs, never the container
+runtime's.)
+
+**A node's hook runs at most once per teardown pass — so write it
+idempotently.** A node that has been torn down is recorded as such the moment
+its hook returns, so a teardown interrupted halfway — its process killed after
+three of five nodes — is *resumed* by whatever picks the run up next, never
+restarted. What that record cannot rule out is two teardowns of the same run
+*overlapping*: a hook is recorded when it returns, so a second pass that starts
+while the first is still inside a hook sees that node as still owing one. Veld
+keeps the window small (the sweep above waits out a grace period before touching
+a run something else may already be tearing down), but it does not lock. So
+`rm --force` with errors swallowed is not merely good instinct — it is the
+contract. A hook that must not run twice (releasing a lease, decrementing a
+counter, `rm -rf`) needs its own guard.
+
+**A hook that fails or times out is not retried.** The record says the hook was
+*attempted*, not that it succeeded — deliberately, because a hook against a
+permanently wedged runtime would otherwise be retried by every later
+`veld start` and tax each one by the full timeout without ever succeeding. Veld
+says so loudly on the stream you are reading; what a failed hook left behind is
+yours to remove.
+
+**A node that never became ready still runs its hook.** The rule is "anything
+past pending", not "anything that reached healthy" — a node that started its
+container and *then* failed its health check is exactly the node whose container
+is left behind. A node that never spawned anything runs nothing.
+
+#### Failure and hangs
+
 If the `on_stop` command fails (non-zero exit code or execution error), Veld logs a warning but continues tearing down the remaining nodes. A failing teardown hook never blocks the stop operation.
+
+A hook that **hangs** is killed (`SIGTERM`, then `SIGKILL`) after 30 seconds,
+Veld says so on the stream you are reading, and teardown continues with the
+remaining nodes. A teardown hook is the last thing between a run and history, so
+an unbounded one is a run that never *ends*: it sits in `stopping` with its
+processes already dead, `veld start` refuses the name, and the only way out is to
+kill the stopper — which loses every hook it had not reached yet. Teardown is not
+where a long job belongs; if a hook legitimately needs longer, make it a project
+`teardown` step, or have it kick off the slow part and return.
 
 If `on_stop` references a variable that cannot be resolved, the hook is **skipped** — Veld
 prints a prominent warning naming the command and what it was meant to clean up, because

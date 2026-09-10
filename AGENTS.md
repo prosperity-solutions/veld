@@ -84,7 +84,7 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-For **contributors** working on this repo, the ship workflow is the required path for every change — kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
+For **contributors** working on this repo, the ship workflow is the required path for every change — measure a reported bug before designing a fix → kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
 
 **One document, three paths, so no agent has to be told which one it is.** The file lives at `.agents/skills/ship/SKILL.md` — the cross-agent [Agent Skills](https://agentskills.io/specification) location, loaded as a real skill by Codex, Pi, Copilot, Gemini CLI, OpenCode, goose and Amp. `.claude/skills/ship` is a symlink to it (Claude Code reads only `.claude/skills/`), as is [`docs/ship.md`](docs/ship.md) for anything that reads neither. Because the same text is reached from three depths, **its internal links are repo-root-relative, not `../`-relative** — a `../../../AGENTS.md` would be correct from at most one of them. Both `.claude/skills/ship` and `docs/ship.md` are tracked symlinks, so a Windows checkout without `core.symlinks` turns them into one-line text files; the real path, `.agents/skills/ship/SKILL.md`, is the fallback worth knowing.
 
@@ -123,6 +123,7 @@ entries may appear.
 
 Follow this workflow for every feature or fix:
 
+0. **Verify the report** — when the task names something already broken, measure the claimed gap before designing a fix (`docs/ship.md` → Step 0.1). A bug report's *cause* is a hypothesis written from a symptom; acting on it unverified is how a PR rewires a mechanism that worked while the real cause ships untouched. Skip it for a feature request and say so in the PR body — chat is not the pull request, and a reviewer cannot tell a skipped evidence pass from a forgotten one.
 1. **Implement** — Make the code changes.
 2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
 3. **Review loop (autonomous, multi-angle, staged)** — Run the loop in [docs/agentic-review.md](docs/agentic-review.md) on the diff: pre-pass (`just lint` + `just test` — cargo clippy+fmt, tsc, and Biome over the JS/TS surfaces) → context pack → staged angles as parallel background subagents with explicit per-angle model tiering → verify each critical/major yourself → fix → re-review the fix delta. Loop until the doc's exit criteria hold or a cap/hard stop fires. Do not run separate single-reviewer warm-up rounds — the multi-angle pass replaces them. Diffs under ~50 lines with no stakes flag take the doc's trivia clause (§11); the stakes override (§3.3) is never downgradable.

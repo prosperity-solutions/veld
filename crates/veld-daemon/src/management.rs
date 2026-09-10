@@ -1512,6 +1512,63 @@ fn stderr_tail(path: &std::path::Path) -> String {
     String::from_utf8_lossy(&buf).trim().to_owned()
 }
 
+/// Hand a run that ended abnormally to `veld stop`, so its nodes' `on_stop`
+/// hooks actually run.
+///
+/// A crashed, orphaned or half-torn-down run still owes every node's teardown,
+/// and for a container node that hook is the only thing that removes its
+/// container: killing the `docker run` / `container run` client does not stop
+/// the container, and `--rm` only fires when the container itself exits. Left
+/// undone it is not clutter but a hard blocker, because the container name
+/// interpolates `${veld.run}` — the *environment* name, not a per-run id — so
+/// the name is identical on every run of that environment and the next
+/// `veld start` fails with `container ... already exists` until somebody removes
+/// it by hand. `veld gc` does not help: it collects veld's own state and logs,
+/// never the container runtime's.
+///
+/// **Delegated rather than run in this process, for two reasons.** Resolving a
+/// hook's command, `${vars.*}`, env and cwd is `Orchestrator`'s job and it must
+/// stay the only resolver (AGENTS.md → Config Authoring Principles: one owner
+/// for resolution). And a daemon-spawned command needs the user's login-shell
+/// `PATH`, which [`spawn_veld`] resolves in the project's own directory —
+/// under launchd this daemon's own `PATH` cannot find `docker` at all, so a
+/// hook run in-process would fail precisely where it matters and report
+/// success-shaped nothing.
+///
+/// The delegate reaches the run when it is already terminal and takes
+/// `Orchestrator::stop`'s already-ended branch, which runs what the run still
+/// owes. **Callers must gate this on their own guarded status transition**
+/// (`finalize_crashed` / `finalize_run` returning `true`): that single-winner
+/// election is what stops the 5s monitor, the 600s GC and a concurrent
+/// `veld start` sweep from each spawning one. Even so, a duplicate is harmless
+/// rather than wrong — teardown's ledger is per node and persisted as each hook
+/// returns, so a second delegate resumes instead of repeating.
+///
+/// Best-effort by design, and **the child's own failure is invisible here**:
+/// [`spawn_veld`] answers as soon as the process starts and never awaits it, so
+/// a `veld stop` that then fails logs on its own side and nothing on this one.
+/// Neither that nor a refused spawn (an update holding the lock) nor a missing
+/// binary loses anything permanently: the next `veld start` for the project
+/// sweeps whatever its runs still owe.
+pub(crate) async fn delegate_teardown(project_root: &std::path::Path, run_name: &str) {
+    let args = vec!["stop".to_owned(), "--name".to_owned(), run_name.to_owned()];
+    let code = spawn_veld(project_root, &args).await;
+    if code.is_success() {
+        // A breadcrumb, because the child's own outcome never reaches here:
+        // `spawn_veld` answers as soon as the process starts, so a `veld stop`
+        // that then fails — an unloadable config, a hook whose `${vars.*}`
+        // cannot resolve, a panic — leaves nothing in the daemon log to tell an
+        // operator whether the hooks ran. This line at least records that the
+        // attempt was made; the recovery is the next `veld start`'s sweep.
+        tracing::info!("spawned `veld stop --name {run_name}` to tear down an ended run");
+    } else {
+        warn!(
+            "could not spawn `veld stop --name {run_name}` to tear down an ended run \
+             ({code}); its on_stop hooks run on the next `veld start` here"
+        );
+    }
+}
+
 /// Spawn `veld <args...>` in the project directory with the user's login-shell
 /// `PATH`. The project_root is looked up from the GlobalRegistry (never
 /// supplied by the client) to prevent directory traversal.

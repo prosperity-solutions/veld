@@ -638,13 +638,53 @@ impl Db {
         Ok(out)
     }
 
-    /// Null a node's recorded PID (and mark it stopped) after its death has
+    /// Forget a node's recorded PID, and **only** that, after its death has
     /// been confirmed. Targeted update: `save_run` deliberately refuses to
-    /// touch terminal runs, and this is the one legitimate post-terminal write.
+    /// touch terminal runs, and this and [`Self::mark_node_torn_down`] are the
+    /// only legitimate post-terminal writes.
+    ///
+    /// A recorded PID means "this process may still be alive" and is what the
+    /// GC straggler sweep keeps covering; clearing it says the process is
+    /// confirmed gone. It says nothing about teardown, and it must not: the
+    /// node's `status` is the per-node teardown ledger
+    /// (`orchestrator::teardown_pending`), so a caller that has not run the
+    /// node's `on_stop` hook writing `status = 'stopped'` here would tell every
+    /// later reaper that a teardown which never happened already had — and the
+    /// container the hook exists to remove would be stranded permanently.
+    ///
+    /// This function used to write both columns as a pair, and the name did not
+    /// say so. Three callers that only ever meant "the PID is gone" — the
+    /// daemon's stale-`stopping` reaper and both arms of its terminal-run
+    /// straggler sweep — were therefore silently marking runs as torn down.
+    /// [`Self::mark_node_torn_down`] is the other half, for the callers that
+    /// did run the hook.
     pub fn clear_node_pid(&self, run_id: &Uuid, node_key: &str) -> Result<(), DbError> {
         let conn = self.lock();
         conn.execute(
-            "UPDATE nodes SET pid = NULL, status = 'stopped'
+            "UPDATE nodes SET pid = NULL
+             WHERE node_key = ?2
+               AND run_row = (SELECT id FROM runs WHERE run_id = ?1)",
+            params![run_id.to_string(), node_key],
+        )?;
+        Ok(())
+    }
+
+    /// Record that a node's `on_stop` hook has run, **without** touching its
+    /// PID.
+    ///
+    /// The teardown ledger and the straggler sweep want different things from
+    /// one node row. `status = 'stopped'` is the ledger
+    /// (`orchestrator::teardown_pending`): it says the hook already ran, so a
+    /// resumed teardown skips this node instead of running it twice. A recorded
+    /// PID says "this process may still be alive" and is what the GC straggler
+    /// sweep keeps covering. A hook that ran against a process which refused to
+    /// die needs both statements at once, so it takes this write and skips
+    /// [`Self::clear_node_pid`], which would drop the only record of the
+    /// survivor.
+    pub fn mark_node_torn_down(&self, run_id: &Uuid, node_key: &str) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE nodes SET status = 'stopped'
              WHERE node_key = ?2
                AND run_row = (SELECT id FROM runs WHERE run_id = ?1)",
             params![run_id.to_string(), node_key],
@@ -1369,6 +1409,51 @@ mod tests {
             .execute("UPDATE runs SET ending_at = NULL", [])
             .unwrap();
         assert_eq!(db.stale_stopping_runs(past_cutoff).unwrap().len(), 1);
+    }
+
+    /// **The two per-node writes must stay column-disjoint**, and nothing in
+    /// the type system says so.
+    ///
+    /// `status = 'stopped'` is the per-node teardown ledger
+    /// (`orchestrator::teardown_pending`) and a recorded PID is the liveness
+    /// record the GC straggler sweep covers. They are written by different
+    /// callers for different reasons, and one function writing both is how a
+    /// caller that had run no hook came to mark runs as torn down: three sites
+    /// in the daemon's GC meant only "this PID is gone" and silently stranded
+    /// every container whose hook had not run yet.
+    #[test]
+    fn the_two_node_writes_stay_column_disjoint() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projDisjoint");
+
+        // `clear_node_pid` forgets the PID and leaves the ledger alone.
+        let a = sample_run("pid-only");
+        db.save_run(root, "proj", &a).unwrap();
+        db.clear_node_pid(&a.run_id, "web:local").unwrap();
+        let a = db.get_run(root, "pid-only").unwrap().unwrap();
+        assert_eq!(a.nodes["web:local"].pid, None);
+        assert_eq!(
+            a.nodes["web:local"].status,
+            NodeStatus::Healthy,
+            "clearing a PID must not claim the node's teardown ran"
+        );
+
+        // `mark_node_torn_down` writes the ledger and leaves the PID alone.
+        let b = sample_run("ledger-only");
+        db.save_run(root, "proj", &b).unwrap();
+        db.mark_node_torn_down(&b.run_id, "web:local").unwrap();
+        let b = db.get_run(root, "ledger-only").unwrap().unwrap();
+        assert_eq!(
+            b.nodes["web:local"].status,
+            NodeStatus::Stopped,
+            "the ledger must record that teardown ran"
+        );
+        assert_eq!(
+            b.nodes["web:local"].pid,
+            Some(4242),
+            "a process that outlived its hook must keep its recorded PID, or \
+             the straggler sweep stops covering it"
+        );
     }
 
     #[test]

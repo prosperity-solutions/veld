@@ -102,6 +102,25 @@ pub enum NodeStatus {
     /// Liveness probe failed but recovery has not yet been exhausted.
     Unhealthy,
     Failed,
+    /// This node's `on_stop` teardown has been **attempted** — and that is what
+    /// the value means, not merely "its process is gone".
+    ///
+    /// It is the per-node teardown ledger
+    /// ([`crate::orchestrator::teardown_pending`]): every path that ends a run
+    /// reads it to decide which nodes still owe a hook, which is what lets an
+    /// interrupted teardown resume instead of running a hook twice. **Never
+    /// write it without running that node's hook.** A crash detector, an orphan
+    /// sweep or a straggler pass that marks a node `Stopped` tells every later
+    /// reaper that a teardown which never happened already had, and whatever
+    /// the hook existed to remove — for a container node, its container — is
+    /// stranded permanently, with no veld command able to collect it. Those
+    /// paths write [`NodeStatus::Failed`] instead, which is also what
+    /// `veld status` already displays for a healthy node whose PID is gone.
+    ///
+    /// Nothing in the type system enforces this. `Db::mark_node_torn_down` is
+    /// the intended writer, and two source-scanning tripwire tests (in the
+    /// daemon's and the CLI's `gc.rs`) fire if a detector reaches for this
+    /// variant.
     Stopped,
     Skipped,
 }
