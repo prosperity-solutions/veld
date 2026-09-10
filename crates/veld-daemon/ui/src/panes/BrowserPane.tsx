@@ -123,6 +123,7 @@ import {
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
 import {
   abandonPermission,
+  addressFor,
   answerPermission,
   browserBackend,
   browserCommand,
@@ -402,14 +403,17 @@ export function BrowserPane(props: {
     if (Object.keys(patch).length > 0) onTab(patch);
   }, [state.url, state.title]);
 
+  // What the bar says when it is not being typed into: the destination while one
+  // is loading, the committed page otherwise (`addressFor`).
+  const address = addressFor(state, tab.url);
   // The address bar is a text field, so it cannot be driven straight off
-  // `state.url` — that would rewrite a half-typed address on every background
+  // `address` — that would rewrite a half-typed address on every background
   // navigation. It follows the view only while unfocused.
   const [draft, setDraft] = useState(tab.url ?? "");
   const [editing, setEditing] = useState(false);
   useEffect(() => {
-    if (!editing) setDraft(state.url || tab.url || "");
-  }, [state.url, editing]);
+    if (!editing) setDraft(address);
+  }, [address, editing]);
 
   // Which screen stands in for the page. `paneCovers` is the *same* predicate that
   // hides the native view in browserHost — shared rather than restated, because the
@@ -1603,7 +1607,7 @@ export function BrowserPane(props: {
                 closeSuggestions();
                 return;
               }
-              setDraft(state.url || tab.url || "");
+              setDraft(address);
               e.currentTarget.blur();
             } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
               if (suggestions.count === 0) return;

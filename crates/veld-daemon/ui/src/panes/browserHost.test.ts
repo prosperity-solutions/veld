@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { type BrowserState, paneCovers } from "./browserHost";
+import {
+  type BrowserState,
+  addressFor,
+  isCommit,
+  paneCovers,
+  settlePending,
+} from "./browserHost";
 
 const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   url: "",
@@ -7,6 +13,7 @@ const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   loading: false,
   canGoBack: false,
   canGoForward: false,
+  pendingUrl: null,
   error: null,
   nested: null,
   profile: "default",
@@ -77,5 +84,106 @@ describe("paneCovers", () => {
     // An error outranks a loaded page: the error screen is the message, and the
     // view has to be out of the way for it to be visible at all.
     expect(paneCovers(state({ url: "http://x.test/", loading: true, error }))).toBe(true);
+  });
+});
+
+/**
+ * `pendingUrl` is the address bar's answer to "where are we going", and it exists
+ * because `url` cannot be: the shell reads `url` off `webContents.getURL()`,
+ * which keeps returning the page being *left* for the whole of a pending load.
+ *
+ * Its lifetime has two ends, and they are separate functions because they answer
+ * separate questions: `settlePending` retires it when the load *stops*, however
+ * it stopped, and `isCommit` retires it when the destination *arrives*. Neither
+ * subsumes the other — a stopped load never commits, and a committed page can go
+ * on loading subresources for seconds — so both are tested here.
+ */
+describe("settlePending", () => {
+  it("keeps the destination while the load is in flight", () => {
+    expect(settlePending(state({ loading: true, pendingUrl: "https://new/" }))).toBe(
+      "https://new/",
+    );
+  });
+
+  it("drops it the moment the load ends, however it ended", () => {
+    // Stopped by the user, failed, or simply arrived — all three reach here as
+    // `loading: false`, and all three mean the bar stops naming a destination.
+    expect(settlePending(state({ loading: false, pendingUrl: "https://new/" }))).toBeNull();
+    expect(
+      settlePending(
+        state({
+          loading: false,
+          pendingUrl: "https://new/",
+          error: { kind: "load", code: -102, text: "refused", url: "https://new/" },
+        }),
+      ),
+    ).toBeNull();
+  });
+});
+
+describe("isCommit", () => {
+  it("does not count the shell re-reporting the page being left", () => {
+    // `did-start-loading` fires with `webContents.getURL()` still on the old page.
+    // Reading that as a commit is the original bug, restated.
+    expect(isCommit("https://old/", "https://old/")).toBe(false);
+  });
+
+  it("counts a commit to a URL nobody typed", () => {
+    // The redirect case, which an equality test against the *typed* address
+    // cannot see: three review angles landed on this line independently.
+    expect(isCommit("https://www.example.com/", "https://example.com/")).toBe(true);
+  });
+
+  it("counts the first page in a view that has never reported one", () => {
+    expect(isCommit("https://first/", "")).toBe(true);
+  });
+
+  it("ignores an event that says nothing about the URL", () => {
+    // A title change, a devtools toggle: `onState` leaves `url` off the patch
+    // entirely, and that must not retire a destination still in flight.
+    expect(isCommit(undefined, "https://old/")).toBe(false);
+  });
+});
+
+describe("addressFor", () => {
+  it("shows the destination over the page being left", () => {
+    expect(
+      addressFor(state({ url: "https://old/", loading: true, pendingUrl: "https://new/" })),
+    ).toBe("https://new/");
+  });
+
+  it("shows the committed page once nothing is pending", () => {
+    expect(addressFor(state({ url: "https://old/" }))).toBe("https://old/");
+  });
+
+  it("keeps the URL that failed, rather than the page it was left on", () => {
+    // A failed load never commits, so `url` is still the old page — while the
+    // error screen under the bar names the one that failed. Showing both at once
+    // is the contradiction this rung exists to prevent.
+    expect(
+      addressFor(
+        state({
+          url: "https://old/",
+          error: { kind: "load", code: -102, text: "refused", url: "https://bad/" },
+        }),
+      ),
+    ).toBe("https://bad/");
+  });
+
+  it("falls through an error that names no URL", () => {
+    // A crashed renderer and a locally-raised failure both carry `url: ""`.
+    expect(
+      addressFor(
+        state({
+          url: "https://old/",
+          error: { kind: "crash", code: null, text: "oom", url: "" },
+        }),
+      ),
+    ).toBe("https://old/");
+  });
+
+  it("falls back to the tab's stored URL before any view has reported", () => {
+    expect(addressFor(state(), "https://stored/")).toBe("https://stored/");
+    expect(addressFor(state())).toBe("");
   });
 });
