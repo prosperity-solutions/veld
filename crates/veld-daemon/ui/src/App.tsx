@@ -45,6 +45,7 @@ import {
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
+import { recallPromptDraft, rememberPromptDraft } from "./ide/promptDraft";
 import {
   applyTerminalPrefs,
   queueInitialPrompt,
@@ -6766,6 +6767,17 @@ function AppInner(props: {
       )}
       {dialog.kind === "new-worktree" && repo && (
         <NewWorktreeDialog
+          // **Remounted per project, and this is load-bearing.** `switchToProject`
+          // does not close this dialog and the ⌘1…⌘9 / ⌘` chords have no dialog
+          // guard, so the project can change under an open create — and every
+          // field in here is seeded once at mount while the props feeding it are
+          // rebound live. Without the key, the prompt draft written on the next
+          // keystroke went to the *new* project's storage carrying the old
+          // project's text, destroying a draft that was never opened; the name,
+          // the source picker and the branch were left describing a repo that is
+          // no longer selected. Remounting reseeds all of it from the project now
+          // shown, and the old project's draft is already safe in its own row.
+          key={repo.root}
           onClose={closeDialog}
           repoRoot={repo.root}
           // Live checkouts only. A trashed row is on its way off the disk, so
@@ -6801,6 +6813,13 @@ function AppInner(props: {
           rememberedAgent={recallLastAgent(window.localStorage, repo.root)}
           onAgentPicked={(agentId) =>
             rememberLastAgent(window.localStorage, repo.root, agentId)
+          }
+          // Also per project and also this client's own storage — see
+          // `ide/promptDraft.ts`. Read here rather than in an effect because the
+          // dialog seeds its field from it once, at mount.
+          promptDraft={recallPromptDraft(window.localStorage, repo.root)}
+          onPromptDraft={(text) =>
+            rememberPromptDraft(window.localStorage, repo.root, text)
           }
           onCreate={async (body) => {
             let created: CreatedWorktree;

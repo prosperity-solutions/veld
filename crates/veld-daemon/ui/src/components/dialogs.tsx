@@ -731,6 +731,17 @@ export function NewWorktreeDialog(props: {
   generatesNames: boolean;
   /** The agent this project was last created with, or `""` — see `ide/lastAgent.ts`. */
   rememberedAgent: string;
+  /**
+   * The prompt this project was in the middle of when the dialog last closed.
+   *
+   * Read once, at mount, into the field's own state — see `ide/promptDraft.ts`
+   * for why a prompt is the one thing in here worth keeping and what clears it.
+   */
+  promptDraft: string;
+  /** Record what is in the prompt field, or clear it with `""`. Called on every
+   *  keystroke, because the gestures this protects against (a tab closing, a
+   *  browser dying) never reach an `onClose` handler. */
+  onPromptDraft: (text: string) => void;
   /** Remember the agent a create actually used, for this project's next one. */
   onAgentPicked: (agentId: string) => void;
   /** Which rail section the "＋" was clicked in — `""` for ungrouped. Shown, not
@@ -759,7 +770,20 @@ export function NewWorktreeDialog(props: {
    * is what this dialog did before it grew a prompt, and nothing is launched —
    * see [`launch`].
    */
-  const [prompt, setPrompt] = useState("");
+  const [prompt, setPrompt] = useState(props.promptDraft);
+  /**
+   * The draft this dialog opened on, frozen at mount.
+   *
+   * **Frozen, and compared against rather than the live prop.** `props.promptDraft`
+   * is re-read from storage on every parent render and the field writes to that
+   * storage on every keystroke, so the prop catches up with what was typed — and
+   * a note gated on `prompt === props.promptDraft` came back on the next 5s poll
+   * to tell the user their own sentence had been "kept from last time". What the
+   * note is about is how this dialog *opened*, which is a value, not a
+   * comparison against a moving one.
+   */
+  const [openedWith] = useState(props.promptDraft);
+  const restoredDraft = openedWith.trim() !== "";
   /**
    * Which pane the prompt goes to.
    *
@@ -1035,10 +1059,17 @@ export function NewWorktreeDialog(props: {
         // checkout — see the `generatesNames` prop.
         name_prompt: props.generatesNames ? launch?.prompt : undefined,
       })
+      .then(() => {
+        // **Cleared by a create that carried it, not by any create.** Typing a
+        // prompt, changing your mind and making a plain checkout instead leaves
+        // an intention you have not spent — so it is still there next time.
+        if (launch !== null) props.onPromptDraft("");
+      })
       .catch((e) => {
         // The create is no longer in flight. The dialog stays open on failure,
         // so the courtesy check must be truthful again: if the daemon's own
         // refresh now lists a sibling, that is a real collision worth saying.
+        // The draft is deliberately *not* cleared here either.
         setPendingAlias(null);
         throw e;
       });
@@ -1543,7 +1574,10 @@ export function NewWorktreeDialog(props: {
                 minRows={10}
                 maxRows={20}
                 value={prompt}
-                onChange={(e) => setPrompt(e.currentTarget.value)}
+                onChange={(e) => {
+                  setPrompt(e.currentTarget.value);
+                  props.onPromptDraft(e.currentTarget.value);
+                }}
                 onKeyDown={(e) => {
                   // Enter is a newline in a prompt, so the keyboard submit has
                   // to be the chord — the same one every composer uses. Shift
@@ -1570,6 +1604,15 @@ export function NewWorktreeDialog(props: {
                   ? `Opens ${props.agents.find((a) => a.id === launch.agent)?.label ?? launch.agent} in the new checkout and types this in once it is ready.`
                   : "Optional. Left empty, the checkout just opens — nothing is started."}
               </Text>
+              {/* Text appearing in a field nobody just typed into needs a
+                  provenance, or it reads as a bug. Said once, on the open that
+                  restored it — not while they are editing it. */}
+              {restoredDraft && prompt === openedWith && (
+                <Text size="xs" c="dimmed">
+                  Kept from the last time this dialog was open. Clear the field
+                  to forget it.
+                </Text>
+              )}
               {/* What this mode decided on the user's behalf, said out loud
                   rather than left to be discovered on the rail. The name is the
                   one worth stating: it is the thing they did not type. */}
