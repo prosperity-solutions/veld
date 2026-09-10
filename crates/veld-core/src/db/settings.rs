@@ -37,7 +37,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 use super::settings_catalog::{
-    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, WORKTREE_STORAGE_MODES,
+    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, WORKTREE_NEW_MODES,
+    WORKTREE_STORAGE_MODES,
 };
 use super::{Db, DbError, now_str};
 
@@ -675,6 +676,8 @@ pub enum SettingKey {
     ActivityNotifyNoticed,
     ActivityNotifyAgentFinished,
     WorktreeMarkerStyle,
+    /// Which half of the New worktree dialog opens: `ask`, `prompt` or `manual`.
+    WorktreeNewMode,
     WorktreeTrashRetention,
     RunsHistoryDays,
     LogsTimeZone,
@@ -749,6 +752,7 @@ impl SettingKey {
         Self::BackupKeepDaily,
         Self::BackupDir,
         // ── Git ──────────────────────────────────────────────────────────────
+        Self::WorktreeNewMode,
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
@@ -852,6 +856,7 @@ impl SettingKey {
             Self::ActivityNotifyNoticed => "activity.notifyNoticed",
             Self::ActivityNotifyAgentFinished => "activity.notifyAgentFinished",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
+            Self::WorktreeNewMode => "worktree.newMode",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
             Self::LogsTimeZone => "logs.timeZone",
@@ -922,6 +927,7 @@ impl SettingKey {
             "activity.notifyNoticed" => Self::ActivityNotifyNoticed,
             "activity.notifyAgentFinished" => Self::ActivityNotifyAgentFinished,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
+            "worktree.newMode" => Self::WorktreeNewMode,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
             "logs.timeZone" => Self::LogsTimeZone,
@@ -1265,6 +1271,7 @@ impl SettingKey {
                 Value::from(s)
             }
             Self::WorktreeMarkerStyle => one_of(value, MARKER_STYLES).ok_or_else(bad)?,
+            Self::WorktreeNewMode => one_of(value, WORKTREE_NEW_MODES).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
             // coerced (same as the other enums here): the daemon acts on this
             // directly in `create_worktree`, so a stored value neither surface
@@ -1640,6 +1647,9 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // Colour is the new default marker; the emoji face stays stored, so this
         // is a rendering choice and switching back is lossless.
         (SettingKey::WorktreeMarkerStyle, Value::from("color")),
+        // `ask` rather than a mode: the first open is the one chance to explain the
+        // two, and defaulting to either would spend it.
+        (SettingKey::WorktreeNewMode, Value::from("ask")),
         // Both quick switches ship **on**. Whether two more buttons belong in a
         // pane's chrome for everyone is a real question — the bar already carries
         // most of a browser's toolbar and has to read at 300px — but the alternative is

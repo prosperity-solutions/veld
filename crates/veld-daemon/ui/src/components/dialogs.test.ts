@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   branchForMode,
   chooseAgent,
+  effectiveMode,
   effectiveName,
   createBlockers,
   sourceForMode,
@@ -388,5 +389,29 @@ describe("chooseAgent", () => {
     // `launch` can never name a pane that does not exist.
     expect(chooseAgent([], null)).toBe(null);
     expect(chooseAgent([], "claude")).toBe(null);
+  });
+});
+
+describe("effectiveMode", () => {
+  it("is the chooser until something is chosen", () => {
+    expect(effectiveMode({ chosen: null, hasAgents: true })).toBe("ask");
+    expect(effectiveMode({ chosen: null, hasAgents: false })).toBe("ask");
+  });
+
+  it("renders the chosen mode when the project can honour it", () => {
+    expect(effectiveMode({ chosen: "prompt", hasAgents: true })).toBe("prompt");
+    expect(effectiveMode({ chosen: "manual", hasAgents: true })).toBe("manual");
+  });
+
+  it("falls through to manual when there is nothing to prompt", () => {
+    // **The empty dialog.** The mode is a user preference and the agents are a
+    // project fact, so they disagree for anyone who picked "Start with a prompt"
+    // and then opened this in a repo with no agent panes — most repos. Rendering
+    // `prompt` there gave a dialog with a mode switch, a Create button and an
+    // empty body: the prompt column is gated on agents and the fields only
+    // render under `manual`.
+    expect(effectiveMode({ chosen: "prompt", hasAgents: false })).toBe("manual");
+    // `manual` never needs an agent, so it is never redirected.
+    expect(effectiveMode({ chosen: "manual", hasAgents: false })).toBe("manual");
   });
 });

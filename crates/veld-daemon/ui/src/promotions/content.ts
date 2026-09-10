@@ -347,10 +347,15 @@ export const PROMOTIONS: Promotion[] = [
   },
   {
     // **Promoted because the way you start work changed.** Not a new field: the
-    // first question the create dialog asks is no longer "what is this called"
-    // but "what needs doing" — and the habit it replaces (name a checkout, open
-    // it, find the agent pane, type the task) is one nobody drops without being
-    // told the shorter route exists.
+    // create dialog can now be asked for by the task rather than by the name —
+    // and the habit that replaces (name a checkout, open it, find the agent
+    // pane, type the task) is one nobody drops without being told the shorter
+    // route exists.
+    //
+    // Note the dialog's *literal* first question is now which mode to use
+    // (`worktree.newMode`, default `ask`), so the card deliberately does not
+    // claim what the first field is — an earlier draft of this comment did, and
+    // stopped being true one commit later.
     //
     // The headline says what the reader now does; "Start a worktree with a
     // prompt, not a name" was the first draft and describes the dialog instead

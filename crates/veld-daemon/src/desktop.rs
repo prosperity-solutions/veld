@@ -2050,7 +2050,7 @@ const MAX_DISPLAY_NAME_LEN: usize = 80;
 /// checks `is_forbidden` first — but this predicate answers "does this character
 /// render as anything", and a version that answered "yes" for U+2028 in order to
 /// avoid the overlap would be wrong the moment anything else called it.
-fn is_invisible(c: char) -> bool {
+pub(crate) fn is_invisible(c: char) -> bool {
     c.is_control()
         || c.is_whitespace()
         || matches!(c,
@@ -2079,7 +2079,7 @@ fn is_invisible(c: char) -> bool {
 /// harmless *beside a visible one* and sometimes required (see that function's
 /// note on U+200D). What is never acceptable is a name made of nothing else,
 /// which [`validate_display_name`] checks separately.
-fn is_forbidden(c: char) -> bool {
+pub(crate) fn is_forbidden(c: char) -> bool {
     c.is_control()
         || matches!(c,
             '\u{2028}' | '\u{2029}'     // line separator, paragraph separator
@@ -2114,7 +2114,7 @@ fn is_forbidden(c: char) -> bool {
 /// what someone typed is worse than telling them it is not a name. Trimming, on
 /// the other hand, *is* applied by the caller — a trailing space is a typo with
 /// one obvious intent.
-fn validate_display_name(name: &str) -> Result<(), ApiError> {
+pub(crate) fn validate_display_name(name: &str) -> Result<(), ApiError> {
     if name.chars().count() > MAX_DISPLAY_NAME_LEN {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -2411,6 +2411,14 @@ struct IdeView {
     /// a global curve. Floored to `0.1` so a hand-written `0` cannot divide by
     /// zero or invert the curve.
     staleness_sensitivity: f64,
+    /// Whether this checkout declares `ide.worktreeName` — i.e. whether a
+    /// prompt sent with a create would be turned into a name.
+    ///
+    /// **A boolean, never the command**, exactly as [`PaneView`] carries no
+    /// argv: the client is deciding whether to *send* the prompt at all, not
+    /// what to run with it. It is the flag that keeps prompt text off the create
+    /// request for every project that would have no use for it.
+    generates_names: bool,
     /// This checkout's `ide.news`, **deliberately never serialized** — it is
     /// consumed by [`select_news`] inside [`repo_view`] and moved up to
     /// [`RepoView::news`] instead, per `news.source`: by default only from the
@@ -2762,6 +2770,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
             // Read the floored scalar before the vec fields are moved below, so
             // the partial moves do not leave `section` half-borrowed.
             let staleness_sensitivity = section.staleness_sensitivity_safe();
+            let generates_names = section.worktree_name.is_some();
             IdeView {
                 quicklinks: section.quicklinks,
                 permissions: section.permissions,
@@ -2771,6 +2780,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
                 // needs a value here, which is why it isn't read from `section`.
                 extensions: Vec::new(),
                 staleness_sensitivity,
+                generates_names,
                 news: section.news,
             }
         })
@@ -3858,6 +3868,18 @@ struct CreateWorktreeBody {
     /// is configured — see `project_slug`.
     #[serde(default)]
     path: Option<String>,
+    /// The prompt this checkout was created from, for `ide.worktreeName` to name
+    /// it by.
+    ///
+    /// **Only ever sent when the project declares that command** — the client
+    /// gates on `IdeView::generates_names` — because a prompt the daemon has no
+    /// use for is prompt text on the wire for nothing. Absent leaves the name the
+    /// request already carries, which is the dialog's own derivation.
+    ///
+    /// It is not stored. It is written to the naming command's stdin and
+    /// dropped; what persists is the name that comes back.
+    #[serde(default)]
+    name_prompt: Option<String>,
     /// Marker glyph chosen in the create dialog; the daemon assigns one when absent.
     #[serde(default)]
     emoji: Option<String>,
@@ -4363,10 +4385,148 @@ async fn create_worktree(
         }
         _ => created,
     };
+    // **After the view, and not awaited.** The checkout exists and already has a
+    // name; a better one is worth a model round trip and is worth nobody waiting
+    // on it. See `spawn_worktree_naming`.
+    let view = worktree_view(&db, created);
+    if let Some(prompt) = body.name_prompt.as_deref().map(str::trim) {
+        if !prompt.is_empty() {
+            spawn_worktree_naming(
+                view.worktree.id,
+                view.worktree.path.clone(),
+                prompt.to_owned(),
+                // What the create stored, so the task can tell "still as I left
+                // it" from "a person renamed it while the command ran".
+                view.worktree.display_name.clone(),
+            );
+        }
+    }
     Ok(Json(CreatedWorktreeView {
-        worktree: worktree_view(&db, created),
+        worktree: view,
         carry_over,
     }))
+}
+
+/// Name a just-created worktree with `ide.worktreeName`, in the background.
+///
+/// **Fire-and-forget, and the create has already answered.** The shape
+/// [`spawn_dirty_sweep`] uses, for the same reason: the request must not wait on
+/// a child process, and the 5s poll is already the channel that carries a
+/// worktree's fields to every open window — so a name that arrives a few seconds
+/// late arrives the same way every other change to that row does, with no push
+/// channel and no reload.
+///
+/// Three properties, each deliberate:
+///
+/// - **It can only ever improve the label, and only the label it was handed.**
+///   Every failure — no command declared, a config that will not parse, a
+///   timeout, a non-zero exit, output that is not a name — leaves the checkout
+///   with the name the dialog gave it. There is no error path to the user
+///   because there is no error: a create that already succeeded cannot be made
+///   to fail by this. Nor will it overwrite a name a *person* chose in the
+///   meantime — see the re-read in [`name_worktree`].
+/// - **`display_name`, never the alias.** The alias picked the directory the
+///   checkout is already in and defaults its run name and hostname; renaming it
+///   here would leave the directory behind and change future URLs. See
+///   `ide::IdeSection::worktree_name`.
+/// - **No single-flight guard**, unlike the dirty sweep. This fires once per
+///   create, from one request, so there is no second caller to collapse onto —
+///   and a user creating three checkouts in a row wants three names.
+fn spawn_worktree_naming(worktree_id: i64, path: String, prompt: String, chose: String) {
+    tokio::spawn(async move {
+        let Ok(db) = open_desktop_db() else { return };
+        name_worktree(&db, worktree_id, &path, &prompt, &chose).await;
+    });
+}
+
+/// The body of [`spawn_worktree_naming`], with the database handed in.
+///
+/// Split out for the reason `worktree_trash::recover_with` is: everything above
+/// this — `tokio::spawn` and the process-wide database — is untestable, and
+/// everything in here is the part with rules worth pinning. `chose` is the name
+/// the create request stored, and it is what makes the last of those rules
+/// checkable.
+async fn name_worktree(db: &Db, worktree_id: i64, path: &str, prompt: &str, chose: &str) {
+    // Read the config from the *new* checkout, which is the one whose
+    // `veld.json` decides — the same rule `worktree_view` follows for panes.
+    let root = std::path::Path::new(path);
+    // `root_config_in`, never a hardcoded name: a `veld.jsonc` project is a
+    // project, and five daemon sites have already been the bug where it was
+    // not (`tests/validate-schema.sh` gates this).
+    let Some(cfg) = veld_core::config::root_config_in(root)
+        .and_then(|c| veld_core::config::parse_config(&c).ok())
+    else {
+        return;
+    };
+    let section = veld_core::ide::parse(cfg.ide.as_ref());
+    let Some(spec) = section.worktree_name.as_ref() else {
+        return;
+    };
+    let Ok(Some(wt)) = db.get_worktree(worktree_id) else {
+        return;
+    };
+    if wt.path != path {
+        return;
+    }
+    let builtins = crate::feedback_server::pty::worktree_builtins(root, &wt.branch, &cfg);
+    let Some(name) =
+        crate::feedback_server::extensions::run_worktree_name(spec, path, path, &builtins, prompt)
+            .await
+    else {
+        return;
+    };
+    // **Both guards run again here, and re-reading is the whole point.** The
+    // command took up to 60 seconds, and the row can have changed under it in
+    // two ways that must not be overwritten:
+    //
+    // - **A reused rowid.** Delete the checkout during those seconds and the
+    //   next one created can be handed the same number, so patching by id would
+    //   stamp this name onto a checkout the user never created it for. The path
+    //   is the identity (`worktrees.path` is `UNIQUE`; the id is a rowid SQLite
+    //   reuses), which is why it is what gets compared. Checking it only
+    //   *before* the command, as the first version did, checked the one window
+    //   in which it cannot happen.
+    // - **A rename by hand.** Somebody who names the checkout themselves in
+    //   those seconds has said what they want it called, and a generated name
+    //   arriving afterwards would silently replace it. `chose` is what the
+    //   create stored, so anything else means a person got there first.
+    let Ok(Some(now)) = db.get_worktree(worktree_id) else {
+        return;
+    };
+    if now.path != path {
+        tracing::info!(
+            worktree = %path,
+            "dropping a generated name: that row is a different checkout now"
+        );
+        return;
+    }
+    if now.display_name != chose {
+        tracing::info!(
+            worktree = %path,
+            "dropping a generated name: the checkout was renamed while the command ran"
+        );
+        return;
+    }
+    // The authority, not a second opinion: `Db::patch_worktree` validates none
+    // of this, and `generated_name` shapes the command's output rather than
+    // ruling on it.
+    if validate_display_name(&name).is_err() {
+        return;
+    }
+    match db.patch_worktree(
+        worktree_id,
+        veld_core::db::WorktreePatch {
+            display_name: Some(name.as_str()),
+            ..Default::default()
+        },
+    ) {
+        Ok(_) => {
+            tracing::info!(worktree = %path, name = %name, "named a new worktree from its prompt")
+        }
+        Err(e) => {
+            tracing::warn!(worktree = %path, error = %e, "could not apply a generated worktree name")
+        }
+    }
 }
 
 /// Partial update. Both fields are optional so the alias-only callers that
@@ -5220,6 +5380,212 @@ mod tests {
             view.ide.extensions.is_empty(),
             "worktree mode must not borrow main's declarations"
         );
+    }
+
+    // -- `name_worktree` (`ide.worktreeName`) --------------------------------
+
+    /// Set up a one-worktree repo whose config declares `worktreeName`, and
+    /// return its row. `script` runs through `sh -c` with the prompt on stdin.
+    fn repo_with_naming_command(db: &Db, dir: &std::path::Path, script: &str) -> WorktreeRecord {
+        let root = dir.join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("veld.json"), // root-config-gate-ok
+            format!(
+                r#"{{"schemaVersion": "3", "name": "t", "nodes": {{}},
+                     "ide": {{"worktreeName": {{"shell": {}}}}}}}"#,
+                serde_json::Value::from(script)
+            ),
+        )
+        .unwrap();
+        db.upsert_repo(dir, "repo").unwrap();
+        db.sync_worktrees(
+            dir,
+            &[DiscoveredWorktree {
+                path: root.to_string_lossy().into_owned(),
+                branch: "main".to_owned(),
+                is_main: true,
+            }],
+        )
+        .unwrap();
+        db.list_worktrees(dir).unwrap().into_iter().next().unwrap()
+    }
+
+    /// The happy path, and the proof the prompt reaches the command's stdin.
+    #[tokio::test]
+    async fn a_naming_command_is_handed_the_prompt_and_its_answer_becomes_the_label() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let wt = repo_with_naming_command(&db, repo_dir.path(), "tr '[:lower:]' '[:upper:]'");
+        db.patch_worktree(
+            wt.id,
+            veld_core::db::WorktreePatch {
+                display_name: Some("Dialog chose this"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        name_worktree(
+            &db,
+            wt.id,
+            &wt.path,
+            "fix the redirect",
+            "Dialog chose this",
+        )
+        .await;
+
+        let named = db.get_worktree(wt.id).unwrap().unwrap();
+        assert_eq!(named.display_name, "FIX THE REDIRECT");
+        // The identifier and the branch are never touched: the alias chose the
+        // directory this checkout is in and defaults its run name.
+        assert_eq!(named.alias, wt.alias);
+        assert_eq!(named.branch, wt.branch);
+    }
+
+    /// **A person who renamed it in the meantime wins.**
+    ///
+    /// The command may take a minute, and somebody who names the checkout
+    /// themselves in that window has said what they want it called. Without the
+    /// re-read the daemon's answer arrived later and silently replaced theirs.
+    #[tokio::test]
+    async fn a_generated_name_does_not_overwrite_one_a_person_chose() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let wt = repo_with_naming_command(&db, repo_dir.path(), "cat >/dev/null; echo Generated");
+        db.patch_worktree(
+            wt.id,
+            veld_core::db::WorktreePatch {
+                display_name: Some("Renamed by hand"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // `chose` is what the *create* stored, so it no longer matches the row.
+        name_worktree(&db, wt.id, &wt.path, "a prompt", "Dialog chose this").await;
+
+        assert_eq!(
+            db.get_worktree(wt.id).unwrap().unwrap().display_name,
+            "Renamed by hand"
+        );
+    }
+
+    /// A name the rename endpoint would refuse never reaches the database.
+    ///
+    /// `Db::patch_worktree` validates no display name, so `generated_name` plus
+    /// `validate_display_name` are the only guards — and a name of nothing but
+    /// zero-width spaces is the one that defeats the `""` sentinel and blanks
+    /// every surface that names the checkout at once.
+    #[tokio::test]
+    async fn a_generated_name_that_would_not_render_is_dropped() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let wt = repo_with_naming_command(
+            &db,
+            repo_dir.path(),
+            // Octal, not `\u`: `sh`'s `printf` has no `\u` escape and prints
+            // the literal text instead, which is *visible* and correctly
+            // accepted — the first version of this test passed for that reason
+            // and proved nothing. `\342\200\213` is U+200B's UTF-8.
+            "cat >/dev/null; printf '\\342\\200\\213\\342\\200\\213\\n'",
+        );
+        db.patch_worktree(
+            wt.id,
+            veld_core::db::WorktreePatch {
+                display_name: Some("Dialog chose this"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        name_worktree(&db, wt.id, &wt.path, "a prompt", "Dialog chose this").await;
+
+        assert_eq!(
+            db.get_worktree(wt.id).unwrap().unwrap().display_name,
+            "Dialog chose this"
+        );
+    }
+
+    /// Every other way this can fail leaves the label alone, because the
+    /// checkout already exists and is already named.
+    #[tokio::test]
+    async fn every_naming_failure_keeps_the_name_the_dialog_chose() {
+        for script in [
+            "cat >/dev/null; exit 3",          // non-zero exit
+            "cat >/dev/null; true",            // no output
+            "cat >/dev/null; printf -- '---'", // nothing left after trimming
+        ] {
+            let (_db_dir, db) = open_test_db();
+            let repo_dir = tempfile::TempDir::new().unwrap();
+            let wt = repo_with_naming_command(&db, repo_dir.path(), script);
+            db.patch_worktree(
+                wt.id,
+                veld_core::db::WorktreePatch {
+                    display_name: Some("Dialog chose this"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+            name_worktree(&db, wt.id, &wt.path, "a prompt", "Dialog chose this").await;
+
+            assert_eq!(
+                db.get_worktree(wt.id).unwrap().unwrap().display_name,
+                "Dialog chose this",
+                "script: {script}"
+            );
+        }
+    }
+
+    /// A repo that declares no naming command runs nothing, even when a prompt
+    /// arrives — which is every project that has not opted in.
+    #[tokio::test]
+    async fn no_declared_command_means_no_command_and_no_change() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let root = repo_dir.path().join("main");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("veld.json"), // root-config-gate-ok
+            r#"{"schemaVersion": "3", "name": "t", "nodes": {}}"#,
+        )
+        .unwrap();
+        db.upsert_repo(repo_dir.path(), "repo").unwrap();
+        db.sync_worktrees(
+            repo_dir.path(),
+            &[DiscoveredWorktree {
+                path: root.to_string_lossy().into_owned(),
+                branch: "main".to_owned(),
+                is_main: true,
+            }],
+        )
+        .unwrap();
+        let wt = db
+            .list_worktrees(repo_dir.path())
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+
+        name_worktree(&db, wt.id, &wt.path, "a prompt", "").await;
+
+        assert_eq!(db.get_worktree(wt.id).unwrap().unwrap().display_name, "");
+    }
+
+    /// The reused-rowid guard: the row this id names must still be the checkout
+    /// the name was generated for. `worktrees.id` is a rowid SQLite reuses.
+    #[tokio::test]
+    async fn a_generated_name_is_dropped_when_the_row_is_a_different_checkout() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().unwrap();
+        let wt = repo_with_naming_command(&db, repo_dir.path(), "tr '[:lower:]' '[:upper:]'");
+
+        // A path that is not this row's: stands in for the id having been
+        // handed to a different checkout since the create.
+        name_worktree(&db, wt.id, "/nowhere/else", "fix the redirect", "").await;
+
+        assert_eq!(db.get_worktree(wt.id).unwrap().unwrap().display_name, "");
     }
 
     /// The fail-closed case: `main` mode with no `is_main` row at all for this

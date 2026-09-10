@@ -7,6 +7,23 @@
   // and how to hand it a stable token, and the config decides what that
   // command is.
   "ide": {
+    // A command that names a new worktree from the prompt the IDE's New
+    // worktree dialog was given. The prompt arrives on **stdin**, not in the
+    // argument list — which is both how `claude -p` and `codex exec` already
+    // take one, and why a prompt (the user's own prose, about whatever they are
+    // working on) never reaches the world-readable process table.
+    //
+    // It runs after the checkout exists, so nothing waits on it: the dialog has
+    // already named the worktree from the prompt's first clause, and this
+    // replaces that label a few seconds later if it answers. Every failure is
+    // silent on purpose — the name the dialog chose stands.
+    "worktreeName": {
+      "argv": [
+        "claude",
+        "-p",
+        "Reply with a 2-4 word title for this task, in sentence case, and nothing else"
+      ]
+    },
     "panes": [
       {
         // The worked example. `claude --session-id <uuid>` starts a

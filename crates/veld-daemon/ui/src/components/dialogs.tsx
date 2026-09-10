@@ -33,7 +33,7 @@ import {
   type WorktreeGitStatus,
 } from "../api";
 import { describeAge } from "../dbhealth/model";
-import type { GitCreateFrom, MarkerStyle } from "../shared/settings";
+import type { GitCreateFrom, MarkerStyle, WorktreeNewMode } from "../shared/settings";
 import {
   aliasCollides,
   DEFAULT_WORKTREE_NAME,
@@ -605,6 +605,35 @@ export function effectiveName(input: {
 }
 
 /**
+ * The mode the dialog actually renders, which is not always the one chosen.
+ *
+ * **`prompt` needs something to prompt.** The mode is a *user* preference and
+ * the agents are a *project* fact, so the two disagree the moment somebody who
+ * picked "Start with a prompt" opens the dialog in a repo that declares no agent
+ * panes — which is most repos. Rendering the chosen mode there produced a dialog
+ * with a mode switch, a Create button and **nothing else**: the prompt column is
+ * gated on having agents and the fields only render in `manual`, so the body was
+ * empty. Falling through to `manual` is the answer rather than an empty prompt
+ * column, because `manual` always works and the checkout is what the user came
+ * for.
+ *
+ * `ask` when nothing has been chosen yet — the chooser is a state, not an
+ * absence.
+ *
+ * A function, and exported, because it is the whole of that rule and the UI
+ * suite has no way to render a component: gating written inline in the JSX is
+ * untestable here by construction, which is how the empty dialog got written.
+ */
+export function effectiveMode(input: {
+  chosen: "prompt" | "manual" | null;
+  hasAgents: boolean;
+}): "prompt" | "manual" | "ask" {
+  if (input.chosen === null) return "ask";
+  if (input.chosen === "prompt" && !input.hasAgents) return "manual";
+  return input.chosen;
+}
+
+/**
  * Which pane the prompt goes to: the user's pick, else the project's first.
  *
  * **Resolved on every render rather than seeded into state**, because the agent
@@ -645,6 +674,12 @@ export function NewWorktreeDialog(props: {
     /** What to type into that pane once it is ready. Absent when the user left
      *  the field empty, which is the "just give me the checkout" case. */
     prompt?: string;
+    /** The same text, for the daemon's `ide.worktreeName` command to name the
+     *  checkout by. Separate from `prompt` because they go to different places
+     *  and are gated on different things: `prompt` is typed into a pane by this
+     *  client, `name_prompt` rides the create request and is only sent when the
+     *  project declares a naming command. */
+    name_prompt?: string;
   }) => Promise<void>;
   /** The repo whose branches the source picker lists. */
   repoRoot: string;
@@ -673,6 +708,31 @@ export function NewWorktreeDialog(props: {
    * would be nothing to hand the text to.
    */
   agents: PaneSpec[];
+  /**
+   * Which half of the dialog opens, from `worktree.newMode`.
+   *
+   * `ask` is the first-run state and is not a missing value — it renders the two
+   * modes side by side with what each one does, and nothing else, so the first
+   * choice is an informed one. Picking either records it through
+   * [`onNewModeChange`], which is why this is a *setting* rather than dialog
+   * state: it is a preference, and the next create should open on it.
+   */
+  newMode: WorktreeNewMode;
+  /** Record the mode the user is working in, so the next create opens on it. */
+  onNewModeChange: (mode: "prompt" | "manual") => void;
+  /**
+   * Whether the project declares `ide.worktreeName` — a command that turns the
+   * prompt into the checkout's name.
+   *
+   * Gates whether the prompt goes on the create request at all: a project with
+   * no such command has no use for it, and the dialog's own derivation already
+   * named the checkout.
+   */
+  generatesNames: boolean;
+  /** The agent this project was last created with, or `""` — see `ide/lastAgent.ts`. */
+  rememberedAgent: string;
+  /** Remember the agent a create actually used, for this project's next one. */
+  onAgentPicked: (agentId: string) => void;
   /** Which rail section the "＋" was clicked in — `""` for ungrouped. Shown, not
    *  editable: the click already chose it, and a second control saying the same
    *  thing is one more thing to disagree with. */
@@ -709,6 +769,28 @@ export function NewWorktreeDialog(props: {
    * opened on "pick one" would make the common case a click it does not need.
    */
   const [agent, setAgent] = useState<string | null>(null);
+  /**
+   * The mode being worked in, or `null` while the chooser is up.
+   *
+   * Seeded from the setting and then owned locally, so switching mode inside an
+   * open dialog is instant rather than waiting on a settings round trip — the
+   * setting is written alongside (see `pickMode`) but is not what this reads.
+   */
+  const [chosenMode, setChosenMode] = useState<"prompt" | "manual" | null>(
+    props.newMode === "ask" ? null : props.newMode,
+  );
+  /** Switch mode, and record it as this user's default for the next create. */
+  const pickMode = (next: "prompt" | "manual") => {
+    setChosenMode(next);
+    props.onNewModeChange(next);
+  };
+  /** See [`effectiveMode`], which owns the rule. What renders reads this; what
+   *  the segmented control shows reads `chosenMode`, so a preference that this
+   *  project cannot honour is still visibly the user's preference. */
+  const shownMode = effectiveMode({
+    chosen: chosenMode,
+    hasAgents: props.agents.length > 0,
+  });
   /**
    * Which of the four sources the checkout comes from.
    *
@@ -822,10 +904,17 @@ export function NewWorktreeDialog(props: {
     const branch = deriveBranch(candidate).toLowerCase();
     return !(branches?.local.some((b) => b.name.toLowerCase() === branch) ?? false);
   };
-  /** See [`effectiveName`], which owns the rule. */
+  /** See [`effectiveName`], which owns the rule.
+   *
+   *  **The prompt only counts in the mode that shows one.** The typed prompt
+   *  survives a switch to "Fill in the details" — which is right, switching back
+   *  should not lose it — but a Name placeholder derived from text that is no
+   *  longer on screen is a name with no visible source. In manual mode the
+   *  generated name is the numbered fallback, which is what "you did not name
+   *  it" honestly looks like there. */
   const { name: chosenName, auto: autoNamed } = effectiveName({
     typed: name,
-    prompt,
+    prompt: shownMode === "prompt" ? prompt : "",
     isFree: nameIsFree,
   });
   const alias = deriveAlias(chosenName);
@@ -875,8 +964,11 @@ export function NewWorktreeDialog(props: {
     carryOver,
   });
 
-  /** See [`chooseAgent`], which owns the rule. */
-  const agentId = chooseAgent(props.agents, agent);
+  /** See [`chooseAgent`], which owns the rule. This project's remembered pick
+   *  stands in for a local one until the user touches the field, so the fallback
+   *  chain is: what they just chose, then what they chose here last time, then
+   *  the project's first declared pane. */
+  const agentId = chooseAgent(props.agents, agent ?? props.rememberedAgent);
   /**
    * The pane to open in the new checkout and the text to hand it — or `null`.
    *
@@ -888,7 +980,7 @@ export function NewWorktreeDialog(props: {
    * empty is how you say "no thanks" without also having to say it twice.
    */
   const launch =
-    prompt.trim() !== "" && agentId !== null
+    shownMode === "prompt" && prompt.trim() !== "" && agentId !== null
       ? { agent: agentId, prompt: prompt.trim() }
       : null;
   /**
@@ -902,9 +994,13 @@ export function NewWorktreeDialog(props: {
    * step further along. Blocked and said out loud instead, in the footer, which
    * is the one part of the dialog that cannot unmount.
    */
-  const promptHasNoAgent = prompt.trim() !== "" && agentId === null;
+  const promptHasNoAgent =
+    shownMode === "prompt" && prompt.trim() !== "" && agentId === null;
   const formRef = useRef<HTMLFormElement>(null);
   const { busy, error, submit } = useSubmit(() => {
+    // Recorded at submit, not on every keystroke in the picker: what is worth
+    // remembering is the agent a create actually used.
+    if (launch !== null) props.onAgentPicked(launch.agent);
     // Captured at submit, before the daemon's response: this is the alias the
     // in-flight create is about to make, and it must not read as a collision
     // when the poll catches up with the daemon mid-request.
@@ -934,6 +1030,10 @@ export function NewWorktreeDialog(props: {
         // See `launch`: the pane and the text travel together or not at all.
         agent: launch?.agent,
         prompt: launch?.prompt,
+        // Only when the project declares a naming command. Otherwise the daemon
+        // has nothing to do with it and the dialog has already named the
+        // checkout — see the `generatesNames` prop.
+        name_prompt: props.generatesNames ? launch?.prompt : undefined,
       })
       .catch((e) => {
         // The create is no longer in flight. The dialog stays open on failure,
@@ -953,6 +1053,94 @@ export function NewWorktreeDialog(props: {
    * dialog), and inside a collapsed disclosure otherwise. Two copies of forty
    * lines of fields would drift.
    */
+  /**
+   * What each mode is for — written to be read *under its own segment*.
+   *
+   * Second person and starting with a verb, so each one reads as a description
+   * of the button above it rather than as a section of the form. The first
+   * version gave each a bold heading repeating the segment's label, which turned
+   * a switch into what looked like two panes to fill in.
+   */
+  const MODE_BLURBS = {
+    prompt:
+      "You type what needs doing; one of the project's agents starts on it. Veld picks the name, branch and marker.",
+    manual:
+      "You name it, choose where it starts from and pick its marker. Nothing is run.",
+  } as const;
+
+  /**
+   * The mode switch, and — on a first create — the only thing in the dialog.
+   *
+   * **The chooser is a real state, not an empty one.** A dialog that opened on
+   * whichever mode happened to be wired first would teach the wrong half of the
+   * feature to everybody who never went looking for the other one, and this is
+   * the single moment where explaining both is cheap: nothing has been typed
+   * yet, so there is nothing to lose by asking. Picking either records it
+   * (`worktree.newMode`) and the next create opens straight into it.
+   *
+   * The control stays on screen afterwards, because a mode is not a decision
+   * somebody should have to visit Settings to revise — and switching re-records,
+   * so the default follows what you actually use.
+   */
+  const modeControl = (
+    <Stack gap={chosenMode === null ? "xs" : 6} pb={chosenMode === null ? 0 : "xs"}>
+      {/* **The control needs a question over it, or it reads as a form.** Two
+          segments with prose underneath look like two things to fill in unless
+          something says they are alternatives — which is exactly how the first
+          version of this read. The question does that in four words, and it is
+          asked only while it is open: once a mode is chosen the control is a
+          switch whose current position is visible, and a standing question over
+          it would imply the choice had not been made. */}
+      {chosenMode === null && (
+        <Text size="sm" fw={600}>
+          How do you want to start?
+        </Text>
+      )}
+      <SegmentedControl
+        fullWidth
+        // `""` while nothing is chosen: Mantine renders no selected segment, so
+        // the control reads as a question rather than as an answer already given.
+        value={chosenMode ?? ""}
+        onChange={(v) => pickMode(v as "prompt" | "manual")}
+        // **Both labels start "Start with a…", and that is the point.** The
+        // parallel construction is what makes two segments read as two doors
+        // into one act rather than as two things to fill in — which is how
+        // "Describe the task"/"Fill in the details" read, because neither half
+        // said what it was an alternative *to*. Each also names the first field
+        // its mode actually asks for, so the label is a promise the body keeps.
+        data={[
+          { value: "prompt", label: "Start with a prompt" },
+          { value: "manual", label: "Start with a name" },
+        ]}
+        data-autofocus={chosenMode === null || undefined}
+      />
+      {chosenMode === null && (
+        <>
+          {/* **Under the segment each one describes, in two columns.** The
+              mapping is the explanation: a blurb sitting under its own button
+              cannot be mistaken for a section of the form, and neither needs a
+              heading because the button above it is the heading. Stacked blocks
+              with bold titles is what this replaced. */}
+          <SimpleGrid cols={2} spacing="lg" verticalSpacing="xs">
+            <Text size="xs" c="dimmed">
+              {MODE_BLURBS.prompt}
+              {props.agents.length === 0 &&
+                " This project declares no agent panes yet, so there is nothing to hand a prompt to."}
+            </Text>
+            <Text size="xs" c="dimmed">
+              {MODE_BLURBS.manual}
+            </Text>
+          </SimpleGrid>
+          <Text size="xs" c="dimmed">
+            Either one creates a worktree — this is just which questions the
+            dialog asks. Your pick becomes the default, and you can change it
+            here or in Settings → Git.
+          </Text>
+        </>
+      )}
+    </Stack>
+  );
+
   const options = (
     <Stack gap="sm">
       <TextInput
@@ -1273,10 +1461,13 @@ export function NewWorktreeDialog(props: {
   return (
     <Modal
       title="New worktree"
-      // Wide enough for two columns, and only when there are two: a project
-      // that declares no agent panes has the old single column of fields, and
-      // 940px of dialog around it would be empty space asking to be filled.
-      size={props.agents.length > 0 ? 940 : undefined}
+      // One width for every state, because the width must not change under a
+      // mode switch — a dialog that resizes when you press a segment reads as a
+      // different dialog. 680 rather than the 560 default: one mode is a prompt
+      // composer that wants a paragraph on a line, the other is a column of
+      // fields plus two marker grids that were cramped at 560, and neither
+      // needs the 940 the two-column version did.
+      size={680}
       onClose={props.onClose}
     >
       <form onSubmit={submit} ref={formRef}>
@@ -1296,23 +1487,17 @@ export function NewWorktreeDialog(props: {
             marginRight: -8,
           }}
         >
-        {/* **Two columns, and nothing hidden.** The first version of this
-            rearrangement put the old fields behind a disclosure, which traded
-            one problem for another: the prompt had room and everything else
-            became a click plus a guess at what was in there. A 560px dialog is
-            what forced the choice — at 940 the prompt gets a column that fits
-            a paragraph and the fields it used to be alone with sit beside it,
-            both visible at once.
-
-            `minColWidth` with `auto-fit`, **not** responsive `cols`. `cols`
-            takes Mantine's breakpoints against the *viewport*, and this grid is
-            inside a modal that is capped to the viewport — so between 768px and
-            940px of window the dialog was as narrow as the window and still
-            split itself into two 360px columns, which is the case the split was
-            supposed to fold out of. `auto-fit` measures the track against the
-            grid's own width instead, needs no query at all, and collapses the
-            empty track — so the no-agents case (one child) fills the row rather
-            than sitting in half a grid. */}
+        {modeControl}
+        {/* One mode is on screen at a time, so this grid now holds a single
+            child and lays it out full width. It is kept rather than replaced by
+            a plain `Stack` because `auto-fit` is what makes that true *without*
+            a query: the track is measured against the grid's own width, so a
+            future mode that wants two columns gets them by rendering two
+            children, and a narrow window still folds instead of scrolling
+            sideways. `minColWidth` is `min(360px, 100%)` and not `360` for that
+            second reason — `minmax(360px, 1fr)` cannot shrink below its
+            minimum, so a modal capped to a narrow viewport would scroll the
+            fields rather than stack them. */}
         <SimpleGrid
           // `min(360px, 100%)`, not `360`: `minmax(360px, 1fr)` cannot shrink
           // below its minimum, so a modal narrower than that (a small window,
@@ -1324,7 +1509,7 @@ export function NewWorktreeDialog(props: {
           spacing="xl"
           verticalSpacing="sm"
         >
-          {props.agents.length > 0 && (
+          {shownMode === "prompt" && (
             <Stack gap="sm">
               {/* The agent, then the prompt, in that order — it is the order the
                   sentence goes in ("give Claude this") and it puts the smaller
@@ -1385,9 +1570,37 @@ export function NewWorktreeDialog(props: {
                   ? `Opens ${props.agents.find((a) => a.id === launch.agent)?.label ?? launch.agent} in the new checkout and types this in once it is ready.`
                   : "Optional. Left empty, the checkout just opens — nothing is started."}
               </Text>
+              {/* What this mode decided on the user's behalf, said out loud
+                  rather than left to be discovered on the rail. The name is the
+                  one worth stating: it is the thing they did not type. */}
+              <Text size="xs" c="dimmed">
+                {props.generatesNames && launch
+                  ? "Named for you once the checkout is open — this project has a naming command."
+                  : `Named ${displayName}. Switch to “Start with a name” to choose the name, source or marker.`}
+              </Text>
+              {/* The ⋯ menu's "Spin off…" already chose the source, so this mode
+                  states it instead of offering a picker it has no room for. */}
+              {props.spinOffFrom !== undefined && (
+                <Text size="xs" c="dimmed">
+                  Branching off <b>{worktreeLabel(props.spinOffFrom)}</b>
+                  {carryOver ? ", uncommitted changes included." : "."}
+                </Text>
+              )}
             </Stack>
           )}
-          {options}
+          {shownMode === "manual" && (
+            <Stack gap="sm">
+              {/* The one case where the mode on screen is not the mode on the
+                  control: say so, or the preference looks broken. */}
+              {chosenMode === "prompt" && (
+                <Text size="xs" c="dimmed">
+                  This project declares no agent panes, so there is nothing to
+                  hand a prompt to — these are the details instead.
+                </Text>
+              )}
+              {options}
+            </Stack>
+          )}
         </SimpleGrid>
         </div>
         <Stack
@@ -1396,6 +1609,11 @@ export function NewWorktreeDialog(props: {
           mt="sm"
           style={{ borderTop: "1px solid var(--border)" }}
         >
+          {shownMode === "ask" && (
+            <Text size="xs" c="dimmed">
+              Pick one above to get started.
+            </Text>
+          )}
           {promptHasNoAgent && (
             <Text size="xs" c="red">
               This project no longer offers an agent that could run your prompt.
@@ -1403,9 +1621,18 @@ export function NewWorktreeDialog(props: {
             </Text>
           )}
           <ErrorText error={error} />
-          <Button type="submit" loading={busy} disabled={!ready || promptHasNoAgent}>
-            Create worktree
-          </Button>
+          {/* No Create until a mode is chosen: there is nothing on screen to
+              create *from* yet, and a button that worked anyway would make the
+              chooser look like something to dismiss. */}
+          {shownMode !== "ask" && (
+            <Button
+              type="submit"
+              loading={busy}
+              disabled={!ready || promptHasNoAgent}
+            >
+              Create worktree
+            </Button>
+          )}
         </Stack>
       </form>
     </Modal>

@@ -149,7 +149,7 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Seven keys under `ide`
+  there. (This is the rule the removed converter broke.) Eight keys under `ide`
   are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`,
   `extensions`, `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
   [configuration.md](configuration.md#ide-the-projects-own-ide-surfaces) — but they are additions
@@ -509,6 +509,15 @@ this release does not know the key, so it lints the pane with an
 `unknown pane key(s) "agent"` problem — the pane itself still loads and still
 works, which is the same additive path every other new pane field took. See
 [configuration.md](configuration.md#idepanes-the-projects-own-panes).
+
+`ide.worktreeName` is new and additive: one `argv`/`shell` command that names a
+new worktree from the prompt the IDE's create dialog was given. Absent — the
+default — nothing changes; the dialog names checkouts from the prompt's first
+clause as it does without it. The prompt is written to the command's **stdin**,
+so there is no new interpolation name to learn and nothing new in any argument
+list. It runs after the create has already answered and only ever sets
+`display_name`, so it cannot fail a create or move a checkout. See
+[configuration.md](configuration.md#ideworktreename-naming-a-new-worktree-from-its-prompt).
 
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld

@@ -526,6 +526,16 @@ export interface IdeSection {
    *  pill (`ide.git.stalenessSensitivity`, default 1). Optional in the type so
    *  a fixture or an older daemon that omits it falls back to the default. */
   staleness_sensitivity?: number;
+  /**
+   * Whether this checkout declares `ide.worktreeName` — a command that turns
+   * the prompt a worktree was created from into its name.
+   *
+   * **The flag, never the command**, for the reason `panes` carries no argv.
+   * The client only needs it to decide whether to put the prompt on the create
+   * request at all: a project that would do nothing with it should not have it
+   * sent. Optional in the type so an older daemon reads as "declares none".
+   */
+  generates_names?: boolean;
 }
 
 /** Mirrors `ExtensionView` in `crates/veld-daemon/src/desktop.rs`. */
@@ -1625,6 +1635,16 @@ export const api = {
     lane?: string;
     emoji?: string;
     marker_color?: string;
+    /**
+     * The prompt to name the checkout from, for `ide.worktreeName`.
+     *
+     * Sent only when the project declares that command
+     * ({@link IdeSection.generates_names}) — otherwise the daemon has no use for
+     * it and it would be prompt text on the wire for nothing. The daemon runs
+     * the command *after* answering this request and patches the name in, so a
+     * create never waits on it.
+     */
+    name_prompt?: string;
   }) =>
     request<CreatedWorktree>("/api/worktrees", {
       method: "POST",

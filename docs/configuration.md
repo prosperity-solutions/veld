@@ -2072,9 +2072,9 @@ already lost its leading zero, so it is refused rather than guessed at.
 ## `ide`: the project's own IDE surfaces
 
 `ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
-the `/ide` view in a browser. Seven keys under it are interpreted — `quicklinks`,
-`permissions`, `externalOrigins`, `panes`, `extensions`, `news` and the `git`
-subscope; the rest of `ide` stays reserved and opaque (see
+the `/ide` view in a browser. Eight keys under it are interpreted — `quicklinks`,
+`permissions`, `externalOrigins`, `panes`, `extensions`, `news`, `worktreeName`
+and the `git` subscope; the rest of `ide` stays reserved and opaque (see
 [below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
 free to use whatever shape it likes.
 
@@ -2351,6 +2351,60 @@ on opposite sides:
 A useful calibration: `s` should be high enough that a normal worktree-creation
 cycle never trips it, but low enough that a `main` nobody has updated for a
 sprint reads clearly red.
+
+### `ide.worktreeName`: naming a new worktree from its prompt
+
+A command that turns the prompt a worktree was created from into that worktree's
+name. Declared like every other command in veld — exactly one of `argv` or
+`shell`:
+
+```jsonc
+{
+  "ide": {
+    "worktreeName": {
+      "argv": [
+        "claude",
+        "-p",
+        "Reply with a 2-4 word title for this task, in sentence case, and nothing else"
+      ]
+    }
+  }
+}
+```
+
+**The prompt arrives on the command's stdin**, never in its argument list. That
+is the shape the tools this exists for already take a prompt in (`claude -p` and
+`codex exec` both read one from stdin), and it is the only shape that keeps the
+prompt — the user's own prose, about whatever they happen to be working on — out
+of the world-readable process table. There is deliberately no `${veld.prompt}`.
+
+**Nothing waits for it.** The IDE's *New worktree…* dialog has already named the
+checkout (from the prompt's first clause, or a numbered fallback) by the time the
+create returns; the daemon runs this afterwards and patches the name in, which
+reaches every open window on the next poll a second or two later.
+
+**Every failure is silent, by design.** No command declared, a config that will
+not parse, a timeout (60s), a non-zero exit, output that is not usable as a name
+— each leaves the checkout with the name the dialog gave it. There is no error to
+report because there is nothing broken: the worktree exists and is named.
+
+What it changes is the **display name** — the label the rail shows — and never
+the alias. The alias is the identifier: it picked the directory the checkout is
+already sitting in, and it defaults the run name and therefore a hostname.
+Renaming it afterwards would leave the directory under the old name and change
+every future URL, so a generated name does not touch it. The branch is likewise
+already cut and is left alone.
+
+The first non-blank line of stdout is the name. A leading list bullet or heading
+marker and surrounding quotes are stripped (a model asked for a title will
+sometimes write one anyway), the result is capped at 48 characters, and a name
+containing a control character or a text-direction override is discarded rather
+than cleaned up — the same posture `display_name` validation takes everywhere
+else.
+
+Scope: `${veld.worktree}`, `${veld.root}`, `${veld.branch}`, `${veld.branch_raw}`
+(`argv` only, for the reason given under `ide.panes`), `${veld.project}` and
+`${veld.username}`.
 
 ### `ide.news`: telling your own team something changed
 
@@ -3271,7 +3325,7 @@ that budget went instead.
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
-inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes`,
+inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes`, `worktreeName`,
 `extensions`, `news` and `git` are not.
 
 ```jsonc

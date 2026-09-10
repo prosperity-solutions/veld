@@ -21,6 +21,12 @@
 //! - **Nothing waits forever.** `stdin` is closed and no tty is attached, so a CLI
 //!   that would prompt for credentials fails instead of hanging; a deadline backs
 //!   that up, and it kills the **process group** so a shell's children go with it.
+//!   One position writes to `stdin` instead of closing it — `ide.worktreeName`,
+//!   which hands the command a prompt that way rather than in an argument list —
+//!   and it holds the same guarantee by a different route: the write happens
+//!   *inside* the deadline, so a command that never reads its input is killed
+//!   with the group like any other slow one. It is still not a tty, so nothing
+//!   there can prompt interactively either.
 //! - **The cost bound belongs to veld.** A minimum interval, a count cap
 //!   (`veld_core::ide`), an output byte cap, and single-flight per extension so
 //!   three IDE windows asking at once spend one child process, not three.
@@ -58,6 +64,29 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(20);
 /// worth a short wait: without it every mistake in an `argv` is a button that
 /// silently does nothing.
 const ACTIVATE_GRACE: Duration = Duration::from_secs(3);
+
+/// How long `ide.worktreeName` may take to answer.
+///
+/// Longer than a badge, because the flagship case *is* a model round trip —
+/// `claude -p` on a laptop is several seconds before it has written anything —
+/// and nothing is waiting on it: the checkout already exists and already has a
+/// name. Short enough that a wedged command cannot sit in the process table for
+/// the rest of the daemon's life.
+const NAME_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Longest prompt handed to a naming command, in bytes.
+///
+/// The prompt is the user's own prose and can be a pasted essay; a naming
+/// command needs the gist, not the whole thing. Capped rather than streamed
+/// because the write shares the deadline with the run — see `spawn_command` —
+/// and because a model asked to summarise 300 KB is a slow way to get a worse
+/// name. Cut on a character boundary so the command is handed valid UTF-8.
+const MAX_NAME_PROMPT_BYTES: usize = 4096;
+
+/// Longest generated name accepted, in characters. The daemon's own
+/// `MAX_DISPLAY_NAME_LEN` is the hard bound; this is deliberately far below it,
+/// because a *name* that fills a rail column is not a name.
+const MAX_GENERATED_NAME_CHARS: usize = 48;
 
 /// Bytes of stdout/stderr read per run, **enforced while reading**.
 ///
@@ -419,6 +448,7 @@ async fn run_status(
         declare_root,
         builtins,
         STATUS_TIMEOUT,
+        None,
     )
     .await;
     let out = match outcome {
@@ -696,6 +726,7 @@ pub(crate) async fn activate(
         &declare_root,
         &builtins,
         ACTIVATE_GRACE,
+        None,
     )
     .await
     .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
@@ -767,8 +798,9 @@ fn resolve_program(program: &str, declare_root: &str) -> std::path::PathBuf {
 ///
 /// - the user's login-shell `PATH` is injected from the warm cache, never resolved
 ///   inline (AGENTS.md: resolution spawns a login shell and can take 10s);
-/// - `stdin` is null, so a CLI that would prompt for credentials fails fast
-///   instead of blocking on a pipe nobody writes to;
+/// - `stdin` is null unless the caller passes `input`, in which case it is a pipe
+///   that is written, flushed and closed — a CLI that would prompt for
+///   credentials still fails fast either way, because the pipe reaches EOF;
 /// - `NO_COLOR`/`TERM` stop a tool colouring output it thinks is a terminal, which
 ///   would put escape sequences inside the badge contract;
 /// - the child gets its **own process group**, so the deadline can kill a `shell`
@@ -783,6 +815,13 @@ pub(crate) async fn spawn_command(
     declare_root: &str,
     builtins: &HashMap<String, String>,
     timeout: Duration,
+    // `input`: text to hand the command on stdin, or `None` to close it. Only
+    // `ide.worktreeName` passes one, and only the user's prompt — see the module
+    // doc. Written *inside* the deadline on purpose: a command that never reads
+    // its input would otherwise block this task in `write` once the pipe buffer
+    // filled, and the whole point of the deadline is that nothing here waits
+    // forever.
+    input: Option<&str>,
 ) -> Result<Output, String> {
     let ctx = veld_core::variables::VariableContext {
         builtins: builtins.clone(),
@@ -824,7 +863,11 @@ pub(crate) async fn spawn_command(
         .env("PATH", path_env)
         .env("NO_COLOR", "1")
         .env("TERM", "dumb")
-        .stdin(std::process::Stdio::null())
+        .stdin(if input.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .process_group(0);
@@ -840,17 +883,41 @@ pub(crate) async fn spawn_command(
     // error, or the request future being dropped under us — kills the group.
     let mut guard = GroupKill(child.id().map(|p| p as i32));
 
+    let mut stdin_pipe = child.stdin.take();
     let mut stdout_pipe = child.stdout.take();
     let mut stderr_pipe = child.stderr.take();
+    let write_input = async {
+        if let (Some(text), Some(mut pipe)) = (input, stdin_pipe.take()) {
+            use tokio::io::AsyncWriteExt;
+            // Errors are dropped rather than raised: a command that reads what it
+            // needs and exits leaves us writing into a closed pipe (EPIPE), which
+            // is the command working correctly, not a failure to report.
+            let _ = pipe.write_all(text.as_bytes()).await;
+            let _ = pipe.flush().await;
+        }
+        // Dropped either way, including when there is nothing to write: the EOF
+        // is what lets a command that reads to end-of-input finish at all.
+        drop(stdin_pipe);
+    };
     let collect = async {
-        // Both pipes are drained concurrently with the wait. Draining matters as
-        // much as the cap: a child that fills a pipe nobody reads blocks in
-        // `write` and then dies at the deadline having done nothing, which reads
-        // as "your command is slow" rather than "veld stopped listening".
-        let (status, stdout, stderr) = tokio::try_join!(
+        // Both pipes are drained concurrently with the wait, **and with the
+        // stdin write**. Draining matters as much as the cap: a child that fills
+        // a pipe nobody reads blocks in `write` and then dies at the deadline
+        // having done nothing, which reads as "your command is slow" rather than
+        // "veld stopped listening". The write is a fourth branch rather than a
+        // prelude for the mirror image of that reason — awaited first, it would
+        // be the thing not draining the readers. Unreachable at today's 4 KB cap
+        // (any kernel pipe buffer takes it without the child reading) and the
+        // deadline covers it regardless, but a join costs nothing and removes
+        // the argument.
+        let (status, stdout, stderr, ()) = tokio::try_join!(
             child.wait(),
             read_capped(&mut stdout_pipe),
             read_capped(&mut stderr_pipe),
+            async {
+                write_input.await;
+                Ok(())
+            },
         )?;
         Ok::<_, std::io::Error>((status, stdout, stderr))
     };
@@ -1075,6 +1142,131 @@ fn declared_display(status: &veld_core::ide::StatusExtension, ext: &Extension) -
     }
 }
 
+/// The name `ide.worktreeName` printed, or `None` if it printed nothing usable.
+///
+/// Pure and separately testable, because it is the one part of the naming path
+/// that has to defend against a *model's* output rather than a program's. The
+/// rules, in order:
+///
+/// - **The first non-blank line.** An agent CLI given "answer in three words"
+///   will still sometimes emit a preamble line or a trailing blank; the first
+///   line that has something on it is the answer.
+/// - **Surrounding quotes and list punctuation dropped.** `"Fix the redirect"`
+///   and `- Fix the redirect` are what a model returns when it thinks it is
+///   writing prose, and neither is a name.
+/// - **Nothing `validate_display_name` would refuse**, checked with *that
+///   validator's own predicates* rather than a copy of its ranges. A control
+///   character or a direction override changes how its neighbours render; a
+///   name of nothing but invisible characters is non-empty and unrenderable at
+///   once, which defeats the `""` sentinel and blanks every surface that names
+///   the checkout. `Db::patch_worktree` validates none of this, so on the
+///   generated path this is the only guard and it has to be the real one.
+/// - **Capped at [`MAX_GENERATED_NAME_CHARS`] characters**, by character.
+///
+/// `None` everywhere means "leave the name alone". There is deliberately no
+/// error path: the checkout is already created and already named.
+pub(crate) fn generated_name(stdout: &str) -> Option<String> {
+    let line = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let trimmed = line
+        // A model writing a list or a heading rather than an answer.
+        .trim_start_matches(['-', '*', '#', ' ', '\t'])
+        // Quotes on either end. `trim_matches` takes them off both sides, which
+        // is right here even for an unbalanced one: a name is not quoted.
+        .trim_matches(['"', '\'', '`'])
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // **`desktop.rs`'s own predicates, not a copy of their ranges.** The first
+    // version hand-copied `is_forbidden` into this module with no test tying the
+    // two together, and got the second clause wrong by omission:
+    // `validate_display_name` also refuses a name with no *visible* character in
+    // it, and `Db::patch_worktree` deliberately validates nothing — so a name of
+    // zero-width spaces was stored and blanked the rail row, the palette entry,
+    // the window title and the tray item at once. Calling the real ones cannot
+    // drift from them.
+    if trimmed
+        .chars()
+        .any(crate::feedback_server::desktop::is_forbidden)
+    {
+        return None;
+    }
+    if trimmed
+        .chars()
+        .all(crate::feedback_server::desktop::is_invisible)
+    {
+        return None;
+    }
+    let capped = clip(trimmed, MAX_GENERATED_NAME_CHARS);
+    let capped = capped.trim().to_owned();
+    if capped.is_empty() {
+        None
+    } else {
+        Some(capped)
+    }
+}
+
+/// Run `ide.worktreeName` for one worktree and return the name it printed.
+///
+/// Nothing here reports a failure anywhere: every outcome that is not a usable
+/// name leaves the checkout with the name the dialog already gave it. That is
+/// what makes this safe to run unattended and safe to run *after* the create has
+/// already answered — see `spawn_worktree_naming` in `desktop.rs`.
+pub(crate) async fn run_worktree_name(
+    spec: &veld_core::config::CommandSpec,
+    root: &str,
+    declare_root: &str,
+    builtins: &HashMap<String, String>,
+    prompt: &str,
+) -> Option<String> {
+    // Cut on a character boundary — `spawn_command` writes these bytes and the
+    // command is entitled to valid UTF-8.
+    let mut capped = prompt;
+    if capped.len() > MAX_NAME_PROMPT_BYTES {
+        let mut end = MAX_NAME_PROMPT_BYTES;
+        while end > 0 && !capped.is_char_boundary(end) {
+            end -= 1;
+        }
+        capped = &capped[..end];
+    }
+    let out = spawn_command(
+        spec,
+        root,
+        declare_root,
+        builtins,
+        NAME_TIMEOUT,
+        Some(capped),
+    )
+    .await;
+    let out = match out {
+        Ok(out) => out,
+        // **The likeliest failure of all, and it was silent.** A config that
+        // ships to every contributor names a binary not all of them have, and a
+        // missing one fails here at `spawn` rather than with an exit code — so
+        // without this line the only diagnostic for "`claude` is not installed"
+        // was a name that never changed. There is no `requires_bin` in this
+        // position to surface it either.
+        Err(message) => {
+            tracing::info!(
+                worktree = root,
+                error = %message,
+                "ide.worktreeName could not be started; keeping the name the dialog chose"
+            );
+            return None;
+        }
+    };
+    if out.timed_out || !out.success {
+        tracing::info!(
+            worktree = root,
+            timed_out = out.timed_out,
+            code = ?out.code,
+            "ide.worktreeName did not produce a name; keeping the one the dialog chose"
+        );
+        return None;
+    }
+    generated_name(&out.stdout)
+}
+
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("").trim()
 }
@@ -1165,9 +1357,16 @@ mod tests {
         }
 
         async fn run(script: &str, timeout: Duration) -> Output {
-            spawn_command(&shell(script), "/tmp", "/tmp", &HashMap::new(), timeout)
-                .await
-                .expect("spawned")
+            spawn_command(
+                &shell(script),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                timeout,
+                None,
+            )
+            .await
+            .expect("spawned")
         }
 
         #[tokio::test]
@@ -1266,6 +1465,7 @@ mod tests {
                 &dir.path().to_string_lossy(),
                 &HashMap::new(),
                 Duration::from_secs(5),
+                None,
             )
             .await
             .expect("spawned");
@@ -1297,6 +1497,7 @@ mod tests {
                 &declaring.path().to_string_lossy(),
                 &HashMap::new(),
                 Duration::from_secs(5),
+                None,
             )
             .await
             .expect("spawned");
@@ -1311,6 +1512,68 @@ mod tests {
                 out.stdout.trim(),
                 expected_cwd.to_string_lossy(),
                 "the script must see the worktree as its cwd, not the checkout it was found in"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_command_is_handed_its_input_on_stdin_and_sees_the_end_of_it() {
+            // The whole contract of the naming position: the prompt arrives on
+            // stdin, never in the argument list. `cat` only finishes because the
+            // pipe is dropped after the write — without that EOF this would hang
+            // until the deadline.
+            let out = spawn_command(
+                &shell("cat"),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_secs(5),
+                Some("Fix the login redirect loop"),
+            )
+            .await
+            .expect("spawned");
+            assert!(out.success, "stderr: {}", out.stderr);
+            assert_eq!(out.stdout.trim(), "Fix the login redirect loop");
+        }
+
+        #[tokio::test]
+        async fn a_command_that_ignores_its_input_still_finishes() {
+            // The common real case — an agent CLI that reads the prompt, answers and
+            // exits without draining the rest. The write must not outlive the child.
+            let out = spawn_command(
+                &shell("echo named"),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_secs(5),
+                Some("a prompt nobody reads"),
+            )
+            .await
+            .expect("spawned");
+            assert!(out.success, "stderr: {}", out.stderr);
+            assert_eq!(out.stdout.trim(), "named");
+        }
+
+        #[tokio::test]
+        async fn a_blocked_write_is_killed_by_the_deadline_rather_than_hanging() {
+            // **Why the write lives inside the timeout.** An input larger than the
+            // pipe buffer handed to a command that never reads it blocks the writing
+            // task in `write` forever. `MAX_NAME_PROMPT_BYTES` keeps the real caller
+            // well under that buffer, but the guarantee this module documents — that
+            // nothing here waits forever — has to hold without relying on the cap.
+            let huge = "x".repeat(1024 * 1024);
+            let out = spawn_command(
+                &shell("sleep 30"),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_millis(600),
+                Some(&huge),
+            )
+            .await
+            .expect("spawned");
+            assert!(
+                out.timed_out,
+                "the deadline must cover the write, not just the wait"
             );
         }
     }
@@ -1599,6 +1862,56 @@ mod tests {
         let text = view.text.expect("text");
         assert_eq!(text.chars().count(), MAX_TEXT_CHARS);
         assert!(text.ends_with('…'));
+    }
+
+    /// `generated_name` defends against a *model's* output, not a program's.
+    #[test]
+    fn a_generated_name_is_taken_from_the_first_usable_line() {
+        assert_eq!(
+            generated_name("Fix the login redirect\n"),
+            Some("Fix the login redirect".to_owned())
+        );
+        // A preamble line, a heading, a list bullet and quotes are all what a
+        // model returns when it thinks it is writing prose rather than answering.
+        assert_eq!(
+            generated_name("\n\n  - \"Fix the redirect\"  \nand some rationale"),
+            Some("Fix the redirect".to_owned())
+        );
+        assert_eq!(
+            generated_name("# Payment reconciliation"),
+            Some("Payment reconciliation".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_generated_name_is_dropped_rather_than_cleaned_when_it_is_not_a_name() {
+        // Every `None` here means the checkout keeps the name the dialog gave
+        // it, which is why there is no error path anywhere in this feature.
+        assert_eq!(generated_name(""), None);
+        assert_eq!(generated_name("\n\n   \n"), None);
+        assert_eq!(generated_name("---"), None);
+        assert_eq!(generated_name("\"\""), None);
+        // A control character or a direction override would make
+        // `validate_display_name` refuse the rename with a 400 nobody asked
+        // for — so it is refused here instead, where the answer is "keep the
+        // old name".
+        assert_eq!(generated_name("Fix\u{1b}[31m the redirect"), None);
+        assert_eq!(generated_name("\u{202e}Fix the redirect"), None);
+    }
+
+    #[test]
+    fn a_generated_name_is_capped_by_character() {
+        let long = "word ".repeat(40);
+        let name = generated_name(&long).expect("a name");
+        assert!(name.chars().count() <= MAX_GENERATED_NAME_CHARS, "{name:?}");
+        // Trailing whitespace before the ellipsis would render as a name that
+        // ends early — `clip` already trims, and this is what pins it.
+        assert_eq!(name, name.trim());
+        // Cut by character, not byte: a name of emoji must not panic or split a
+        // code point.
+        let emoji = "🦒".repeat(80);
+        let name = generated_name(&emoji).expect("a name");
+        assert!(name.chars().count() <= MAX_GENERATED_NAME_CHARS);
     }
 
     #[test]

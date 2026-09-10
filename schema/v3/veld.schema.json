@@ -256,6 +256,13 @@
             ]
           ]
         },
+        "worktreeName": {
+          "$ref": "#/$defs/commandObject",
+          "description": "A command that names a new worktree from the prompt it was created from. The IDE's New worktree dialog sends the prompt with the create; the daemon runs this command AFTER the checkout exists \u2014 nothing waits on it \u2014 and applies the first line it prints as the worktree's display name. The prompt arrives on the command's stdin, never in its argument list: `{\"argv\": [\"claude\", \"-p\", \"Name this task in at most four words\"]}` is the shape, and `claude -p` and `codex exec` both read a prompt that way. Every failure is silent by design (no command, a timeout, a non-zero exit, output that is not a name): the checkout keeps the name the dialog already gave it, because it has already been created. It changes the display name only \u2014 never the alias, which picked the checkout's directory and defaults its run name and hostname. May use ${veld.worktree}, ${veld.root}, ${veld.branch}, ${veld.branch_raw} (argv only), ${veld.project} and ${veld.username}.",
+          "examples": [
+            { "argv": ["claude", "-p", "Reply with a 2-4 word title for this task and nothing else"] }
+          ]
+        },
         "git": {
           "type": "object",
           "description": "Per-project knobs for Veld's git-powered IDE surfaces. Only the keys below are interpreted; other keys here are RESERVED (parsed and stored, not rendered).",

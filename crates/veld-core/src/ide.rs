@@ -295,6 +295,25 @@ pub const EXTENSION_BUILTINS: &[&str] = &[
     "worktree",
 ];
 
+/// The scope of `ide.worktreeName`'s command — [`EXTENSION_BUILTINS`] exactly.
+///
+/// Same reasoning: it runs against a *worktree*, not while a pane is launching.
+/// Named separately so the error message says `worktree-name` rather than
+/// `extension` — and it is a genuine alias, not a copy: a name added to
+/// [`EXTENSION_BUILTINS`] is accepted here too. That is the intended coupling
+/// rather than an oversight, because the two scopes answer the same question
+/// ("what does a command running against a checkout get to know"), and a name
+/// that made sense for one and not the other would be the surprise.
+///
+/// **There is deliberately no `${veld.prompt}`.** The user's prompt arrives on
+/// the command's **stdin**, never in its argument list. A prompt is the user's
+/// own prose about whatever they are working on, and an argument list is
+/// world-readable through the process table — the same reason this repo's
+/// config rules forbid putting a secret on a command line. It is also the shape
+/// the tools this exists for already take a prompt in (`claude -p` and
+/// `codex exec` both read one from stdin), so the honest contract costs nothing.
+pub const WORKTREE_NAME_BUILTINS: &[&str] = EXTENSION_BUILTINS;
+
 /// `${veld.*}` names permitted only in `argv`, refused in `shell`.
 ///
 /// `branch_raw` is the checkout name **unslugified** — the value `branch`
@@ -527,6 +546,21 @@ pub struct IdeSection {
     /// have a home rather than each squatting at the top of `ide`.
     #[serde(default = "default_staleness_sensitivity")]
     pub staleness_sensitivity: f64,
+    /// A command that names a new worktree from the prompt that created it.
+    ///
+    /// Absent means the dialog's own derivation stands (the prompt's first
+    /// clause, or a numbered fallback). Present, the daemon runs it *after* the
+    /// checkout exists — the create never waits on it — and applies what it
+    /// prints as the worktree's `display_name`.
+    ///
+    /// **`display_name` only, never the alias.** The alias is the identifier: it
+    /// defaults the run name, becomes a hostname, and picked the directory the
+    /// checkout already lives in. Renaming it afterwards would leave the
+    /// directory under the old name and change every future URL — so what a
+    /// generated name changes is the label, which is what `display_name` exists
+    /// for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_name: Option<crate::config::CommandSpec>,
     /// Top-level keys under `ide` that this version still does not interpret, in
     /// sorted order. F8 names them so an author can tell "reserved" from "typo".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -547,6 +581,7 @@ impl IdeSection {
             && self.panes.is_empty()
             && self.news.is_empty()
             && self.extensions.is_empty()
+            && self.worktree_name.is_none()
     }
 
     /// The staleness-sensitivity multiplier, floored at `0.1`. Always at least
@@ -1100,6 +1135,38 @@ fn parse_git(value: &serde_json::Value, out: &mut IdeSection) {
     }
 }
 
+/// Parse `ide.worktreeName` — one command, in the [`WORKTREE_NAME_BUILTINS`]
+/// scope.
+///
+/// Lenient like every other `ide` field: a malformed command is a problem and
+/// the key is dropped, never a load error. Dropping it means the dialog's own
+/// name derivation stands, which is a working outcome rather than a broken one —
+/// nothing here should ever be able to stop a checkout being created.
+fn parse_worktree_name(value: &serde_json::Value, out: &mut IdeSection) {
+    let Some(map) = value.as_object() else {
+        out.problems.push(IdeProblem {
+            location: "ide.worktreeName".to_owned(),
+            message: "must be an object with an `argv` or a `shell`; it was ignored".to_owned(),
+        });
+        return;
+    };
+    // Unknown children are reserved rather than errors, matching `ide.git` — and
+    // named with their parent so an author can tell a typo from a key a newer
+    // veld will read.
+    for key in map.keys() {
+        if key != "argv" && key != "shell" {
+            out.uninterpreted.push(format!("worktreeName.{key}"));
+        }
+    }
+    out.worktree_name = parse_command_in_scope(
+        map,
+        "ide.worktreeName",
+        "worktree-name",
+        WORKTREE_NAME_BUILTINS,
+        out,
+    );
+}
+
 /// Parse `ide.git.stalenessSensitivity` — a non-negative multiplier, clamped to
 /// `[0.1, 10]`. Lenient like every other `ide` field: an unparseable value
 /// reports a problem and keeps the default, never a load error.
@@ -1149,6 +1216,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "extensions" => parse_extensions(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
             "git" => parse_git(child, &mut section),
+            "worktreeName" => parse_worktree_name(child, &mut section),
             other => section.uninterpreted.push(other.to_owned()),
         }
     }
@@ -3569,6 +3637,87 @@ mod tests {
         // the interpreted set) and is prefixed so lint names it under `git`.
         let parsed = section(json!({ "git": { "autoUpdate": true } }));
         assert_eq!(parsed.uninterpreted, vec!["git.autoUpdate"]);
+    }
+
+    /// `ide.worktreeName` is one command, in the worktree scope, and lenient.
+    #[test]
+    fn worktree_name_is_parsed_scoped_and_lenient() {
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["claude", "-p", "Name this in three words"] }
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        assert!(
+            parsed.uninterpreted.is_empty(),
+            "{:?}",
+            parsed.uninterpreted
+        );
+        assert!(
+            !parsed.is_empty(),
+            "a naming command is worth sending to a UI"
+        );
+        assert_eq!(
+            parsed.worktree_name,
+            Some(crate::config::CommandSpec::Argv(vec![
+                "claude".to_owned(),
+                "-p".to_owned(),
+                "Name this in three words".to_owned(),
+            ]))
+        );
+
+        // The worktree scope: `${veld.worktree}` is in it, and the pane family
+        // is not — a naming command runs against a checkout, not a launching pane.
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name", "${veld.worktree}", "${veld.root}"] }
+        }));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name", "${veld.pane.token}"] }
+        }));
+        assert!(parsed.worktree_name.is_none());
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.message.contains("worktree-name")),
+            "the error must name this scope, not `pane`: {:?}",
+            parsed.problems
+        );
+
+        // **No `${veld.prompt}`.** The prompt arrives on stdin; a name for it in
+        // an argument list is what this scope exists to refuse.
+        let parsed = section(json!({ "worktreeName": { "argv": ["name", "${veld.prompt}"] } }));
+        assert!(parsed.worktree_name.is_none());
+        assert!(!parsed.problems.is_empty());
+
+        // Malformed is a problem and a dropped key, never a load error: the
+        // dialog's own derivation still names the checkout.
+        for bad in [
+            json!({ "worktreeName": "claude -p name" }),
+            json!({ "worktreeName": { "argv": ["a"], "shell": "b" } }),
+            json!({ "worktreeName": {} }),
+        ] {
+            let parsed = section(bad.clone());
+            assert!(parsed.worktree_name.is_none(), "{bad:?}");
+            assert!(!parsed.problems.is_empty(), "{bad:?}");
+        }
+
+        // An unknown child is reserved, not an error — as under `ide.git`.
+        let parsed = section(json!({
+            "worktreeName": { "argv": ["name"], "timeoutSeconds": 5 }
+        }));
+        assert_eq!(parsed.uninterpreted, vec!["worktreeName.timeoutSeconds"]);
+        assert!(parsed.worktree_name.is_some());
+    }
+
+    /// It had a meaning added, so it must stop being reported as reserved.
+    #[test]
+    fn worktree_name_is_no_longer_reported_as_uninterpreted() {
+        let parsed = section(json!({ "worktreeName": { "argv": ["name"] } }));
+        assert!(
+            !parsed.uninterpreted.iter().any(|k| k == "worktreeName"),
+            "{:?}",
+            parsed.uninterpreted
+        );
     }
 
     #[test]
