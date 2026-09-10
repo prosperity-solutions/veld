@@ -1,8 +1,8 @@
-# Resuming earlier sessions: `ide.panes[].sessions`
+# IDE panes and session resume (`ide.panes`)
 
 Authoring reference for the picker that lets a pane reopen a coding-agent session
 it never started. The field table is in
-[config.md](config.md#idepanes); this page is how to **decide whether to write one
+`veld skills config`; this page is how to **decide whether to write one
 and what to put in it**, plus adapters you can copy.
 
 Read [Before you write one](#before-you-write-one) first. The commonest mistake
@@ -224,9 +224,9 @@ slug=$(printf '%s' "$PWD" | sed 's/[^A-Za-z0-9]/-/g')
 dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/$slug"
 [ -d "$dir" ] || exit 0          # no sessions here — not an error
 
-# GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
-# FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
-# fires and the substitution captures both. BSD has no `-c` and fails cleanly.
+## GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
+## FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
+## fires and the substitution captures both. BSD has no `-c` and fails cleanly.
 mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
 
 rows=$(
@@ -297,13 +297,13 @@ set -uo pipefail
 dir="$HOME/.mytool/sessions"   # where your tool keeps them
 ext="json"                     # one file per session
 
-# Not an error, and this is the line that makes the picker disappear in a
-# worktree with no history rather than showing an empty one.
+## Not an error, and this is the line that makes the picker disappear in a
+## worktree with no history rather than showing an empty one.
 [ -d "$dir" ] || exit 0
 
-# GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
-# FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
-# fires and the substitution captures both. BSD has no `-c` and fails cleanly.
+## GNU first: GNU's `-f` is --file-system and takes no argument, so `stat -f '%m'
+## FILE` on Linux prints a filesystem dump to *stdout* and exits 1 — the `||`
+## fires and the substitution captures both. BSD has no `-c` and fails cleanly.
 mtime() { stat -c '%Y' "$1" 2>/dev/null || stat -f '%m' "$1" 2>/dev/null || echo 0; }
 
 rows=$(
@@ -406,3 +406,7 @@ code path:
 2. **A worktree with none** — the pane opens with no dialog at all.
 3. **Break the script on purpose** (`exit 1` with a message on stderr) — the
    dialog still opens, still offers *Start fresh*, and shows your message.
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

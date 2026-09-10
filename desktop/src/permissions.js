@@ -38,8 +38,8 @@
  * schema is the one source; the other three are gated against it.
  *
  * Two prose copies are **not** gated — `docs/configuration.md` and
- * `skills/veld/reference/config.md` both list the ids for a reader. Adding an id
- * means editing those by hand.
+ * `crates/veld/src/commands/skills/config.md` (what `veld skills config` prints)
+ * both list the ids for a reader. Adding an id means editing those by hand.
  */
 const VELD_PERMISSIONS = [
   "camera",

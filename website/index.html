@@ -545,6 +545,18 @@ veld share <span class="kw">--web</span>
       <pre data-copy="npx skills add prosperity-solutions/veld"><code>npx skills add prosperity-solutions/veld</code></pre>
       <p class="lead" style="font-size:14px;">Installs the veld skill for Claude Code, Cursor, Codex, Windsurf, and 40+ more — so your agent can configure, run, and share environments without you narrating each step.</p>
 
+      <h3 style="margin-top:36px; font-size:17px;">Docs that can't go stale</h3>
+      <p class="lead" style="font-size:14px; margin-bottom:6px;">The skill is a pointer, a few kilobytes. The documentation ships inside the binary, so your agent reads the docs for the veld you actually have — and reads only the page it needs, when it needs it, instead of loading a manual and your whole config into its context first.</p>
+      <pre data-copy="veld skills
+veld skills basics
+veld skills config"><code><span class="cmt"># the index — thirteen topics, one line each:</span>
+veld skills
+
+<span class="cmt"># then just the page the task needs:</span>
+veld skills basics
+veld skills config</code></pre>
+      <p class="note">Nothing to re-install when veld updates: the skill never changes, because it only says where to look.</p>
+
       <h3 style="margin-top:36px; font-size:17px;">The feedback loop</h3>
       <p class="lead" style="font-size:14px; margin-bottom:6px;">Every app veld serves gets an in-browser overlay. Review the running thing and hand comments straight to your agent — no copy-pasting screenshots into a chat.</p>
       <ol class="steps">

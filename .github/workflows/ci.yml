@@ -1461,6 +1461,16 @@ jobs:
           # Rust. A gate that skips itself reads as a pass, so it lives where it runs.
           python3 tests/validate-doc-examples.py target/debug/veld
 
+      - name: Documented `veld` commands exist
+        run: |
+          set -e
+          # Same reasoning as the step above, for the *commands* in the docs rather
+          # than the configs: the gate needs a built veld and this job has one. The
+          # self-test runs first — a gate that has quietly stopped detecting
+          # anything reports the same "0 failing" as a clean corpus.
+          python3 tests/validate-doc-commands.py target/debug/veld --selftest
+          python3 tests/validate-doc-commands.py target/debug/veld
+
       - name: Reject a v1/v2 config with the upgrade instructions
         run: |
           set -e

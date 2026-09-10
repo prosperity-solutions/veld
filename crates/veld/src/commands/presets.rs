@@ -48,9 +48,10 @@ pub async fn run(json: bool, pin: bool) -> i32 {
 
 /// The human listing.
 ///
-/// Not a table, deliberately. `skills/veld/SKILL.md` injects this command's
-/// output into every coding agent's context, so `when_to_use` has to appear
-/// here — and prose does not fit in a column. The shape below stays scannable
+/// Not a table, deliberately. A coding agent runs this command and pipes its
+/// stdout straight into its own context — the `veld` skill tells it to, at the
+/// moment it has to choose something to start — so `when_to_use` has to appear
+/// here, and prose does not fit in a column. The shape below stays scannable
 /// for a person and unambiguous for an agent: one key, one label, one line of
 /// intent, one line of what it actually starts.
 fn print_listing(config: &veld_core::config::VeldConfig, resolved: &[ResolvedPreset]) {

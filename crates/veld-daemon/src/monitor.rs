@@ -361,9 +361,8 @@ async fn run_liveness_checks(
         // per-daemon and never pruned, so a name-only key carries a *previous*
         // run's `last_pass_logged` into a fresh `veld start` of the same name —
         // and the new run's `internal` stream then says nothing about that node
-        // for up to `PASS_HEARTBEAT`, which is not what README and
-        // `skills/veld/SKILL.md` promise a reader ("a quiet stream means
-        // healthy"). `run.run_id` changes per instance, so a restart re-arms
+        // for up to `PASS_HEARTBEAT`, which is not what README
+        // promises a reader ("a quiet stream means healthy"). `run.run_id` changes per instance, so a restart re-arms
         // both the probe interval and the heartbeat.
         let check_key: LastCheckKey = (
             project_root.to_path_buf(),

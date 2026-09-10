@@ -71,7 +71,7 @@ const CMD_MAX_CHARS: usize = 160;
 /// **Read from whichever process is doing the sampling, and there are now two.**
 /// The daemon reads it from its service environment (launchd/systemd); the CLI
 /// reads it from the user's shell. A user who wants argv capture off has to turn
-/// it off in both places — the docs in `README.md` and `skills/veld/SKILL.md` say
+/// it off in both places — the docs in `README.md` and the `outputs` skill topic say
 /// so, and the verification step there points at a `command` node for exactly
 /// this reason. Do not "simplify" this into one lookup without giving the CLI a
 /// way to see the service environment, which it has none of.

@@ -1,4 +1,123 @@
-# Veld Configuration Reference
+# Authoring veld.json
+
+The full schema, variables and node types follow below — **read "Authoring principles" first.**
+
+Two capabilities under `ide` are worth knowing you have before a user asks for
+something you think veld cannot do: customizing the IDE's top bar
+with the project's own badges, buttons and menus (`veld skills ide-extensions`),
+and telling the team something changed (`veld skills ide-news`).
+
+The short version, because the wrong instinct here is expensive:
+
+- **Deduplicate values, never structure.** Which keys a node has stays written in
+  that node. `rg <ENV_VAR_NAME>` must still find the line that sets it.
+- **No inheritance, no mixins, no `extends`, no templates, no loops, no
+  conditionals.** Do not reach for patterns from other config systems. If you want
+  one, you want a node-level default or a `var`.
+- **Prefer `argv` over `shell`.** `argv` is spawned directly, so an interpolated
+  value can never change the argument count.
+- **A secret is a pointer plus a flag, never custody** — a value source plus
+  `secret: true`, delivered via the environment or `files`, never a command line.
+- **Run `veld lint` after editing.** It reports every problem at once; `veld start`
+  refuses on the same errors.
+
+Comments and trailing commas are legal in every config file. Editors need
+`"files.associations": {"veld.json": "jsonc"}` to stop flagging them.
+
+Quick reference for the two node types :
+
+**`long_running`** — a process veld supervises for the life of the run. `type` names the **lifecycle only**; whether the node serves anything is a property of its `ports`. By default it gets one auto-allocated http port and must bind to `${veld.port}`. A readiness probe (`probes.readiness` or legacy `health_check`) is always required. `start_server` is a permanent alias for the same type — old configs load forever, but write `long_running` in anything new.
+```jsonc
+{
+  "type": "long_running",
+  "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
+  "probes": {
+    "readiness": { "type": "http", "path": "/health" },
+    "liveness": { "type": "http", "path": "/health", "interval_ms": 5000 }
+  },
+  "depends_on": { "database": "docker" },
+  "env": { "DATABASE_URL": "${nodes.database.DATABASE_URL}" }
+}
+```
+
+**Portless `long_running`** — `"ports": null` supervises a process that serves nothing: an Electron shell, a file watcher, a background compiler. No port, no `${veld.port}`, no URL, no route. Readiness is still mandatory, and an `http`/`port` probe here is a `probe-needs-port` error — use `command` when the process publishes something observable, `settle` otherwise.
+```jsonc
+{
+  "type": "long_running",
+  "shell": "electron .",
+  "ports": null,
+  "depends_on": { "web": "dev" },
+  "env": { "APP_URL": "${nodes.web.url}" },
+  "probes": { "readiness": { "type": "settle", "seconds": 5 } }
+}
+```
+
+**Named ports with protocols** — shorthand (`"auto"`, `5432`) or the long form. Default protocol: `http` for the primary port, `tcp` for every other, so existing multi-port configs gain no new hostname. An `http` port gets its own hostname (`api-admin.<run>.<project>.localhost` for a secondary — a sibling of the node's own, not a deeper label) and a Caddy route, plus `${veld.urls.<name>}` / `VELD_URL_<NAME>`. A `tcp` port is allocated and exported (`${veld.ports.<name>}`, `VELD_PORT_<NAME>`) and never routed.
+```jsonc
+{
+  "type": "long_running",
+  "shell": "api --port ${veld.port} --admin ${veld.ports.admin}",
+  "ports": {
+    "http":     "auto",                                  // primary → http
+    "admin":    { "port": "auto", "protocol": "http" },  // own hostname
+    "postgres": { "port": 5432,   "protocol": "tcp" },
+    "debug":    "auto"                                   // secondary → tcp
+  },
+  "env": { "ADMIN_ORIGIN": "${veld.urls.admin.origin}" },
+  "probes": { "readiness": { "type": "port" } }
+}
+```
+Add `"host": "<template>"` to an `http` entry to override the derived hostname — the documented way out of a collision.
+
+**`command`** — run-to-completion. Emits outputs via `$VELD_OUTPUT_FILE`. Supports liveness probes for long-lived resources (e.g., SSH tunnels).
+```jsonc
+{
+  "type": "command",
+  "script": "./scripts/setup.sh",
+  "outputs": ["DATABASE_URL"],
+  "skip_if": { "shell": "./scripts/check.sh" },
+  "probes": {
+    "liveness": { "type": "command", "argv": ["pg_isready"], "interval_ms": 5000 }
+  }
+}
+```
+
+**Node-level defaults** — declare a field once for every variant of a node
+(`schemaVersion: "3"`). Any variant overrides it; `"KEY": null` erases an inherited
+map entry. See the merge table under [Node-level defaults](#node-level-defaults-v3) below — the strategies differ per field.
+```jsonc
+{
+  "type": "long_running",
+  "probes": { "readiness": { "type": "http", "path": "/healthz" } },
+  "env": { "LOG_LEVEL": "info" },
+  "variants": {
+    "dev":   { "argv": ["node", "server.js"] },
+    "debug": { "argv": ["node", "--inspect", "server.js"], "env": { "LOG_LEVEL": "debug" } }
+  }
+}
+```
+
+**Reverse-proxy header rules** — optional `proxy` block at project/node/variant level (most specific wins; `remove` lists union, `set` maps merge). Applies to the local Caddy proxy **and** the web gateway (`veld share --web`), NOT to direct peer shares (`veld share`). Veld does no header manipulation by default.
+```json
+{
+  "proxy": {
+    "request":  { "remove": ["Origin"] },
+    "response": { "set": { "X-Frame-Options": "DENY" } }
+  }
+}
+```
+
+**Staleness sensitivity** — `ide.git.stalenessSensitivity` (default `1`) tunes
+how urgently the top-bar "update main" pill colours when the main checkout is
+behind `origin/<default>`. It scales two thresholds: a commit reads red at ~7
+days old (`1`), and ~50 commits reads red; doubling `s` halves both, halving it
+doubles them. When a user says the pill is always orange on a freshly cloned
+repo or a long-lived release branch, lower it (`0.5`/`0.25`); when worktrees are
+being born stale and PRs conflict late, raise it (`2`–`3`). See
+the `ide.git` field table below.
+
+
+## Veld Configuration Reference
 
 ## Authoring principles
 
@@ -66,12 +185,13 @@ unreadable.
 optional in every file, so an included file is just `{ "nodes": { … } }`.
 
 `schemaVersion` must be `"3"` — `"1"` and `"2"` are not supported and fail to load.
-There is no converter — apply the rules in `docs/migrating-to-v3.md` yourself and
+There is no converter — apply the rules in
+<https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md> yourself and
 run `veld lint`. The `command` key is replaced by `argv`/`shell`.
 
 There is no `"4"` either. `long_running`, `"ports": null`, `protocol`/`host` on a
 named port, the `settle` probe and per-port `share` were all added *within* `"3"`;
-`docs/adopting-long-running-and-ports.md` covers adopting them and the behaviour
+<https://github.com/prosperity-solutions/veld/blob/main/docs/adopting-long-running-and-ports.md> covers adopting them and the behaviour
 changes that come with them.
 
 ## Running something: `argv` or `shell`
@@ -648,7 +768,7 @@ real `//` comment.
   - **Join side:** a joiner auto-uses the ticket's relay(s) (a custom-relay share is never joined over public relays). For a token-gated relay the token resolves by priority (highest first): prompt-entered > ticket-embedded > local cache (the central veld database, `<data_dir>/veld/veld.db`, 0600) > `VELD_SHARE_RELAY`+`VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay). If none works, the joiner is prompted (browser overlay / `veld join` terminal; `--json` returns `needs_relay_token` instead) and the entered token is cached; a wrong token re-prompts.
 - `sharing.dangerouslyEmbedRelayTokensInTicket` — **DANGER, default false.** Embeds the resolved relay token(s) in the share ticket so joiners need no token setup. Ships the relay secret in every share link (Slack, email, history) — disposable per-project tokens only, never a shared org secret. camelCase (à la React's `dangerouslySetInnerHTML`) to flag the danger.
 - `sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes` — how long this project's share **links** live, per audience, in minutes (5–480, clamped; snake_case, unlike the deliberate camelCase danger flag above). Defaults 240 (peer) and 120 (web) — web is shorter because its audience is the open internet. Both are **longer than the keep-awake caps** (2h mains / 30m battery), so with defaults everywhere the cap is what ends the hold and the link outlives it. **This is normally the deadline that ends a share**, and therefore what ends the automatic keep-awake with it: `keepAwake.sharing*Minutes` is a *ceiling* over this, not a second countdown, so a 4-hour keep-awake cap under a 2-hour share link counts down from 2h. Precedence, most specific first: `veld share --ttl <secs>` (one share; no upper bound, floored at 60s) > these config fields > the machine's `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` settings (`veld settings`), which carry the defaults. Out of range is **clamped, not refused** — lint rule `share-ttl-range` (warn) is the only surface that says so and names the value that will apply. A *misspelled* key is silently ignored (no `deny_unknown_fields` on `sharing`) and falls through to the machine default, which is the longer number; nothing lints that, so check `veld share --json`'s `expires_at` when it matters.
-- `sharing.gateway` — the public web gateway `veld share --web` registers with: a bare URL, or `{ "url": ..., "token": ... }` where `token` is a secret source (same forms as relay tokens) for the gateway's required registration auth. Env override: `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` on the daemon. The gateway is a self-hosted container (`ghcr.io/prosperity-solutions/veld-gateway`); operator guide: `docs/gateway.md`.
+- `sharing.gateway` — the public web gateway `veld share --web` registers with: a bare URL, or `{ "url": ..., "token": ... }` where `token` is a secret source (same forms as relay tokens) for the gateway's required registration auth. Env override: `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` on the daemon. The gateway is a self-hosted container (`ghcr.io/prosperity-solutions/veld-gateway`); operator guide: <https://github.com/prosperity-solutions/veld/blob/main/docs/gateway.md>.
 - `share.expose` — `peer` (Veld-to-Veld via `veld share`) and/or `web` (any browser via `veld share --web` + the gateway; real public URL, best-effort fidelity). Empty list or absent = not shareable. Peer and web are separate shares with separate capabilities — revoking one never touches the other.
 - **Where `share` is written, and how it resolves.** On the port entry. A node/variant-level `share` is *defined* as shorthand for the **primary** port's policy, so every config written before per-port consent means exactly what it meant — and the same words can never spread to an ops console or a database the author never mentioned. A port's own `share` **replaces** the shorthand for that port (no merge; the more specific declaration wins), an absent `share` is always "not shared", and nothing anywhere widens a port that declared none. A node with no primary (all-`tcp`, or `"ports": null`) has nowhere to fold the shorthand into, so it grants nothing.
 - **`web` requires `"protocol": "http"`** — lint rule `web-share-needs-http` (error). The gateway speaks HTTP/1.1 over the tunnel and a browser cannot speak a raw protocol through it: that is what the `web` audience *is*, not a limitation to be lifted. Enforced three times — `veld lint`/`veld start`, the daemon at share time (which names the excluded port instead of dropping it silently), and the gateway, which discards any non-routed manifest entry.
@@ -878,7 +998,7 @@ their day. Ask the user before adding one unless they asked: it is a message
 published to their colleagues in their name.
 ### `ide.extensions`
 
-> **Authoring guide: [extensions.md](extensions.md).** This is the field table; that
+> **Authoring guide: `veld skills ide-extensions`.** This is the field table; that
 > is how to decide what to write, with worked adapters. Read it before adding one —
 > the commonest mistake is a badge nobody needed, not a malformed entry.
 
@@ -953,7 +1073,7 @@ Gotchas worth knowing before writing one:
 - **`extensions.autoRefresh`** (a user setting, default on) turns the unattended
   half off machine-wide; actions and menus keep working, because a click is the
   user asking. There is no consent prompt by design — see
-  `docs/extensions-vision.md`.
+  <https://github.com/prosperity-solutions/veld/blob/main/docs/extensions-vision.md>.
 - **A right-click on a badge re-runs it** (or all of them). A forced refresh
   ignores `refresh_seconds`, bounded by a 3s floor instead, and surfaces its own
   errors — unlike the background poll, which is deliberately silent. Running an
@@ -1032,7 +1152,7 @@ first row, and picking a row runs **the pane's own `resume`** with
   `ask_first: false` keeps click-to-launch and moves the list into a labelled
   button in the card's other half.
 - **Authoring guide, with worked adapters for Claude Code and Codex, the value
-  charset and the bounds veld enforces: [pane-sessions.md](pane-sessions.md).**
+  charset and the bounds veld enforces: `veld skills ide-panes`.**
 
 - **A picked value chooses which session a declared command opens. It can never
   contribute a command.** Same rule as a badge's `actions`. So the resumed
@@ -1118,3 +1238,7 @@ reporting are unaffected.
 `variants` exist because a node is a graph vertex a preset selects across; a pane
 is neither, and one token per pane is what keeps "which conversation is this"
 answerable.
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

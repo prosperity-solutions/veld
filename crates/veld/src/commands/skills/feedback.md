@@ -1,4 +1,23 @@
-# Veld Feedback Reference
+# Human feedback in the browser
+
+The full workflow, the `next` output schema, thread fields, and the resolve policy are all below.
+
+Core pattern — a single agent draining a linear queue, no cursor to track:
+
+```
+loop:
+  out = veld feedback next --wait --name <run> --json
+  → "item"    : fix it, then `veld feedback reply <id> "..."` (or resolve on explicit approval)
+  → "timeout" : call next again
+  → "ended"   : reviewer clicked "Done" → stop
+```
+
+`next` is a pure read (same item until you reply/resolve), so it's safe to
+re-run and resumes cleanly after a restart. Reply parks a thread on the human
+and drops it off the queue; a new human comment brings it back automatically.
+
+
+## Veld Feedback Reference
 
 Veld injects a feedback overlay into every page it serves. A human leaves comments on elements, pages, or screenshots; you pull them off a linear queue, fix them, and reply — one item at a time.
 
@@ -39,21 +58,21 @@ can't be actioned, the reviewer resolves it from the threads panel.
 ## Commands
 
 ```bash
-# Get the next waiting item (blocks with --wait). Pure read — safe to re-run.
+## Get the next waiting item (blocks with --wait). Pure read — safe to re-run.
 veld feedback next --wait --name dev --json
 
-# Reply → the thread becomes "blocked" and drops off the queue until the
-# human responds again (which puts it back automatically).
+## Reply → the thread becomes "blocked" and drops off the queue until the
+## human responds again (which puts it back automatically).
 veld feedback reply --name dev <thread-id> "Done — bumped the font to 2rem"
 
-# Resolve → close the thread. Only on explicit human approval (see below).
+## Resolve → close the thread. Only on explicit human approval (see below).
 veld feedback resolve --name dev <thread-id>
 
-# Ask → open a new thread with a question for the reviewer.
+## Ask → open a new thread with a question for the reviewer.
 veld feedback ask --name dev "Should the sidebar collapse on mobile too?"
 veld feedback ask --name dev --page "/dashboard" "Does this layout feel right?"
 
-# Inspect threads (debugging / overview).
+## Inspect threads (debugging / overview).
 veld feedback threads --name dev --json
 veld feedback threads --name dev --json --open
 veld feedback threads --name dev --json --resolved
@@ -191,3 +210,99 @@ connect-src 'self' wss://*.dev.preview.life.li https://*.dev.preview.life.li
 **Symptom**: Browser shows "Your connection is not private" or certificate errors.
 
 **Fix**: Run `veld setup privileged` (or `veld setup unprivileged`) to generate and trust the local CA certificate. If already set up, run `veld doctor` to check CA trust status.
+
+## Launch the Veld Feedback Loop
+
+Veld shows the human an in-browser overlay to comment on elements, pages, and
+screenshots. Those comments land on a **linear queue**. Your job: drain it —
+pull the next item, fix it, reply, repeat — until the human clicks **Done**.
+
+The queue is stateless from your side: there is **no cursor to track**. You call
+`veld feedback next`, work the item it returns, then `reply`/`resolve`. That item
+drops off, and the next call returns the following one.
+
+## On invocation — start looping now
+
+1. **Find the run.** `veld feedback next` auto-selects the current run (a single
+   active or recently-used run); if several exist, pass `--name <run>`. If there
+   is no run at all, ask the human to `veld start <node> --name <run>` first.
+2. **Enter the loop below and keep running it until you get `"ended"`.** Don't
+   stop after one item — this is a Ralph loop; you keep pulling.
+
+```
+loop:
+  out = veld feedback next --wait --name <run> --json
+  → result "item"    : work it (below), then reply (or resolve)
+  → result "timeout" : call next again (nothing waiting yet)
+  → result "ended"   : the reviewer clicked "Done" → stop the loop
+```
+
+`next --wait` blocks in the CLI (polling ~1×/sec, up to ~4 min) then returns
+`timeout`. On `timeout`, **just call it again** — re-invoking is free (no cursor)
+and resumes cleanly even if you were killed or the session restarted: a day-old
+comment is still at the head next time you call.
+
+## Working an item
+
+The `item` payload has everything you need in one call:
+
+| Field | Use |
+|-------|-----|
+| `thread.messages` (last human one) | What to do right now; earlier messages are context |
+| `thread.scope.selector` | CSS selector — grep the codebase for it to find the source |
+| `thread.scope.element_text` | Visible text of the element (middle-truncated) — disambiguates when the selector alone matches several elements |
+| `thread.scope.source_file` / `source_line` | Best-effort file:line of the element's JSX/template tag — jump straight there instead of grepping for the selector. Absent in production builds (and on React 19, which dropped the dev-source metadata this reads) |
+| `thread.component_trace` | React/Vue hierarchy — the **deepest** component is usually the file to edit |
+| `thread.scope.page_url` | Which route |
+| `thread.messages[].screenshot` | Absolute path to a PNG — `Read` it directly |
+| `thread.viewport_width` / `height` | Check for responsive issues |
+
+Make the change in code, then reply on the thread:
+
+```
+veld feedback reply --name <run> <thread-id> "Done — <what you changed>"
+```
+
+`<thread-id>` accepts a short prefix. After you reply, the thread becomes
+**blocked** — hidden from `next` — until the human responds again; a new human
+message puts it back in the queue automatically. Keep replies short; the human is
+reviewing in flow.
+
+## Reply vs resolve
+
+- **Reply** is the default — it parks the thread on the human.
+- **Resolve** (`veld feedback resolve --name <run> <id>`) closes a thread. Use it
+  **only when the human has explicitly approved** ("looks good", "done", "ship
+  it"). When in doubt, reply and leave it open.
+- Under-resolving is harmless; over-resolving closes work the human didn't sign
+  off on. The human can always reopen from the overlay panel.
+
+## Asking a question
+
+If feedback is ambiguous, open a thread instead of guessing:
+
+```
+veld feedback ask --name <run> "Which blue — the brand token or the CTA hover?"
+veld feedback ask --name <run> --page "/pricing" "Should this table scroll on mobile?"
+```
+
+Your question is blocked until the human answers, then it comes back to you.
+
+## Stopping
+
+The loop ends **only** when the human clicks **Done** in the overlay → `next`
+returns `"ended"`. Done drains first: while any thread is still waiting on you,
+`next` keeps returning `item`; `ended` fires once the queue is empty. So reply or
+resolve every item. If the human adds feedback *after* Done, just run the loop
+again — it picks up where it left off.
+
+## Notes
+
+- **One agent per run.** The loop is built for a single reviewer + single agent;
+  don't run two `next` loops against the same run.
+- This skill only drives the loop. For starting environments, config, or logs,
+  use the main `veld` skill or `veld --help`.
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

@@ -1,6 +1,7 @@
 pub mod action;
 pub mod agent;
 pub mod backup;
+pub mod cli_dump;
 pub mod config;
 pub mod desktop;
 pub mod doctor;
@@ -20,6 +21,7 @@ pub mod runs;
 pub mod settings;
 pub mod setup;
 pub mod share;
+pub mod skills;
 pub mod start;
 pub mod stats;
 pub mod status;

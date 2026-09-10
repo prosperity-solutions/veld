@@ -69,10 +69,11 @@ pub fn cross() -> String {
 /// Render a config-authored string as one line of inert text.
 ///
 /// Free-prose config fields (a preset's `label`, `when_to_use`, `group`) reach
-/// this program's stdout, and `skills/veld/SKILL.md` pipes that stdout straight
-/// into a coding agent's context. Printed raw, one line in a `veld.json` — or in
-/// any file an `include` glob matches, such as a vendored sub-config arriving by
-/// PR — can:
+/// this program's stdout, and a coding agent runs `veld presets` and pipes that
+/// stdout straight into its context — which the `veld` skill now tells it to do
+/// at the moment it needs to choose something to start. Printed raw, one line in
+/// a `veld.json` — or in any file an `include` glob matches, such as a vendored
+/// sub-config arriving by PR — can:
 ///
 /// * erase and rewrite what it already printed (`ESC [ 2K`, `CR`), so the human's
 ///   terminal and the agent's context see different text; and
@@ -345,9 +346,9 @@ mod tests {
     };
 
     /// A preset's `label`/`when_to_use`/`group` is free prose from a config file,
-    /// and `skills/veld/SKILL.md` pipes `veld presets` output into a coding agent's
-    /// context. So the two things one line of `veld.json` must not be able to do
-    /// are rewrite what was already printed, and forge an extra list row.
+    /// and a coding agent pipes `veld presets` output into its own context. So the
+    /// two things one line of `veld.json` must not be able to do are rewrite what
+    /// was already printed, and forge an extra list row.
     #[test]
     fn one_line_neutralises_terminal_and_row_forgery() {
         let payload = format!(

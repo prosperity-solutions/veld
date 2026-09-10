@@ -83,7 +83,8 @@
 //!    [`AgentTool`]) — easy to miss since it lives well below [`Injection`] itself.
 //! 4. Whatever [`HookPayload`] is missing for the new tool's schema — every field is
 //!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
-//! 5. Docs: the two settings rows, README, `skills/veld/SKILL.md`, `llms-full.txt`.
+//! 5. Docs: the two settings rows, README, the relevant `veld skills` topic
+//!    (`crates/veld/src/commands/skills/`), `llms-full.txt`.
 //!
 //! ## The five traps, each already paid for once
 //!

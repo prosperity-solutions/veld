@@ -5153,7 +5153,7 @@ mod tests {
     /// it is neither of the two scopes above and needs its own gate. The failure
     /// this catches actually happened during review: `${veld.pane.id}` was
     /// accepted by lint, documented as usable in
-    /// `skills/veld/reference/pane-sessions.md`, and resolved by nothing, so
+    /// the `ide-panes` skill topic, and resolved by nothing, so
     /// every declaring pane rendered "could not resolve the command".
     #[test]
     fn sessions_commands_resolve_exactly_the_names_lint_accepts() {

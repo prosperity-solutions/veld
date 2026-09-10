@@ -1,5 +1,9 @@
 # Troubleshooting
 
+WebSocket failures, CSP errors, a vanishing overlay, port conflicts and cert warnings are all below.
+
+## Troubleshooting
+
 ## Content-Security-Policy
 
 Veld serves through a reverse proxy on a different hostname and port than the app's dev server. The app's CSP must allow this. Check for:
@@ -71,3 +75,7 @@ acts.
 
 Clicking through the browser warning works but is not a fix: the certificate is
 what the shared and injected surfaces are served over too.
+
+---
+
+`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

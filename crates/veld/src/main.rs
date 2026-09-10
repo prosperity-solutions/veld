@@ -88,7 +88,7 @@ pub enum SetupCommand {
     about = "Local development environment orchestrator",
     after_help = "Management UI: https://veld.localhost (run `veld ui` to open)"
 )]
-struct Cli {
+pub(crate) struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
@@ -481,6 +481,24 @@ enum Command {
     /// Initialise a new veld.json in the current directory.
     Init,
 
+    /// Print veld's agent documentation, carried by this binary.
+    ///
+    /// With no topic, the index. The consumer skills in `skills/` are pointers
+    /// here rather than copies of this text: a skill file installed into
+    /// somebody's project describes whichever veld they had that day, while
+    /// this describes the one they are running.
+    Skills {
+        /// The topic to print. Omit for the index.
+        #[arg(value_name = "TOPIC")]
+        topic: Option<String>,
+
+        /// Output as JSON — the index as `[{name, summary, bytes}]`, a topic
+        /// as `{name, summary, body}`. `bytes` is the document's size, so a
+        /// caller with a context budget can choose before it spends one.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List all Veld projects on this machine.
     List {
         /// Include URLs in the output.
@@ -779,6 +797,14 @@ enum Command {
         #[arg(long)]
         log: std::path::PathBuf,
     },
+
+    /// Internal: this clap tree as JSON — every node's flags (hidden ones
+    /// included), whether it takes a positional, and whether it requires a
+    /// subcommand. Consumed by `tests/validate-doc-commands.py`, which used to
+    /// infer the same thing by parsing `--help` prose and got it wrong three
+    /// ways (see `commands/cli_dump.rs`).
+    #[command(name = "_cli-dump", hide = true)]
+    InternalCliDump,
 }
 
 #[derive(Subcommand)]
@@ -1270,6 +1296,10 @@ async fn main() {
 
         Command::Init => commands::init::run().await,
 
+        Command::Skills { topic, json } => commands::skills::run(topic, json),
+
+        Command::InternalCliDump => commands::cli_dump::run(),
+
         Command::List { urls, json } => commands::list::run(urls, json).await,
 
         Command::Feedback { command } => commands::feedback::run(command).await,
@@ -1713,6 +1743,11 @@ fn command_survives_an_update(command: &Command) -> bool {
             | Command::Config { .. }
             | Command::Lint { .. }
             | Command::Init
+            // Nothing at all: the whole answer is a compile-time string, with no
+            // config, database or daemon behind it. Blocking it would tell a coding
+            // agent to come back later for its own instructions, which is a worse
+            // outcome than any it could protect.
+            | Command::Skills { .. }
             | Command::InternalLog { .. }
             | Command::InternalTimestamp { .. }
             // **This one IS the update.** `install.sh` runs inside
@@ -2122,6 +2157,23 @@ mod update_gate_tests {
                 binary: std::path::PathBuf::from("/tmp/veld-helper"),
             }
         ));
+    }
+
+    /// An agent reading its own instructions must never be told to come back
+    /// later, and `veld skills` costs nothing to serve — it opens no config, no
+    /// database and no socket. The allowlist is one `matches!` arm and a
+    /// reshuffle drops it silently, which is why every other entry here has a
+    /// test of its own.
+    #[test]
+    fn reading_the_documentation_survives_an_update() {
+        assert!(command_survives_an_update(&Command::Skills {
+            topic: None,
+            json: false,
+        }));
+        assert!(command_survives_an_update(&Command::Skills {
+            topic: Some("basics".into()),
+            json: true,
+        }));
     }
 
     #[test]
