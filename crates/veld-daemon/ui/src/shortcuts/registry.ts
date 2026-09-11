@@ -432,6 +432,13 @@ export const SHORTCUTS: ShortcutDef[] = [
  * which is deprecated but still present everywhere this needs to run — then the
  * user agent string as the fallback every other browser needs.
  */
+/**
+ * A page-dispatched chord must also stand down while a modal is up — see
+ * `ide/dialogGuards.ts`'s `pageChordsBlocked`, which is the condition to call
+ * rather than rewrite. Nothing in this file enforces that; a row here is a
+ * description of a binding, not its implementation.
+ */
+
 export function isMac(): boolean {
   if (typeof navigator === "undefined") return false;
   const uaData = (navigator as { userAgentData?: { platform?: string } }).userAgentData;
