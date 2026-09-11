@@ -2,15 +2,21 @@
  * When an open modal takes a keyboard chord away from the page underneath it.
  *
  * Five places in `App.tsx` ask a version of "is anything open" for a reason that
- * has nothing to do with rendering, and every one of them is guarding a bug this
- * app has already shipped once:
+ * has nothing to do with rendering. Two of them are answering a bug this app
+ * shipped and had to fix:
  *
  * - **`⌘W` closed a terminal tab behind the Settings modal**, with no
  *   confirmation, on the reflex Chrome parity had just trained.
  * - **`Escape` mid-batch unmounted the dialog while every remaining `PATCH` or
  *   `DELETE` kept firing.** Which reads as a cancel, and is not one.
- * - **`⌃Tab` cycled the tab strip invisibly behind the What's New card** — the
- *   card that existed to announce `⌃Tab`.
+ *
+ * A third was written preventively, in the same commit as the chord it guards,
+ * against the same failure: **`⌃Tab` cycling the tab strip invisibly behind the
+ * What's New card** — the card that exists to announce `⌃Tab` — and
+ * `mod+shift+D` moving a tab between docks behind either. The fifth is a
+ * different question in the same clothes: `App.tsx`'s browser-suspend effect
+ * hides the embedded browser panes while any overlay is up, because this app's
+ * own overlays are not portalled where `panes/overlayGuard.ts` can see them.
  *
  * They lived as five hand-written boolean expressions inside a 6,100-line
  * component, where nothing could test them and the only way to find a wrong one
