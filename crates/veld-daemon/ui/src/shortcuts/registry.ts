@@ -183,6 +183,21 @@ export function categoryLabel(category: ShortcutCategory): string {
   return CATEGORY_LABELS[category];
 }
 
+/**
+ * A row here describes a binding; it does not implement one. Two things live
+ * elsewhere and neither is enforced from this file.
+ *
+ * The *mechanism* — a page keydown, an Electron menu accelerator, a chord the
+ * terminal answers itself — decides what else a new row's diff must touch; see
+ * the checklist in `AGENTS.md` under this file's name.
+ *
+ * And a **page-dispatched chord must stand down while a modal is up**: call
+ * `ide/dialogGuards.ts`'s `pageChordsBlocked` rather than writing that condition
+ * by hand. It has two halves, and the second is the one that gets forgotten —
+ * What's New is a separate modal from `dialog`, and it is the one most likely to
+ * be open, because the release that adds a chord is the release whose card
+ * announces it.
+ */
 export const SHORTCUTS: ShortcutDef[] = [
   // ---- navigation ----------------------------------------------------------
   {

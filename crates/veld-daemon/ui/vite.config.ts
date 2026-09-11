@@ -87,7 +87,74 @@ export default defineConfig({
       "/api": { target: `http://127.0.0.1:${daemonPort}`, ws: true },
     },
   },
+  // Two test projects, split by file extension, because a component test needs
+  // a DOM and 47 module tests do not.
+  //
+  // **Why not simply `environment: "jsdom"` globally.** It works — all 1275
+  // existing tests pass under it — but it costs every suite jsdom's per-file
+  // construction whether or not the suite touches the DOM. Measured on this
+  // tree at `--maxWorkers=4` (roughly a CI runner's parallelism), two runs each:
+  //
+  //     environment: "node"     4.3s / 4.9s      (what this repo had)
+  //     environment: "jsdom"   11.2s / 12.6s     2.6x, for no extra coverage
+  //     these two projects      4.7s / 5.1s
+  //
+  // The middle row buys nothing the bottom row doesn't: the same component
+  // tests, in the same jsdom. It just also taxes the 47 files that never look
+  // at a `document`.
+  //
+  // **Why by extension rather than a per-file docblock.** The sibling package
+  // `crates/veld-daemon/frontend` reaches the same place with
+  // `// @vitest-environment jsdom` at the top of each of its ~19 DOM tests, and
+  // that is a perfectly good answer there. Here the extension already carries
+  // the signal — a `.tsx` test exists *because* it renders a component — so
+  // deriving the environment from it leaves nothing to remember. Either scheme
+  // fails loudly rather than silently when you get it wrong — a forgotten
+  // docblock over there gives `document is not defined`; a render test saved as
+  // `.test.ts` here dies earlier still, at transform, because esbuild does not
+  // parse JSX in a `.ts` file. So this is ergonomics, not a correctness gate.
+  //
+  // `extends: true` is what gives each project the root config above, the
+  // `react()` plugin included — without it a `.tsx` test has no JSX transform.
+  //
+  // **The two `include`s must partition vitest's default pattern exactly, and
+  // that is the whole subtlety here.** A file matched by *neither* project is
+  // not an error — it is simply never collected, so a broken test in it reports
+  // green and exits 0. This was got wrong twice while writing it: first scoped
+  // to `src/**` (a suite in `tests/`, where the sibling package keeps its own,
+  // would have vanished), then narrowed to `.test.ts`/`.test.tsx` (a `.spec.ts`
+  // or `.test.mts` vanished — measured: two deliberately failing files, "48
+  // passed", exit 0). So these mirror vitest's own default,
+  // `**/*.{test,spec}.?(c|m)[jt]s?(x)`, split on the one thing that decides the
+  // environment: the trailing `x`. JSX means a component, a component means a
+  // DOM. Widen both together or neither.
+  //
+  // `exclude` **replaces** vitest's defaults rather than extending them, which
+  // is why these are spelled `**/`-anchored — an unanchored `node_modules/**`
+  // would only match at the package root and let a nested one be crawled.
   test: {
-    environment: "node",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          environment: "node",
+          include: ["**/*.{test,spec}.?(c|m)[jt]s"],
+          exclude: ["**/node_modules/**", "**/dist/**"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          environment: "jsdom",
+          include: ["**/*.{test,spec}.?(c|m)[jt]sx"],
+          exclude: ["**/node_modules/**", "**/dist/**"],
+          // Unmounts between tests and stubs the browser APIs jsdom is missing.
+          // Not optional — see that file for what breaks without it.
+          setupFiles: ["./src/shared/testSetup.ts"],
+        },
+      },
+    ],
   },
 });

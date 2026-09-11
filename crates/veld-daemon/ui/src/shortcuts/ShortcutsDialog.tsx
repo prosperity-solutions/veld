@@ -8,6 +8,7 @@ import {
   comboTokens,
   combosFor,
   isMac,
+  type ShortcutDef,
   visibleShortcuts,
 } from "./registry";
 
@@ -18,8 +19,21 @@ import {
  * Read straight from `./registry`, the single source of truth for this list;
  * see its doc comment for what "single source" does and doesn't cover.
  */
-export function ShortcutsDialog(props: { onClose: () => void }) {
+export function ShortcutsDialog(props: {
+  onClose: () => void;
+  /**
+   * The rows to show. Defaults to the whole registry, which is what `/ide`
+   * passes — it exists so a test can hand in a list where the platform filter
+   * empties a *whole category*, which is the one branch below (`rows.length
+   * === 0`) that today's `SHORTCUTS` cannot reach: every category has rows on
+   * both platforms, so without this the branch is a forward guard no test can
+   * touch. Injected rather than module-mocked so the default path stays the
+   * one real callers take.
+   */
+  shortcuts?: readonly ShortcutDef[];
+}) {
   const mac = isMac();
+  const all = props.shortcuts ?? SHORTCUTS;
   return (
     <Modal title="Keyboard shortcuts" onClose={props.onClose} size={860}>
       <ScrollArea.Autosize mah="min(70vh, 560px)" type="auto" offsetScrollbars>
@@ -27,7 +41,7 @@ export function ShortcutsDialog(props: { onClose: () => void }) {
           {CATEGORY_ORDER.map((category) => {
             // Filtered by **platform as well as category** — see
             // `visibleShortcuts`, which is shared with the test that pins this.
-            const rows = visibleShortcuts(SHORTCUTS, mac).filter(
+            const rows = visibleShortcuts(all, mac).filter(
               (s) => s.category === category,
             );
             if (rows.length === 0) return null;
