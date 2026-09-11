@@ -309,7 +309,7 @@ function pruneShowing() {
 
 /** @type {null | {
  *   baseUrl: string,
- *   waitingHtml: string,
+ *   waitingPage: (ctx: {elapsedMs: number}) => string,
  *   daemonReachable: () => Promise<boolean>,
  *   appIcon: string,
  *   topbarHeight: number,
@@ -498,7 +498,23 @@ async function loadAppWhenReady(win, url) {
     await win.loadURL(url);
     return;
   }
-  await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(deps.waitingHtml)}`);
+  // The waiting page is a function of how long this window has been waiting, not
+  // a constant: it opens on "starting up", and only escalates to a page that
+  // diagnoses anything once that has stopped being a plausible explanation. See
+  // `waitingScreen.js` for why, and for who decides.
+  const waitingSince = Date.now();
+  let shownHtml = null;
+  const showWaiting = async () => {
+    const elapsedMs = Date.now() - waitingSince;
+    const html = deps.waitingPage({ elapsedMs });
+    // Compared rather than re-rendered every tick: a `loadURL` every two seconds
+    // would restart the page, and anything the user had selected — a command
+    // they were half-way through copying — would go with it.
+    if (html === shownHtml) return;
+    shownHtml = html;
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+  };
+  await showWaiting();
   const timer = setInterval(async () => {
     if (win.isDestroyed()) {
       clearInterval(timer);
@@ -514,7 +530,13 @@ async function loadAppWhenReady(win, url) {
       await win.loadURL(url).catch((err) => {
         if (!win.isDestroyed()) console.error("[veld] window failed to load", err);
       });
+      return;
     }
+    // Same catch, same reason: the window can go away across the await above.
+    if (win.isDestroyed()) return;
+    await showWaiting().catch((err) => {
+      if (!win.isDestroyed()) console.error("[veld] waiting page failed to load", err);
+    });
   }, 2000);
 }
 

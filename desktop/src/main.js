@@ -32,11 +32,16 @@ const {
   tabCommand,
 } = require("./windows");
 const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
+const { installedCliPath, waitingHtml, waitingStage } = require("./waitingScreen");
 const {
   checkForUpdates,
   initUpdater,
   noteDaemonVersion,
   quitIfUpdating,
+  // Renamed at the import: `settingsChanged` is already the name of the
+  // renderer-side nudge this file receives, and two of them in one module is a
+  // trap for whoever edits the handler next.
+  settingsChanged: updaterSettingsChanged,
   skewMenuItem,
 } = require("./updater");
 
@@ -186,37 +191,38 @@ function claimSlot(preferred) {
   return preferred;
 }
 
-// Shown while the daemon is unreachable; self-contained and branded
-// (dark tokens + wordmark dot styling from the design handoff).
-//
-// The commands are spelled out rather than linked, because this screen is what a
-// packaged download shows on a machine that has never had veld: the app is a
-// shell around a daemon it does not ship, and "install veld" with no command is
-// a dead end. Both steps are named because the installer deliberately does not
-// run setup (`install.sh` → "no auto-run of veld setup"), and setup is what
-// installs the daemon agent this screen is waiting for
-// (`commands/setup/unprivileged.rs:38`) — `veld doctor` only *diagnoses* it.
-// `-webkit-user-select` is re-enabled on the commands alone — the rest of the
-// page is a drag region, which otherwise swallows the selection.
-const INSTALL_COMMAND = "curl -fsSL https://veld.oss.life.li/get | bash";
-const SETUP_COMMAND = "veld setup unprivileged";
-const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Veld</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.2 36L12 12H16.4L23.7 31.8H23.8L31.1 12H35.5L26.3 36H21.2Z' fill='white'/><path d='M32.5 37C33.8807 37 35 35.8807 35 34.5C35 33.1193 33.8807 32 32.5 32C31.1193 32 30 33.1193 30 34.5C30 35.8807 31.1193 37 32.5 37Z' fill='%23C4F56A'/></svg>">
-<style>
-  body{margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
-       background:#0d0e10;color:#98a0a9;font:13px/1.6 system-ui,sans-serif;-webkit-app-region:drag}
-  .wm{font-weight:700;font-size:22px;color:#e7e9ec}.wm i{color:oklch(0.74 0.14 158);font-style:normal}
-  code{font-family:ui-monospace,monospace;background:#1a1d21;border:1px solid #2a2e35;border-radius:6px;padding:2px 7px}
-  code.cmd{-webkit-user-select:text;user-select:text;-webkit-app-region:no-drag;color:#e7e9ec}
-  p{max-width:420px;text-align:center;margin:0}
-</style></head><body>
-  <div class="wm">veld<i>.</i></div>
-  <p>Waiting for the veld daemon…</p>
-  <p>On a fresh machine, install veld and set it up — no sudo needed:</p>
-  <p><code class="cmd">${INSTALL_COMMAND}</code></p>
-  <p><code class="cmd">${SETUP_COMMAND}</code></p>
-  <p>Already set up? Run <code>veld doctor</code> to see what's wrong. Retrying automatically.</p>
-</body></html>`;
+/**
+ * The page a window shows while the daemon is unreachable, for how long it has
+ * been waiting.
+ *
+ * The CLI probe is re-run per call rather than cached at startup, and that is
+ * the point: the two moments this is asked are seconds and a minute apart, and
+ * in between them the user may have done exactly what the first page implied and
+ * installed veld. A cached `false` would then keep telling somebody with a
+ * working install to go and install it — the original bug in a slower costume.
+ * Three `accessSync` calls, twice per window, is not a cost worth caching.
+ *
+ * @param {{elapsedMs: number}} ctx
+ * @returns {string}
+ */
+function waitingPage({ elapsedMs }) {
+  const cliPath = installedCliPath({
+    home: app.getPath("home"),
+    isExecutable: (p) => {
+      try {
+        fs.accessSync(p, fs.constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  });
+  return waitingHtml({
+    stage: waitingStage({ cliPath, elapsedMs }),
+    cliPath,
+    baseUrl: BASE_URL,
+  });
+}
 
 /**
  * Liveness plus the daemon's version, which is half of the skew check in
@@ -250,7 +256,7 @@ async function daemonReachable() {
 // icon, the top bar's geometry).
 initWindows({
   baseUrl: BASE_URL,
-  waitingHtml: WAITING_HTML,
+  waitingPage,
   daemonReachable,
   appIcon: APP_ICON,
   topbarHeight: TOPBAR_HEIGHT,
@@ -772,6 +778,11 @@ app.whenReady().then(async () => {
   // mirror, and taking the page's word for it would put an icon back that the
   // daemon says is off. So this re-reads, exactly like the tick.
   ipcMain.handle("veld:app:settings-changed", async () => {
+    // Two readers now, and only one of them is macOS-only: the tray, and the
+    // updater's `desktop.updateFrequency`. The updater's re-read runs on every
+    // platform and before the tray gate, or a Linux user moving the update
+    // control would wait out an interval up to twelve hours long for it to take.
+    await updaterSettingsChanged();
     if (process.platform !== "darwin") return;
     await syncTray();
   });
@@ -791,6 +802,10 @@ app.whenReady().then(async () => {
     // genuinely cancels a quit, so it is the one that has to say so — and it is
     // the AppImage updater's, i.e. Linux, where `activate` never fires.
     onQuitCancelled: () => setQuitting(false),
+    settingsUrl: SETTINGS_URL,
+    // Beside `windows.json` and `permissions.json`, for the same reason: it is
+    // this install's state, not this machine's veld's. `~/.veld` is the CLI's.
+    stateFile: path.join(app.getPath("userData"), "update-nudges.json"),
   });
   setInterval(() => void daemonReachable(), VERSION_POLL_MS);
   // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which

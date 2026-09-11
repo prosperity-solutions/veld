@@ -345,4 +345,25 @@ export const PROMOTIONS: Promotion[] = [
       "A pane your project declares now takes the title its tool sets, so four Claude tabs read as four tasks. Pin one back with fixed_label in veld.json.",
     glyph: "terminal",
   },
+  {
+    // A default that flipped, and the shape this channel is for on both counts:
+    // it happens *to* the reader with no action of theirs, and the control that
+    // undoes it is one nobody would go looking for — a settings row about a
+    // dialog you only see when it is already in front of you.
+    //
+    // The headline is what stops happening, not what the app now computes. "Veld
+    // Desktop offers updates less often" was the first draft and opens on the
+    // product; the ripening rule and the version count are mechanism and belong
+    // in the setting's own help text, which is where the body points.
+    //
+    // `inbox`, like the other cards about being told something — this one is
+    // about being told it less.
+    id: "update-frequency-tiers",
+    since: "2026-09-11",
+    eyebrow: "Changed",
+    headline: "Get asked about updates once a day at most",
+    body:
+      "Update prompts now wait for a release to settle, and come at most once a day. Want them sooner, or rarer? Settings, under How eagerly to offer updates.",
+    glyph: "inbox",
+  },
 ];

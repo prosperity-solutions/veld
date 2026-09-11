@@ -5,9 +5,11 @@ const path = require("node:path");
 
 const {
   CONSOLE_HANDOFF,
+  DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
+  UPDATE_TIERS,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -15,12 +17,18 @@ const {
   handoffCommand,
   looksLikeVeldCli,
   primaryAction,
+  pruneUpdateState,
+  releaseAgeMs,
   releasePageUrl,
   reportIsFresh,
+  shouldOfferUpdate,
+  updateFrequencyFrom,
   updateInProgress,
   updateMode,
   updatePhaseLabel,
+  updateTier,
   versionSkew,
+  versionsAhead,
 } = require("./updatePolicy");
 
 // A `phase_at` the staleness rule will accept, unless a test wants otherwise.
@@ -521,4 +529,205 @@ test("console-handoff alone never invents the full route", () => {
   assert.equal(full, false);
   assert.equal(args.includes("--console"), false);
   assert.deepEqual(args.slice(0, 2), ["desktop", "update"]);
+});
+
+// ---------------------------------------------------------------------------
+// Update frequency tiers
+// ---------------------------------------------------------------------------
+
+const HOUR = 60 * 60 * 1000;
+const NOW = Date.parse("2026-09-11T12:00:00Z");
+
+test("the default tier is quieter than the behaviour it replaces", () => {
+  // The whole point of the change, asserted rather than described: same check
+  // interval, but a release has to ripen and a day has to pass between prompts.
+  // A regression that made the default prompt eagerly would otherwise be
+  // invisible — every individual dialog still looks correct.
+  const before = UPDATE_TIERS.balanced;
+  assert.equal(DEFAULT_UPDATE_FREQUENCY, "balanced");
+  assert.equal(before.checkIntervalMs, 6 * HOUR);
+  assert.ok(before.minReleaseAgeMs > 0);
+  assert.ok(before.minPromptGapMs >= 24 * HOUR);
+  assert.equal(UPDATE_TIERS.eager.minReleaseAgeMs, 0);
+  assert.equal(UPDATE_TIERS.eager.minPromptGapMs, 0);
+  // Each tier is strictly quieter than the one above it on every axis a person
+  // can perceive, so the labels stay true in both directions.
+  for (const axis of ["minReleaseAgeMs", "minPromptGapMs", "versionsAheadOverride"]) {
+    assert.ok(UPDATE_TIERS.eager[axis] <= UPDATE_TIERS.balanced[axis], axis);
+    assert.ok(UPDATE_TIERS.balanced[axis] <= UPDATE_TIERS.relaxed[axis], axis);
+  }
+});
+
+test("an unknown tier name is the default, in both directions", () => {
+  // A newer daemon can offer a tier this app has never heard of, and a garbled
+  // value must not leave the updater with no schedule at all.
+  assert.equal(updateTier("relaxed"), UPDATE_TIERS.relaxed);
+  assert.equal(updateTier("glacial"), UPDATE_TIERS.balanced);
+  assert.equal(updateTier(undefined), UPDATE_TIERS.balanced);
+  assert.equal(updateTier(7), UPDATE_TIERS.balanced);
+  // Not `Object.prototype`'s, either: a stored "constructor" must not resolve.
+  assert.equal(updateTier("constructor"), UPDATE_TIERS.balanced);
+});
+
+test("updateFrequencyFrom only moves off the fallback for a tier it knows", () => {
+  assert.equal(updateFrequencyFrom({ settings: { "desktop.updateFrequency": "eager" } }), "eager");
+  assert.equal(updateFrequencyFrom({ settings: {} }, "relaxed"), "relaxed");
+  assert.equal(updateFrequencyFrom(null, "relaxed"), "relaxed");
+  assert.equal(updateFrequencyFrom({ settings: { "desktop.updateFrequency": 3 } }), "balanced");
+  // An older app against a newer daemon: keep what we had rather than guessing.
+  assert.equal(
+    updateFrequencyFrom({ settings: { "desktop.updateFrequency": "nightly" } }, "relaxed"),
+    "relaxed",
+  );
+});
+
+test("a release's age survives a laptop that was shut", () => {
+  // `firstSeenAt` alone would restart the ripening clock every time the app
+  // reopens, so a release that has been out for a week would be treated as new.
+  const age = releaseAgeMs({
+    releaseDate: "2026-09-04T12:00:00Z",
+    firstSeenAt: NOW,
+    now: NOW,
+  });
+  assert.equal(age, 7 * 24 * HOUR);
+});
+
+test("a release with no usable date falls back to when it was first seen", () => {
+  const seen = NOW - 5 * HOUR;
+  assert.equal(releaseAgeMs({ releaseDate: undefined, firstSeenAt: seen, now: NOW }), 5 * HOUR);
+  assert.equal(releaseAgeMs({ releaseDate: "not a date", firstSeenAt: seen, now: NOW }), 5 * HOUR);
+  // A publisher's clock ahead of ours is not a release from tomorrow, and must
+  // never produce a negative age that reads as "ripe".
+  assert.equal(
+    releaseAgeMs({ releaseDate: "2026-09-12T12:00:00Z", firstSeenAt: seen, now: NOW }),
+    5 * HOUR,
+  );
+  // Nothing known at all is age zero, i.e. "not ripe" — the quiet direction.
+  assert.equal(releaseAgeMs({ now: NOW }), 0);
+});
+
+test("versionsAhead counts only what the running version has not caught up with", () => {
+  const seen = { "16.70.0": 1, "16.71.0": 2, "16.72.0": 3, "16.73.0": 4 };
+  assert.equal(versionsAhead({ seen, currentVersion: "16.71.0" }), 2);
+  assert.equal(versionsAhead({ seen, currentVersion: "16.73.0" }), 0);
+  assert.equal(versionsAhead({ seen: null, currentVersion: "16.71.0" }), 0);
+});
+
+test("the default tier waits for a release to settle, then offers it", () => {
+  const tier = UPDATE_TIERS.balanced;
+  const base = { tier, ahead: 1, lastPromptedAt: null, now: NOW };
+  assert.deepEqual(shouldOfferUpdate({ ...base, ageMs: 6 * HOUR }), {
+    offer: false,
+    reason: "ripening",
+  });
+  assert.deepEqual(shouldOfferUpdate({ ...base, ageMs: 40 * HOUR }), {
+    offer: true,
+    reason: "aged",
+  });
+});
+
+test("releases piling up shortcut the age gate but never the prompt gap", () => {
+  // The distinction the tiers turn on: a burst is a reason to stop waiting for
+  // the current release to settle, not a reason to prompt twice in an hour.
+  const tier = UPDATE_TIERS.balanced;
+  assert.deepEqual(shouldOfferUpdate({ tier, ageMs: 1 * HOUR, ahead: 4, now: NOW }), {
+    offer: true,
+    reason: "piled-up",
+  });
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier,
+      ageMs: 1 * HOUR,
+      ahead: 40,
+      lastPromptedAt: NOW - 2 * HOUR,
+      now: NOW,
+    }),
+    { offer: false, reason: "too-soon" },
+  );
+});
+
+test("a manual check is answered whatever the tier says", () => {
+  // Clicking Check for Updates… is the one input that outranks every gate,
+  // including a decline — asking again is the whole point of clicking it.
+  const tier = UPDATE_TIERS.relaxed;
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier,
+      ageMs: 0,
+      ahead: 0,
+      declined: true,
+      lastPromptedAt: NOW - 60_000,
+      manual: true,
+      now: NOW,
+    }),
+    { offer: true, reason: "manual" },
+  );
+});
+
+test("a declined release stays declined for the automatic check", () => {
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier: UPDATE_TIERS.eager,
+      ageMs: 99 * HOUR,
+      ahead: 9,
+      declined: true,
+      now: NOW,
+    }),
+    { offer: false, reason: "declined" },
+  );
+});
+
+test("a clock that jumped backwards does not silence the app for days", () => {
+  // One-sided, like `updateInProgress`'s phase check. A `lastPromptedAt` in the
+  // future read as "the gap has not elapsed" would mute updates until the
+  // timestamp caught up.
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier: UPDATE_TIERS.balanced,
+      ageMs: 99 * HOUR,
+      ahead: 1,
+      lastPromptedAt: NOW + 30 * 24 * HOUR,
+      now: NOW,
+    }),
+    { offer: true, reason: "aged" },
+  );
+});
+
+test("the eager tier offers a release the moment it is seen", () => {
+  assert.deepEqual(
+    shouldOfferUpdate({ tier: UPDATE_TIERS.eager, ageMs: 0, ahead: 1, now: NOW }),
+    { offer: true, reason: "piled-up" },
+  );
+});
+
+test("nudge state is pruned to the running version", () => {
+  // Without this the `seen` map is append-only for the life of an install, and —
+  // worse — the four releases that triggered a prompt would still be counted
+  // against the release they installed.
+  const state = pruneUpdateState(
+    {
+      lastPromptedAt: 1234,
+      seen: { "16.70.0": 1, "16.72.0": 2, "16.73.0": 3 },
+      declined: ["16.70.0", "16.73.0"],
+    },
+    "16.72.0",
+  );
+  assert.deepEqual(state, {
+    lastPromptedAt: 1234,
+    seen: { "16.73.0": 3 },
+    declined: ["16.73.0"],
+  });
+});
+
+test("a malformed nudge file degrades to nothing known", () => {
+  // It lives in userData where anything can edit it, and an updater that throws
+  // on every check is a worse outcome than one extra prompt.
+  const empty = { lastPromptedAt: null, seen: {}, declined: [] };
+  assert.deepEqual(pruneUpdateState(null, "16.72.0"), empty);
+  assert.deepEqual(pruneUpdateState("nonsense", "16.72.0"), empty);
+  assert.deepEqual(pruneUpdateState({ seen: [], declined: "16.73.0" }, "16.72.0"), empty);
+  assert.deepEqual(
+    pruneUpdateState({ lastPromptedAt: "soon", seen: { "16.73.0": "yes" } }, "16.72.0"),
+    empty,
+  );
 });

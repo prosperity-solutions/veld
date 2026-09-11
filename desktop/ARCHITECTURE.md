@@ -1099,10 +1099,48 @@ turns macOS self-updates on.
 
 Two different mismatches, deliberately reported differently:
 
-- **A newer release exists.** Checked 15 s after launch and every 6 h, silent
-  unless it finds something, never re-prompting for a version already declined in
-  this session. A user-initiated *Check for Updates…* (tray on macOS, application
-  menu everywhere) reports every outcome including "up to date".
+- **A newer release exists.** Checked 15 s after launch and then on the interval
+  the user's tier asks for, silent unless it finds something. A user-initiated
+  *Check for Updates…* (tray on macOS, application menu everywhere) reports every
+  outcome including "up to date", and outranks every gate below.
+
+  **How often it *asks* is a setting, `desktop.updateFrequency`, and that is a
+  different question from how often it checks.** The app used to check every six
+  hours and offer whatever it found, which on a release train that ships several
+  times a day is several dialogs a day — each one individually correct, and
+  collectively the complaint. The three tiers live in `updatePolicy.js`'s
+  `UPDATE_TIERS`, and each is four numbers rather than an interval, because
+  "how often" turned out to be four questions:
+
+  | | check every | release must be | …or this many waiting | gap between prompts |
+  |---|---|---|---|---|
+  | `eager` | 1 h | — | 1 | — |
+  | `balanced` (default) | 6 h | 36 h old | 4 | 24 h |
+  | `relaxed` | 12 h | 72 h old | 8 | 48 h |
+
+  The *age* gate is what the tiers are really for: the release that follows a bad
+  one lands within hours, so a tier that waits skips the dialog for both. The
+  version count is the escape hatch that stops a quiet tier sitting out a week,
+  and it overrides the age gate only — never the prompt gap, because a burst of
+  releases is not a reason to prompt twice in an hour. A release's age comes from
+  the feed's `releaseDate` where it has one and from when this app first recorded
+  the version otherwise, whichever is older, so a laptop shut for a week does not
+  restart the clock on reopening.
+
+  The state behind it — when the last prompt was, which versions have been seen,
+  which were declined — is `update-nudges.json` in `userData`, beside
+  `windows.json`. It has to survive restarts or the promise is about uptime
+  rather than about days, and it is pruned to the running version on every read
+  so it neither grows without bound nor counts releases the app has installed.
+  Declining is persisted for the same reason: it used to live in a `Set` that
+  died with the process, so quitting and reopening asked again about the release
+  you had just turned down.
+
+  The tier is re-read from `GET /api/settings` on every check *and* on the
+  renderer's `veld:app:settings-changed` nudge, and the schedule is a
+  self-rescheduling `setTimeout` rather than a `setInterval` so a changed setting
+  takes effect at once instead of at the end of an interval that may be twelve
+  hours long.
 
   On the `"cli"` route the prompt is about the **release**, not the app —
   *"veld 16.8.0 is available"*, *"Quit and Update veld"* — because that is what
@@ -1120,13 +1158,36 @@ Two different mismatches, deliberately reported differently:
   `veld update` performed while the app is open both raises and clears the
   notice.
 
-The app is a shell around a daemon it does not ship, so its waiting screen spells
-out both commands — the installer *and* `veld setup unprivileged` — rather than
-saying "install veld". For a packaged download on a machine that has never had
-it, that screen is the whole first impression, and the installer deliberately
-does not run setup, which is the step that actually installs the daemon agent
-the screen is waiting for. `veld doctor` only diagnoses, so it is offered to
-someone who is already set up.
+### The waiting screen asks before it advises
+
+The app is a shell around a daemon it does not ship, so when the daemon does not
+answer the screen has to say something useful with no daemon to ask. It used to
+say one thing to everybody: install veld, then run setup. That is right exactly
+once, on a fresh machine, and wrong in the case that happens most — `veld update`
+restarts the daemon and relaunches the app, the app wins the race by a second,
+and a working install is told to go and install itself. Following that advice
+means re-running an installer over a machine that is mid-update.
+
+So `waitingScreen.js` asks one question first: **is the veld CLI on this machine
+at all?** Existence and the execute bit over `cliCandidatePaths` — deliberately
+not the updater's `--version`-and-check-the-output probe, which is asking a
+different question because it is about to *run* what it found.
+
+- **No binary** → the commands, immediately. Nothing is coming, and this is the
+  first-impression case the original screen was written for. Both steps are named
+  because the installer deliberately does not run setup (`install.sh` → "no
+  auto-run of veld setup"), and setup is what installs the daemon agent
+  (`commands/setup/unprivileged.rs`).
+- **A binary, under a minute** → *"Starting Veld… If you just updated, the daemon
+  is restarting."* No commands at all.
+- **A binary, over a minute** (`STALL_AFTER_MS`) → the fault page: where veld is
+  installed, what is not answering, `veld setup unprivileged` for an install that
+  never ran setup, and `veld doctor` for one that did. Never the installer — this
+  machine demonstrably has veld.
+
+The probe is re-run per render rather than cached at startup, because the two
+renders are a minute apart and in between the user may have done exactly what the
+first page told them to.
 
 ## Data model
 
