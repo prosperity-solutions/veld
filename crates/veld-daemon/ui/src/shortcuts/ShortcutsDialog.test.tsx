@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
-import { afterEach, describe, expect, test } from "vitest";
-import { render } from "../shared/testRender";
+import { describe, expect, test } from "vitest";
+import { render, setPlatform } from "../shared/testRender";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import {
   SHORTCUTS,
@@ -28,34 +28,10 @@ import {
  * `asMac` below flips it.
  */
 
-/** Override `navigator.platform` for the current test. */
-function setPlatform(value: string) {
-  Object.defineProperty(globalThis.navigator, "platform", {
-    value,
-    configurable: true,
-  });
-}
-
-/** Make `isMac()` answer true for the next render. */
+/** Make `isMac()` answer true for the current test. Undone by `testSetup.ts`. */
 function asMac() {
   setPlatform("MacIntel");
 }
-
-afterEach(() => {
-  // **Delete, do not restore.** jsdom defines `platform` as a getter on
-  // `Navigator.prototype`, not on the navigator instance — so
-  // `getOwnPropertyDescriptor(navigator, "platform")` is `undefined` before any
-  // test touches it, and a "save the original descriptor and put it back"
-  // teardown restores nothing at all. What `setPlatform` adds is an *own*
-  // property shadowing the prototype getter; deleting it un-shadows the getter,
-  // which answers `""` — jsdom's real value, and the non-mac branch.
-  //
-  // This was wrong in the first version of this file, and silently: the restore
-  // was a no-op, so the first `asMac()` leaked into every test after it. The two
-  // tests that assert the non-mac branch passed only because they happened to be
-  // declared above the first one that called `asMac()`.
-  Reflect.deleteProperty(globalThis.navigator, "platform");
-});
 
 test("this file runs in the `dom` project, with a DOM", () => {
   // The twin of the assertion in `ide/dialogGuards.test.ts`: a `.test.tsx` gets

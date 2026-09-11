@@ -413,24 +413,46 @@ mod tests {
     #[test]
     fn test_reservation_holds_port() {
         let _guard = port_guard();
-        let allocator = PortAllocator::new();
-        let reservation = allocator.allocate().unwrap();
-        let port = reservation.port;
 
-        // While the reservation is held, binding the same wildcard address should fail.
-        let wildcard: SocketAddr = ([0, 0, 0, 0], port).into();
-        let bind_result = TcpListener::bind(wildcard);
-        assert!(
-            bind_result.is_err(),
-            "port {port} should be held by reservation"
-        );
+        // **Retried, for the same reason as `test_reserve_fixed_refuses_to_substitute`
+        // above.** The second half needs the port *free*, so the reservation has to
+        // let go of it first, and in that gap anything else on the machine may take
+        // it — `port_guard` only serialises this crate's own tests, and this crate's
+        // range (19000+) is exactly where another worktree's dev stack sits.
+        // Measured before this loop existed: roughly one run in three of
+        // `cargo test -p veld-core --lib` failed here, naming a different port each
+        // time ("port 19003 should be free after release", then 19004), with and
+        // without a dev stack running.
+        //
+        // The half that is actually this test's subject — that a held reservation
+        // *blocks* a bind — is asserted on every attempt and never retried. Only
+        // the "and is free again afterwards" half can lose a coin flip, and losing
+        // all sixteen still fails, so a reservation that genuinely stopped
+        // releasing is still caught.
+        let mut freed = false;
+        for _ in 0..16 {
+            let allocator = PortAllocator::new();
+            let reservation = allocator.allocate().unwrap();
+            let port = reservation.port;
 
-        // After releasing, binding should succeed.
-        reservation.release();
-        let bind_result = TcpListener::bind(wildcard);
+            // While the reservation is held, binding the same wildcard address should fail.
+            let wildcard: SocketAddr = ([0, 0, 0, 0], port).into();
+            assert!(
+                TcpListener::bind(wildcard).is_err(),
+                "port {port} should be held by reservation"
+            );
+
+            // After releasing, binding should succeed — unless somebody else won
+            // the race for it, which is not what this test is about.
+            reservation.release();
+            if TcpListener::bind(wildcard).is_ok() {
+                freed = true;
+                break;
+            }
+        }
         assert!(
-            bind_result.is_ok(),
-            "port {port} should be free after release"
+            freed,
+            "releasing a reservation never freed its port, in 16 attempts"
         );
     }
 

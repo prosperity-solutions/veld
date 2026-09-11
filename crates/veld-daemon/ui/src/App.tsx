@@ -2419,7 +2419,13 @@ function AppInner(props: {
   // the state that opens them instead. Without this the ⌘K palette opens
   // *behind* a native view (see panes/overlayGuard.ts).
   useEffect(() => {
-    if (!isDialogOpen(dialog)) return;
+    // The discriminant, not `dialog` itself, so what this reads and what the dep
+    // array lists are the same thing — as they were before this was a named
+    // predicate. Hand it the whole object and the effect reads a value its deps
+    // do not mention, which invites "fixing" the lint nudge by adding `dialog`;
+    // that re-runs on a payload-only re-set that keeps the same kind, and
+    // push/pop here is a refcount, so it would leak a suspend per re-set.
+    if (!isDialogOpen({ kind: dialog.kind })) return;
     pushBrowserSuspend();
     return popBrowserSuspend;
   }, [dialog.kind]);

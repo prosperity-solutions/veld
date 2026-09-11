@@ -446,8 +446,14 @@ run, while a plain terminal in the same app works perfectly.
 - **A `crates/veld-daemon/ui` test gets a DOM only if it is a `.tsx` file.**
   `vite.config.ts` runs two vitest projects: `*.test.ts` under `node`, and
   `*.test.tsx` under `jsdom`. So a test that renders a component must be named
-  `.test.tsx` — as a `.test.ts` it fails with `document is not defined`, which
-  reads like a missing polyfill rather than a wrong extension. Render through
+  `.test.tsx`, and the two ways of getting that wrong fail *differently* — worth
+  knowing, because only one of them mentions a DOM. A render test saved as
+  `.test.ts` never reaches the environment at all: esbuild does not parse JSX in
+  a `.ts` file, so it dies at transform with `ERROR: Expected ">" but found
+  "onClose"` — a syntax error naming your prop, with nothing about `document`,
+  the environment, or the extension in it. Only a *non*-JSX test that touches
+  `document` directly gives the `document is not defined` you might expect.
+  Render through
   `shared/testRender.tsx`'s `render`, never `@testing-library/react`'s directly:
   every component here is a Mantine component and one without a
   `MantineProvider` above it throws rather than rendering something imperfect.
@@ -464,10 +470,14 @@ run, while a plain terminal in the same app works perfectly.
   global flip. One assertion in each of the two projects (`typeof document`)
   pins that split, because nothing else would notice a later global flip —
   the doc would just go quietly false. The two packages also track different
-  `jsdom` majors on purpose rather than by drift: `ui` is on `^30`, whose
-  `engines` floor is `^22.22.2 || ^24.15.0 || >=26`, and CI's `node-version:
-  '22'` resolves above that floor; `frontend` is still on `^29` and there is no
-  reason to move it until Renovate does.
+  `jsdom` majors on purpose rather than by drift: `ui` is on `^30`, `frontend`
+  still on `^29`, and there is no reason to move the latter until Renovate does.
+  jsdom 30's floor is unusually narrow (`^22.22.2 || ^24.15.0 || >=26`), so the
+  `ui` package carries an `engines.node` of its own rather than leaving that
+  floor implied by a transitive dependency — CI's `node-version: '22'` clears it
+  today, but only while setup-node keeps resolving the newest 22.x, and a
+  too-old Node otherwise installs with a warning and fails later as something
+  that looks unrelated.
 - **Reach for a Mantine primitive before hand-rolling DOM+CSS for anything the
   library already provides.** This UI is `React+Mantine`, and a hand-rolled
   equivalent of `Tooltip`/`Button`/`Menu`/`Modal`/`ActionIcon` quietly forks the

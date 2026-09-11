@@ -108,17 +108,30 @@ export default defineConfig({
   // `// @vitest-environment jsdom` at the top of each of its ~19 DOM tests, and
   // that is a perfectly good answer there. Here the extension already carries
   // the signal — a `.tsx` test exists *because* it renders a component — so
-  // deriving the environment from it leaves nothing to remember. A forgotten
-  // docblock fails loudly (`document is not defined`) rather than silently, so
-  // this is ergonomics, not a correctness gate.
+  // deriving the environment from it leaves nothing to remember. Either scheme
+  // fails loudly rather than silently when you get it wrong — a forgotten
+  // docblock over there gives `document is not defined`; a render test saved as
+  // `.test.ts` here dies earlier still, at transform, because esbuild does not
+  // parse JSX in a `.ts` file. So this is ergonomics, not a correctness gate.
   //
   // `extends: true` is what gives each project the root config above, the
   // `react()` plugin included — without it a `.tsx` test has no JSX transform.
   //
-  // The globs are package-wide rather than `src/**`, so a suite that later lands
-  // outside `src/` — the sibling package keeps its whole suite in `tests/` — is
-  // still collected. Scoped to one project each, a file matched by neither would
-  // simply not run and report as a pass.
+  // **The two `include`s must partition vitest's default pattern exactly, and
+  // that is the whole subtlety here.** A file matched by *neither* project is
+  // not an error — it is simply never collected, so a broken test in it reports
+  // green and exits 0. This was got wrong twice while writing it: first scoped
+  // to `src/**` (a suite in `tests/`, where the sibling package keeps its own,
+  // would have vanished), then narrowed to `.test.ts`/`.test.tsx` (a `.spec.ts`
+  // or `.test.mts` vanished — measured: two deliberately failing files, "48
+  // passed", exit 0). So these mirror vitest's own default,
+  // `**/*.{test,spec}.?(c|m)[jt]s?(x)`, split on the one thing that decides the
+  // environment: the trailing `x`. JSX means a component, a component means a
+  // DOM. Widen both together or neither.
+  //
+  // `exclude` **replaces** vitest's defaults rather than extending them, which
+  // is why these are spelled `**/`-anchored — an unanchored `node_modules/**`
+  // would only match at the package root and let a nested one be crawled.
   test: {
     projects: [
       {
@@ -126,8 +139,8 @@ export default defineConfig({
         test: {
           name: "unit",
           environment: "node",
-          include: ["**/*.test.ts"],
-          exclude: ["node_modules/**", "dist/**"],
+          include: ["**/*.{test,spec}.?(c|m)[jt]s"],
+          exclude: ["**/node_modules/**", "**/dist/**"],
         },
       },
       {
@@ -135,8 +148,8 @@ export default defineConfig({
         test: {
           name: "dom",
           environment: "jsdom",
-          include: ["**/*.test.tsx"],
-          exclude: ["node_modules/**", "dist/**"],
+          include: ["**/*.{test,spec}.?(c|m)[jt]sx"],
+          exclude: ["**/node_modules/**", "**/dist/**"],
           // Unmounts between tests and stubs the browser APIs jsdom is missing.
           // Not optional — see that file for what breaks without it.
           setupFiles: ["./src/shared/testSetup.ts"],

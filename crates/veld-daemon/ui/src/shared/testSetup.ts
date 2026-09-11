@@ -5,7 +5,7 @@ import { afterEach } from "vitest";
  * What every `*.test.tsx` needs before it renders anything. Wired in as the
  * `dom` project's `setupFiles` (`vite.config.ts`), so no test imports it.
  *
- * Two jobs, and the first one is not optional.
+ * Three jobs, and the first one is not optional.
  *
  * **Unmount between tests.** `@testing-library/react` normally registers its own
  * `afterEach(cleanup)` — but only when it can see a *global* `afterEach`, which
@@ -29,6 +29,17 @@ import { afterEach } from "vitest";
 
 afterEach(() => {
   cleanup();
+  // **Undo any `setPlatform` globally, so the correct teardown is structural.**
+  // jsdom defines `platform` as a getter on `Navigator.prototype`, not on the
+  // navigator instance, so the instinctive "save the own descriptor and restore
+  // it" teardown saves `undefined` and restores nothing — the override survives
+  // into every later test in the file, silently and order-dependently. That
+  // shipped in the first draft of `ShortcutsDialog.test.tsx` and two tests
+  // passed only because they were declared above the first override. Deleting
+  // the own property un-shadows the prototype getter, which answers `""`.
+  // Unconditional: deleting an absent own property is a no-op.
+  Reflect.deleteProperty(globalThis.navigator, "platform");
+  Reflect.deleteProperty(globalThis.navigator, "userAgentData");
 });
 
 // Defined only when genuinely missing, so a future jsdom that ships a real
