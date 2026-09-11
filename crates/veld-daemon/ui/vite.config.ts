@@ -88,7 +88,7 @@ export default defineConfig({
     },
   },
   // Two test projects, split by file extension, because a component test needs
-  // a DOM and 46 module tests do not.
+  // a DOM and 47 module tests do not.
   //
   // **Why not simply `environment: "jsdom"` globally.** It works — all 1275
   // existing tests pass under it — but it costs every suite jsdom's per-file
@@ -100,7 +100,7 @@ export default defineConfig({
   //     these two projects      4.7s / 5.1s
   //
   // The middle row buys nothing the bottom row doesn't: the same component
-  // tests, in the same jsdom. It just also taxes the 46 files that never look
+  // tests, in the same jsdom. It just also taxes the 47 files that never look
   // at a `document`.
   //
   // **Why by extension rather than a per-file docblock.** The sibling package

@@ -18,6 +18,9 @@ import { afterEach } from "vitest";
  * test never leaving. Both of this file's first two component tests failed that
  * way before this hook existed.
  *
+ * **Undo a `setPlatform`.** The third job, and the reason it is here rather
+ * than in each test's own `afterEach` is in the comment on that line below.
+ *
  * **Stub the two browser APIs jsdom lacks that Mantine calls.** `matchMedia`
  * (color-scheme, `visibleFrom`/`hiddenFrom`) and `ResizeObserver` (anything that
  * measures itself — `ScrollArea.Autosize`, a sticky `Table` header). Both stubs

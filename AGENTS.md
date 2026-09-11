@@ -463,7 +463,7 @@ run, while a plain terminal in the same app works perfectly.
   file fails with "Found multiple elements", which reads like a double render
   rather than a leftover tree. The split is by extension rather than a global
   `environment: "jsdom"` because a global one costs every suite jsdom's per-file
-  construction — measured at 4.3s → 11.2s across this package's 46 node suites —
+  construction — measured at 4.3s → 11.2s across this package's node suites —
   for no coverage a `.tsx` test does not already give. The sibling package
   `crates/veld-daemon/frontend` reaches the same place with a per-file
   `// @vitest-environment jsdom` docblock; both are fine, and neither is a

@@ -937,8 +937,7 @@ type DialogState =
    * Values this machine owes the project. `retry` re-fires the start that
    * was held back, so answering and starting is one flow rather than two.
    */
-  | { kind: "config-vars"; project: string; retry?: () => void }
-;
+  | { kind: "config-vars"; project: string; retry?: () => void };
 
 /** Just the discriminant of [`DialogState`]. */
 export type DialogKind = DialogState["kind"];

@@ -16,13 +16,13 @@ import {
  * `registry.test.ts` already pins the *data* — that every row is well-formed,
  * that `visibleShortcuts` filters by platform, that a page-dispatched chord is
  * accepted by `isAppShortcutChord`. What it cannot reach is the dialog's own
- * decision, which lives in JSX: `ShortcutsDialog.tsx:33` drops a whole category
+ * decision, which lives in JSX: `ShortcutsDialog.tsx`'s category loop drops a whole category
  * heading when the platform filter leaves it with no rows. That branch is the
  * reason this file exists — it is one `if` in a component, it is invisible to
  * every pure test in this package, and getting it wrong ships a bare heading
  * with nothing under it.
  *
- * Platform is chosen by `isMac()` (`registry.ts:435`), which reads
+ * Platform is chosen by `isMac()` in `./registry`, which reads
  * `navigator.platform` and then `navigator.userAgent`. jsdom's own navigator
  * reports neither as mac, so the default render here is the non-mac branch;
  * `asMac` below flips it.
@@ -46,7 +46,7 @@ describe("ShortcutsDialog", () => {
     const shown = visibleShortcuts(SHORTCUTS, false);
     const hidden = SHORTCUTS.filter((s) => !shown.includes(s));
 
-    // The predicate is shared with the component on purpose (`registry.ts:445`
+    // The predicate is shared with the component on purpose (`visibleShortcuts`'s doc comment
     // says why), so this asserts the *rendering*, not the predicate: every kept
     // row reached the DOM, and every dropped one did not.
     for (const s of shown) {
@@ -65,7 +65,7 @@ describe("ShortcutsDialog", () => {
   test("renders a category heading only when that category has visible rows", () => {
     // Two categories, and the platform filter empties exactly one of them: the
     // `layout` row is mac-only, so on a non-mac render `visibleShortcuts` drops
-    // it and `ShortcutsDialog.tsx:47` must drop its heading with it. Today's real
+    // it and the `rows.length === 0` guard must drop its heading with it. Today's real
     // `SHORTCUTS` cannot produce this state — every category has rows on both
     // platforms (navigation=4 layout=6 run=4 general=10/8) — which is why the
     // list is injected. Asserted against the real registry this test passed
@@ -125,7 +125,7 @@ describe("ShortcutsDialog", () => {
   test("shows the platform's own modifier glyphs, not the other platform's", () => {
     asMac();
     const { unmount } = render(<ShortcutsDialog onClose={() => {}} />);
-    // ⌘ is the mac token `comboTokens` emits for `mod` (`registry.ts:473`).
+    // ⌘ is the mac token `comboTokens` emits for `mod`.
     expect(document.body.textContent).toContain("⌘");
     unmount();
 
@@ -140,11 +140,11 @@ describe("ShortcutsDialog", () => {
   });
 
   test("shows only this platform's combos for a row bound on both", () => {
-    // The failure `combosFor`'s own doc comment names (`registry.ts:463`): "a
+    // The failure `combosFor`'s own doc comment names: "a
     // macOS user is shown a Linux chord as if it were a second way to do the
     // same thing". The row survives `visibleShortcuts` either way, so the
-    // platform filter that matters here is the *inner* one at
-    // `ShortcutsDialog.tsx:62` — and dropping it is invisible to every other
+    // platform filter that matters here is the *inner* one, the
+    // `combosFor(s, mac)` call inside the row — and dropping it is invisible to every other
     // test in this file, because the leaked combo's `mod` still renders with the
     // reader's own glyph.
     const rows: ShortcutDef[] = [
