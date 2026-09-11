@@ -32,11 +32,18 @@
  */
 
 /**
- * The `dialog` state's closed value. Exported so the predicates below and the
- * state that feeds them cannot drift: every one of them compares against this
- * exact string, and renaming the variant without renaming this would leave them
- * silently reporting "open" forever — which fails *open*, suppressing every
- * guarded chord rather than throwing.
+ * The `dialog` state's closed value, and the string every predicate here
+ * compares against.
+ *
+ * Exported so the state and the predicates share one spelling. Note what does
+ * and does not protect that: `App.tsx` writes `{ kind: DIALOG_NONE }` against a
+ * union that declares the literal `"none"`, so **renaming the variant is a
+ * compile error at both write sites** — the compiler catches it before any
+ * predicate can misbehave. What is not checked is the direction nobody expects:
+ * "fixing" that error by putting the literal back at the write site rather than
+ * updating this constant, which would leave the predicates comparing against a
+ * string the state never holds — reporting "open" forever, and so suppressing
+ * every guarded chord rather than throwing.
  */
 export const DIALOG_NONE = "none" as const;
 

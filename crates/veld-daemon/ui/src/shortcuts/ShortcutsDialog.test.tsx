@@ -28,26 +28,39 @@ import {
  * `asMac` below flips it.
  */
 
-const originalPlatform = Object.getOwnPropertyDescriptor(
-  globalThis.navigator,
-  "platform",
-);
-
-/** Make `isMac()` answer true for the next render. */
-function asMac() {
+/** Override `navigator.platform` for the current test. */
+function setPlatform(value: string) {
   Object.defineProperty(globalThis.navigator, "platform", {
-    value: "MacIntel",
+    value,
     configurable: true,
   });
 }
 
+/** Make `isMac()` answer true for the next render. */
+function asMac() {
+  setPlatform("MacIntel");
+}
+
 afterEach(() => {
-  // Restore rather than delete: `navigator.platform` is an own property of
-  // jsdom's Navigator, so deleting it would leave `isMac()` reading `undefined`
-  // in whichever test ran next instead of jsdom's real value.
-  if (originalPlatform) {
-    Object.defineProperty(globalThis.navigator, "platform", originalPlatform);
-  }
+  // **Delete, do not restore.** jsdom defines `platform` as a getter on
+  // `Navigator.prototype`, not on the navigator instance — so
+  // `getOwnPropertyDescriptor(navigator, "platform")` is `undefined` before any
+  // test touches it, and a "save the original descriptor and put it back"
+  // teardown restores nothing at all. What `setPlatform` adds is an *own*
+  // property shadowing the prototype getter; deleting it un-shadows the getter,
+  // which answers `""` — jsdom's real value, and the non-mac branch.
+  //
+  // This was wrong in the first version of this file, and silently: the restore
+  // was a no-op, so the first `asMac()` leaked into every test after it. The two
+  // tests that assert the non-mac branch passed only because they happened to be
+  // declared above the first one that called `asMac()`.
+  Reflect.deleteProperty(globalThis.navigator, "platform");
+});
+
+test("this file runs in the `dom` project, with a DOM", () => {
+  // The twin of the assertion in `ide/dialogGuards.test.ts`: a `.test.tsx` gets
+  // `environment: "jsdom"`. See that one for why the pair exists.
+  expect(typeof document).toBe("object");
 });
 
 describe("ShortcutsDialog", () => {
@@ -143,10 +156,7 @@ describe("ShortcutsDialog", () => {
     // Same dialog, non-mac: the same `mod` flag has to come out as "Ctrl", and
     // the mac glyphs must be gone entirely — a stale ⌘ on Linux is the bug this
     // catches, and it is invisible to a test that only reads the registry.
-    Object.defineProperty(globalThis.navigator, "platform", {
-      value: "Linux x86_64",
-      configurable: true,
-    });
+    setPlatform("Linux x86_64");
     render(<ShortcutsDialog onClose={() => {}} />);
     expect(document.body.textContent).toContain("Ctrl");
     expect(document.body.textContent).not.toContain("⌘");
@@ -181,10 +191,7 @@ describe("ShortcutsDialog", () => {
     expect(screen.queryByText("LINUXKEY")).toBeNull();
     unmount();
 
-    Object.defineProperty(globalThis.navigator, "platform", {
-      value: "Linux x86_64",
-      configurable: true,
-    });
+    setPlatform("Linux x86_64");
     render(<ShortcutsDialog onClose={() => {}} shortcuts={rows} />);
     expect(screen.getByText("LINUXKEY")).toBeTruthy();
     expect(screen.queryByText("MACKEY")).toBeNull();

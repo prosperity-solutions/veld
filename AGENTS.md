@@ -461,7 +461,13 @@ run, while a plain terminal in the same app works perfectly.
   for no coverage a `.tsx` test does not already give. The sibling package
   `crates/veld-daemon/frontend` reaches the same place with a per-file
   `// @vitest-environment jsdom` docblock; both are fine, and neither is a
-  global flip.
+  global flip. One assertion in each of the two projects (`typeof document`)
+  pins that split, because nothing else would notice a later global flip —
+  the doc would just go quietly false. The two packages also track different
+  `jsdom` majors on purpose rather than by drift: `ui` is on `^30`, whose
+  `engines` floor is `^22.22.2 || ^24.15.0 || >=26`, and CI's `node-version:
+  '22'` resolves above that floor; `frontend` is still on `^29` and there is no
+  reason to move it until Renovate does.
 - **Reach for a Mantine primitive before hand-rolling DOM+CSS for anything the
   library already provides.** This UI is `React+Mantine`, and a hand-rolled
   equivalent of `Tooltip`/`Button`/`Menu`/`Modal`/`ActionIcon` quietly forks the

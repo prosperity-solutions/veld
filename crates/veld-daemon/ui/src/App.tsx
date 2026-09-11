@@ -871,6 +871,78 @@ export function App() {
   );
 }
 
+/**
+ * Which dialog is open, and what it was opened about.
+ *
+ * Named — rather than left inline on the `useState` below — so that
+ * `DialogKind` exists for `ide/dialogGuards.ts`'s tests to be exhaustive
+ * against. Those predicates only ever compare a kind to `none`, so they take
+ * a bare `string` and this union stays here with its payloads; what the name
+ * buys is that adding a variant is a compile error in the test that claims to
+ * cover every variant, instead of a silently thinner test.
+ */
+type DialogState =
+  | { kind: "none" }
+  | { kind: "import" }
+  /** `lane` is where the new checkout is filed — `""` for ungrouped. Carried
+   *  on the dialog state because the rail now has one create button per
+   *  section, so "which lane" is decided by the click, not by the dialog. */
+  /** `spinOffFrom` set means the ⋯ menu's "Spin off…" opened it, so the
+   *  dialog starts on that checkout as its source rather than on the default
+   *  new-branch create. */
+  | { kind: "new-worktree"; lane: string; spinOffFrom?: Worktree }
+  | { kind: "sharing" }
+  | { kind: "rename"; worktree: Worktree }
+  /**
+   * The trash confirmation, split out of the edit dialog: fetches the git
+   * dirty state and offers trash-anyway vs revert-first.
+   */
+  | { kind: "trash"; worktree: Worktree }
+  /**
+   * A trashed worktree that is dirty, opened by the delete flow instead of
+   * enqueueing a removal that would refuse. `status` is the fetched dirty
+   * state; the dialog turns it into a choice (discard vs revert first).
+   */
+  | { kind: "confirm-delete"; worktree: Worktree; status: WorktreeGitStatus }
+  /**
+   * The top bar's "update main" hit a dirty repo root. `status` is the
+   * fetched dirty state; the dialog turns it into a choice (revert first, or
+   * cancel) instead of the daemon's refusal landing as a bare toast.
+   */
+  | { kind: "update-main-dirty"; root: string; status: WorktreeGitStatus }
+  | { kind: "marker"; worktree: Worktree }
+  /** `worktree` set means "create it, then move this one into it". */
+  | { kind: "new-lane"; worktree?: Worktree }
+  | { kind: "rename-lane"; lane: string }
+  /**
+   * The two batch actions on a whole rail section: move everything in it into
+   * another group, or move everything in it to the trash.
+   *
+   * Only the section is carried, never its members. The members are resolved
+   * from live state while the dialog renders and again when it fires, so a
+   * checkout the 5s poll adds or removes in between is not acted on from a
+   * list captured when the menu opened. `lane` is the section's group key,
+   * which for every section that has a menu is also its lane — `""` for the
+   * ungrouped section, a lane name for a real one.
+   */
+  | { kind: "move-lane-worktrees"; lane: string }
+  | { kind: "trash-lane-worktrees"; lane: string }
+  | { kind: "settings" }
+  | { kind: "shortcuts" }
+  | { kind: "remove-repo"; repo: Repo }
+  /** Veld's own database: what is wrong with it, and putting a backup back. */
+  | { kind: "db-health" }
+  | { kind: "search" }
+  /**
+   * Values this machine owes the project. `retry` re-fires the start that
+   * was held back, so answering and starting is one flow rather than two.
+   */
+  | { kind: "config-vars"; project: string; retry?: () => void }
+;
+
+/** Just the discriminant of [`DialogState`]. */
+export type DialogKind = DialogState["kind"];
+
 function AppInner(props: {
   theme: string;
   themePref: string;
@@ -2340,64 +2412,7 @@ function AppInner(props: {
   };
 
   // ---- dialogs ------------------------------------------------------------
-  const [dialog, setDialog] = useState<
-    | { kind: "none" }
-    | { kind: "import" }
-    /** `lane` is where the new checkout is filed — `""` for ungrouped. Carried
-     *  on the dialog state because the rail now has one create button per
-     *  section, so "which lane" is decided by the click, not by the dialog. */
-    /** `spinOffFrom` set means the ⋯ menu's "Spin off…" opened it, so the
-     *  dialog starts on that checkout as its source rather than on the default
-     *  new-branch create. */
-    | { kind: "new-worktree"; lane: string; spinOffFrom?: Worktree }
-    | { kind: "sharing" }
-    | { kind: "rename"; worktree: Worktree }
-    /**
-     * The trash confirmation, split out of the edit dialog: fetches the git
-     * dirty state and offers trash-anyway vs revert-first.
-     */
-    | { kind: "trash"; worktree: Worktree }
-    /**
-     * A trashed worktree that is dirty, opened by the delete flow instead of
-     * enqueueing a removal that would refuse. `status` is the fetched dirty
-     * state; the dialog turns it into a choice (discard vs revert first).
-     */
-    | { kind: "confirm-delete"; worktree: Worktree; status: WorktreeGitStatus }
-    /**
-     * The top bar's "update main" hit a dirty repo root. `status` is the
-     * fetched dirty state; the dialog turns it into a choice (revert first, or
-     * cancel) instead of the daemon's refusal landing as a bare toast.
-     */
-    | { kind: "update-main-dirty"; root: string; status: WorktreeGitStatus }
-    | { kind: "marker"; worktree: Worktree }
-    /** `worktree` set means "create it, then move this one into it". */
-    | { kind: "new-lane"; worktree?: Worktree }
-    | { kind: "rename-lane"; lane: string }
-    /**
-     * The two batch actions on a whole rail section: move everything in it into
-     * another group, or move everything in it to the trash.
-     *
-     * Only the section is carried, never its members. The members are resolved
-     * from live state while the dialog renders and again when it fires, so a
-     * checkout the 5s poll adds or removes in between is not acted on from a
-     * list captured when the menu opened. `lane` is the section's group key,
-     * which for every section that has a menu is also its lane — `""` for the
-     * ungrouped section, a lane name for a real one.
-     */
-    | { kind: "move-lane-worktrees"; lane: string }
-    | { kind: "trash-lane-worktrees"; lane: string }
-    | { kind: "settings" }
-    | { kind: "shortcuts" }
-    | { kind: "remove-repo"; repo: Repo }
-    /** Veld's own database: what is wrong with it, and putting a backup back. */
-    | { kind: "db-health" }
-    | { kind: "search" }
-    /**
-     * Values this machine owes the project. `retry` re-fires the start that
-     * was held back, so answering and starting is one flow rather than two.
-     */
-    | { kind: "config-vars"; project: string; retry?: () => void }
-  >({ kind: DIALOG_NONE });
+  const [dialog, setDialog] = useState<DialogState>({ kind: DIALOG_NONE });
 
   // This app's own overlays are not portalled the way Mantine's are, so
   // `overlayGuard` cannot see them — they hide the embedded browser panes from

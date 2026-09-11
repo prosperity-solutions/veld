@@ -5,6 +5,7 @@ import {
   isDialogOpen,
   pageChordsBlocked,
 } from "./dialogGuards";
+import type { DialogKind } from "../App";
 
 /**
  * Each case here names the bug it stands for. These five guards lived as
@@ -14,29 +15,53 @@ import {
  * that the boolean still covers the case somebody hit.
  */
 
-/** Every `kind` the union carries, minus `none`. Kept as literals on purpose: */
-/*  the predicates only ever compare against `none`, so any other string must   */
-/*  behave identically, and listing the real ones says which strings are real.  */
-const OPEN_KINDS = [
-  "import",
-  "new-worktree",
-  "sharing",
-  "rename",
-  "trash",
-  "confirm-delete",
-  "update-main-dirty",
-  "marker",
-  "new-lane",
-  "rename-lane",
-  "move-lane-worktrees",
-  "trash-lane-worktrees",
-  "settings",
-  "shortcuts",
-  "remove-repo",
-  "db-health",
-  "search",
-  "config-vars",
-];
+/**
+ * Every `kind` the union carries, minus `none`.
+ *
+ * A `Record` keyed by the union rather than an array of strings, because that
+ * is what makes it **exhaustive by the compiler**: adding a 20th variant to
+ * `DialogState` in `App.tsx` turns this into a type error until the variant is
+ * listed here. As a hand-written array it compiled clean and the "every open
+ * kind is true" test below simply stopped covering the new one — the test still
+ * passes, and it silently means less. That is the same hand-maintained-pairing
+ * failure the repo documents for the schema/example and shortcut-registry pairs.
+ *
+ * `import type` is erased at build time, so pulling this from `App.tsx` costs
+ * the test nothing at runtime.
+ */
+const OPEN_KINDS_SET: Record<Exclude<DialogKind, typeof DIALOG_NONE>, true> = {
+  import: true,
+  "new-worktree": true,
+  sharing: true,
+  rename: true,
+  trash: true,
+  "confirm-delete": true,
+  "update-main-dirty": true,
+  marker: true,
+  "new-lane": true,
+  "rename-lane": true,
+  "move-lane-worktrees": true,
+  "trash-lane-worktrees": true,
+  settings: true,
+  shortcuts: true,
+  "remove-repo": true,
+  "db-health": true,
+  search: true,
+  "config-vars": true,
+};
+
+const OPEN_KINDS = Object.keys(OPEN_KINDS_SET);
+
+test("this file runs in the `node` project, with no DOM", () => {
+  // Pins the contract AGENTS.md states and `vite.config.ts` implements: a
+  // `.test.ts` gets `environment: "node"`. Its twin is in
+  // `shortcuts/ShortcutsDialog.test.tsx`. Together they are the only thing that
+  // would notice a later global `environment: "jsdom"` — which is the change
+  // this config deliberately does not make, for a cost measured in that file's
+  // comment. Without these two, the doc and the 4.3s/11.2s rationale behind it
+  // could go silently false.
+  expect(typeof document).toBe("undefined");
+});
 
 describe("isDialogOpen", () => {
   test("`none` is the only closed state", () => {
@@ -47,11 +72,12 @@ describe("isDialogOpen", () => {
   });
 
   test("DIALOG_NONE is the string the state actually stores", () => {
-    // The one piece of coupling this module cannot check for itself: `App.tsx`
-    // writes `{ kind: DIALOG_NONE }`, so this only has to stay the literal the
-    // union declares. If the variant is ever renamed, renaming it here too is
-    // what keeps every guard below honest — and forgetting fails *open*,
-    // suppressing every guarded chord rather than throwing.
+    // `App.tsx` writes `{ kind: DIALOG_NONE }` against a union declaring the
+    // literal `"none"`, so a rename of the variant is already a compile error
+    // there. This covers the direction the compiler cannot: someone clearing
+    // that error by restoring the literal at the write site instead of updating
+    // the constant, which leaves every predicate comparing against a string the
+    // state never holds.
     expect(DIALOG_NONE).toBe("none");
   });
 });

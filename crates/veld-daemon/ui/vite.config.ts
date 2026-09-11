@@ -114,6 +114,11 @@ export default defineConfig({
   //
   // `extends: true` is what gives each project the root config above, the
   // `react()` plugin included — without it a `.tsx` test has no JSX transform.
+  //
+  // The globs are package-wide rather than `src/**`, so a suite that later lands
+  // outside `src/` — the sibling package keeps its whole suite in `tests/` — is
+  // still collected. Scoped to one project each, a file matched by neither would
+  // simply not run and report as a pass.
   test: {
     projects: [
       {
@@ -121,7 +126,8 @@ export default defineConfig({
         test: {
           name: "unit",
           environment: "node",
-          include: ["src/**/*.test.ts"],
+          include: ["**/*.test.ts"],
+          exclude: ["node_modules/**", "dist/**"],
         },
       },
       {
@@ -129,7 +135,8 @@ export default defineConfig({
         test: {
           name: "dom",
           environment: "jsdom",
-          include: ["src/**/*.test.tsx"],
+          include: ["**/*.test.tsx"],
+          exclude: ["node_modules/**", "dist/**"],
           // Unmounts between tests and stubs the browser APIs jsdom is missing.
           // Not optional — see that file for what breaks without it.
           setupFiles: ["./src/shared/testSetup.ts"],
