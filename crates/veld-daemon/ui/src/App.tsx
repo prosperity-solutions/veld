@@ -210,6 +210,12 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import {
+  DIALOG_NONE,
+  escapeClosesDialog,
+  isDialogOpen,
+  pageChordsBlocked,
+} from "./ide/dialogGuards";
+import {
   foldedSectionsKey,
   forgetFoldedSection,
   readFoldedSections,
@@ -2391,14 +2397,14 @@ function AppInner(props: {
      * was held back, so answering and starting is one flow rather than two.
      */
     | { kind: "config-vars"; project: string; retry?: () => void }
-  >({ kind: "none" });
+  >({ kind: DIALOG_NONE });
 
   // This app's own overlays are not portalled the way Mantine's are, so
   // `overlayGuard` cannot see them — they hide the embedded browser panes from
   // the state that opens them instead. Without this the ⌘K palette opens
   // *behind* a native view (see panes/overlayGuard.ts).
   useEffect(() => {
-    if (dialog.kind === "none") return;
+    if (!isDialogOpen(dialog)) return;
     pushBrowserSuspend();
     return popBrowserSuspend;
   }, [dialog.kind]);
@@ -3170,7 +3176,7 @@ function AppInner(props: {
     await refresh();
   };
 
-  const closeDialog = () => setDialog({ kind: "none" });
+  const closeDialog = () => setDialog({ kind: DIALOG_NONE });
 
   // `dialog` is read inside the listener but deliberately not a dependency —
   // rebinding a window listener on every dialog change is wasteful, so the
@@ -3323,7 +3329,13 @@ function AppInner(props: {
         // chords auto-opens a What's New card *naming them* — without this,
         // reading that card and pressing ⌃Tab cycles the strip invisibly behind
         // it.
-        if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+        if (
+          pageChordsBlocked({
+            dialogKind: dialogRef.current.kind,
+            promotionsOpen: promotionsOpenRef.current,
+          })
+        )
+          return;
         // Tabs: literal Ctrl on every platform, so the chord is the same
         // everywhere and cannot be confused with `mod`.
         if (e.ctrlKey && !e.metaKey && !e.altKey) {
@@ -3403,7 +3415,13 @@ function AppInner(props: {
         if (e.key === "d" || e.key === "D") {
           // Guarded like the Tab chords above, and for the same reason: moving a
           // tab between docks behind an open modal is invisible.
-          if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+          if (
+            pageChordsBlocked({
+              dialogKind: dialogRef.current.kind,
+              promotionsOpen: promotionsOpenRef.current,
+            })
+          )
+            return;
           e.preventDefault();
           paneHandleRef.current?.splitActiveTab();
           return;
@@ -3475,9 +3493,11 @@ function AppInner(props: {
       // Not while a batch is mid-flight: closing would read as a cancel and the
       // requests would carry on regardless. See `batchBusy`.
       if (
-        e.key === "Escape" &&
-        dialogRef.current.kind !== "none" &&
-        !batchBusy.current
+        escapeClosesDialog({
+          key: e.key,
+          dialogKind: dialogRef.current.kind,
+          batchBusy: batchBusy.current,
+        })
       ) {
         closeDialog();
       }
@@ -4691,7 +4711,13 @@ function AppInner(props: {
         // release carrying these chords opens it automatically to announce
         // them. Guarding only `dialog` meant ⌘W closed a terminal behind the
         // very card telling the user what ⌘W now does.
-        if (dialogRef.current.kind !== "none" || promotionsOpenRef.current) return;
+        if (
+          pageChordsBlocked({
+            dialogKind: dialogRef.current.kind,
+            promotionsOpen: promotionsOpenRef.current,
+          })
+        )
+          return;
         if (command === "new") {
           paneHandleRef.current?.newTab();
           return;

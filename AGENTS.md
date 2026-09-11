@@ -443,6 +443,25 @@ run, while a plain terminal in the same app works perfectly.
   for a symbol across the UI will report zero hits while the only production consumer
   sits in that file. Found when a review agent concluded a function had no callers.
   Use `rg -a` (or `grep -a`) for anything that greps the UI tree.
+- **A `crates/veld-daemon/ui` test gets a DOM only if it is a `.tsx` file.**
+  `vite.config.ts` runs two vitest projects: `*.test.ts` under `node`, and
+  `*.test.tsx` under `jsdom`. So a test that renders a component must be named
+  `.test.tsx` — as a `.test.ts` it fails with `document is not defined`, which
+  reads like a missing polyfill rather than a wrong extension. Render through
+  `shared/testRender.tsx`'s `render`, never `@testing-library/react`'s directly:
+  every component here is a Mantine component and one without a
+  `MantineProvider` above it throws rather than rendering something imperfect.
+  The `dom` project's `setupFiles` (`shared/testSetup.ts`) unmounts between
+  tests and stubs the two browser APIs jsdom lacks that Mantine calls
+  (`matchMedia`, `ResizeObserver`); without the unmount the *second* test in a
+  file fails with "Found multiple elements", which reads like a double render
+  rather than a leftover tree. The split is by extension rather than a global
+  `environment: "jsdom"` because a global one costs every suite jsdom's per-file
+  construction — measured at 4.3s → 11.2s across this package's 46 node suites —
+  for no coverage a `.tsx` test does not already give. The sibling package
+  `crates/veld-daemon/frontend` reaches the same place with a per-file
+  `// @vitest-environment jsdom` docblock; both are fine, and neither is a
+  global flip.
 - **Reach for a Mantine primitive before hand-rolling DOM+CSS for anything the
   library already provides.** This UI is `React+Mantine`, and a hand-rolled
   equivalent of `Tooltip`/`Button`/`Menu`/`Modal`/`ActionIcon` quietly forks the

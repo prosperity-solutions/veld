@@ -33,8 +33,8 @@ afterEach(() => {
 
 // Defined only when genuinely missing, so a future jsdom that ships a real
 // `matchMedia` wins over this stub instead of being shadowed by it.
-if (!window.matchMedia) {
-  Object.defineProperty(window, "matchMedia", {
+if (!globalThis.window.matchMedia) {
+  Object.defineProperty(globalThis.window, "matchMedia", {
     writable: true,
     value: (query: string) => ({
       matches: false,
