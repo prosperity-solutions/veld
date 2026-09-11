@@ -1004,6 +1004,12 @@ function AppInner(props: {
   // A string join rather than an array in the dependency list: a fresh array
   // every render is a fresh dependency every render, which is the bug this
   // narrowing exists to avoid.
+  //
+  // **Adding a third shell-read setting means editing this line and
+  // `desktop/src/main.js`'s handler.** Nothing checks that, and the cost is not
+  // symmetric: the tray has an independent ten-second tick to fall back on, so a
+  // missed key there is latency, while the update schedule's own interval is up
+  // to twelve hours — which is the exact bug this nudge was extended to fix.
   const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}`;
   useEffect(() => {
     // Nothing read yet — a daemon older than both keys, or the first paint.

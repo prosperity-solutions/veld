@@ -1141,26 +1141,33 @@ Two different mismatches, deliberately reported differently:
   starting its clock at first sight.
 
   The state behind it — when the last prompt was, which versions have been seen,
-  which were declined and when — is `update-nudges.json` in `userData`, beside
+  which have been answered and when — is `update-nudges.json` in `userData`, beside
   `windows.json`, and written the same way they are (temp file, then rename: a
-  torn one parses as nothing, which here means every decline and the
+  torn one parses as nothing, which here means every answer and the
   one-a-day floor are gone). It has to survive restarts or the promise is about
   uptime rather than about days, and it is pruned to the running version on the
   first read of each process — every time it can matter, since a running app's
   version cannot change under it — so it neither grows without bound nor counts
   releases the app has installed.
 
-  Declining is persisted for the same reason: it used to live in a `Set` that
-  died with the process, so quitting and reopening asked again about the release
-  you had just turned down. It **expires after a week** (`DECLINE_EXPIRY_MS`),
-  and that is not a detail — the button says *Later*, and since the feed only
-  ever names the newest release, a decline that never expired would mean an
-  automatic check never raised that version again. On a quiet week that is
-  *never*, from a button that promised otherwise.
+  **One clock answers "have I already asked about this version", and it is
+  persisted.** `REOFFER_AFTER_MS` is a week. Getting there took two review rounds
+  and both wrong answers are worth recording, because each looked right on its
+  own. A session `Set` suppressed a version until the process exited — weeks, on
+  a machine nobody reboots. A persisted *decline* list suppressed it forever,
+  because the feed only ever names the newest release, so on a quiet week "the
+  next version" never comes and a button labelled *Later* meant *never*. And
+  while both existed, the `Set` ran first and silently defeated the expiry that
+  had just been added to fix exactly that.
+
+  The clock records **every** answer, not only a decline: closing the dialog with
+  the window button counts, and so does clicking Download and Install, because an
+  install that then fails would otherwise be re-offered an hour later forever on
+  `eager`, whose prompt gap is zero.
 
   A **manual** *Check for Updates…* is outside all of this: it answers
-  immediately, it re-offers a declined version, it does not spend the tier's
-  prompt budget, and it does not re-arm the background timer. The setting is
+  immediately, it re-offers a version already answered for, it does not spend the
+  tier's prompt budget, and it does not re-arm the background timer. The setting is
   about the channel that interrupts you unasked; a question you asked is not
   that channel.
 
@@ -1174,6 +1181,14 @@ Two different mismatches, deliberately reported differently:
   check out to a full hour on `eager` and twelve on `relaxed`; and the timer
   callback catches, because a chain of timeouts — unlike an interval — can stop
   for good on one rejection.
+
+  The tier names are **half of a cross-language contract**: the other half is
+  `UPDATE_FREQUENCIES` in `crates/veld-core/src/db/settings_catalog.rs`, which is
+  what the settings dialog offers and what the validator accepts. Both halves
+  fail silently alone — a tier only in the JS is unreachable from Settings, a
+  choice only in the Rust is stored and then read as `balanced` forever — so
+  `updatePolicy.test.js`'s *the tier names match the Rust allow-list* reads that
+  file and compares, in the same spirit as the schema/example drift gate.
 
   On the `"cli"` route the prompt is about the **release**, not the app —
   *"veld 16.8.0 is available"*, *"Quit and Update veld"* — because that is what
@@ -1227,6 +1242,11 @@ nothing else. The loop only calls `loadURL` when the rendered HTML actually
 changes, so the page itself is not reloaded on the tick; and `shownHtml` is
 recorded only *after* that load resolves, or one failed escalation would leave
 the window on "Starting Veld…" for good.
+
+The minute is counted in **attempts × the tick, not wall clock**. The escalation
+claims the app has genuinely tried, and a laptop asleep on "Starting Veld…" makes
+no attempts while its clock runs — a wall-clock reading would wake straight onto
+the diagnostic page having retried zero extra times.
 
 One honest limit: `installedCliPath` knows only the three directories
 `install.sh` prefers, and `install.sh` will install elsewhere — `VELD_INSTALL_DIR`,

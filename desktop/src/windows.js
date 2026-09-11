@@ -502,11 +502,17 @@ async function loadAppWhenReady(win, url) {
   // a constant: it opens on "starting up", and only escalates to a page that
   // diagnoses anything once that has stopped being a plausible explanation. See
   // `waitingScreen.js` for why, and for who decides.
-  const waitingSince = Date.now();
+  // **Attempts × the tick, not wall clock.** The escalation is a claim about
+  // having genuinely tried — and a laptop asleep on "Starting Veld…" makes no
+  // attempts while its clock keeps running, so a wall-clock reading would wake
+  // straight onto the diagnostic page having retried zero extra times. Counting
+  // ticks makes the number mean what the page says it means, and in the ordinary
+  // case the two are the same sixty seconds.
+  const TICK_MS = 2000;
+  let attempts = 0;
   let shownHtml = null;
   const showWaiting = async () => {
-    const elapsedMs = Date.now() - waitingSince;
-    const html = deps.waitingPage({ elapsedMs });
+    const html = deps.waitingPage({ elapsedMs: attempts * TICK_MS });
     // Compared rather than re-rendered every tick: a `loadURL` every two seconds
     // would restart the page, and anything the user had selected — a command
     // they were half-way through copying — would go with it.
@@ -519,12 +525,18 @@ async function loadAppWhenReady(win, url) {
     // at most a repeated render on the next two-second tick, and self-heals.
     shownHtml = html;
   };
-  await showWaiting();
+  // Caught like every other load in this function: without it, a rejected first
+  // load returned before the retry loop below was ever created, so the window
+  // got no retries, no escalation and no recovery — only an unhandled rejection.
+  await showWaiting().catch((err) => {
+    if (!win.isDestroyed()) console.error("[veld] waiting page failed to load", err);
+  });
   const timer = setInterval(async () => {
     if (win.isDestroyed()) {
       clearInterval(timer);
       return;
     }
+    attempts++;
     if (await deps.daemonReachable()) {
       clearInterval(timer);
       // Same treatment as the first load. This promise is discarded by the

@@ -193,6 +193,16 @@ function versionSkew({ appVersion, daemonVersion, isPackaged }) {
  * fourth one this app has seen) before it produces a dialog, and never more than
  * one dialog a day.
  *
+ * **These key names are half of a contract with Rust.** The other half is
+ * `UPDATE_FREQUENCIES` in `crates/veld-core/src/db/settings_catalog.rs`, which
+ * is what the settings dialog offers and what `settings.rs`'s validator accepts
+ * — so a tier added *here* alone is unreachable from Settings, and a choice
+ * added *there* alone is storable but falls back to `balanced` in this app
+ * forever. Nothing in either language can see the other, so
+ * `updatePolicy.test.js`'s `the tier names match the Rust allow-list` reads that
+ * file and compares. That test is the only thing standing between an ordinary
+ * edit and a silently dead setting; do not delete it when adding a tier, fix it.
+ *
  * @type {Record<string, {checkIntervalMs: number, minReleaseAgeMs: number, versionsAheadOverride: number, minPromptGapMs: number}>}
  */
 const UPDATE_TIERS = {
@@ -228,19 +238,31 @@ const UPDATE_TIERS = {
 const DEFAULT_UPDATE_FREQUENCY = "balanced";
 
 /**
- * How long "Later" lasts.
+ * How long one release stays answered, before the automatic channel may raise it
+ * again.
  *
- * The button says *Later*, so a decline that never expired would make the label
- * a lie: the feed only ever names the newest release, so on a quiet week an
- * automatic check would never raise that version again. A week is long enough
- * that declining actually buys quiet — the whole point — and short enough that
- * somebody who meant "not today" is asked again eventually rather than never.
+ * Two things used to do this job and neither did it properly. A session `Set`
+ * suppressed a version until the process exited — which on macOS can be weeks —
+ * and a persisted decline list suppressed it forever, because the feed only ever
+ * names the *newest* release, so on a quiet week "the next version" never comes.
+ * A button labelled *Later* meant "never again", and a review round found the
+ * `Set` short-circuiting the expiry that was added to fix exactly that.
+ *
+ * So there is one clock and it is persisted: you were asked about this version,
+ * at this time. A week is long enough that answering actually buys quiet — the
+ * whole point — and short enough that somebody who meant "not today" is asked
+ * again eventually rather than never.
+ *
+ * It covers *every* answer, not just a decline. Clicking Download and Install
+ * and then having the install fail is the case a decline-only clock missed: on
+ * `eager`, whose prompt gap is zero, nothing else would stop the next hourly
+ * check re-offering the release that just failed to install.
  *
  * Independent of the tier. The tier governs how often you are asked about
  * releases in general; this governs one release you have already answered about,
- * and a `relaxed` user who declined has not asked to be *never* told again.
+ * and a `relaxed` user who said Later has not asked to be *never* told again.
  */
-const DECLINE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+const REOFFER_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * The tier named by a stored setting value.
@@ -296,13 +318,28 @@ function updateFrequencyFrom(body, fallback = DEFAULT_UPDATE_FREQUENCY) {
 /**
  * How long the newest release has been available, in ms.
  *
- * Two sources, and the older answer wins. `releaseDate` comes off the update
- * feed and is the truth when it is there; `firstSeenAt` is when *this* app first
- * recorded the version and is the fallback for a feed that omits the field or
- * writes something unparseable. Taking the older of the two is what makes the
- * age gate survive a laptop that was shut for a week: without `releaseDate`,
- * reopening the app would restart the ripening clock on a release that has been
- * out for days, and the user would be asked to wait all over again.
+ * Two sources, and the older answer wins. `firstSeenAt` is when *this* app first
+ * recorded the version; `releaseDate` comes off the update feed. Taking the
+ * older of the two is what makes the age gate survive a laptop that was shut for
+ * a week: on `firstSeenAt` alone, reopening the app would restart the ripening
+ * clock on a release that has been out for days, and the user would be asked to
+ * wait all over again.
+ *
+ * **`releaseDate` is a *pack* time, not a publish time**, and an earlier version
+ * of this comment called it "the truth" — it is not. `app-builder-lib` stamps it
+ * with `new Date()` while generating the feed
+ * (`out/publish/updateInfoBuilder.js`), and `release.yml` creates the GitHub
+ * release as a **draft** and flips it visible afterwards, so the gap between the
+ * two is however long that takes; the yml's own comments record a run where a
+ * release sat as an invisible draft until the job was re-run. The matrix also
+ * builds `latest-mac.yml` and `latest-linux.yml` in separate jobs, so the two
+ * platforms ripen the same release on slightly different clocks.
+ *
+ * Left as the older-wins rule anyway, deliberately: the error is bounded by the
+ * draft delay (minutes, normally), it only ever makes a release look *riper*,
+ * and the worst case is one prompt that could have waited — which is the
+ * behaviour every user had before the tiers existed. Clamping it would need a
+ * publish time nothing in the feed carries.
  *
  * A `releaseDate` in the future is a publisher's clock, not a release from
  * tomorrow, so it is ignored rather than producing a negative age.
@@ -344,20 +381,35 @@ function versionsAhead({ seen, currentVersion }) {
 }
 
 /**
- * Whether a decline of this exact version is still in force.
+ * Whether this version has been recorded in a `seen` map.
+ *
+ * `Object.hasOwn` rather than a truthy lookup, for {@link pruneUpdateState}'s
+ * reason — and because a legitimately-recorded `0` (a clock at the epoch) would
+ * read as "not seen" under truthiness and reset the ripening clock on every
+ * check.
+ *
+ * @param {{seen: Record<string, number> | null | undefined, version: string}} ctx
+ * @returns {boolean}
+ */
+function alreadySeen({ seen, version }) {
+  return Boolean(seen) && Object.hasOwn(/** @type {object} */ (seen), version);
+}
+
+/**
+ * Whether this exact version counts as already answered.
  *
  * Clock-tolerant in both directions, like {@link reportIsFresh} and for the same
- * reason: a `declinedAt` in the future is a machine whose clock moved, and
- * reading it as "declined for the next thirty years" would silence the automatic
+ * reason: an `offeredAt` in the future is a machine whose clock moved, and
+ * reading it as "answered for the next thirty years" would silence the automatic
  * channel for that version permanently — the failure the expiry exists to
  * prevent, arrived by another road.
  *
- * @param {{declinedAt?: number | null, now?: number, maxAgeMs?: number}} ctx
+ * @param {{offeredAt?: number | null, now?: number, maxAgeMs?: number}} ctx
  * @returns {boolean}
  */
-function declineHolds({ declinedAt, now = Date.now(), maxAgeMs = DECLINE_EXPIRY_MS }) {
-  if (typeof declinedAt !== "number" || !Number.isFinite(declinedAt)) return false;
-  return Math.abs(now - declinedAt) <= maxAgeMs;
+function alreadyAnswered({ offeredAt, now = Date.now(), maxAgeMs = REOFFER_AFTER_MS }) {
+  if (typeof offeredAt !== "number" || !Number.isFinite(offeredAt)) return false;
+  return Math.abs(now - offeredAt) <= maxAgeMs;
 }
 
 /**
@@ -367,7 +419,7 @@ function declineHolds({ declinedAt, now = Date.now(), maxAgeMs = DECLINE_EXPIRY_
  * combinations are tested rather than reasoned about. Order matters: a manual
  * check answers `true` before anything else is considered, because a person who
  * clicked *Check for Updates…* is owed an answer regardless of how quiet their
- * tier is, and a version declined within the last {@link DECLINE_EXPIRY_MS} is
+ * tier is, and a version answered within the last {@link REOFFER_AFTER_MS} is
  * silent regardless of how eager it is.
  *
  * `versionsAhead` overrides only the **age** gate, never `minPromptGapMs`. A
@@ -380,23 +432,23 @@ function declineHolds({ declinedAt, now = Date.now(), maxAgeMs = DECLINE_EXPIRY_
  *   ageMs: number,
  *   ahead: number,
  *   lastPromptedAt?: number | null,
- *   declinedAt?: number | null,
+ *   offeredAt?: number | null,
  *   manual?: boolean,
  *   now?: number,
  * }} ctx
- * @returns {{offer: boolean, reason: "manual" | "declined" | "too-soon" | "ripening" | "aged" | "piled-up"}}
+ * @returns {{offer: boolean, reason: "manual" | "answered" | "too-soon" | "ripening" | "aged" | "piled-up"}}
  */
 function shouldOfferUpdate({
   tier,
   ageMs,
   ahead,
   lastPromptedAt = null,
-  declinedAt = null,
+  offeredAt = null,
   manual = false,
   now = Date.now(),
 }) {
   if (manual) return { offer: true, reason: "manual" };
-  if (declineHolds({ declinedAt, now })) return { offer: false, reason: "declined" };
+  if (alreadyAnswered({ offeredAt, now })) return { offer: false, reason: "answered" };
   // One-sided, like `updateInProgress`'s phase check: a `lastPromptedAt` in the
   // future is a clock that moved, and reading it as "the gap has not elapsed"
   // would silence the app until the timestamp catches up — days, on a machine
@@ -740,45 +792,47 @@ function primaryAction({ viaCli, canInstall, full }) {
  *
  * @param {unknown} state
  * @param {string} currentVersion
- * @returns {{lastPromptedAt: number | null, seen: Record<string, number>, declined: Record<string, number>}}
+ * @returns {{lastPromptedAt: number | null, seen: Record<string, number>, offeredAt: Record<string, number>}}
  */
 function pruneUpdateState(state, currentVersion) {
   const raw = state && typeof state === "object" ? /** @type {any} */ (state) : {};
   const ahead = (v) => typeof v === "string" && compareVersions(v, currentVersion) > 0;
-  /** @type {Record<string, number>} */
-  const seen = {};
-  if (raw.seen && typeof raw.seen === "object") {
-    for (const [version, at] of Object.entries(raw.seen)) {
-      if (ahead(version) && typeof at === "number" && Number.isFinite(at)) seen[version] = at;
+  // `Object.create(null)`, for the reason {@link isTierName} gives about
+  // `UPDATE_TIERS`: these are maps keyed by a string that arrives from a JSON
+  // file and from an update feed, and on a plain object literal `constructor`
+  // and `toString` are already present. A truthy lookup would then read such a
+  // version as "already seen", and `firstSeenAt` would come back as a function.
+  // Unreachable from GitHub today; the cost of not relying on that is one call.
+  /** @param {unknown} source @returns {Record<string, number>} */
+  const timestamps = (source) => {
+    const out = Object.create(null);
+    if (!source || typeof source !== "object" || Array.isArray(source)) return out;
+    for (const [version, at] of Object.entries(source)) {
+      if (ahead(version) && typeof at === "number" && Number.isFinite(at)) out[version] = at;
     }
-  }
+    return out;
+  };
   const lastPromptedAt =
     typeof raw.lastPromptedAt === "number" && Number.isFinite(raw.lastPromptedAt)
       ? raw.lastPromptedAt
       : null;
-  /** @type {Record<string, number>} */
-  const declined = {};
-  if (raw.declined && typeof raw.declined === "object" && !Array.isArray(raw.declined)) {
-    for (const [version, at] of Object.entries(raw.declined)) {
-      if (ahead(version) && typeof at === "number" && Number.isFinite(at)) declined[version] = at;
-    }
-  }
-  return { lastPromptedAt, seen, declined };
+  return { lastPromptedAt, seen: timestamps(raw.seen), offeredAt: timestamps(raw.offeredAt) };
 }
 
 module.exports = {
   CONSOLE_HANDOFF,
-  DECLINE_EXPIRY_MS,
   DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
+  REOFFER_AFTER_MS,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
   UPDATE_TIERS,
+  alreadyAnswered,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
-  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,

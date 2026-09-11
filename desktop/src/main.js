@@ -792,6 +792,11 @@ app.whenReady().then(async () => {
     // Concurrently, not in sequence: both readers fetch the same document with
     // their own 2 s budget, and awaiting one before starting the other doubles
     // the latency this nudge exists to remove.
+    //
+    // **Every setting the main process acts on needs a reader here**, and its
+    // key listed in `desktopShellPrefs` in `crates/veld-daemon/ui/src/App.tsx`,
+    // or the renderer never sends the nudge in the first place. Nothing checks
+    // either half.
     await Promise.all([
       updaterSettingsChanged(),
       process.platform === "darwin" ? syncTray() : Promise.resolve(),

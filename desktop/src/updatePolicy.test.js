@@ -9,12 +9,13 @@ const {
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
-  DECLINE_EXPIRY_MS,
+  REOFFER_AFTER_MS,
   UPDATE_TIERS,
+  alreadyAnswered,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
-  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,
@@ -657,7 +658,7 @@ test("a manual check is answered whatever the tier says", () => {
       tier,
       ageMs: 0,
       ahead: 0,
-      declinedAt: NOW,
+      offeredAt: NOW,
       lastPromptedAt: NOW - 60_000,
       manual: true,
       now: NOW,
@@ -666,36 +667,78 @@ test("a manual check is answered whatever the tier says", () => {
   );
 });
 
-test("a declined release stays declined for the automatic check", () => {
+test("an answered release stays quiet for the automatic check", () => {
   assert.deepEqual(
     shouldOfferUpdate({
       tier: UPDATE_TIERS.eager,
       ageMs: 99 * HOUR,
       ahead: 9,
-      declinedAt: NOW - HOUR,
+      offeredAt: NOW - HOUR,
       now: NOW,
     }),
-    { offer: false, reason: "declined" },
+    { offer: false, reason: "answered" },
   );
 });
 
 test("\"Later\" means later, not never", () => {
-  // The feed only ever names the newest release, so a decline that never expired
+  // The feed only ever names the newest release, so an answer that never expired
   // would mean an automatic check never raises that version again — on a quiet
   // week, never at all, from a button labelled Later.
   const base = { tier: UPDATE_TIERS.balanced, ageMs: 99 * HOUR, ahead: 1, now: NOW };
-  assert.equal(shouldOfferUpdate({ ...base, declinedAt: NOW - DECLINE_EXPIRY_MS + HOUR }).offer, false);
-  assert.equal(shouldOfferUpdate({ ...base, declinedAt: NOW - DECLINE_EXPIRY_MS - HOUR }).offer, true);
+  assert.equal(shouldOfferUpdate({ ...base, offeredAt: NOW - REOFFER_AFTER_MS + HOUR }).offer, false);
+  assert.equal(shouldOfferUpdate({ ...base, offeredAt: NOW - REOFFER_AFTER_MS - HOUR }).offer, true);
 });
 
-test("a decline timestamp from the future does not silence the app forever", () => {
-  // Same clock tolerance as `reportIsFresh`, and here it matters more: a
-  // `declinedAt` years ahead would mute that version permanently, which is the
+test("an answer timestamped in the future does not silence the app forever", () => {
+  // Same clock tolerance as `reportIsFresh`, and here it matters more: an
+  // `offeredAt` years ahead would mute that version permanently, which is the
   // exact failure the expiry was added to prevent.
-  assert.equal(declineHolds({ declinedAt: NOW + 30 * 24 * HOUR, now: NOW }), false);
-  assert.equal(declineHolds({ declinedAt: NOW + HOUR, now: NOW }), true);
-  assert.equal(declineHolds({ declinedAt: null, now: NOW }), false);
-  assert.equal(declineHolds({ declinedAt: "yesterday", now: NOW }), false);
+  assert.equal(alreadyAnswered({ offeredAt: NOW + 30 * 24 * HOUR, now: NOW }), false);
+  assert.equal(alreadyAnswered({ offeredAt: NOW + HOUR, now: NOW }), true);
+  assert.equal(alreadyAnswered({ offeredAt: null, now: NOW }), false);
+  assert.equal(alreadyAnswered({ offeredAt: "yesterday", now: NOW }), false);
+});
+
+test("the tier names match the Rust allow-list", () => {
+  // The one thing tying `UPDATE_TIERS` to `UPDATE_FREQUENCIES` in
+  // `crates/veld-core/src/db/settings_catalog.rs`. Neither language can see the
+  // other, and both halves fail silently on their own: a tier added only here is
+  // unreachable from Settings because the Rust validator rejects the value, and
+  // a choice added only there is offered, stored, and then read by this app as
+  // `balanced` forever. Same shape as the schema/example drift gate elsewhere in
+  // this repo — a test, because there is no compiler that can do it.
+  const rust = fs.readFileSync(
+    path.join(__dirname, "../../crates/veld-core/src/db/settings_catalog.rs"),
+    "utf8",
+  );
+  const block = rust.match(/UPDATE_FREQUENCIES: &\[Choice\] = &\[([\s\S]*?)\];/);
+  assert.ok(block, "UPDATE_FREQUENCIES not found — did it move or get renamed?");
+  const values = [...block[1].matchAll(/choice\("([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(values, Object.keys(UPDATE_TIERS));
+  // The stored default has to be one of them, in both languages.
+  assert.ok(values.includes(DEFAULT_UPDATE_FREQUENCY));
+  assert.match(
+    fs.readFileSync(
+      path.join(__dirname, "../../crates/veld-core/src/db/settings.rs"),
+      "utf8",
+    ),
+    new RegExp(
+      `SettingKey::DesktopUpdateFrequency,\\s*Value::from\\("${DEFAULT_UPDATE_FREQUENCY}"\\)`,
+    ),
+  );
+});
+
+test("a version map never answers for a key it does not have", () => {
+  // `constructor` and `toString` are present on every object literal, and these
+  // maps are keyed by strings from a JSON file and an update feed. A truthy
+  // lookup would read such a version as already seen and hand back a function as
+  // its timestamp.
+  const seen = pruneUpdateState({ seen: { "16.73.0": 5 } }, "16.72.0").seen;
+  assert.equal(alreadySeen({ seen, version: "16.73.0" }), true);
+  assert.equal(alreadySeen({ seen, version: "constructor" }), false);
+  assert.equal(alreadySeen({ seen, version: "__proto__" }), false);
+  // A recorded epoch timestamp is a real sighting, not an absent one.
+  assert.equal(alreadySeen({ seen: { "16.73.0": 0 }, version: "16.73.0" }), true);
 });
 
 test("a clock that jumped backwards does not silence the app for days", () => {
@@ -729,30 +772,30 @@ test("nudge state is pruned to the running version", () => {
     {
       lastPromptedAt: 1234,
       seen: { "16.70.0": 1, "16.72.0": 2, "16.73.0": 3 },
-      declined: { "16.70.0": 9, "16.73.0": 10 },
+      offeredAt: { "16.70.0": 9, "16.73.0": 10 },
     },
     "16.72.0",
   );
-  assert.deepEqual(state, {
-    lastPromptedAt: 1234,
-    seen: { "16.73.0": 3 },
-    declined: { "16.73.0": 10 },
-  });
+  // Spread before comparing: the maps are `Object.create(null)`, and a strict
+  // deep-equal compares prototypes.
+  assert.equal(state.lastPromptedAt, 1234);
+  assert.deepEqual({ ...state.seen }, { "16.73.0": 3 });
+  assert.deepEqual({ ...state.offeredAt }, { "16.73.0": 10 });
 });
 
 test("a malformed nudge file degrades to nothing known", () => {
   // It lives in userData where anything can edit it, and an updater that throws
   // on every check is a worse outcome than one extra prompt.
-  const empty = { lastPromptedAt: null, seen: {}, declined: {} };
-  assert.deepEqual(pruneUpdateState(null, "16.72.0"), empty);
-  assert.deepEqual(pruneUpdateState("nonsense", "16.72.0"), empty);
-  assert.deepEqual(pruneUpdateState({ seen: [], declined: "16.73.0" }, "16.72.0"), empty);
-  // An array is the shape this field had while the feature was being written,
-  // and it carries no timestamps — so it cannot answer the expiry question and
+  const isEmpty = (state) => {
+    assert.equal(state.lastPromptedAt, null);
+    assert.deepEqual({ ...state.seen }, {});
+    assert.deepEqual({ ...state.offeredAt }, {});
+  };
+  isEmpty(pruneUpdateState(null, "16.72.0"));
+  isEmpty(pruneUpdateState("nonsense", "16.72.0"));
+  isEmpty(pruneUpdateState({ seen: [], offeredAt: "16.73.0" }, "16.72.0"));
+  // An array carries no timestamps, so it cannot answer the expiry question and
   // is dropped rather than half-honoured.
-  assert.deepEqual(pruneUpdateState({ declined: ["16.73.0"] }, "16.72.0"), empty);
-  assert.deepEqual(
-    pruneUpdateState({ lastPromptedAt: "soon", seen: { "16.73.0": "yes" } }, "16.72.0"),
-    empty,
-  );
+  isEmpty(pruneUpdateState({ offeredAt: ["16.73.0"] }, "16.72.0"));
+  isEmpty(pruneUpdateState({ lastPromptedAt: "soon", seen: { "16.73.0": "yes" } }, "16.72.0"));
 });

@@ -730,7 +730,8 @@ impl SettingKey {
                        old, or until it has seen four pile up, and never asks more than once a \
                        day. Rarely: three days of settling, two days between prompts. Whatever \
                        you pick, Check for Updates… in the menu always answers immediately and \
-                       spends none of this budget, declining a release quiets it for a week, and \
+                       spends none of this budget, a release you have answered about stays \
+                       quiet for a week, and \
                        `veld update` in a terminal is unaffected — this is the desktop app \
                        asking you, not the only way to get a release.",
                 group: General,

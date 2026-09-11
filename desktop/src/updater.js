@@ -31,9 +31,9 @@ const { autoUpdater } = require("electron-updater");
 const {
   DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
-  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,
@@ -326,8 +326,6 @@ async function findCli() {
 
 /** @type {"off" | "install" | "download" | "cli"} */
 let mode = "off";
-/** Versions already offered this session, so a periodic check can't re-ask. */
-const offered = new Set();
 /** Daemon versions already reported as skewed, same reason. */
 const skewReported = new Set();
 /** `desktop.updateFrequency`, last read from the daemon. */
@@ -336,7 +334,7 @@ let frequency = DEFAULT_UPDATE_FREQUENCY;
 let settingsUrl = null;
 /** Where the nudge state is kept, from `initUpdater`. */
 let nudgeStateFile = null;
-/** @type {{lastPromptedAt: number | null, seen: Record<string, number>, declined: Record<string, number>} | null} */
+/** @type {{lastPromptedAt: number | null, seen: Record<string, number>, offeredAt: Record<string, number>} | null} */
 let nudges = null;
 /** @type {NodeJS.Timeout | null} */
 let checkTimer = null;
@@ -358,10 +356,13 @@ let onQuitCancelled = null;
  * What this install has already been told about, across restarts.
  *
  * Session memory was not enough once the tiers existed, and the gap is the whole
- * complaint: `offered` is a `Set` that dies with the process, so a machine that
+ * complaint: the `Set` this replaces died with the process, so a machine that
  * reopens Veld Desktop twice a day was asked about the same declined release
- * twice a day, and a "at most one prompt per day" promise made against
- * in-memory state would be a promise about uptime rather than about days.
+ * twice a day, and an "at most one prompt per day" promise made against
+ * in-memory state would be a promise about uptime rather than about days. The
+ * `Set` is gone rather than kept alongside: while both existed it ran *first*
+ * and never expired, which silently defeated {@link REOFFER_AFTER_MS} for the
+ * whole life of a session — weeks, on a machine nobody reboots.
  *
  * Read lazily and pruned to the running version on that first read — once per
  * process, which is every time it can matter, since a running app's version
@@ -660,17 +661,13 @@ async function checkForUpdates({ manual }) {
     }
     return;
   }
-  // A manual check re-offers a version already declined — asking is the whole
-  // point of clicking the item — while the periodic one stays quiet.
-  if (!manual && offered.has(version)) return;
-
   // Record the sighting before deciding anything with it. This is what starts a
   // release's ripening clock and what `versionsAhead` counts, so it has to
   // happen on the check that *declines* to prompt — that is the whole case it
   // exists for.
   const state = readNudges();
   const now = Date.now();
-  if (!state.seen[version]) {
+  if (!alreadySeen({ seen: state.seen, version })) {
     state.seen[version] = now;
     saveNudges();
   }
@@ -684,21 +681,17 @@ async function checkForUpdates({ manual }) {
     }),
     ahead: versionsAhead({ seen: state.seen, currentVersion: app.getVersion() }),
     lastPromptedAt: state.lastPromptedAt,
-    declinedAt: state.declined[version] ?? null,
+    offeredAt: state.offeredAt[version] ?? null,
     manual,
     now,
   });
   if (!offer) return;
 
-  offered.add(version);
   // The tier's prompt gap is about the *automatic* channel, which is what the
   // setting's help text promises. A manual check is the user asking, so it does
-  // not spend that budget — and it cannot cause a repeat either, because the
-  // dialog it opens records a decline of its own if they say Later.
-  if (!manual) {
-    state.lastPromptedAt = now;
-    saveNudges();
-  }
+  // not spend that budget — but it does count as having asked about this
+  // version, which is why `offerUpdate` records that side unconditionally.
+  if (!manual) state.lastPromptedAt = now;
   await offerUpdate(version);
 }
 
@@ -733,6 +726,17 @@ async function offerUpdate(version) {
     detail += "\n\nAsked too often? Settings → General → “How eagerly to offer updates”.";
   }
 
+  // Recorded *before* the dialog and for every answer, not only for "Later".
+  // Two reasons. A dialog the user closes with the window button, or one that
+  // never returns because the app is quitting into an update, still has to count
+  // as asked — otherwise the next automatic check re-offers it. And clicking
+  // Download and Install is not a reason to ask again either: if that install
+  // fails, `eager`'s zero prompt gap would otherwise re-offer the same release
+  // an hour later, forever.
+  const state = readNudges();
+  state.offeredAt[version] = Date.now();
+  saveNudges();
+
   const { response } = await dialog.showMessageBox({
     type: "info",
     // Named for what is actually being offered. The feed's version is the
@@ -747,18 +751,12 @@ async function offerUpdate(version) {
     defaultId: 0,
     cancelId: 1,
   });
-  if (response !== 0) {
-    // "Later" now means later, not "until the next launch". Declining used to
-    // live in a `Set` that died with the process, so quitting and reopening —
-    // which is most of what people do with a desktop app — asked again about the
-    // release they had just turned down. A *manual* check still re-offers it,
-    // and so does the next release, because `pruneUpdateState` drops every
-    // version the installed one has caught up with.
-    const state = readNudges();
-    state.declined[version] = Date.now();
-    saveNudges();
-    return;
-  }
+  // "Later" is already recorded above, along with every other answer. It now
+  // means later rather than "until the next launch" — and, because
+  // `REOFFER_AFTER_MS` expires, later rather than never. A manual check still
+  // re-offers it at any time, and so does the next release, since
+  // `pruneUpdateState` drops every version the installed one has caught up with.
+  if (response !== 0) return;
 
   if (viaCli) {
     await updateViaCli(version);

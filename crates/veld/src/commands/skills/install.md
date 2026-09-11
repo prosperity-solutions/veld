@@ -135,8 +135,8 @@ values. `eager` checks hourly and offers every release it finds. `balanced` (the
 default) checks every six hours but holds the dialog until a release is 36 hours
 old — or until the app has seen four pile up — and never prompts more than once a
 day. `relaxed` checks every twelve hours, waits three days, and leaves two days
-between prompts. Declining a release quiets it for a week rather than until the
-next launch. None of this touches the two things a person or an agent does on
+between prompts. A release you have answered about — Later, or Install —
+stays quiet for a week rather than coming back at the next launch. None of this touches the two things a person or an agent does on
 purpose: *Check for Updates…* answers immediately and spends none of the budget,
 and `veld update` in a terminal is unaffected. Read it with
 `veld settings describe desktop.updateFrequency`. Only Veld Desktop reads this —
