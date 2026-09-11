@@ -511,8 +511,13 @@ async function loadAppWhenReady(win, url) {
     // would restart the page, and anything the user had selected — a command
     // they were half-way through copying — would go with it.
     if (html === shownHtml) return;
-    shownHtml = html;
     await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    // **After** the load, not before. The escalation to the diagnostic page is a
+    // single transition, and its `loadURL` can reject; marking it shown first
+    // meant one failed load left the window on "Starting Veld…" for good, since
+    // the equality guard above then suppressed every retry. Assigning here costs
+    // at most a repeated render on the next two-second tick, and self-heals.
+    shownHtml = html;
   };
   await showWaiting();
   const timer = setInterval(async () => {

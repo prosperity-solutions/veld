@@ -9,10 +9,12 @@ const {
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
+  DECLINE_EXPIRY_MS,
   UPDATE_TIERS,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
+  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,
@@ -655,7 +657,7 @@ test("a manual check is answered whatever the tier says", () => {
       tier,
       ageMs: 0,
       ahead: 0,
-      declined: true,
+      declinedAt: NOW,
       lastPromptedAt: NOW - 60_000,
       manual: true,
       now: NOW,
@@ -670,11 +672,30 @@ test("a declined release stays declined for the automatic check", () => {
       tier: UPDATE_TIERS.eager,
       ageMs: 99 * HOUR,
       ahead: 9,
-      declined: true,
+      declinedAt: NOW - HOUR,
       now: NOW,
     }),
     { offer: false, reason: "declined" },
   );
+});
+
+test("\"Later\" means later, not never", () => {
+  // The feed only ever names the newest release, so a decline that never expired
+  // would mean an automatic check never raises that version again — on a quiet
+  // week, never at all, from a button labelled Later.
+  const base = { tier: UPDATE_TIERS.balanced, ageMs: 99 * HOUR, ahead: 1, now: NOW };
+  assert.equal(shouldOfferUpdate({ ...base, declinedAt: NOW - DECLINE_EXPIRY_MS + HOUR }).offer, false);
+  assert.equal(shouldOfferUpdate({ ...base, declinedAt: NOW - DECLINE_EXPIRY_MS - HOUR }).offer, true);
+});
+
+test("a decline timestamp from the future does not silence the app forever", () => {
+  // Same clock tolerance as `reportIsFresh`, and here it matters more: a
+  // `declinedAt` years ahead would mute that version permanently, which is the
+  // exact failure the expiry was added to prevent.
+  assert.equal(declineHolds({ declinedAt: NOW + 30 * 24 * HOUR, now: NOW }), false);
+  assert.equal(declineHolds({ declinedAt: NOW + HOUR, now: NOW }), true);
+  assert.equal(declineHolds({ declinedAt: null, now: NOW }), false);
+  assert.equal(declineHolds({ declinedAt: "yesterday", now: NOW }), false);
 });
 
 test("a clock that jumped backwards does not silence the app for days", () => {
@@ -708,24 +729,28 @@ test("nudge state is pruned to the running version", () => {
     {
       lastPromptedAt: 1234,
       seen: { "16.70.0": 1, "16.72.0": 2, "16.73.0": 3 },
-      declined: ["16.70.0", "16.73.0"],
+      declined: { "16.70.0": 9, "16.73.0": 10 },
     },
     "16.72.0",
   );
   assert.deepEqual(state, {
     lastPromptedAt: 1234,
     seen: { "16.73.0": 3 },
-    declined: ["16.73.0"],
+    declined: { "16.73.0": 10 },
   });
 });
 
 test("a malformed nudge file degrades to nothing known", () => {
   // It lives in userData where anything can edit it, and an updater that throws
   // on every check is a worse outcome than one extra prompt.
-  const empty = { lastPromptedAt: null, seen: {}, declined: [] };
+  const empty = { lastPromptedAt: null, seen: {}, declined: {} };
   assert.deepEqual(pruneUpdateState(null, "16.72.0"), empty);
   assert.deepEqual(pruneUpdateState("nonsense", "16.72.0"), empty);
   assert.deepEqual(pruneUpdateState({ seen: [], declined: "16.73.0" }, "16.72.0"), empty);
+  // An array is the shape this field had while the feature was being written,
+  // and it carries no timestamps — so it cannot answer the expiry question and
+  // is dropped rather than half-honoured.
+  assert.deepEqual(pruneUpdateState({ declined: ["16.73.0"] }, "16.72.0"), empty);
   assert.deepEqual(
     pruneUpdateState({ lastPromptedAt: "soon", seen: { "16.73.0": "yes" } }, "16.72.0"),
     empty,

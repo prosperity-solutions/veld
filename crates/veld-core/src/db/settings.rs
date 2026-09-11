@@ -1970,7 +1970,8 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // several dialogs a day — each one correct, and collectively the thing
         // people asked to be rid of. `balanced` keeps the six-hour check but puts
         // two gates in front of the dialog: a release has to be a day and a half
-        // old, or the fourth one waiting, and there is at most one prompt a day.
+        // old, or the fourth the app has seen, and there is at most one prompt a
+        // day.
         // `eager` is the old behaviour and then some (hourly); `relaxed` is two
         // days between prompts. Read by the Electron shell only — a browser tab
         // does not check for releases.

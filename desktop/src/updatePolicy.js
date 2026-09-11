@@ -178,17 +178,20 @@ function versionSkew({ appVersion, daemonVersion, isPackaged }) {
  *   worth interrupting somebody for. The point of waiting is that the release
  *   that follows a bad one lands within hours, so a tier that waits skips the
  *   dialog for both.
- * - `versionsAheadOverride` — how far behind is far enough to ask anyway, when
- *   the age gate has not opened yet. This is what stops a quiet tier from
- *   sitting out an entire week of releases.
+ * - `versionsAheadOverride` — how many *seen* releases is enough to ask anyway,
+ *   when the age gate has not opened yet. This is what stops a quiet tier from
+ *   sitting out an entire week of releases — and on a train that ships several
+ *   times a day it is the gate that actually fires, because the newest release
+ *   is never old enough to clear `minReleaseAgeMs`. "Seen" is the honest word:
+ *   see {@link versionsAhead} for why the true release count is not available.
  * - `minPromptGapMs` — the floor between two prompts, whatever else is true.
  *   The one knob a user can predict from the label: "at most once a day".
  *
  * Default is {@link DEFAULT_UPDATE_FREQUENCY}, and it is deliberately quieter
  * than the behaviour it replaces on every axis that a person can perceive: the
  * same six-hour check, but a release has to be a day and a half old (or the
- * fifth one waiting) before it produces a dialog, and never more than one dialog
- * a day.
+ * fourth one this app has seen) before it produces a dialog, and never more than
+ * one dialog a day.
  *
  * @type {Record<string, {checkIntervalMs: number, minReleaseAgeMs: number, versionsAheadOverride: number, minPromptGapMs: number}>}
  */
@@ -211,8 +214,8 @@ const UPDATE_TIERS = {
     minPromptGapMs: 24 * 60 * 60 * 1000,
   },
   // For someone happy to run a version that is a few days old. Two days between
-  // prompts, three days of ripening, and eight releases is the only thing that
-  // shortcuts either.
+  // prompts, three days of ripening, and eight seen releases is the only thing
+  // that shortcuts the *age* gate — nothing shortcuts the prompt gap.
   relaxed: {
     checkIntervalMs: 12 * 60 * 60 * 1000,
     minReleaseAgeMs: 72 * 60 * 60 * 1000,
@@ -223,6 +226,21 @@ const UPDATE_TIERS = {
 
 /** The tier a machine that has never touched the setting is on. */
 const DEFAULT_UPDATE_FREQUENCY = "balanced";
+
+/**
+ * How long "Later" lasts.
+ *
+ * The button says *Later*, so a decline that never expired would make the label
+ * a lie: the feed only ever names the newest release, so on a quiet week an
+ * automatic check would never raise that version again. A week is long enough
+ * that declining actually buys quiet — the whole point — and short enough that
+ * somebody who meant "not today" is asked again eventually rather than never.
+ *
+ * Independent of the tier. The tier governs how often you are asked about
+ * releases in general; this governs one release you have already answered about,
+ * and a `relaxed` user who declined has not asked to be *never* told again.
+ */
+const DECLINE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * The tier named by a stored setting value.
@@ -326,14 +344,31 @@ function versionsAhead({ seen, currentVersion }) {
 }
 
 /**
+ * Whether a decline of this exact version is still in force.
+ *
+ * Clock-tolerant in both directions, like {@link reportIsFresh} and for the same
+ * reason: a `declinedAt` in the future is a machine whose clock moved, and
+ * reading it as "declined for the next thirty years" would silence the automatic
+ * channel for that version permanently — the failure the expiry exists to
+ * prevent, arrived by another road.
+ *
+ * @param {{declinedAt?: number | null, now?: number, maxAgeMs?: number}} ctx
+ * @returns {boolean}
+ */
+function declineHolds({ declinedAt, now = Date.now(), maxAgeMs = DECLINE_EXPIRY_MS }) {
+  if (typeof declinedAt !== "number" || !Number.isFinite(declinedAt)) return false;
+  return Math.abs(now - declinedAt) <= maxAgeMs;
+}
+
+/**
  * Whether an available release is worth a dialog right now.
  *
  * The whole point of the tiers, in one place and with no I/O, so the awkward
  * combinations are tested rather than reasoned about. Order matters: a manual
  * check answers `true` before anything else is considered, because a person who
  * clicked *Check for Updates…* is owed an answer regardless of how quiet their
- * tier is, and a version already declined is silent regardless of how eager it
- * is.
+ * tier is, and a version declined within the last {@link DECLINE_EXPIRY_MS} is
+ * silent regardless of how eager it is.
  *
  * `versionsAhead` overrides only the **age** gate, never `minPromptGapMs`. A
  * burst of releases is a reason to stop waiting for the current one to settle;
@@ -345,7 +380,7 @@ function versionsAhead({ seen, currentVersion }) {
  *   ageMs: number,
  *   ahead: number,
  *   lastPromptedAt?: number | null,
- *   declined?: boolean,
+ *   declinedAt?: number | null,
  *   manual?: boolean,
  *   now?: number,
  * }} ctx
@@ -356,12 +391,12 @@ function shouldOfferUpdate({
   ageMs,
   ahead,
   lastPromptedAt = null,
-  declined = false,
+  declinedAt = null,
   manual = false,
   now = Date.now(),
 }) {
   if (manual) return { offer: true, reason: "manual" };
-  if (declined) return { offer: false, reason: "declined" };
+  if (declineHolds({ declinedAt, now })) return { offer: false, reason: "declined" };
   // One-sided, like `updateInProgress`'s phase check: a `lastPromptedAt` in the
   // future is a clock that moved, and reading it as "the gap has not elapsed"
   // would silence the app until the timestamp catches up — days, on a machine
@@ -705,7 +740,7 @@ function primaryAction({ viaCli, canInstall, full }) {
  *
  * @param {unknown} state
  * @param {string} currentVersion
- * @returns {{lastPromptedAt: number | null, seen: Record<string, number>, declined: string[]}}
+ * @returns {{lastPromptedAt: number | null, seen: Record<string, number>, declined: Record<string, number>}}
  */
 function pruneUpdateState(state, currentVersion) {
   const raw = state && typeof state === "object" ? /** @type {any} */ (state) : {};
@@ -721,12 +756,19 @@ function pruneUpdateState(state, currentVersion) {
     typeof raw.lastPromptedAt === "number" && Number.isFinite(raw.lastPromptedAt)
       ? raw.lastPromptedAt
       : null;
-  const declined = Array.isArray(raw.declined) ? raw.declined.filter(ahead) : [];
+  /** @type {Record<string, number>} */
+  const declined = {};
+  if (raw.declined && typeof raw.declined === "object" && !Array.isArray(raw.declined)) {
+    for (const [version, at] of Object.entries(raw.declined)) {
+      if (ahead(version) && typeof at === "number" && Number.isFinite(at)) declined[version] = at;
+    }
+  }
   return { lastPromptedAt, seen, declined };
 }
 
 module.exports = {
   CONSOLE_HANDOFF,
+  DECLINE_EXPIRY_MS,
   DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
@@ -736,6 +778,7 @@ module.exports = {
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
+  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,

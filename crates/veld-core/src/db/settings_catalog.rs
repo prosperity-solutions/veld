@@ -727,11 +727,12 @@ impl SettingKey {
                        hourly and offers whatever it finds — the newest build, including the one \
                        that gets superseded that afternoon. Once it has settled (the default): \
                        it checks every six hours but waits until a release is a day and a half \
-                       old, or the fourth one queued up behind it, and never asks more than once \
-                       a day. Rarely: three days of settling, two days between prompts. \
-                       Whatever you pick, Check for Updates… in the menu always answers \
-                       immediately, and `veld update` in a terminal is unaffected — this is the \
-                       desktop app asking you, not the only way to get a release.",
+                       old, or until it has seen four pile up, and never asks more than once a \
+                       day. Rarely: three days of settling, two days between prompts. Whatever \
+                       you pick, Check for Updates… in the menu always answers immediately and \
+                       spends none of this budget, declining a release quiets it for a week, and \
+                       `veld update` in a terminal is unaffected — this is the desktop app \
+                       asking you, not the only way to get a release.",
                 group: General,
                 section: None,
                 shape: ValueShape::Text,

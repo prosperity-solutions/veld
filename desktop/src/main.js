@@ -196,11 +196,18 @@ function claimSlot(preferred) {
  * been waiting.
  *
  * The CLI probe is re-run per call rather than cached at startup, and that is
- * the point: the two moments this is asked are seconds and a minute apart, and
- * in between them the user may have done exactly what the first page implied and
- * installed veld. A cached `false` would then keep telling somebody with a
- * working install to go and install it — the original bug in a slower costume.
- * Three `accessSync` calls, twice per window, is not a cost worth caching.
+ * the point: in between two calls the user may have done exactly what the page
+ * told them to and installed veld. A cached `false` would then keep telling
+ * somebody with a working install to go and install it — the original bug in a
+ * slower costume.
+ *
+ * Be accurate about what that costs, because an earlier version of this comment
+ * was not: `windows.js`'s retry loop calls this on **every two-second tick** for
+ * as long as the daemon is unreachable, not twice per window. That is three
+ * `accessSync` calls every two seconds per waiting window — a `stat` on three
+ * fixed paths, with no spawn and no allocation, on a window that is doing
+ * nothing else. Cheap enough to pay for the correctness above; not cheap enough
+ * to describe as free.
  *
  * @param {{elapsedMs: number}} ctx
  * @returns {string}
@@ -782,9 +789,13 @@ app.whenReady().then(async () => {
     // updater's `desktop.updateFrequency`. The updater's re-read runs on every
     // platform and before the tray gate, or a Linux user moving the update
     // control would wait out an interval up to twelve hours long for it to take.
-    await updaterSettingsChanged();
-    if (process.platform !== "darwin") return;
-    await syncTray();
+    // Concurrently, not in sequence: both readers fetch the same document with
+    // their own 2 s budget, and awaiting one before starting the other doubles
+    // the latency this nudge exists to remove.
+    await Promise.all([
+      updaterSettingsChanged(),
+      process.platform === "darwin" ? syncTray() : Promise.resolve(),
+    ]);
   });
   buildAppMenu();
   app.setAboutPanelOptions({

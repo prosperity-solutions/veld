@@ -1122,25 +1122,58 @@ Two different mismatches, deliberately reported differently:
   one lands within hours, so a tier that waits skips the dialog for both. The
   version count is the escape hatch that stops a quiet tier sitting out a week,
   and it overrides the age gate only — never the prompt gap, because a burst of
-  releases is not a reason to prompt twice in an hour. A release's age comes from
-  the feed's `releaseDate` where it has one and from when this app first recorded
-  the version otherwise, whichever is older, so a laptop shut for a week does not
-  restart the clock on reopening.
+  releases is not a reason to prompt twice in an hour.
+
+  Two things about that count are worth knowing before trusting the labels. It
+  counts **releases this app has seen go past**, not releases that exist: the
+  feed names only the newest one, and the true count needs a second, rate-limited
+  request to the source the handoff already avoids (`handoffCommand`'s
+  `--target-version`). And on a train that ships several times a day it is the
+  gate that actually fires, because the newest release is never old enough to
+  clear `minReleaseAgeMs` — the age gate is for the quiet weeks, the count for
+  the busy ones. Measured over 14 simulated days at a release every 8 h (42
+  releases): 42 prompts before this change, 42 on `eager`, 13 on `balanced`,
+  6 on `relaxed`.
+
+  A release's age comes from the feed's `releaseDate` where it has one and from
+  when this app first recorded the version otherwise, whichever is older — so a
+  release published before this app ever saw it keeps its real age rather than
+  starting its clock at first sight.
 
   The state behind it — when the last prompt was, which versions have been seen,
-  which were declined — is `update-nudges.json` in `userData`, beside
-  `windows.json`. It has to survive restarts or the promise is about uptime
-  rather than about days, and it is pruned to the running version on every read
-  so it neither grows without bound nor counts releases the app has installed.
+  which were declined and when — is `update-nudges.json` in `userData`, beside
+  `windows.json`, and written the same way they are (temp file, then rename: a
+  torn one parses as nothing, which here means every decline and the
+  one-a-day floor are gone). It has to survive restarts or the promise is about
+  uptime rather than about days, and it is pruned to the running version on the
+  first read of each process — every time it can matter, since a running app's
+  version cannot change under it — so it neither grows without bound nor counts
+  releases the app has installed.
+
   Declining is persisted for the same reason: it used to live in a `Set` that
   died with the process, so quitting and reopening asked again about the release
-  you had just turned down.
+  you had just turned down. It **expires after a week** (`DECLINE_EXPIRY_MS`),
+  and that is not a detail — the button says *Later*, and since the feed only
+  ever names the newest release, a decline that never expired would mean an
+  automatic check never raised that version again. On a quiet week that is
+  *never*, from a button that promised otherwise.
 
-  The tier is re-read from `GET /api/settings` on every check *and* on the
-  renderer's `veld:app:settings-changed` nudge, and the schedule is a
+  A **manual** *Check for Updates…* is outside all of this: it answers
+  immediately, it re-offers a declined version, it does not spend the tier's
+  prompt budget, and it does not re-arm the background timer. The setting is
+  about the channel that interrupts you unasked; a question you asked is not
+  that channel.
+
+  The tier is re-read from `GET /api/settings` on every automatic check *and* on
+  the renderer's `veld:app:settings-changed` nudge, and the schedule is a
   self-rescheduling `setTimeout` rather than a `setInterval` so a changed setting
   takes effect at once instead of at the end of an interval that may be twelve
-  hours long.
+  hours long. Two consequences of that swap are paid for explicitly: the nudge
+  re-arms to `min(what is already pending, the new interval)`, because it arrives
+  inside the first check's fifteen seconds and a plain re-arm pushed that first
+  check out to a full hour on `eager` and twelve on `relaxed`; and the timer
+  callback catches, because a chain of timeouts — unlike an interval — can stop
+  for good on one rejection.
 
   On the `"cli"` route the prompt is about the **release**, not the app —
   *"veld 16.8.0 is available"*, *"Quit and Update veld"* — because that is what
@@ -1185,9 +1218,22 @@ different question because it is about to *run* what it found.
   never ran setup, and `veld doctor` for one that did. Never the installer — this
   machine demonstrably has veld.
 
-The probe is re-run per render rather than cached at startup, because the two
-renders are a minute apart and in between the user may have done exactly what the
-first page told them to.
+The probe is re-run per render rather than cached at startup, because in between
+two renders the user may have done exactly what the page told them to. Be exact
+about what that costs: `windows.js`'s retry loop renders on **every two-second
+tick** while the daemon is unreachable, so this is three `accessSync` calls every
+two seconds per waiting window — a `stat` on three fixed paths, on a window doing
+nothing else. The loop only calls `loadURL` when the rendered HTML actually
+changes, so the page itself is not reloaded on the tick; and `shownHtml` is
+recorded only *after* that load resolves, or one failed escalation would leave
+the window on "Starting Veld…" for good.
+
+One honest limit: `installedCliPath` knows only the three directories
+`install.sh` prefers, and `install.sh` will install elsewhere — `VELD_INSTALL_DIR`,
+or an existing veld found anywhere and updated in place. So it can say "no binary"
+about a machine that has one. That is why the `not-installed` page still carries
+a `veld doctor` line: being wrong has to cost a redundant instruction, never a
+dead end.
 
 ## Data model
 

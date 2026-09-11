@@ -33,6 +33,7 @@ const {
   FULL_UPDATE_HANDOFF,
   capabilitiesFrom,
   cliCandidatePaths,
+  declineHolds,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,
@@ -335,10 +336,12 @@ let frequency = DEFAULT_UPDATE_FREQUENCY;
 let settingsUrl = null;
 /** Where the nudge state is kept, from `initUpdater`. */
 let nudgeStateFile = null;
-/** @type {{lastPromptedAt: number | null, seen: Record<string, number>, declined: string[]} | null} */
+/** @type {{lastPromptedAt: number | null, seen: Record<string, number>, declined: Record<string, number>} | null} */
 let nudges = null;
 /** @type {NodeJS.Timeout | null} */
 let checkTimer = null;
+/** When {@link checkTimer} is due to fire, so a re-arm can never push it later. */
+let checkDueAt = null;
 let checking = false;
 /** Set across `quitAndInstall` — see the error listener in `initUpdater`. */
 let installing = false;
@@ -360,8 +363,10 @@ let onQuitCancelled = null;
  * twice a day, and a "at most one prompt per day" promise made against
  * in-memory state would be a promise about uptime rather than about days.
  *
- * Read lazily and pruned to the running version on every read, so the file never
- * accumulates and a downgrade cannot resurrect a count. A missing, unreadable or
+ * Read lazily and pruned to the running version on that first read — once per
+ * process, which is every time it can matter, since a running app's version
+ * cannot change under it. That is what stops the file accumulating and stops a
+ * downgrade resurrecting a count. A missing, unreadable or
  * malformed file is "nothing known" — the same direction everything else in this
  * file takes with `~/.veld` state, because the cost of forgetting is one extra
  * prompt and the cost of throwing is an updater that never runs again.
@@ -391,7 +396,14 @@ function saveNudges() {
   if (!nudgeStateFile || !nudges) return;
   try {
     fs.mkdirSync(path.dirname(nudgeStateFile), { recursive: true });
-    fs.writeFileSync(nudgeStateFile, `${JSON.stringify(nudges, null, 2)}\n`);
+    // Write-then-rename, like the two `userData` files this sits beside
+    // (`windows.js`'s `windows.json`, `browserViews.js`'s `permissions.json`) and
+    // for the same reason they give: a torn file parses as nothing, which here
+    // means every decline and the one-prompt-a-day floor are gone — the app
+    // starts asking again, which is exactly the behaviour this file prevents.
+    const tmp = `${nudgeStateFile}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(nudges, null, 2)}\n`);
+    fs.renameSync(tmp, nudgeStateFile);
   } catch (err) {
     console.error("[veld] could not save update nudge state", err);
   }
@@ -433,8 +445,10 @@ async function readFrequency() {
  */
 function armCheck(delayMs) {
   if (checkTimer) clearTimeout(checkTimer);
+  checkDueAt = Date.now() + delayMs;
   checkTimer = setTimeout(() => {
     checkTimer = null;
+    checkDueAt = null;
     void checkForUpdates({ manual: false }).catch((err) => {
       // A `setInterval` could not stop running; a chain of timeouts can. Without
       // this, one unexpected rejection — a dialog that fails to open, anything
@@ -460,7 +474,16 @@ async function settingsChanged() {
   if (mode === "off") return;
   const before = frequency;
   await readFrequency();
-  if (frequency !== before) armCheck(updateTier(frequency).checkIntervalMs);
+  if (frequency === before) return;
+  // **Never later than what is already armed.** The renderer sends this nudge as
+  // soon as the settings document loads, which on a normal launch is inside the
+  // fifteen seconds `initUpdater` armed the first check for — so a plain re-arm
+  // would cancel that first check and replace it with the tier's full interval:
+  // an hour on `eager`, twelve on `relaxed`. Only `balanced` escaped, because it
+  // equals the in-memory default and took the early return above. Shortening is
+  // still allowed, which is what a move to a faster tier should do.
+  const remainingMs = checkDueAt === null ? Number.POSITIVE_INFINITY : checkDueAt - Date.now();
+  armCheck(Math.max(0, Math.min(remainingMs, updateTier(frequency).checkIntervalMs)));
 }
 
 /**
@@ -594,7 +617,11 @@ async function checkForUpdates({ manual }) {
   // rather than in `initUpdater` is what makes the interval a setting at all.
   await readFrequency();
   const tier = updateTier(frequency);
-  armCheck(tier.checkIntervalMs);
+  // Automatic checks only. A manual *Check for Updates…* answers a question the
+  // user asked; it is not the background channel and must not reset its clock,
+  // or someone who checks by hand on `relaxed` would never get an automatic
+  // check at all. Same reasoning as not spending the prompt budget below.
+  if (!manual) armCheck(tier.checkIntervalMs);
 
   // Guards the network check only, never the dialogs that follow it — and
   // cleared before any of them opens, including the failure one. A `finally`
@@ -657,15 +684,21 @@ async function checkForUpdates({ manual }) {
     }),
     ahead: versionsAhead({ seen: state.seen, currentVersion: app.getVersion() }),
     lastPromptedAt: state.lastPromptedAt,
-    declined: state.declined.includes(version),
+    declinedAt: state.declined[version] ?? null,
     manual,
     now,
   });
   if (!offer) return;
 
   offered.add(version);
-  state.lastPromptedAt = now;
-  saveNudges();
+  // The tier's prompt gap is about the *automatic* channel, which is what the
+  // setting's help text promises. A manual check is the user asking, so it does
+  // not spend that budget — and it cannot cause a repeat either, because the
+  // dialog it opens records a decline of its own if they say Later.
+  if (!manual) {
+    state.lastPromptedAt = now;
+    saveNudges();
+  }
   await offerUpdate(version);
 }
 
@@ -722,10 +755,8 @@ async function offerUpdate(version) {
     // and so does the next release, because `pruneUpdateState` drops every
     // version the installed one has caught up with.
     const state = readNudges();
-    if (!state.declined.includes(version)) {
-      state.declined.push(version);
-      saveNudges();
-    }
+    state.declined[version] = Date.now();
+    saveNudges();
     return;
   }
 

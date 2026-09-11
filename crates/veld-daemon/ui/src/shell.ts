@@ -352,8 +352,13 @@ export interface DesktopAppApi {
    * The settings document changed — re-read whatever you act on.
    *
    * Today that is `desktop.menuBarIcon`, which decides whether the shell keeps
-   * its macOS menu-bar icon; only the main process can create or destroy a
-   * `Tray`, so a page cannot do this for itself.
+   * its macOS menu-bar icon (only the main process can create or destroy a
+   * `Tray`, so a page cannot do this for itself), and `desktop.updateFrequency`,
+   * which sets how often the shell checks for a release and how ripe one must be
+   * before it interrupts anybody. The second is not macOS-only, and it is the one
+   * that makes this nudge worth having rather than merely faster: the tray
+   * re-reads on a ten-second tick anyway, while the update schedule's own
+   * interval is up to twelve hours.
    *
    * **A nudge, deliberately carrying no value.** The document is the daemon's and
    * the shell reads it directly — including on its own timer, for a change made

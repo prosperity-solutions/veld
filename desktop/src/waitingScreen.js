@@ -19,7 +19,12 @@
 //
 //  - **No binary.** Nothing is coming. Say so at once, with the commands — this
 //    is the first-impression case the original screen was written for, and
-//    making it wait would be a regression.
+//    making it wait would be a regression. It keeps the old screen's `veld
+//    doctor` line too, and that is not decoration: the probe only knows the
+//    three directories `install.sh` prefers, and `install.sh` will happily
+//    install elsewhere — `VELD_INSTALL_DIR`, or an existing veld found anywhere
+//    and updated in place. Somebody in that position reads "no binary" wrongly,
+//    so the page must still hand them the command that tells them the truth.
 //  - **A binary, and it has been seconds.** Something is starting, or something
 //    just restarted. Say that, name no commands, and wait.
 //  - **A binary, and it has been a minute.** Now it is a fault worth debugging,
@@ -52,6 +57,13 @@ const STALL_AFTER_MS = 60_000;
  * install that could be starting up. Spawning three processes to render a
  * waiting screen would be the wrong trade, and the worst case here is a page
  * that says "you have veld" to somebody who has some other program called veld.
+ *
+ * **This can say `null` about a machine that has veld.** `install.sh` honours
+ * `VELD_INSTALL_DIR` and updates an existing binary wherever it finds one, so a
+ * veld outside these three directories is legitimate and invisible here. That is
+ * why the `not-installed` page keeps a `veld doctor` line rather than only
+ * offering the installer: the failure mode of guessing wrong has to be a
+ * redundant instruction, never a dead end.
  *
  * `isExecutable` is injected so this stays testable without a filesystem.
  *
@@ -152,6 +164,7 @@ function waitingHtml({ stage, cliPath = null, baseUrl = "" }) {
   <p>On a fresh machine, install veld and set it up — no sudo needed:</p>
   <p><code class="cmd">${INSTALL_COMMAND}</code></p>
   <p><code class="cmd">${SETUP_COMMAND}</code></p>
+  <p>Already have veld somewhere else? <code>veld doctor</code> says what's wrong.</p>
   <p class="quiet">Retrying automatically.</p>`;
   }
 
