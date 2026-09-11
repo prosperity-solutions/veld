@@ -87,7 +87,54 @@ export default defineConfig({
       "/api": { target: `http://127.0.0.1:${daemonPort}`, ws: true },
     },
   },
+  // Two test projects, split by file extension, because a component test needs
+  // a DOM and 46 module tests do not.
+  //
+  // **Why not simply `environment: "jsdom"` globally.** It works — all 1275
+  // existing tests pass under it — but it costs every suite jsdom's per-file
+  // construction whether or not the suite touches the DOM. Measured on this
+  // tree at `--maxWorkers=4` (roughly a CI runner's parallelism), two runs each:
+  //
+  //     environment: "node"     4.3s / 4.9s      (what this repo had)
+  //     environment: "jsdom"   11.2s / 12.6s     2.6x, for no extra coverage
+  //     these two projects      4.7s / 5.1s
+  //
+  // The middle row buys nothing the bottom row doesn't: the same component
+  // tests, in the same jsdom. It just also taxes the 46 files that never look
+  // at a `document`.
+  //
+  // **Why by extension rather than a per-file docblock.** The sibling package
+  // `crates/veld-daemon/frontend` reaches the same place with
+  // `// @vitest-environment jsdom` at the top of each of its ~19 DOM tests, and
+  // that is a perfectly good answer there. Here the extension already carries
+  // the signal — a `.tsx` test exists *because* it renders a component — so
+  // deriving the environment from it leaves nothing to remember. A forgotten
+  // docblock fails loudly (`document is not defined`) rather than silently, so
+  // this is ergonomics, not a correctness gate.
+  //
+  // `extends: true` is what gives each project the root config above, the
+  // `react()` plugin included — without it a `.tsx` test has no JSX transform.
   test: {
-    environment: "node",
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: "unit",
+          environment: "node",
+          include: ["src/**/*.test.ts"],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "dom",
+          environment: "jsdom",
+          include: ["src/**/*.test.tsx"],
+          // Unmounts between tests and stubs the browser APIs jsdom is missing.
+          // Not optional — see that file for what breaks without it.
+          setupFiles: ["./src/shared/testSetup.ts"],
+        },
+      },
+    ],
   },
 });
