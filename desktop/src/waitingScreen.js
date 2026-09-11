@@ -100,11 +100,13 @@ function waitingStage({ cliPath, elapsedMs, stallAfterMs = STALL_AFTER_MS }) {
 /**
  * Text into HTML.
  *
- * `cliPath` is the only interpolated value that does not come from this file,
- * and it is a filesystem path from `cliCandidatePaths` — so today it is one of
- * three literals. It is escaped anyway: the list is a function whose contents
- * have changed once already, and the day it learns to read `$VELD_BIN` is not
- * the day anybody will remember this page renders it into markup.
+ * Two interpolated values do not come from this file — `cliPath`, a filesystem
+ * path from `cliCandidatePaths`, and `baseUrl`, which is `VELD_DESKTOP_URL` from
+ * the environment when that is set. Today both are effectively fixed strings, and
+ * both are escaped anyway: `cliCandidatePaths` is a function whose contents have
+ * changed once already, `VELD_DESKTOP_URL` is whatever a developer exports, and
+ * the day either learns something new is not the day anybody will remember this
+ * page renders it into markup.
  *
  * @param {string} s
  */

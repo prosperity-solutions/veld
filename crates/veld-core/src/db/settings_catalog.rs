@@ -436,9 +436,16 @@ pub(super) const LOG_TIME_ZONES: &[Choice] = &[choice("local", "Local time"), ch
 /// text spells them out; these have to be pickable at a glance.
 ///
 /// The values are the same three names `desktop/src/updatePolicy.js`'s
-/// `UPDATE_TIERS` is keyed by. Nothing but review ties the two lists together —
-/// a value here with no tier there silently falls back to `balanced` in the app,
-/// which is the same shape as the schema/example pairing elsewhere in this repo.
+/// `UPDATE_TIERS` is keyed by, and **both halves fail silently alone**: a value
+/// here with no tier there is offered, stored, and then read as `balanced` by the
+/// app forever, while a tier there with no value here is unreachable because this
+/// list is also the validator's allow-list (`SettingKey::DesktopUpdateFrequency`
+/// in `settings.rs`). No compiler can see across the two languages, so
+/// `desktop/src/updatePolicy.test.js`'s *the tier names match the Rust allow-list*
+/// parses this constant out of this file and compares — the same shape as the
+/// schema/example drift gate elsewhere in this repo. Renaming this constant, or
+/// reformatting it beyond `choice("value", "Label")`, breaks that test rather
+/// than silently passing it.
 pub(super) const UPDATE_FREQUENCIES: &[Choice] = &[
     choice("eager", "Every release, as soon as it lands"),
     choice("balanced", "Once it has settled — at most one a day"),

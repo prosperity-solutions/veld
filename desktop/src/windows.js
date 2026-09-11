@@ -554,7 +554,10 @@ async function loadAppWhenReady(win, url) {
     await showWaiting().catch((err) => {
       if (!win.isDestroyed()) console.error("[veld] waiting page failed to load", err);
     });
-  }, 2000);
+    // `TICK_MS`, not a second literal `2000`: `elapsedMs` above is derived from
+    // this period, so two copies that drift would move when the sixty seconds
+    // elapses while every comment still claimed sixty.
+  }, TICK_MS);
 }
 
 /**
