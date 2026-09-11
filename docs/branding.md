@@ -41,7 +41,7 @@ serves it must stay self-contained, so the mark cannot be an `<img src>` — it 
 percent-escaped into a data-URI in `website/index.html`,
 `crates/veld-gateway/src/pages.rs`, `crates/veld-daemon/assets/management-ui.html`
 (the v1 dashboard at `/`), `crates/veld-daemon/ui/index.html` (`/ide`), and
-`desktop/src/main.js` (the waiting screen). Nothing in HTML, Rust, or JS can see
+`desktop/src/waitingScreen.js` (the waiting screen). Nothing in HTML, Rust, or JS can see
 that those five agree, so `tests/validate-favicon.sh` derives the expected string
 from `website/favicon.svg` and greps for it — run by `just lint`, by CI's
 `schema` job, and (against the built `/ide` bundle) by CI's `ui` job. It also

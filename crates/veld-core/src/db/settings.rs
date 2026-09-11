@@ -37,7 +37,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 use super::settings_catalog::{
-    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, WORKTREE_STORAGE_MODES,
+    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, UPDATE_FREQUENCIES,
+    WORKTREE_STORAGE_MODES,
 };
 use super::{Db, DbError, now_str};
 
@@ -705,6 +706,7 @@ pub enum SettingKey {
     BackupDir,
     FeedbackSuppressOverlay,
     DesktopMenuBarIcon,
+    DesktopUpdateFrequency,
     Unknown(String),
 }
 
@@ -742,6 +744,7 @@ impl SettingKey {
         Self::NewsSource,
         Self::FeedbackSuppressOverlay,
         Self::DesktopMenuBarIcon,
+        Self::DesktopUpdateFrequency,
         // ── General › Database backups ───────────────────────────────────────
         Self::BackupEnabled,
         Self::BackupIntervalMinutes,
@@ -889,6 +892,7 @@ impl SettingKey {
             Self::BackupDir => "backup.dir",
             Self::FeedbackSuppressOverlay => "feedback.suppressOverlay",
             Self::DesktopMenuBarIcon => "desktop.menuBarIcon",
+            Self::DesktopUpdateFrequency => "desktop.updateFrequency",
             Self::Unknown(k) => k,
         }
     }
@@ -959,6 +963,7 @@ impl SettingKey {
             "backup.dir" => Self::BackupDir,
             "feedback.suppressOverlay" => Self::FeedbackSuppressOverlay,
             "desktop.menuBarIcon" => Self::DesktopMenuBarIcon,
+            "desktop.updateFrequency" => Self::DesktopUpdateFrequency,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -1265,6 +1270,15 @@ impl SettingKey {
                 Value::from(s)
             }
             Self::WorktreeMarkerStyle => one_of(value, MARKER_STYLES).ok_or_else(bad)?,
+            // How eagerly Veld Desktop offers a new release. Rejected rather than
+            // coerced, like every other enum here — but the reader is the Electron
+            // shell rather than the daemon, and it maps an unknown value onto its
+            // own default (`updateTier` in `desktop/src/updatePolicy.js`) so that
+            // an app older than the daemon keeps a schedule. Refusing the write
+            // here is what stops the two from disagreeing in the first place:
+            // a stored tier no app understands would silently be the default while
+            // the settings dialog showed something else.
+            Self::DesktopUpdateFrequency => one_of(value, UPDATE_FREQUENCIES).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
             // coerced (same as the other enums here): the daemon acts on this
             // directly in `create_worktree`, so a stored value neither surface
@@ -1950,6 +1964,18 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // ambient status rather than access. Read by the Electron shell only —
         // a browser tab has no menu bar to put anything in.
         (SettingKey::DesktopMenuBarIcon, Value::from(true)),
+        // `balanced`, and the choice of default is the point of the setting
+        // existing. The app used to check every six hours and offer whatever it
+        // found, so a release train that ships several times a day produced
+        // several dialogs a day — each one correct, and collectively the thing
+        // people asked to be rid of. `balanced` keeps the six-hour check but puts
+        // two gates in front of the dialog: a release has to be a day and a half
+        // old, or the fourth the app has seen, and there is at most one prompt a
+        // day.
+        // `eager` is the old behaviour and then some (hourly); `relaxed` is two
+        // days between prompts. Read by the Electron shell only — a browser tab
+        // does not check for releases.
+        (SettingKey::DesktopUpdateFrequency, Value::from("balanced")),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))

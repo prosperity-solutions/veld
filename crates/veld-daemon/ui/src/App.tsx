@@ -983,27 +983,41 @@ function AppInner(props: {
     setBellSuppressed(focusSuppresses(focusPrefs(settings), FOCUS_SUPPRESS_BELL));
   }, [settings]);
 
-  // Tell the Electron shell to re-read the one key it acts on
-  // (`desktop.menuBarIcon` — only the main process can create or destroy a `Tray`).
+  // Tell the Electron shell to re-read the keys only its main process can act on:
+  // `desktop.menuBarIcon` (only the main process can create or destroy a `Tray`)
+  // and `desktop.updateFrequency` (the update schedule lives there too).
   //
   // A nudge, not the value: see `settingsChanged` in `shell.ts`. It is about
-  // latency alone — the shell reads the document on its own ten-second tick, so
-  // without this a toggle in the settings dialog sits there doing nothing for up
-  // to ten seconds. A no-op in a browser tab and against an older shell.
+  // latency alone — the shell re-reads on its own schedule either way, so without
+  // this a change in the settings dialog sits there doing nothing. For the tray
+  // that is a ten-second tick; for the update tier it is the check interval,
+  // which on the quietest tier is twelve hours, so the nudge matters more there.
+  // A no-op in a browser tab and against an older shell.
   //
-  // Keyed on that key's **value**, not on the document's identity, the same
+  // Keyed on those keys' **values**, not on the document's identity, the same
   // narrowing `filePolicyKey` below makes and for a sharper reason: `useSettings`
   // re-reads on every window `focus` and calls `setSettings` with a fresh object
   // even when the document is byte-identical, so a dependency on `settings` sent
   // the shell a fetch (and a whole tray-menu rebuild) every time somebody clicked
   // between two Veld windows — once per open window, forever.
-  const menuBarIconPref = settings?.["desktop.menuBarIcon"];
+  //
+  // A string join rather than an array in the dependency list: a fresh array
+  // every render is a fresh dependency every render, which is the bug this
+  // narrowing exists to avoid.
+  //
+  // **Adding a third shell-read setting means editing this line and
+  // `desktop/src/main.js`'s handler.** Nothing checks that, and the cost is not
+  // symmetric: the tray has an independent ten-second tick to fall back on, so a
+  // missed key there is latency, while the update schedule's own interval is up
+  // to twelve hours — which is the exact bug this nudge was extended to fix.
+  const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}`;
   useEffect(() => {
-    // `undefined` is "not read yet", or a daemon older than the key — nothing to
-    // tell the shell either way, and it converges on its own tick regardless.
-    if (menuBarIconPref === undefined) return;
+    // Nothing read yet — a daemon older than both keys, or the first paint.
+    // Nothing to tell the shell either way, and it converges on its own schedule
+    // regardless. `String(undefined)` is what a missing key renders as above.
+    if (desktopShellPrefs === "undefined\u0000undefined") return;
     void desktopApp?.settingsChanged?.();
-  }, [menuBarIconPref]);
+  }, [desktopShellPrefs]);
 
   // How much run history the pickers offer. Read here and applied to the polled
   // payload once (see `pruneRunHistory`), so every surface that renders history

@@ -428,6 +428,30 @@ pub(super) const WORKTREE_STORAGE_MODES: &[Choice] = &[
 
 pub(super) const LOG_TIME_ZONES: &[Choice] = &[choice("local", "Local time"), choice("utc", "UTC")];
 
+/// How eagerly Veld Desktop offers a new release (`desktop.updateFrequency`).
+///
+/// The labels say what a person gets, not what the app does, because the
+/// mechanism behind each one is three numbers (a check interval, a minimum
+/// release age, a floor between prompts) and no label can carry them. The help
+/// text spells them out; these have to be pickable at a glance.
+///
+/// The values are the same three names `desktop/src/updatePolicy.js`'s
+/// `UPDATE_TIERS` is keyed by, and **both halves fail silently alone**: a value
+/// here with no tier there is offered, stored, and then read as `balanced` by the
+/// app forever, while a tier there with no value here is unreachable because this
+/// list is also the validator's allow-list (`SettingKey::DesktopUpdateFrequency`
+/// in `settings.rs`). No compiler can see across the two languages, so
+/// `desktop/src/updatePolicy.test.js`'s *the tier names match the Rust allow-list*
+/// parses this constant out of this file and compares — the same shape as the
+/// schema/example drift gate elsewhere in this repo. Renaming this constant, or
+/// reformatting it beyond `choice("value", "Label")`, breaks that test rather
+/// than silently passing it.
+pub(super) const UPDATE_FREQUENCIES: &[Choice] = &[
+    choice("eager", "Every release, as soon as it lands"),
+    choice("balanced", "Once it has settled — at most one a day"),
+    choice("relaxed", "Rarely — at most one every two days"),
+];
+
 /// `extensions.source` and `news.source` share a value vocabulary and not their
 /// labels — see [`Choice`].
 const EXTENSIONS_SOURCES: &[Choice] = &[
@@ -703,6 +727,28 @@ impl SettingKey {
                  log collector and the /__veld__/* routes are unaffected.",
                 General,
             ),
+            Self::DesktopUpdateFrequency => Spec {
+                title: "How eagerly to offer updates",
+                help: "Veld Desktop checks for new releases in the background and asks before \
+                       installing one. This is how often it asks. Every release: it checks \
+                       hourly and offers whatever it finds — the newest build, including the one \
+                       that gets superseded that afternoon. Once it has settled (the default): \
+                       it checks every six hours but waits until a release is a day and a half \
+                       old, or until it has seen four pile up, and never asks more than once a \
+                       day. Rarely: three days of settling, two days between prompts. Whatever \
+                       you pick, Check for Updates… in the menu always answers immediately and \
+                       spends none of this budget, a release you have answered about stays \
+                       quiet for a week, and \
+                       `veld update` in a terminal is unaffected — this is the desktop app \
+                       asking you, not the only way to get a release.",
+                group: General,
+                section: None,
+                shape: ValueShape::Text,
+                choices: Choices::Static {
+                    options: UPDATE_FREQUENCIES,
+                },
+                requires: None,
+            },
             Self::DesktopMenuBarIcon => toggle(
                 "Show the menu bar icon",
                 "Veld Desktop puts an icon in the macOS menu bar: running runs, a window to \

@@ -29,24 +29,31 @@ const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
 const {
+  DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
   downloadOnlyReason,
   handoffCommand,
   looksLikeVeldCli,
   primaryAction,
+  pruneUpdateState,
+  releaseAgeMs,
   releasePageUrl,
   reportIsFresh,
+  shouldOfferUpdate,
+  updateFrequencyFrom,
   updateInProgress,
   updateMode,
   updatePhaseLabel,
+  updateTier,
   versionSkew,
+  versionsAhead,
 } = require("./updatePolicy");
 
 /** Let the window come up first — an update prompt is never the reason someone opened the app. */
 const FIRST_CHECK_DELAY_MS = 15_000;
-const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The PATH the CLI is handed, rather than the one this process happens to have.
@@ -319,10 +326,20 @@ async function findCli() {
 
 /** @type {"off" | "install" | "download" | "cli"} */
 let mode = "off";
-/** Versions already offered this session, so a periodic check can't re-ask. */
-const offered = new Set();
 /** Daemon versions already reported as skewed, same reason. */
 const skewReported = new Set();
+/** `desktop.updateFrequency`, last read from the daemon. */
+let frequency = DEFAULT_UPDATE_FREQUENCY;
+/** Where `GET /api/settings` lives, from `initUpdater`. */
+let settingsUrl = null;
+/** Where the nudge state is kept, from `initUpdater`. */
+let nudgeStateFile = null;
+/** @type {{lastPromptedAt: number | null, seen: Record<string, number>, offeredAt: Record<string, number>} | null} */
+let nudges = null;
+/** @type {NodeJS.Timeout | null} */
+let checkTimer = null;
+/** When {@link checkTimer} is due to fire, so a re-arm can never push it later. */
+let checkDueAt = null;
 let checking = false;
 /** Set across `quitAndInstall` — see the error listener in `initUpdater`. */
 let installing = false;
@@ -336,18 +353,159 @@ let onSkewChange = null;
 let onQuitCancelled = null;
 
 /**
+ * What this install has already been told about, across restarts.
+ *
+ * Session memory was not enough once the tiers existed, and the gap is the whole
+ * complaint: the `Set` this replaces died with the process, so a machine that
+ * reopens Veld Desktop twice a day was asked about the same declined release
+ * twice a day, and an "at most one prompt per day" promise made against
+ * in-memory state would be a promise about uptime rather than about days. The
+ * `Set` is gone rather than kept alongside: while both existed it ran *first*
+ * and never expired, which silently defeated {@link REOFFER_AFTER_MS} for the
+ * whole life of a session — weeks, on a machine nobody reboots.
+ *
+ * Read lazily and pruned to the running version on that first read — once per
+ * process, which is every time it can matter, since a running app's version
+ * cannot change under it. That is what stops the file accumulating and stops a
+ * downgrade resurrecting a count. A missing, unreadable or
+ * malformed file is "nothing known" — the same direction everything else in this
+ * file takes with `~/.veld` state, because the cost of forgetting is one extra
+ * prompt and the cost of throwing is an updater that never runs again.
+ */
+function readNudges() {
+  if (nudges) return nudges;
+  let parsed = null;
+  try {
+    if (nudgeStateFile) parsed = JSON.parse(fs.readFileSync(nudgeStateFile, "utf8"));
+  } catch {
+    parsed = null;
+  }
+  nudges = pruneUpdateState(parsed, app.getVersion());
+  return nudges;
+}
+
+/**
+ * Persist the nudge state, best-effort.
+ *
+ * A write that fails costs the user a repeated prompt after a restart, which is
+ * exactly the thing this file is here to reduce — but it is not a reason to
+ * refuse an update, and `userData` being unwritable is a problem the update
+ * dialog cannot fix. The in-memory copy stays authoritative for the session
+ * either way.
+ */
+function saveNudges() {
+  if (!nudgeStateFile || !nudges) return;
+  try {
+    fs.mkdirSync(path.dirname(nudgeStateFile), { recursive: true });
+    // Write-then-rename, like the two `userData` files this sits beside
+    // (`windows.js`'s `windows.json`, `browserViews.js`'s `permissions.json`) and
+    // for the same reason they give: a torn file parses as nothing, which here
+    // means every decline and the one-prompt-a-day floor are gone — the app
+    // starts asking again, which is exactly the behaviour this file prevents.
+    const tmp = `${nudgeStateFile}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(nudges, null, 2)}\n`);
+    fs.renameSync(tmp, nudgeStateFile);
+  } catch (err) {
+    console.error("[veld] could not save update nudge state", err);
+  }
+}
+
+/**
+ * Re-read `desktop.updateFrequency` from the daemon.
+ *
+ * Its own request rather than a value threaded through `main.js`, because the
+ * updater is the only thing that reads this key and the schedule has to survive
+ * a daemon that was not up when the app started. The same 2 s budget the tray's
+ * settings read uses; a failure leaves the last known tier in place rather than
+ * snapping back to the default, so a daemon restart does not silently re-tier a
+ * machine that had chosen `relaxed`.
+ */
+async function readFrequency() {
+  if (!settingsUrl) return frequency;
+  try {
+    const res = await fetch(settingsUrl, { signal: AbortSignal.timeout(2000) });
+    if (!res.ok) return frequency;
+    frequency = updateFrequencyFrom(await res.json(), frequency);
+  } catch {
+    // Offline, or no daemon yet. Keep what we had.
+  }
+  return frequency;
+}
+
+/**
+ * Arm the next automatic check.
+ *
+ * A self-rescheduling timeout rather than `setInterval`, because the period is
+ * now a setting: an interval fixed at startup would keep a machine on the tier
+ * it had when the app launched, and "I changed it and nothing happened" is the
+ * failure a settings screen must not have. Each check re-reads the tier and
+ * re-arms at its interval, and {@link settingsChanged} re-arms immediately when
+ * the user actually moves the control.
+ *
+ * @param {number} delayMs
+ */
+function armCheck(delayMs) {
+  if (checkTimer) clearTimeout(checkTimer);
+  checkDueAt = Date.now() + delayMs;
+  checkTimer = setTimeout(() => {
+    checkTimer = null;
+    checkDueAt = null;
+    void checkForUpdates({ manual: false }).catch((err) => {
+      // A `setInterval` could not stop running; a chain of timeouts can. Without
+      // this, one unexpected rejection — a dialog that fails to open, anything
+      // that throws before the re-arm inside the check — ends automatic updates
+      // for the life of the process, silently. Re-arm only if nothing else has.
+      console.error("[veld] update check failed", err);
+      if (!checkTimer) armCheck(updateTier(frequency).checkIntervalMs);
+    });
+  }, delayMs);
+  // Nothing here should hold the process alive on its own.
+  checkTimer.unref?.();
+}
+
+/**
+ * Re-read the tier and re-arm, after the renderer says a setting changed.
+ *
+ * Rides the nudge `main.js` already forwards for `desktop.menuBarIcon`, so
+ * moving the control takes effect at once instead of at the end of an interval
+ * that may be twelve hours long. It deliberately does *not* run a check: the
+ * user changed a preference, they did not ask to be told about a release.
+ */
+async function settingsChanged() {
+  if (mode === "off") return;
+  const before = frequency;
+  await readFrequency();
+  if (frequency === before) return;
+  // **Never later than what is already armed.** The renderer sends this nudge as
+  // soon as the settings document loads, which on a normal launch is inside the
+  // fifteen seconds `initUpdater` armed the first check for — so a plain re-arm
+  // would cancel that first check and replace it with the tier's full interval:
+  // an hour on `eager`, twelve on `relaxed`. Only `balanced` escaped, because it
+  // equals the in-memory default and took the early return above. Shortening is
+  // still allowed, which is what a move to a faster tier should do.
+  const remainingMs = checkDueAt === null ? Number.POSITIVE_INFINITY : checkDueAt - Date.now();
+  armCheck(Math.max(0, Math.min(remainingMs, updateTier(frequency).checkIntervalMs)));
+}
+
+/**
  * Wire up the updater and start the background schedule.
  *
- * @param {{onSkewChange?: () => void, onQuitCancelled?: () => void}} [opts]
+ * @param {{onSkewChange?: () => void, onQuitCancelled?: () => void, settingsUrl?: string, stateFile?: string}} [opts]
  *   `onSkewChange` fires when the daemon-skew notice appears or clears, so the
  *   tray menu can re-render without polling for it. `onQuitCancelled` fires
  *   when an install failed *after* `quitAndInstall` was called — the app asked
  *   to quit, `before-quit` ran, and then it kept running, which is a state the
- *   rest of the shell has to be told about rather than infer.
+ *   rest of the shell has to be told about rather than infer. `settingsUrl` is
+ *   `GET /api/settings`, where `desktop.updateFrequency` lives; `stateFile` is
+ *   where the cross-restart nudge state is kept. Both are passed in rather than
+ *   derived here for the same reason `windows.js` takes its own state file:
+ *   `main.js` owns what the app's paths are.
  */
 function initUpdater(opts = {}) {
   onSkewChange = opts.onSkewChange ?? null;
   onQuitCancelled = opts.onQuitCancelled ?? null;
+  settingsUrl = opts.settingsUrl ?? null;
+  nudgeStateFile = opts.stateFile ?? null;
   // Deliberately does NOT resolve the CLI here. `findCli` spawns up to three
   // candidates × two probes, and this runs inside `whenReady`, before the first
   // window exists — to answer a question nothing needs for another fifteen
@@ -413,13 +571,12 @@ function initUpdater(opts = {}) {
 
   if (mode === "off") return;
 
-  setTimeout(() => void checkForUpdates({ manual: false }), FIRST_CHECK_DELAY_MS);
-  const timer = setInterval(
-    () => void checkForUpdates({ manual: false }),
-    CHECK_INTERVAL_MS,
-  );
-  // Nothing here should hold the process alive on its own.
-  timer.unref?.();
+  // The first check keeps its fixed fifteen seconds on every tier. The tier
+  // governs how often a *release* is put in front of somebody, not how long the
+  // app waits before knowing one exists — and knowing early is what lets the
+  // `balanced` tier start a release's ripening clock on the day it lands rather
+  // than on the day it is finally offered.
+  armCheck(FIRST_CHECK_DELAY_MS);
 }
 
 /**
@@ -454,6 +611,19 @@ async function checkForUpdates({ manual }) {
     }
     return;
   }
+
+  // Re-read the tier per check, for the same reason the mode is re-resolved
+  // above: a setting the user changed in a browser tab has to reach the app, and
+  // the renderer's nudge only arrives when a Veld window is open. Re-arming here
+  // rather than in `initUpdater` is what makes the interval a setting at all.
+  await readFrequency();
+  const tier = updateTier(frequency);
+  // Automatic checks only. A manual *Check for Updates…* answers a question the
+  // user asked; it is not the background channel and must not reset its clock,
+  // or someone who checks by hand on `relaxed` would never get an automatic
+  // check at all. Same reasoning as not spending the prompt budget below.
+  if (!manual) armCheck(tier.checkIntervalMs);
+
   // Guards the network check only, never the dialogs that follow it — and
   // cleared before any of them opens, including the failure one. A `finally`
   // would not do: it runs after the `catch` block, which awaits its dialog, so
@@ -491,10 +661,37 @@ async function checkForUpdates({ manual }) {
     }
     return;
   }
-  // A manual check re-offers a version already declined — asking is the whole
-  // point of clicking the item — while the periodic one stays quiet.
-  if (!manual && offered.has(version)) return;
-  offered.add(version);
+  // Record the sighting before deciding anything with it. This is what starts a
+  // release's ripening clock and what `versionsAhead` counts, so it has to
+  // happen on the check that *declines* to prompt — that is the whole case it
+  // exists for.
+  const state = readNudges();
+  const now = Date.now();
+  if (!alreadySeen({ seen: state.seen, version })) {
+    state.seen[version] = now;
+    saveNudges();
+  }
+
+  const { offer } = shouldOfferUpdate({
+    tier,
+    ageMs: releaseAgeMs({
+      releaseDate: result?.updateInfo?.releaseDate,
+      firstSeenAt: state.seen[version],
+      now,
+    }),
+    ahead: versionsAhead({ seen: state.seen, currentVersion: app.getVersion() }),
+    lastPromptedAt: state.lastPromptedAt,
+    offeredAt: state.offeredAt[version] ?? null,
+    manual,
+    now,
+  });
+  if (!offer) return;
+
+  // The tier's prompt gap is about the *automatic* channel, which is what the
+  // setting's help text promises. A manual check is the user asking, so it does
+  // not spend that budget — but it does count as having asked about this
+  // version, which is why `offerUpdate` records that side unconditionally.
+  if (!manual) state.lastPromptedAt = now;
   await offerUpdate(version);
 }
 
@@ -521,6 +718,25 @@ async function offerUpdate(version) {
     detail = `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`;
   }
 
+  // The knob, named at the moment somebody might want it — which is while an
+  // update dialog is on screen, not while reading a settings list. Withheld on
+  // the quietest tier: offering to make it quieter is noise to the one person
+  // who has already answered the question.
+  if (frequency !== "relaxed") {
+    detail += "\n\nAsked too often? Settings → General → “How eagerly to offer updates”.";
+  }
+
+  // Recorded *before* the dialog and for every answer, not only for "Later".
+  // Two reasons. A dialog the user closes with the window button, or one that
+  // never returns because the app is quitting into an update, still has to count
+  // as asked — otherwise the next automatic check re-offers it. And clicking
+  // Download and Install is not a reason to ask again either: if that install
+  // fails, `eager`'s zero prompt gap would otherwise re-offer the same release
+  // an hour later, forever.
+  const state = readNudges();
+  state.offeredAt[version] = Date.now();
+  saveNudges();
+
   const { response } = await dialog.showMessageBox({
     type: "info",
     // Named for what is actually being offered. The feed's version is the
@@ -535,6 +751,11 @@ async function offerUpdate(version) {
     defaultId: 0,
     cancelId: 1,
   });
+  // "Later" is already recorded above, along with every other answer. It now
+  // means later rather than "until the next launch" — and, because
+  // `REOFFER_AFTER_MS` expires, later rather than never. A manual check still
+  // re-offers it at any time, and so does the next release, since
+  // `pruneUpdateState` drops every version the installed one has caught up with.
   if (response !== 0) return;
 
   if (viaCli) {
@@ -866,5 +1087,6 @@ module.exports = {
   initUpdater,
   noteDaemonVersion,
   quitIfUpdating,
+  settingsChanged,
   skewMenuItem,
 };

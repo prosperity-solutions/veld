@@ -1099,10 +1099,96 @@ turns macOS self-updates on.
 
 Two different mismatches, deliberately reported differently:
 
-- **A newer release exists.** Checked 15 s after launch and every 6 h, silent
-  unless it finds something, never re-prompting for a version already declined in
-  this session. A user-initiated *Check for Updates…* (tray on macOS, application
-  menu everywhere) reports every outcome including "up to date".
+- **A newer release exists.** Checked 15 s after launch and then on the interval
+  the user's tier asks for, silent unless it finds something. A user-initiated
+  *Check for Updates…* (tray on macOS, application menu everywhere) reports every
+  outcome including "up to date", and outranks every gate below.
+
+  **How often it *asks* is a setting, `desktop.updateFrequency`, and that is a
+  different question from how often it checks.** The app used to check every six
+  hours and offer whatever it found, which on a release train that ships several
+  times a day is several dialogs a day — each one individually correct, and
+  collectively the complaint. The three tiers live in `updatePolicy.js`'s
+  `UPDATE_TIERS`, and each is four numbers rather than an interval, because
+  "how often" turned out to be four questions:
+
+  | | check every | release must be | …or this many waiting | gap between prompts |
+  |---|---|---|---|---|
+  | `eager` | 1 h | — | 1 | — |
+  | `balanced` (default) | 6 h | 36 h old | 4 | 24 h |
+  | `relaxed` | 12 h | 72 h old | 8 | 48 h |
+
+  The *age* gate is what the tiers are really for: the release that follows a bad
+  one lands within hours, so a tier that waits skips the dialog for both. The
+  version count is the escape hatch that stops a quiet tier sitting out a week,
+  and it overrides the age gate only — never the prompt gap, because a burst of
+  releases is not a reason to prompt twice in an hour.
+
+  Two things about that count are worth knowing before trusting the labels. It
+  counts **releases this app has seen go past**, not releases that exist: the
+  feed names only the newest one, and the true count needs a second, rate-limited
+  request to the source the handoff already avoids (`handoffCommand`'s
+  `--target-version`). And on a train that ships several times a day it is the
+  gate that actually fires, because the newest release is never old enough to
+  clear `minReleaseAgeMs` — the age gate is for the quiet weeks, the count for
+  the busy ones. Measured over 14 simulated days at a release every 8 h (42
+  releases): 42 prompts before this change, 42 on `eager`, 13 on `balanced`,
+  6 on `relaxed`.
+
+  A release's age comes from the feed's `releaseDate` where it has one and from
+  when this app first recorded the version otherwise, whichever is older — so a
+  release published before this app ever saw it keeps its real age rather than
+  starting its clock at first sight.
+
+  The state behind it — when the last prompt was, which versions have been seen,
+  which have been answered and when — is `update-nudges.json` in `userData`, beside
+  `windows.json`, and written the same way they are (temp file, then rename: a
+  torn one parses as nothing, which here means every answer and the
+  one-a-day floor are gone). It has to survive restarts or the promise is about
+  uptime rather than about days, and it is pruned to the running version on the
+  first read of each process — every time it can matter, since a running app's
+  version cannot change under it — so it neither grows without bound nor counts
+  releases the app has installed.
+
+  **One clock answers "have I already asked about this version", and it is
+  persisted.** `REOFFER_AFTER_MS` is a week. Getting there took two review rounds
+  and both wrong answers are worth recording, because each looked right on its
+  own. A session `Set` suppressed a version until the process exited — weeks, on
+  a machine nobody reboots. A persisted *decline* list suppressed it forever,
+  because the feed only ever names the newest release, so on a quiet week "the
+  next version" never comes and a button labelled *Later* meant *never*. And
+  while both existed, the `Set` ran first and silently defeated the expiry that
+  had just been added to fix exactly that.
+
+  The clock records **every** answer, not only a decline: closing the dialog with
+  the window button counts, and so does clicking Download and Install, because an
+  install that then fails would otherwise be re-offered an hour later forever on
+  `eager`, whose prompt gap is zero.
+
+  A **manual** *Check for Updates…* is outside all of this: it answers
+  immediately, it re-offers a version already answered for, it does not spend the
+  tier's prompt budget, and it does not re-arm the background timer. The setting is
+  about the channel that interrupts you unasked; a question you asked is not
+  that channel.
+
+  The tier is re-read from `GET /api/settings` on every automatic check *and* on
+  the renderer's `veld:app:settings-changed` nudge, and the schedule is a
+  self-rescheduling `setTimeout` rather than a `setInterval` so a changed setting
+  takes effect at once instead of at the end of an interval that may be twelve
+  hours long. Two consequences of that swap are paid for explicitly: the nudge
+  re-arms to `min(what is already pending, the new interval)`, because it arrives
+  inside the first check's fifteen seconds and a plain re-arm pushed that first
+  check out to a full hour on `eager` and twelve on `relaxed`; and the timer
+  callback catches, because a chain of timeouts — unlike an interval — can stop
+  for good on one rejection.
+
+  The tier names are **half of a cross-language contract**: the other half is
+  `UPDATE_FREQUENCIES` in `crates/veld-core/src/db/settings_catalog.rs`, which is
+  what the settings dialog offers and what the validator accepts. Both halves
+  fail silently alone — a tier only in the JS is unreachable from Settings, a
+  choice only in the Rust is stored and then read as `balanced` forever — so
+  `updatePolicy.test.js`'s *the tier names match the Rust allow-list* reads that
+  file and compares, in the same spirit as the schema/example drift gate.
 
   On the `"cli"` route the prompt is about the **release**, not the app —
   *"veld 16.8.0 is available"*, *"Quit and Update veld"* — because that is what
@@ -1120,13 +1206,54 @@ Two different mismatches, deliberately reported differently:
   `veld update` performed while the app is open both raises and clears the
   notice.
 
-The app is a shell around a daemon it does not ship, so its waiting screen spells
-out both commands — the installer *and* `veld setup unprivileged` — rather than
-saying "install veld". For a packaged download on a machine that has never had
-it, that screen is the whole first impression, and the installer deliberately
-does not run setup, which is the step that actually installs the daemon agent
-the screen is waiting for. `veld doctor` only diagnoses, so it is offered to
-someone who is already set up.
+### The waiting screen asks before it advises
+
+The app is a shell around a daemon it does not ship, so when the daemon does not
+answer the screen has to say something useful with no daemon to ask. It used to
+say one thing to everybody: install veld, then run setup. That is right exactly
+once, on a fresh machine, and wrong in the case that happens most — `veld update`
+restarts the daemon and relaunches the app, the app wins the race by a second,
+and a working install is told to go and install itself. Following that advice
+means re-running an installer over a machine that is mid-update.
+
+So `waitingScreen.js` asks one question first: **is the veld CLI on this machine
+at all?** Existence and the execute bit over `cliCandidatePaths` — deliberately
+not the updater's `--version`-and-check-the-output probe, which is asking a
+different question because it is about to *run* what it found.
+
+- **No binary** → the commands, immediately. Nothing is coming, and this is the
+  first-impression case the original screen was written for. Both steps are named
+  because the installer deliberately does not run setup (`install.sh` → "no
+  auto-run of veld setup"), and setup is what installs the daemon agent
+  (`commands/setup/unprivileged.rs`).
+- **A binary, under a minute** → *"Starting Veld… If you just updated, the daemon
+  is restarting."* No commands at all.
+- **A binary, over a minute** (`STALL_AFTER_MS`) → the fault page: where veld is
+  installed, what is not answering, `veld setup unprivileged` for an install that
+  never ran setup, and `veld doctor` for one that did. Never the installer — this
+  machine demonstrably has veld.
+
+The probe is re-run per render rather than cached at startup, because in between
+two renders the user may have done exactly what the page told them to. Be exact
+about what that costs: `windows.js`'s retry loop renders on **every two-second
+tick** while the daemon is unreachable, so this is three `accessSync` calls every
+two seconds per waiting window — a `stat` on three fixed paths, on a window doing
+nothing else. The loop only calls `loadURL` when the rendered HTML actually
+changes, so the page itself is not reloaded on the tick; and `shownHtml` is
+recorded only *after* that load resolves, or one failed escalation would leave
+the window on "Starting Veld…" for good.
+
+The minute is counted in **attempts × the tick, not wall clock**. The escalation
+claims the app has genuinely tried, and a laptop asleep on "Starting Veld…" makes
+no attempts while its clock runs — a wall-clock reading would wake straight onto
+the diagnostic page having retried zero extra times.
+
+One honest limit: `installedCliPath` knows only the three directories
+`install.sh` prefers, and `install.sh` will install elsewhere — `VELD_INSTALL_DIR`,
+or an existing veld found anywhere and updated in place. So it can say "no binary"
+about a machine that has one. That is why the `not-installed` page still carries
+a `veld doctor` line: being wrong has to cost a redundant instruction, never a
+dead end.
 
 ## Data model
 

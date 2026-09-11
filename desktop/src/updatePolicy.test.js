@@ -5,9 +5,14 @@ const path = require("node:path");
 
 const {
   CONSOLE_HANDOFF,
+  DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
+  REOFFER_AFTER_MS,
+  UPDATE_TIERS,
+  alreadyAnswered,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -15,12 +20,18 @@ const {
   handoffCommand,
   looksLikeVeldCli,
   primaryAction,
+  pruneUpdateState,
+  releaseAgeMs,
   releasePageUrl,
   reportIsFresh,
+  shouldOfferUpdate,
+  updateFrequencyFrom,
   updateInProgress,
   updateMode,
   updatePhaseLabel,
+  updateTier,
   versionSkew,
+  versionsAhead,
 } = require("./updatePolicy");
 
 // A `phase_at` the staleness rule will accept, unless a test wants otherwise.
@@ -521,4 +532,270 @@ test("console-handoff alone never invents the full route", () => {
   assert.equal(full, false);
   assert.equal(args.includes("--console"), false);
   assert.deepEqual(args.slice(0, 2), ["desktop", "update"]);
+});
+
+// ---------------------------------------------------------------------------
+// Update frequency tiers
+// ---------------------------------------------------------------------------
+
+const HOUR = 60 * 60 * 1000;
+const NOW = Date.parse("2026-09-11T12:00:00Z");
+
+test("the default tier is quieter than the behaviour it replaces", () => {
+  // The whole point of the change, asserted rather than described: same check
+  // interval, but a release has to ripen and a day has to pass between prompts.
+  // A regression that made the default prompt eagerly would otherwise be
+  // invisible — every individual dialog still looks correct.
+  const before = UPDATE_TIERS.balanced;
+  assert.equal(DEFAULT_UPDATE_FREQUENCY, "balanced");
+  assert.equal(before.checkIntervalMs, 6 * HOUR);
+  assert.ok(before.minReleaseAgeMs > 0);
+  assert.ok(before.minPromptGapMs >= 24 * HOUR);
+  assert.equal(UPDATE_TIERS.eager.minReleaseAgeMs, 0);
+  assert.equal(UPDATE_TIERS.eager.minPromptGapMs, 0);
+  // Each tier is strictly quieter than the one above it on every axis a person
+  // can perceive, so the labels stay true in both directions.
+  for (const axis of ["minReleaseAgeMs", "minPromptGapMs", "versionsAheadOverride"]) {
+    assert.ok(UPDATE_TIERS.eager[axis] <= UPDATE_TIERS.balanced[axis], axis);
+    assert.ok(UPDATE_TIERS.balanced[axis] <= UPDATE_TIERS.relaxed[axis], axis);
+  }
+});
+
+test("an unknown tier name is the default, in both directions", () => {
+  // A newer daemon can offer a tier this app has never heard of, and a garbled
+  // value must not leave the updater with no schedule at all.
+  assert.equal(updateTier("relaxed"), UPDATE_TIERS.relaxed);
+  assert.equal(updateTier("glacial"), UPDATE_TIERS.balanced);
+  assert.equal(updateTier(undefined), UPDATE_TIERS.balanced);
+  assert.equal(updateTier(7), UPDATE_TIERS.balanced);
+  // Not `Object.prototype`'s, either: a stored "constructor" must not resolve.
+  assert.equal(updateTier("constructor"), UPDATE_TIERS.balanced);
+});
+
+test("updateFrequencyFrom only moves off the fallback for a tier it knows", () => {
+  assert.equal(updateFrequencyFrom({ settings: { "desktop.updateFrequency": "eager" } }), "eager");
+  assert.equal(updateFrequencyFrom({ settings: {} }, "relaxed"), "relaxed");
+  assert.equal(updateFrequencyFrom(null, "relaxed"), "relaxed");
+  assert.equal(updateFrequencyFrom({ settings: { "desktop.updateFrequency": 3 } }), "balanced");
+  // An older app against a newer daemon: keep what we had rather than guessing.
+  assert.equal(
+    updateFrequencyFrom({ settings: { "desktop.updateFrequency": "nightly" } }, "relaxed"),
+    "relaxed",
+  );
+});
+
+test("a release's age survives a laptop that was shut", () => {
+  // `firstSeenAt` alone would restart the ripening clock every time the app
+  // reopens, so a release that has been out for a week would be treated as new.
+  const age = releaseAgeMs({
+    releaseDate: "2026-09-04T12:00:00Z",
+    firstSeenAt: NOW,
+    now: NOW,
+  });
+  assert.equal(age, 7 * 24 * HOUR);
+});
+
+test("a release with no usable date falls back to when it was first seen", () => {
+  const seen = NOW - 5 * HOUR;
+  assert.equal(releaseAgeMs({ releaseDate: undefined, firstSeenAt: seen, now: NOW }), 5 * HOUR);
+  assert.equal(releaseAgeMs({ releaseDate: "not a date", firstSeenAt: seen, now: NOW }), 5 * HOUR);
+  // A publisher's clock ahead of ours is not a release from tomorrow, and must
+  // never produce a negative age that reads as "ripe".
+  assert.equal(
+    releaseAgeMs({ releaseDate: "2026-09-12T12:00:00Z", firstSeenAt: seen, now: NOW }),
+    5 * HOUR,
+  );
+  // Nothing known at all is age zero, i.e. "not ripe" — the quiet direction.
+  assert.equal(releaseAgeMs({ now: NOW }), 0);
+});
+
+test("versionsAhead counts only what the running version has not caught up with", () => {
+  const seen = { "16.70.0": 1, "16.71.0": 2, "16.72.0": 3, "16.73.0": 4 };
+  assert.equal(versionsAhead({ seen, currentVersion: "16.71.0" }), 2);
+  assert.equal(versionsAhead({ seen, currentVersion: "16.73.0" }), 0);
+  assert.equal(versionsAhead({ seen: null, currentVersion: "16.71.0" }), 0);
+});
+
+test("the default tier waits for a release to settle, then offers it", () => {
+  const tier = UPDATE_TIERS.balanced;
+  const base = { tier, ahead: 1, lastPromptedAt: null, now: NOW };
+  assert.deepEqual(shouldOfferUpdate({ ...base, ageMs: 6 * HOUR }), {
+    offer: false,
+    reason: "ripening",
+  });
+  assert.deepEqual(shouldOfferUpdate({ ...base, ageMs: 40 * HOUR }), {
+    offer: true,
+    reason: "aged",
+  });
+});
+
+test("releases piling up shortcut the age gate but never the prompt gap", () => {
+  // The distinction the tiers turn on: a burst is a reason to stop waiting for
+  // the current release to settle, not a reason to prompt twice in an hour.
+  const tier = UPDATE_TIERS.balanced;
+  assert.deepEqual(shouldOfferUpdate({ tier, ageMs: 1 * HOUR, ahead: 4, now: NOW }), {
+    offer: true,
+    reason: "piled-up",
+  });
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier,
+      ageMs: 1 * HOUR,
+      ahead: 40,
+      lastPromptedAt: NOW - 2 * HOUR,
+      now: NOW,
+    }),
+    { offer: false, reason: "too-soon" },
+  );
+});
+
+test("a manual check is answered whatever the tier says", () => {
+  // Clicking Check for Updates… is the one input that outranks every gate,
+  // including a decline — asking again is the whole point of clicking it.
+  const tier = UPDATE_TIERS.relaxed;
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier,
+      ageMs: 0,
+      ahead: 0,
+      offeredAt: NOW,
+      lastPromptedAt: NOW - 60_000,
+      manual: true,
+      now: NOW,
+    }),
+    { offer: true, reason: "manual" },
+  );
+});
+
+test("an answered release stays quiet for the automatic check", () => {
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier: UPDATE_TIERS.eager,
+      ageMs: 99 * HOUR,
+      ahead: 9,
+      offeredAt: NOW - HOUR,
+      now: NOW,
+    }),
+    { offer: false, reason: "answered" },
+  );
+});
+
+test("\"Later\" means later, not never", () => {
+  // The feed only ever names the newest release, so an answer that never expired
+  // would mean an automatic check never raises that version again — on a quiet
+  // week, never at all, from a button labelled Later.
+  const base = { tier: UPDATE_TIERS.balanced, ageMs: 99 * HOUR, ahead: 1, now: NOW };
+  assert.equal(shouldOfferUpdate({ ...base, offeredAt: NOW - REOFFER_AFTER_MS + HOUR }).offer, false);
+  assert.equal(shouldOfferUpdate({ ...base, offeredAt: NOW - REOFFER_AFTER_MS - HOUR }).offer, true);
+});
+
+test("an answer timestamped in the future does not silence the app forever", () => {
+  // Same clock tolerance as `reportIsFresh`, and here it matters more: an
+  // `offeredAt` years ahead would mute that version permanently, which is the
+  // exact failure the expiry was added to prevent.
+  assert.equal(alreadyAnswered({ offeredAt: NOW + 30 * 24 * HOUR, now: NOW }), false);
+  assert.equal(alreadyAnswered({ offeredAt: NOW + HOUR, now: NOW }), true);
+  assert.equal(alreadyAnswered({ offeredAt: null, now: NOW }), false);
+  assert.equal(alreadyAnswered({ offeredAt: "yesterday", now: NOW }), false);
+});
+
+test("the tier names match the Rust allow-list", () => {
+  // The one thing tying `UPDATE_TIERS` to `UPDATE_FREQUENCIES` in
+  // `crates/veld-core/src/db/settings_catalog.rs`. Neither language can see the
+  // other, and both halves fail silently on their own: a tier added only here is
+  // unreachable from Settings because the Rust validator rejects the value, and
+  // a choice added only there is offered, stored, and then read by this app as
+  // `balanced` forever. Same shape as the schema/example drift gate elsewhere in
+  // this repo — a test, because there is no compiler that can do it.
+  const rust = fs.readFileSync(
+    path.join(__dirname, "../../crates/veld-core/src/db/settings_catalog.rs"),
+    "utf8",
+  );
+  const block = rust.match(/UPDATE_FREQUENCIES: &\[Choice\] = &\[([\s\S]*?)\];/);
+  assert.ok(block, "UPDATE_FREQUENCIES not found — did it move or get renamed?");
+  const values = [...block[1].matchAll(/choice\("([^"]+)"/g)].map((m) => m[1]);
+  assert.deepEqual(values, Object.keys(UPDATE_TIERS));
+  // The stored default has to be one of them, in both languages.
+  assert.ok(values.includes(DEFAULT_UPDATE_FREQUENCY));
+  assert.match(
+    fs.readFileSync(
+      path.join(__dirname, "../../crates/veld-core/src/db/settings.rs"),
+      "utf8",
+    ),
+    new RegExp(
+      `SettingKey::DesktopUpdateFrequency,\\s*Value::from\\("${DEFAULT_UPDATE_FREQUENCY}"\\)`,
+    ),
+  );
+});
+
+test("a version map never answers for a key it does not have", () => {
+  // `constructor` and `toString` are present on every object literal, and these
+  // maps are keyed by strings from a JSON file and an update feed. A truthy
+  // lookup would read such a version as already seen and hand back a function as
+  // its timestamp.
+  const seen = pruneUpdateState({ seen: { "16.73.0": 5 } }, "16.72.0").seen;
+  assert.equal(alreadySeen({ seen, version: "16.73.0" }), true);
+  assert.equal(alreadySeen({ seen, version: "constructor" }), false);
+  assert.equal(alreadySeen({ seen, version: "__proto__" }), false);
+  // A recorded epoch timestamp is a real sighting, not an absent one.
+  assert.equal(alreadySeen({ seen: { "16.73.0": 0 }, version: "16.73.0" }), true);
+});
+
+test("a clock that jumped backwards does not silence the app for days", () => {
+  // One-sided, like `updateInProgress`'s phase check. A `lastPromptedAt` in the
+  // future read as "the gap has not elapsed" would mute updates until the
+  // timestamp caught up.
+  assert.deepEqual(
+    shouldOfferUpdate({
+      tier: UPDATE_TIERS.balanced,
+      ageMs: 99 * HOUR,
+      ahead: 1,
+      lastPromptedAt: NOW + 30 * 24 * HOUR,
+      now: NOW,
+    }),
+    { offer: true, reason: "aged" },
+  );
+});
+
+test("the eager tier offers a release the moment it is seen", () => {
+  assert.deepEqual(
+    shouldOfferUpdate({ tier: UPDATE_TIERS.eager, ageMs: 0, ahead: 1, now: NOW }),
+    { offer: true, reason: "piled-up" },
+  );
+});
+
+test("nudge state is pruned to the running version", () => {
+  // Without this the `seen` map is append-only for the life of an install, and —
+  // worse — the four releases that triggered a prompt would still be counted
+  // against the release they installed.
+  const state = pruneUpdateState(
+    {
+      lastPromptedAt: 1234,
+      seen: { "16.70.0": 1, "16.72.0": 2, "16.73.0": 3 },
+      offeredAt: { "16.70.0": 9, "16.73.0": 10 },
+    },
+    "16.72.0",
+  );
+  // Spread before comparing: the maps are `Object.create(null)`, and a strict
+  // deep-equal compares prototypes.
+  assert.equal(state.lastPromptedAt, 1234);
+  assert.deepEqual({ ...state.seen }, { "16.73.0": 3 });
+  assert.deepEqual({ ...state.offeredAt }, { "16.73.0": 10 });
+});
+
+test("a malformed nudge file degrades to nothing known", () => {
+  // It lives in userData where anything can edit it, and an updater that throws
+  // on every check is a worse outcome than one extra prompt.
+  const isEmpty = (state) => {
+    assert.equal(state.lastPromptedAt, null);
+    assert.deepEqual({ ...state.seen }, {});
+    assert.deepEqual({ ...state.offeredAt }, {});
+  };
+  isEmpty(pruneUpdateState(null, "16.72.0"));
+  isEmpty(pruneUpdateState("nonsense", "16.72.0"));
+  isEmpty(pruneUpdateState({ seen: [], offeredAt: "16.73.0" }, "16.72.0"));
+  // An array carries no timestamps, so it cannot answer the expiry question and
+  // is dropped rather than half-honoured.
+  isEmpty(pruneUpdateState({ offeredAt: ["16.73.0"] }, "16.72.0"));
+  isEmpty(pruneUpdateState({ lastPromptedAt: "soon", seen: { "16.73.0": "yes" } }, "16.72.0"));
 });

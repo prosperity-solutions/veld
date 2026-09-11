@@ -130,6 +130,18 @@ and are launched by launchd normally.
 replaced, and the CLI moves every half and reopens it. One click, one restart, no
 follow-up trip to a terminal.
 
+**How often the app *offers* one is a setting: `desktop.updateFrequency`.** Three
+values. `eager` checks hourly and offers every release it finds. `balanced` (the
+default) checks every six hours but holds the dialog until a release is 36 hours
+old — or until the app has seen four pile up — and never prompts more than once a
+day. `relaxed` checks every twelve hours, waits three days, and leaves two days
+between prompts. A release you have answered about — Later, or Install —
+stays quiet for a week rather than coming back at the next launch. None of this touches the two things a person or an agent does on
+purpose: *Check for Updates…* answers immediately and spends none of the budget,
+and `veld update` in a terminal is unaffected. Read it with
+`veld settings describe desktop.updateFrequency`. Only Veld Desktop reads this —
+the CLI has never nagged and still does not.
+
 **`--console` re-runs the update in a terminal window**, which fixes two things a
 detached child cannot do. It has no surface to show progress on once the app has
 quit — one to four minutes of nothing — and no controlling terminal, so on a

@@ -309,7 +309,7 @@ function pruneShowing() {
 
 /** @type {null | {
  *   baseUrl: string,
- *   waitingHtml: string,
+ *   waitingPage: (ctx: {elapsedMs: number}) => string,
  *   daemonReachable: () => Promise<boolean>,
  *   appIcon: string,
  *   topbarHeight: number,
@@ -498,12 +498,45 @@ async function loadAppWhenReady(win, url) {
     await win.loadURL(url);
     return;
   }
-  await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(deps.waitingHtml)}`);
+  // The waiting page is a function of how long this window has been waiting, not
+  // a constant: it opens on "starting up", and only escalates to a page that
+  // diagnoses anything once that has stopped being a plausible explanation. See
+  // `waitingScreen.js` for why, and for who decides.
+  // **Attempts × the tick, not wall clock.** The escalation is a claim about
+  // having genuinely tried — and a laptop asleep on "Starting Veld…" makes no
+  // attempts while its clock keeps running, so a wall-clock reading would wake
+  // straight onto the diagnostic page having retried zero extra times. Counting
+  // ticks makes the number mean what the page says it means, and in the ordinary
+  // case the two are the same sixty seconds.
+  const TICK_MS = 2000;
+  let attempts = 0;
+  let shownHtml = null;
+  const showWaiting = async () => {
+    const html = deps.waitingPage({ elapsedMs: attempts * TICK_MS });
+    // Compared rather than re-rendered every tick: a `loadURL` every two seconds
+    // would restart the page, and anything the user had selected — a command
+    // they were half-way through copying — would go with it.
+    if (html === shownHtml) return;
+    await win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(html)}`);
+    // **After** the load, not before. The escalation to the diagnostic page is a
+    // single transition, and its `loadURL` can reject; marking it shown first
+    // meant one failed load left the window on "Starting Veld…" for good, since
+    // the equality guard above then suppressed every retry. Assigning here costs
+    // at most a repeated render on the next two-second tick, and self-heals.
+    shownHtml = html;
+  };
+  // Caught like every other load in this function: without it, a rejected first
+  // load returned before the retry loop below was ever created, so the window
+  // got no retries, no escalation and no recovery — only an unhandled rejection.
+  await showWaiting().catch((err) => {
+    if (!win.isDestroyed()) console.error("[veld] waiting page failed to load", err);
+  });
   const timer = setInterval(async () => {
     if (win.isDestroyed()) {
       clearInterval(timer);
       return;
     }
+    attempts++;
     if (await deps.daemonReachable()) {
       clearInterval(timer);
       // Same treatment as the first load. This promise is discarded by the
@@ -514,8 +547,17 @@ async function loadAppWhenReady(win, url) {
       await win.loadURL(url).catch((err) => {
         if (!win.isDestroyed()) console.error("[veld] window failed to load", err);
       });
+      return;
     }
-  }, 2000);
+    // Same catch, same reason: the window can go away across the await above.
+    if (win.isDestroyed()) return;
+    await showWaiting().catch((err) => {
+      if (!win.isDestroyed()) console.error("[veld] waiting page failed to load", err);
+    });
+    // `TICK_MS`, not a second literal `2000`: `elapsedMs` above is derived from
+    // this period, so two copies that drift would move when the sixty seconds
+    // elapses while every comment still claimed sixty.
+  }, TICK_MS);
 }
 
 /**

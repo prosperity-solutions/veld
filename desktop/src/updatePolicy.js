@@ -162,6 +162,311 @@ function versionSkew({ appVersion, daemonVersion, isPackaged }) {
 }
 
 /**
+ * How eagerly this machine wants to be told about a new release.
+ *
+ * One setting, `desktop.updateFrequency`, with three answers — and the knobs
+ * below exist because "how often" turned out to be three separate questions that
+ * a single interval answered badly. The app used to check every six hours and
+ * offer whatever it found, which is why the complaint was never about the
+ * checking: a release train that ships several times a day produced several
+ * dialogs a day, each one correct and each one an interruption.
+ *
+ * - `checkIntervalMs` — how often the network check runs. Silent either way;
+ *   this is the only knob that costs anything, and it is the *least* important
+ *   of the three.
+ * - `minReleaseAgeMs` — how long a release has to have existed before it is
+ *   worth interrupting somebody for. The point of waiting is that the release
+ *   that follows a bad one lands within hours, so a tier that waits skips the
+ *   dialog for both.
+ * - `versionsAheadOverride` — how many *seen* releases is enough to ask anyway,
+ *   when the age gate has not opened yet. This is what stops a quiet tier from
+ *   sitting out an entire week of releases — and on a train that ships several
+ *   times a day it is the gate that actually fires, because the newest release
+ *   is never old enough to clear `minReleaseAgeMs`. "Seen" is the honest word:
+ *   see {@link versionsAhead} for why the true release count is not available.
+ * - `minPromptGapMs` — the floor between two prompts, whatever else is true.
+ *   The one knob a user can predict from the label: "at most once a day".
+ *
+ * Default is {@link DEFAULT_UPDATE_FREQUENCY}, and it is deliberately quieter
+ * than the behaviour it replaces on every axis that a person can perceive: the
+ * same six-hour check, but a release has to be a day and a half old (or the
+ * fourth one this app has seen) before it produces a dialog, and never more than
+ * one dialog a day.
+ *
+ * **These key names are half of a contract with Rust.** The other half is
+ * `UPDATE_FREQUENCIES` in `crates/veld-core/src/db/settings_catalog.rs`, which
+ * is what the settings dialog offers and what `settings.rs`'s validator accepts
+ * — so a tier added *here* alone is unreachable from Settings, and a choice
+ * added *there* alone is storable but falls back to `balanced` in this app
+ * forever. Nothing in either language can see the other, so
+ * `updatePolicy.test.js`'s `the tier names match the Rust allow-list` reads that
+ * file and compares. That test is the only thing standing between an ordinary
+ * edit and a silently dead setting; do not delete it when adding a tier, fix it.
+ *
+ * @type {Record<string, {checkIntervalMs: number, minReleaseAgeMs: number, versionsAheadOverride: number, minPromptGapMs: number}>}
+ */
+const UPDATE_TIERS = {
+  // Every release, as soon as the check finds it. For someone who wants the
+  // newest build — and accepts that "newest" and "settled" are different things.
+  eager: {
+    checkIntervalMs: 60 * 60 * 1000,
+    minReleaseAgeMs: 0,
+    versionsAheadOverride: 1,
+    minPromptGapMs: 0,
+  },
+  // The default. At most one prompt a day, for a release that has had a day and
+  // a half to be superseded — or for a fourth release that has piled up behind
+  // the gate, which is the case the age rule alone handles badly.
+  balanced: {
+    checkIntervalMs: 6 * 60 * 60 * 1000,
+    minReleaseAgeMs: 36 * 60 * 60 * 1000,
+    versionsAheadOverride: 4,
+    minPromptGapMs: 24 * 60 * 60 * 1000,
+  },
+  // For someone happy to run a version that is a few days old. Two days between
+  // prompts, three days of ripening, and eight seen releases is the only thing
+  // that shortcuts the *age* gate — nothing shortcuts the prompt gap.
+  relaxed: {
+    checkIntervalMs: 12 * 60 * 60 * 1000,
+    minReleaseAgeMs: 72 * 60 * 60 * 1000,
+    versionsAheadOverride: 8,
+    minPromptGapMs: 48 * 60 * 60 * 1000,
+  },
+};
+
+/** The tier a machine that has never touched the setting is on. */
+const DEFAULT_UPDATE_FREQUENCY = "balanced";
+
+/**
+ * How long one release stays answered, before the automatic channel may raise it
+ * again.
+ *
+ * Two things used to do this job and neither did it properly. A session `Set`
+ * suppressed a version until the process exited — which on macOS can be weeks —
+ * and a persisted decline list suppressed it forever, because the feed only ever
+ * names the *newest* release, so on a quiet week "the next version" never comes.
+ * A button labelled *Later* meant "never again", and a review round found the
+ * `Set` short-circuiting the expiry that was added to fix exactly that.
+ *
+ * So there is one clock and it is persisted: you were asked about this version,
+ * at this time. A week is long enough that answering actually buys quiet — the
+ * whole point — and short enough that somebody who meant "not today" is asked
+ * again eventually rather than never.
+ *
+ * It covers *every* answer, not just a decline. Clicking Download and Install
+ * and then having the install fail is the case a decline-only clock missed: on
+ * `eager`, whose prompt gap is zero, nothing else would stop the next hourly
+ * check re-offering the release that just failed to install.
+ *
+ * Independent of the tier. The tier governs how often you are asked about
+ * releases in general; this governs one release you have already answered about,
+ * and a `relaxed` user who said Later has not asked to be *never* told again.
+ */
+const REOFFER_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * The tier named by a stored setting value.
+ *
+ * Anything unrecognised is the default, on purpose and in both directions: a
+ * *newer* daemon could offer a tier this app has never heard of (the settings
+ * document is shared across clients and outlives any one app build), and a
+ * garbled value must not leave the updater with no schedule at all. The Rust
+ * side validates against the same three names, so this path is reached by
+ * version skew rather than by a user typo.
+ *
+ * @param {unknown} value
+ */
+function updateTier(value) {
+  return isTierName(value) ? UPDATE_TIERS[value] : UPDATE_TIERS[DEFAULT_UPDATE_FREQUENCY];
+}
+
+/**
+ * Whether a stored value names a tier this build has.
+ *
+ * `Object.hasOwn` rather than `in` or a truthy lookup, and it is not pedantry:
+ * `UPDATE_TIERS` is an object literal, so `"constructor"` and `"toString"` are
+ * `in` it and resolve to functions off `Object.prototype`. A stored value of
+ * `"constructor"` would then be accepted as a tier and read as
+ * `tier.checkIntervalMs === undefined`, which `setTimeout` treats as zero — a
+ * check every tick, from a string nobody validated on the way in.
+ *
+ * @param {unknown} value
+ * @returns {value is keyof typeof UPDATE_TIERS}
+ */
+function isTierName(value) {
+  return typeof value === "string" && Object.hasOwn(UPDATE_TIERS, value);
+}
+
+/**
+ * The `desktop.updateFrequency` value in a `GET /api/settings` body.
+ *
+ * Shaped like `trayVisibility.js`'s `menuBarIconFrom` and for the same reason:
+ * the fetch can fail, the key can be absent on an older daemon, and the value
+ * can be any JSON at all. Only a string that names a tier this build knows moves
+ * the answer off `fallback` — which keeps a daemon that has never heard of the
+ * key from silently re-tiering the app.
+ *
+ * @param {unknown} body
+ * @param {string} fallback
+ * @returns {string}
+ */
+function updateFrequencyFrom(body, fallback = DEFAULT_UPDATE_FREQUENCY) {
+  const value = /** @type {any} */ (body)?.settings?.["desktop.updateFrequency"];
+  return isTierName(value) ? value : fallback;
+}
+
+/**
+ * How long the newest release has been available, in ms.
+ *
+ * Two sources, and the older answer wins. `firstSeenAt` is when *this* app first
+ * recorded the version; `releaseDate` comes off the update feed. Taking the
+ * older of the two is what makes the age gate survive a laptop that was shut for
+ * a week: on `firstSeenAt` alone, reopening the app would restart the ripening
+ * clock on a release that has been out for days, and the user would be asked to
+ * wait all over again.
+ *
+ * **`releaseDate` is a *pack* time, not a publish time**, and an earlier version
+ * of this comment called it "the truth" — it is not. `app-builder-lib` stamps it
+ * with `new Date()` while generating the feed
+ * (`out/publish/updateInfoBuilder.js`), and `release.yml` creates the GitHub
+ * release as a **draft** and flips it visible afterwards, so the gap between the
+ * two is however long that takes; the yml's own comments record a run where a
+ * release sat as an invisible draft until the job was re-run. The matrix also
+ * builds `latest-mac.yml` and `latest-linux.yml` in separate jobs, so the two
+ * platforms ripen the same release on slightly different clocks.
+ *
+ * Left as the older-wins rule anyway, deliberately: the error is bounded by the
+ * draft delay (minutes, normally), it only ever makes a release look *riper*,
+ * and the worst case is one prompt that could have waited — which is the
+ * behaviour every user had before the tiers existed. Clamping it would need a
+ * publish time nothing in the feed carries.
+ *
+ * A `releaseDate` in the future is a publisher's clock, not a release from
+ * tomorrow, so it is ignored rather than producing a negative age.
+ *
+ * @param {{releaseDate?: string | null, firstSeenAt?: number | null, now?: number}} ctx
+ * @returns {number}
+ */
+function releaseAgeMs({ releaseDate, firstSeenAt, now = Date.now() }) {
+  const candidates = [];
+  const published = Date.parse(typeof releaseDate === "string" ? releaseDate : "");
+  if (!Number.isNaN(published) && published <= now) candidates.push(published);
+  if (typeof firstSeenAt === "number" && Number.isFinite(firstSeenAt) && firstSeenAt <= now) {
+    candidates.push(firstSeenAt);
+  }
+  if (candidates.length === 0) return 0;
+  return now - Math.min(...candidates);
+}
+
+/**
+ * How many releases newer than the installed one this app has actually observed.
+ *
+ * A **lower bound**, and deliberately not more than that. The feed names only the
+ * newest release, so the true count is not available without a second request to
+ * a second, rate-limited source — the one the handoff already goes out of its way
+ * not to ask (see `handoffCommand`'s `--target-version`). What is available for
+ * free is the set of versions this app has seen go past on its own checks, which
+ * is exactly the signal `versionsAheadOverride` wants: it answers "have releases
+ * been piling up while I stayed quiet", not "how many exist".
+ *
+ * Versions at or below the running one are ignored rather than trusted, so a
+ * downgrade or a re-install cannot inflate the count.
+ *
+ * @param {{seen: Record<string, number> | null | undefined, currentVersion: string}} ctx
+ * @returns {number}
+ */
+function versionsAhead({ seen, currentVersion }) {
+  if (!seen || typeof seen !== "object") return 0;
+  return Object.keys(seen).filter((v) => compareVersions(v, currentVersion) > 0).length;
+}
+
+/**
+ * Whether this version has been recorded in a `seen` map.
+ *
+ * `Object.hasOwn` rather than a truthy lookup, for {@link pruneUpdateState}'s
+ * reason — and because a legitimately-recorded `0` (a clock at the epoch) would
+ * read as "not seen" under truthiness and reset the ripening clock on every
+ * check.
+ *
+ * @param {{seen: Record<string, number> | null | undefined, version: string}} ctx
+ * @returns {boolean}
+ */
+function alreadySeen({ seen, version }) {
+  return Boolean(seen) && Object.hasOwn(/** @type {object} */ (seen), version);
+}
+
+/**
+ * Whether this exact version counts as already answered.
+ *
+ * Clock-tolerant in both directions, like {@link reportIsFresh} and for the same
+ * reason: an `offeredAt` in the future is a machine whose clock moved, and
+ * reading it as "answered for the next thirty years" would silence the automatic
+ * channel for that version permanently — the failure the expiry exists to
+ * prevent, arrived by another road.
+ *
+ * @param {{offeredAt?: number | null, now?: number, maxAgeMs?: number}} ctx
+ * @returns {boolean}
+ */
+function alreadyAnswered({ offeredAt, now = Date.now(), maxAgeMs = REOFFER_AFTER_MS }) {
+  if (typeof offeredAt !== "number" || !Number.isFinite(offeredAt)) return false;
+  return Math.abs(now - offeredAt) <= maxAgeMs;
+}
+
+/**
+ * Whether an available release is worth a dialog right now.
+ *
+ * The whole point of the tiers, in one place and with no I/O, so the awkward
+ * combinations are tested rather than reasoned about. Order matters: a manual
+ * check answers `true` before anything else is considered, because a person who
+ * clicked *Check for Updates…* is owed an answer regardless of how quiet their
+ * tier is, and a version answered within the last {@link REOFFER_AFTER_MS} is
+ * silent regardless of how eager it is.
+ *
+ * `versionsAhead` overrides only the **age** gate, never `minPromptGapMs`. A
+ * burst of releases is a reason to stop waiting for the current one to settle;
+ * it is not a reason to prompt twice in an hour, which is the behaviour being
+ * fixed.
+ *
+ * @param {{
+ *   tier: {minReleaseAgeMs: number, versionsAheadOverride: number, minPromptGapMs: number},
+ *   ageMs: number,
+ *   ahead: number,
+ *   lastPromptedAt?: number | null,
+ *   offeredAt?: number | null,
+ *   manual?: boolean,
+ *   now?: number,
+ * }} ctx
+ * @returns {{offer: boolean, reason: "manual" | "answered" | "too-soon" | "ripening" | "aged" | "piled-up"}}
+ */
+function shouldOfferUpdate({
+  tier,
+  ageMs,
+  ahead,
+  lastPromptedAt = null,
+  offeredAt = null,
+  manual = false,
+  now = Date.now(),
+}) {
+  if (manual) return { offer: true, reason: "manual" };
+  if (alreadyAnswered({ offeredAt, now })) return { offer: false, reason: "answered" };
+  // One-sided, like `updateInProgress`'s phase check: a `lastPromptedAt` in the
+  // future is a clock that moved, and reading it as "the gap has not elapsed"
+  // would silence the app until the timestamp catches up — days, on a machine
+  // whose clock jumped. Treat it as "no recent prompt" instead.
+  if (
+    typeof lastPromptedAt === "number" &&
+    Number.isFinite(lastPromptedAt) &&
+    lastPromptedAt <= now &&
+    now - lastPromptedAt < tier.minPromptGapMs
+  ) {
+    return { offer: false, reason: "too-soon" };
+  }
+  if (ahead >= tier.versionsAheadOverride) return { offer: true, reason: "piled-up" };
+  if (ageMs < tier.minReleaseAgeMs) return { offer: false, reason: "ripening" };
+  return { offer: true, reason: "aged" };
+}
+
+/**
  * How long a handoff report stays meaningful.
  *
  * The whole exchange is seconds long: the CLI writes the outcome and the app is
@@ -470,12 +775,61 @@ function primaryAction({ viaCli, canInstall, full }) {
   return "Open Release Page";
 }
 
+/**
+ * The nudge state, with everything the running version has outgrown removed.
+ *
+ * Read on every launch and written after every check, so without this the `seen`
+ * map is append-only for the life of an install — a release train that ships
+ * daily would leave hundreds of dead keys in a file whose only job is to answer
+ * two questions about the *current* version. Dropping versions at or below the
+ * installed one is also what keeps `versionsAhead` honest after an update: the
+ * four releases that finally triggered the prompt must not still be counted
+ * against the release they installed.
+ *
+ * Shape-checked rather than trusted: this file lives in `userData` where anything
+ * can edit it, and a malformed one must degrade to "nothing known" rather than
+ * to an updater that throws on every check.
+ *
+ * @param {unknown} state
+ * @param {string} currentVersion
+ * @returns {{lastPromptedAt: number | null, seen: Record<string, number>, offeredAt: Record<string, number>}}
+ */
+function pruneUpdateState(state, currentVersion) {
+  const raw = state && typeof state === "object" ? /** @type {any} */ (state) : {};
+  const ahead = (v) => typeof v === "string" && compareVersions(v, currentVersion) > 0;
+  // `Object.create(null)`, for the reason {@link isTierName} gives about
+  // `UPDATE_TIERS`: these are maps keyed by a string that arrives from a JSON
+  // file and from an update feed, and on a plain object literal `constructor`
+  // and `toString` are already present. A truthy lookup would then read such a
+  // version as "already seen", and `firstSeenAt` would come back as a function.
+  // Unreachable from GitHub today; the cost of not relying on that is one call.
+  /** @param {unknown} source @returns {Record<string, number>} */
+  const timestamps = (source) => {
+    const out = Object.create(null);
+    if (!source || typeof source !== "object" || Array.isArray(source)) return out;
+    for (const [version, at] of Object.entries(source)) {
+      if (ahead(version) && typeof at === "number" && Number.isFinite(at)) out[version] = at;
+    }
+    return out;
+  };
+  const lastPromptedAt =
+    typeof raw.lastPromptedAt === "number" && Number.isFinite(raw.lastPromptedAt)
+      ? raw.lastPromptedAt
+      : null;
+  return { lastPromptedAt, seen: timestamps(raw.seen), offeredAt: timestamps(raw.offeredAt) };
+}
+
 module.exports = {
   CONSOLE_HANDOFF,
+  DEFAULT_UPDATE_FREQUENCY,
   FULL_UPDATE_HANDOFF,
   GITHUB_REPO,
+  REOFFER_AFTER_MS,
   REPORT_MAX_AGE_MS,
   UPDATE_PHASE_TIMEOUT_MS,
+  UPDATE_TIERS,
+  alreadyAnswered,
+  alreadySeen,
   capabilitiesFrom,
   cliCandidatePaths,
   compareVersions,
@@ -483,10 +837,16 @@ module.exports = {
   handoffCommand,
   looksLikeVeldCli,
   primaryAction,
+  pruneUpdateState,
+  releaseAgeMs,
   releasePageUrl,
   reportIsFresh,
+  shouldOfferUpdate,
+  updateFrequencyFrom,
   updateInProgress,
   updateMode,
   updatePhaseLabel,
+  updateTier,
   versionSkew,
+  versionsAhead,
 };
