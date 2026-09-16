@@ -337,7 +337,7 @@ body[data-fullscreen="true"] .topbar.electron {
   --input-height: var(--topbar-control-h) !important;
 }
 
-/* The Next button: go to wherever you are needed, in any project.
+/* The Next unread button: go to wherever you are needed, in any project.
  *
  * **Only the label is coloured**, from the same three vars the rail glyph and the
  * pane-tab dot use — so the word tells you what kind of thing is waiting before

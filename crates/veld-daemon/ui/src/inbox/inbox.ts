@@ -675,14 +675,21 @@ class WorktreeInbox {
   /**
    * The one unread event a "take me to it" gesture should land on.
    *
-   * Two orderings, and they answer different questions. `PRECEDENCE` first, the same
-   * order every other surface here uses, so an agent that is *blocked* outranks one
-   * that merely finished however long ago — a waiting agent is stopped work and a
-   * finished one is not. Then **oldest first** within a kind, which is where this
-   * deliberately parts company with {@link RowSummary.entries}: a tooltip lists what
-   * just happened, so newest-first is right there, while this is a queue you are
-   * working off, and newest-first would keep handing you whatever landed last while
-   * the agent that has been blocked longest waits longer still.
+   * `PRECEDENCE` first, the same order every other surface here uses, so an agent
+   * that is *blocked* outranks one that merely finished however recently — a waiting
+   * agent is stopped work and a finished one is not. Then **newest first**, the same
+   * way {@link RowSummary.entries} is sorted and the same thing a notification does.
+   *
+   * **Newest, because the button's appearing and where it sends you are one event.**
+   * This shipped oldest-first — a queue-fairness argument, so the pane blocked
+   * longest got seen first — and that was wrong in a way a user hit immediately. An
+   * agent files *two* `finished` events per session, `idle` when a turn ends and
+   * `done` when the session ends, so a pane already read goes unread again later.
+   * With oldest-first, a third agent finishing made the button appear and pressing
+   * it opened the *first* agent, whose session-end event was older. The control had
+   * no visible cause any more. Precedence can still send you somewhere other than
+   * the newest event — but only to a *waiting* agent, and one of those was already
+   * keeping the button on screen, so nothing appears to jump.
    *
    * `working` can never be returned: it is not an event, there is nothing to go and
    * see, and a button that took you to a busy pane would be sending you to watch a
@@ -706,7 +713,7 @@ class WorktreeInbox {
       if (!worktreeIds.has(session.worktreeId)) continue;
       const rank = PRECEDENCE.indexOf(unseen.kind);
       if (rank > bestRank) continue;
-      if (rank === bestRank && best !== null && unseen.at >= best.unseen.at) continue;
+      if (rank === bestRank && best !== null && unseen.at <= best.unseen.at) continue;
       best = { worktreeId: session.worktreeId, sessionId, unseen };
       bestRank = rank;
     }

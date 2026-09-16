@@ -205,7 +205,7 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "navigation",
     title: "Go to what needs you",
     description:
-      "Jump to the worktree and pane where an agent is waiting, or where something finished or failed — in any project, not only the one on screen. Same thing the Next button in the top bar does.",
+      "Jump to the worktree and pane where an agent is waiting, or where something finished or failed — in any project, not only the one on screen. Same thing the Next unread button in the top bar does.",
     combos: [{ mod: true, shift: true, keys: ["J"] }],
     // Page-dispatched, and it reaches a focused terminal through
     // `isAppShortcutChord`. `desktopOnly` because a browser claims this chord

@@ -694,6 +694,7 @@ pub enum SettingKey {
     UiHideDisabledActions,
     UiShowProjectNews,
     UiShowProjectColumn,
+    UiShowNextUnread,
     GitCreateFrom,
     WorktreeStorageMode,
     WorktreeStorageDir,
@@ -742,6 +743,7 @@ impl SettingKey {
         Self::LogsTimeZone,
         Self::UiHideDisabledActions,
         Self::UiShowProjectColumn,
+        Self::UiShowNextUnread,
         Self::UiShowProjectNews,
         Self::NewsSource,
         Self::FeedbackSuppressOverlay,
@@ -875,6 +877,7 @@ impl SettingKey {
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::UiShowProjectNews => "ui.showProjectNews",
             Self::UiShowProjectColumn => "ui.showProjectColumn",
+            Self::UiShowNextUnread => "ui.showNextUnread",
             Self::GitCreateFrom => "git.createFrom",
             Self::WorktreeStorageMode => "worktree.storageMode",
             Self::WorktreeStorageDir => "worktree.storageDir",
@@ -947,6 +950,7 @@ impl SettingKey {
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "ui.showProjectNews" => Self::UiShowProjectNews,
             "ui.showProjectColumn" => Self::UiShowProjectColumn,
+            "ui.showNextUnread" => Self::UiShowNextUnread,
             "git.createFrom" => Self::GitCreateFrom,
             "worktree.storageMode" => Self::WorktreeStorageMode,
             "worktree.storageDir" => Self::WorktreeStorageDir,
@@ -1070,6 +1074,7 @@ impl SettingKey {
             | Self::UiHideDisabledActions
             | Self::UiShowProjectNews
             | Self::UiShowProjectColumn
+            | Self::UiShowNextUnread
             | Self::FocusModeEnabled
             | Self::FocusModeSuppressBell
             | Self::FocusModeSuppressToasts
@@ -1891,6 +1896,11 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // rather than only in Settings: a control nobody can find is the same thing
         // as a feature nobody has.
         (SettingKey::UiShowProjectColumn, Value::from(false)),
+        // On. The button costs nothing while nothing is waiting — it is not there
+        // at all — so the only install it charges is one where an agent genuinely
+        // needs somebody, which is the install it exists for. The switch is for
+        // someone who does not want the bar changing shape under them.
+        (SettingKey::UiShowNextUnread, Value::from(true)),
         (SettingKey::FocusModeEnabled, Value::from(false)),
         // All three suppression rows default on: the point of turning focus mode
         // on at all is "stop interrupting me", so a master switch whose sub-rows

@@ -1206,7 +1206,7 @@ describe("a whole project's glyph", () => {
 });
 
 /**
- * Where a "take me to it" gesture lands — the top bar's Next button and ⌘⇧J.
+ * Where a "take me to it" gesture lands — the top bar's Next unread button and ⌘⇧J.
  *
  * The set it is given is every project's worktrees, so this is the one reader of the
  * store that is not scoped to a project or a row.
@@ -1240,30 +1240,65 @@ describe("the next thing that needs you", () => {
     expect(box.nextUnread(ALL)?.sessionId).toBe("waiting");
   });
 
-  /**
-   * **Oldest first within a kind**, which is where this deliberately parts company
-   * with `entries`' newest-first ordering. A tooltip lists what just happened; this is
-   * a queue being worked off, and newest-first would keep handing you whatever landed
-   * last while the agent blocked longest waits longer still.
-   */
-  it("takes the one that has been waiting longest", () => {
+  /** **Newest first within a kind**, the same order `entries` is sorted in — the
+   *  button appearing and the place it sends you are one event. */
+  it("takes the one that happened most recently", () => {
     const box = createInbox();
-    box.report("new", WT, agent("blocked"), NOW + 2000);
-    box.report("old", OTHER_WT, agent("blocked"), NOW);
+    box.report("old", WT, agent("blocked"), NOW);
+    box.report("new", OTHER_WT, agent("blocked"), NOW + 2000);
     box.report("mid", THIRD_WT, agent("blocked"), NOW + 1000);
-    expect(box.nextUnread(ALL)?.sessionId).toBe("old");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("new");
+  });
+
+  /**
+   * The regression, reported against the first cut of this button.
+   *
+   * **An agent files two `finished` events per session** — `idle` when a turn ends,
+   * `done` when the session ends — so a pane that has already been read goes unread
+   * again later, correctly. Ordered oldest-first, a third agent finishing therefore
+   * made the button appear while pressing it opened the *first* agent, whose
+   * session-end event was older than the finish that had just arrived. The control
+   * had no visible cause any more, which is exactly how a user found it.
+   */
+  it("goes to the event that just arrived, not an older one that came back", () => {
+    const box = createInbox();
+    box.report("a1", WT, agent("idle"), NOW + 1000);
+    box.report("a2", WT, agent("idle"), NOW + 2000);
+    box.read("a1");
+    box.read("a2");
+    expect(box.nextUnread(ALL)).toBe(null);
+
+    // `a1`'s session ends — a second, independent event on a pane already read.
+    box.report("a1", WT, agent("done"), NOW + 3000);
+    // …and then the agent in the other worktree finishes.
+    box.report("a3", THIRD_WT, agent("idle"), NOW + 4000);
+
+    expect(box.nextUnread(ALL)?.sessionId).toBe("a3");
+  });
+
+  /**
+   * The one case that still sends you somewhere other than the newest event, and it
+   * is deliberate: a waiting agent is stopped work. It cannot surprise anyone the way
+   * the regression above did, because an unread `attention` was already keeping the
+   * button on screen — nothing *appears* in response to the finish.
+   */
+  it("still lets a waiting agent outrank a newer finish", () => {
+    const box = createInbox();
+    box.report("waiting", WT, agent("blocked"), NOW);
+    box.report("finished", OTHER_WT, agent("idle"), NOW + 5000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("waiting");
   });
 
   /** Arriving reads the event (`setWatching`), which is what walks the queue down —
    *  there is no cursor, so this is the whole of the "next, then next" behaviour. */
   it("moves on once the one it named has been read", () => {
     const box = createInbox();
-    box.report("first", WT, agent("blocked"), NOW);
-    box.report("second", OTHER_WT, agent("blocked"), NOW + 1000);
-    expect(box.nextUnread(ALL)?.sessionId).toBe("first");
-    box.read("first");
-    expect(box.nextUnread(ALL)?.sessionId).toBe("second");
-    box.read("second");
+    box.report("older", WT, agent("blocked"), NOW);
+    box.report("newer", OTHER_WT, agent("blocked"), NOW + 1000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("newer");
+    box.read("newer");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("older");
+    box.read("older");
     expect(box.nextUnread(ALL)).toBe(null);
   });
 

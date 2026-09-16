@@ -410,7 +410,7 @@ export const PROMOTIONS: Promotion[] = [
     // Nobody goes looking for it, because until now the answer to "who needs me"
     // was a glyph you had to have the right project selected to see.
     //
-    // The headline is the move, not the control: "A Next button in the top bar"
+    // The headline is the move, not the control: "A Next unread button in the bar"
     // was the first draft and opens on the mechanism, which is the failure this
     // doc spends a page on. No chord in it either — `keyboard-shortcuts` already
     // established that Veld has them, and a key in a headline is a thing to
@@ -423,7 +423,7 @@ export const PROMOTIONS: Promotion[] = [
     eyebrow: "New",
     headline: "Go straight to the agent waiting on you",
     body:
-      "Agents running in three projects, and one of them is stuck on a question. Next, at the end of the top bar, takes you to it — then to the one after.",
+      "Agents running in three projects, and one of them is stuck on a question. Next unread, at the end of the top bar, takes you to it — then to the one after.",
     glyph: "inbox",
   },
 ];

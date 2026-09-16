@@ -413,7 +413,8 @@ function holderNotice(w: Worktree, holder?: ClientInfo): string {
  * Where an unseen event is, in words: the project, the worktree, and the pane.
  *
  * **One owner, because two surfaces now name the same place** — the notification
- * (toast or OS banner) and the Next button's tooltip — and they have to agree.
+ * (toast or OS banner) and the Next unread button's tooltip — and they have to
+ * agree.
  * They are read in sequence by the same person: a banner says a worktree needs
  * you, you come back, and the button beside the ⋯ menu is the thing you press to
  * get there. If one of them called it `feature/x` and the other `veld · main`,
@@ -3483,8 +3484,8 @@ function AppInner(props: {
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
           return;
         }
-        // Go to whatever needs you, in any project — the top bar's Next button
-        // from the keyboard, through the same single owner (`goNextRef`).
+        // Go to whatever needs you, in any project — the top bar's Next unread
+        // button from the keyboard, through the same single owner (`goNextRef`).
         //
         // Not in the Tab-shaped navigation block a few lines up, deliberately:
         // those step a list one place and this jumps to a specific destination
@@ -4498,6 +4499,14 @@ function AppInner(props: {
   const goNext = () => {
     const target = inbox.nextUnread(allProjectWorktreeIds(reposRef.current));
     if (!target) return;
+    // **Switch to the IDE first, exactly as `openPalette` does, and for the same
+    // reason.** The destination is a *pane*, and panes only exist in the IDE — so
+    // pressing this in Runs mode selected the worktree, activated its tab, and
+    // showed the user none of it, which reads as a dead button. Switching first
+    // means the one handler behaves identically from either view instead of the
+    // button having to be absent from one of them: the control is about where you
+    // are needed, and where you are needed is somewhere this view cannot show.
+    if (mode !== "ide") setMode("ide");
     // `void`: the claim and the panes arriving are awaited inside, and there is
     // nothing here to do with the outcome — a refusal has already raised the
     // window that does have the worktree, and said so.
@@ -5857,7 +5866,7 @@ function AppInner(props: {
   openPaletteRef.current = openPalette;
 
   /**
-   * Where the Next button would take you — the one unread event, anywhere.
+   * Where the Next unread button would take you — the one unread event, anywhere.
    *
    * **Across every project, which is the whole point of the control.** Until now a
    * worktree's state was only legible from the worktree itself: the rail glyph
