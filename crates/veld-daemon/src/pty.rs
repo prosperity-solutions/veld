@@ -5116,6 +5116,7 @@ mod tests {
                 launch: veld_core::config::CommandSpec::Argv(vec!["true".to_owned()]),
                 resume: None,
                 sessions: None,
+                agent: None,
                 auto_resume: false,
                 close_on_exit: true,
                 fixed_label: false,

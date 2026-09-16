@@ -254,3 +254,164 @@ export function takenExcluding(taken: string[], pending: string | null): string[
   if (!pending) return taken;
   return taken.filter((t) => !aliasCollides(pending, [t]));
 }
+
+/**
+ * The name a checkout gets when nobody typed one and there is no prompt to
+ * borrow from.
+ *
+ * Deliberately a plain English word rather than something clever: it is the
+ * name a rail row will carry for as long as the checkout lives, and a generated
+ * name that tries to be memorable ("brisk-otter") reads as information the user
+ * is expected to hold on to. `Workspace 2` reads as what it is — a checkout
+ * nobody bothered to name — and [`uniqueName`] numbers it.
+ */
+export const DEFAULT_WORKTREE_NAME = "Workspace";
+
+/**
+ * Characters that cannot appear in a name the dialog invents.
+ *
+ * `is_forbidden` in `crates/veld-daemon/src/desktop.rs`, **minus everything
+ * JavaScript's `\s` matches**: U+0009–U+000D, U+2028, U+2029 and U+FEFF are all
+ * collapsed by [`nameFromPrompt`]'s own `\s+` word split and re-joined as single
+ * spaces, so none of them can survive into the name and none of them is a reason
+ * to decline one. Listing them anyway was over-broad in exactly the case this
+ * guard exists for: a first line pasted from terminal output or an indented
+ * document usually contains a tab, and the whole name was refused over a
+ * character the next line of code was about to remove.
+ *
+ * What is left is what actually survives the split: the non-whitespace C0 and C1
+ * controls (`ESC` above all), the bidi embeddings, overrides and isolates, and
+ * the interlinear annotation marks. The daemon is the authority and refuses a
+ * name containing any of them with a 400 — this is how a *borrowed* name avoids
+ * asking for that refusal.
+ */
+const FORBIDDEN_IN_NAME =
+  /[\u0000-\u0008\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069\ufff9-\ufffb]/;
+
+/**
+ * How long a name borrowed from a prompt may be, in characters.
+ *
+ * Shorter than [`MAX_DERIVED_LEN`] on purpose: this one has to fit a rail column
+ * *and* read as a name rather than as a truncated sentence, and a prompt's first
+ * 48 characters are usually mid-clause. Whole words only — see [`nameFromPrompt`].
+ */
+const MAX_PROMPT_NAME_LEN = 36;
+
+/**
+ * A name for the checkout, taken from the prompt the user typed.
+ *
+ * The create dialog is prompt-first: a user who has described a task has already
+ * said what the checkout is for, so asking them to name it again is the ceremony
+ * the dialog exists to remove. This is what turns *"Fix the login redirect loop
+ * so that expired sessions land on /login"* into `Fix the login redirect loop`.
+ *
+ * Three rules, each because the obvious version reads badly:
+ *
+ * - **First non-blank line only.** A pasted multi-paragraph prompt's later lines
+ *   are context, not subject, and a name spliced across a blank line is a name
+ *   built from two unrelated sentences.
+ * - **Whole words, up to [`MAX_PROMPT_NAME_LEN`].** Slicing at the character cap
+ *   left names ending mid-word (`Fix the login redir`), which reads as damage
+ *   rather than as a summary. A first word longer than the cap is the one case
+ *   that still gets cut, because dropping it would leave nothing.
+ * - **Trailing punctuation dropped.** The cut usually lands on a comma or a
+ *   colon, and `Fix the login redirect loop,` is not a name.
+ *
+ * - **Trailing function words dropped.** The word-boundary cut lands on `so
+ *   that` or `and the` often enough to matter, and a name ending in a dangling
+ *   conjunction reads as a sentence someone gave up on. Only the *trailing* run
+ *   is dropped, and never all of it — `The` is a poor name and still better than
+ *   none.
+ *
+ * - **Nothing usable from a line carrying control or text-direction
+ *   characters.** `validate_display_name` in the daemon *rejects* those rather
+ *   than stripping them (`is_forbidden`), and rightly: they change how their
+ *   neighbours render. But that refusal is a 400 on the whole create, and a
+ *   prompt pasted out of terminal output is full of `ESC`. Naming the checkout
+ *   after such a line would fail the create on a field the description told the
+ *   user to leave empty — so the line simply does not supply a name, and
+ *   [`DEFAULT_WORKTREE_NAME`] does. A name the user *typed* still gets the
+ *   daemon's refusal, which is the right answer for something they chose.
+ *
+ * Returns `""` when there is nothing usable, which is the caller's signal to fall
+ * back to [`DEFAULT_WORKTREE_NAME`]. Nothing here is unique or valid — it is a
+ * free-text *name*, and [`deriveAlias`]/[`deriveBranch`] still own what it becomes.
+ */
+export function nameFromPrompt(prompt: string): string {
+  const line = prompt.split("\n").find((l) => l.trim() !== "")?.trim() ?? "";
+  if (line === "" || FORBIDDEN_IN_NAME.test(line)) return "";
+  let out = "";
+  for (const word of line.split(/\s+/)) {
+    if (out === "") {
+      out = word;
+    } else if (out.length + 1 + word.length <= MAX_PROMPT_NAME_LEN) {
+      out += ` ${word}`;
+    } else {
+      break;
+    }
+  }
+  // Only the first word may exceed the cap, and only because the alternative is
+  // an empty name. Sliced by code point, like `deriveDisplayName`, so the cut
+  // cannot leave a lone surrogate behind.
+  if (out.length > MAX_PROMPT_NAME_LEN) {
+    out = [...out].slice(0, MAX_PROMPT_NAME_LEN).join("");
+  }
+  // Punctuation the cut landed on, plus the sentence-ending kind a short prompt
+  // brings with it. Quotes and brackets go too: an unbalanced one is worse than
+  // none.
+  const trimPunctuation = (text: string) => text.replace(/[\s,;:.!?\-–—_/\\'"`([{<]+$/u, "");
+  const words = trimPunctuation(out).split(/\s+/);
+  while (words.length > 1 && TRAILING_FILLER.has(words[words.length - 1].toLowerCase())) {
+    words.pop();
+  }
+  return trimPunctuation(words.join(" "));
+}
+
+/**
+ * Words a name must not end on.
+ *
+ * Not a stopword list — nothing is removed from the *middle* of a name, where
+ * `the` and `of` carry the meaning. This is only about the cut: `Fix the login
+ * redirect loop so that` fits the cap and reads as a sentence that was
+ * interrupted, and the fix is to stop one word earlier. Kept to conjunctions,
+ * prepositions, articles and the copula — the words that cannot end an English
+ * noun phrase.
+ */
+const TRAILING_FILLER = new Set([
+  "a", "an", "and", "as", "at", "but", "by", "for", "from", "if", "in", "into",
+  "is", "it", "of", "on", "or", "so", "than", "that", "the", "then", "this",
+  "to", "when", "which", "while", "with",
+]);
+
+/**
+ * `base`, or the first `base N` nothing has taken yet.
+ *
+ * A generated name has to be free without asking the user to resolve a clash
+ * they did not create — so unlike a *typed* name, whose collision is worth
+ * reporting because the user chose it, this one is simply moved out of the way.
+ * Numbered with a space (`Workspace 2`), which [`deriveAlias`] turns into
+ * `workspace-2` — the same shape the daemon's own `unique_alias` produces, so a
+ * repo does not end up with two numbering conventions.
+ *
+ * `isTaken` decides, and the dialog passes more than aliases to it: a name whose
+ * *branch* already exists locally is equally unusable, and a create that would
+ * be refused for the branch is not improved by being refused under a free alias.
+ *
+ * Bounded, and the bound's answer is **deterministic**. This runs during render,
+ * so a fallback built from `Date.now()` returned a different name on every
+ * render — the alias shown in the dialog's "identified as" receipt was then not
+ * the alias the next render submitted, which is the one thing that receipt
+ * exists to promise. A thousand checkouts all called `Workspace` is not a real
+ * repo state; a name that changes while you read it is a real bug. So the last
+ * candidate is just the bound, and if that is taken too the daemon says so the
+ * way it does for any other collision.
+ */
+export function uniqueName(base: string, isTaken: (name: string) => boolean): string {
+  if (!isTaken(base)) return base;
+  const LIMIT = 1000;
+  for (let n = 2; n <= LIMIT; n += 1) {
+    const candidate = `${base} ${n}`;
+    if (!isTaken(candidate)) return candidate;
+  }
+  return `${base} ${LIMIT}`;
+}
