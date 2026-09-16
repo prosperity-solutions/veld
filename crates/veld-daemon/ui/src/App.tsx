@@ -4280,6 +4280,12 @@ function AppInner(props: {
         // `browserViews.js`. Split carries no `chromeless` guard, matching its
         // keydown copy: a detached window is a dock and can split like any other.
         else if (accelerator === "split") paneHandleRef.current?.splitActiveTab();
+        // Guarded like the worktree pair below and for the same reason, matching
+        // this chord's own keydown copy: a detached window has no rail, no
+        // selection and no Next unread button, so there is nothing here to move.
+        else if (accelerator === "next-unread") {
+          if (!chromeless) goNextRef.current();
+        }
         // The worktree pair *is* guarded, also matching its keydown copy: a
         // detached window is a satellite of one worktree and must not move the
         // rail's selection.
@@ -4369,12 +4375,17 @@ function AppInner(props: {
   // desktop app) and activate its tab. Shared by the toast, the browser banner,
   // and the native-notification click below.
   /**
-   * Returns whether this window is the one that ended up showing the pane — false
-   * when the claim was refused, which means another window was raised instead (or
-   * the socket is down and nothing happened at all). `goNext` needs the answer so
-   * it does not switch view for a jump that did not land; the notification paths
-   * discard it, because a refusal has already raised the window that does have
-   * the worktree and said so.
+   * Returns whether **this window won the worktree** — false only when the claim
+   * was refused, which means another window was raised instead, or the socket is
+   * down and nothing happened at all.
+   *
+   * Deliberately not "the pane is now on screen": the `setPendingFocusPane` arm
+   * returns `true` before any layout has arrived, and the effect that drains it
+   * drops the request if the selection has moved on by then. What the caller
+   * actually needs to know is whether the navigation was *granted*, because that
+   * is what makes switching view earned. `goNext` is that caller; the two
+   * notification paths discard the answer, since a refusal has already raised the
+   * window that does have the worktree and said so.
    */
   const focusPane = async (wtId: number, sessionId: string): Promise<boolean> => {
     // **Every project's worktrees, not the selected project's.** An agent hook is
@@ -4484,8 +4495,15 @@ function AppInner(props: {
     // jump that did not happen. The cost of waiting is one round trip before the
     // view changes, which is the honest price of only changing it when there is
     // something to change it for.
+    // The view this press started from. A claim can take a reconnect plus the
+    // daemon's ack timeout, and reading the mode at *resolution* meant a user who
+    // deliberately pressed ⌘⇧X to Runs while waiting got silently pulled back. So
+    // switch only if they have not moved since — their later choice outranks this
+    // one, and the old synchronous switch could not get this wrong because there
+    // was no gap to be wrong in.
+    const from = mode;
     void focusPane(target.worktreeId, target.sessionId).then((landed) => {
-      if (landed && modeRef.current !== "ide") setModeRef.current("ide");
+      if (landed && modeRef.current === from && from !== "ide") setModeRef.current("ide");
     });
   };
   goNextRef.current = goNext;

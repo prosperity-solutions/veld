@@ -214,13 +214,13 @@ export const SHORTCUTS: ShortcutDef[] = [
     // same thing. The letter is still the right one: it is layout-stable on
     // every Latin keyboard, which the free punctuation chords are not.
     //
-    // **Not forwarded out of a browser pane** (`desktop/src/browserViews.js`), so
-    // it does nothing while one has the keyboard. That matches every other
-    // app-level chord — ⌘⇧L, ⌘⇧X and ⌘⇧K are not forwarded either; only ⌘F is,
-    // and it earns that by substituting the pane's own find bar. AGENTS.md's rule
-    // is that a forwarded chord has to leave the guest page something, and taking
-    // ⌘⇧J from every embedded page to save a keystroke in the one pane kind that
-    // is not a terminal is the wrong side of that trade.
+    // **Forwarded out of a browser pane** too (`desktop/src/browserViews.js`),
+    // which puts it with `⌃Tab`, `⌥Tab`, `⌘⇧D` and the worktree pair rather than
+    // with `⌘⇧L`/`⌘⇧X`/`⌘⇧K`. The line is not app-level versus navigation: it is
+    // whether a guest page loses anything it could use. This one leaves the pane
+    // entirely, usually for another worktree, and no page binds the chord — the
+    // same trade `browserViews.js` records for the split chord. `⌘⇧`+arrow is the
+    // counter-example that was reverted: it took text selection from every page.
     desktopOnly: true,
   },
   {

@@ -1896,10 +1896,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // rather than only in Settings: a control nobody can find is the same thing
         // as a feature nobody has.
         (SettingKey::UiShowProjectColumn, Value::from(false)),
-        // On. The button costs nothing while nothing is waiting — it is not there
-        // at all — so the only install it charges is one where an agent genuinely
-        // needs somebody, which is the install it exists for. The switch is for
-        // someone who does not want the bar changing shape under them.
+        // On. The button costs nothing while nothing is unread — it is not there
+        // at all — so the only install it charges is one where something genuinely
+        // wants somebody: an agent waiting, or a command that finished or failed.
+        // The switch is for someone who does not want the bar changing shape.
         (SettingKey::UiShowNextUnread, Value::from(true)),
         (SettingKey::FocusModeEnabled, Value::from(false)),
         // All three suppression rows default on: the point of turning focus mode
