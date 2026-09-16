@@ -49,6 +49,24 @@ export function projectWorktreeIds(repo: ProjectRepo | null): Set<number> {
 }
 
 /**
+ * The worktree ids of *every* project whose news counts.
+ *
+ * The population a Veld-level control works over, as opposed to
+ * {@link projectWorktreeIds} (one project's rail) and
+ * {@link otherProjectWorktreeIds} (the selector's "somewhere else" dot). The
+ * selected project is deliberately included: "take me to what needs me" means the
+ * nearest one, and excluding the project already on screen would walk you past a
+ * blocked agent two rows down to reach one in another repo.
+ */
+export function allProjectWorktreeIds(repos: readonly ProjectRepo[]): Set<number> {
+  const ids = new Set<number>();
+  for (const r of repos) {
+    for (const w of r.worktrees) if (countable(w)) ids.add(w.id);
+  }
+  return ids;
+}
+
+/**
  * The worktree ids of every project *except* the one on screen.
  *
  * This is what the closed selector's dot is computed from: the question it answers is

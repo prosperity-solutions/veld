@@ -157,6 +157,10 @@ const FALLBACK = {
   // key that decides whether controls appear takes the shipped default so an older
   // daemon (which cannot know the key) does not look like a broken new UI.
   hideDisabledActions: true,
+  // Same rule as `hideDisabledActions` above: a new key deciding whether a control
+  // appears takes the *shipped* default, so an older daemon that cannot know the key
+  // shows the button rather than looking like a new UI with a piece missing.
+  showNextUnread: true,
   // Matches the Rust default rather than the previous release's behaviour, and
   // the two disagree here: before this key there were no project cards at all,
   // so the rule would say `false`. But an older daemon cannot know the key, and
@@ -721,6 +725,26 @@ export function logsTimeZone(doc: SettingsDoc): LogTimeZone {
  */
 export function hideDisabledActions(doc: SettingsDoc): boolean {
   return bool(doc, "ui.hideDisabledActions", FALLBACK.hideDisabledActions);
+}
+
+/**
+ * Whether the top bar carries the Next unread button. **Defaults on.**
+ *
+ * Deliberately *not* folded into [`hideDisabledActions`], which is the sibling it
+ * most resembles and answers a different question. That one is "hide an
+ * inapplicable control, or grey it out" — a choice about a control that exists
+ * either way. This button has no inapplicable state to render: with nothing
+ * unread there is nowhere to go, and a greyed word saying so is a permanent
+ * fixture in the densest row of the app earning nothing. So it is simply absent
+ * when idle, for everybody, and this key is the separate question of whether
+ * somebody wants it at all.
+ *
+ * ⌘⇧J is not gated on it. The chord costs no space, so the reason to turn the
+ * button off does not apply to it, and someone who has switched the button off
+ * has said something about their top bar rather than about the feature.
+ */
+export function showNextUnread(doc: SettingsDoc): boolean {
+  return bool(doc, "ui.showNextUnread", FALLBACK.showNextUnread);
 }
 
 /** The five `keepAwake.*` keys. See [`keepAwakePrefs`]. */

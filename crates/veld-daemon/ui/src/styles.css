@@ -336,6 +336,30 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar .mantine-Input-wrapper {
   --input-height: var(--topbar-control-h) !important;
 }
+
+/* The Next unread button: go to wherever you are needed, in any project.
+ *
+ * **Only the label is coloured**, from the same three vars the rail glyph and the
+ * pane-tab dot use — so the word tells you what kind of thing is waiting before
+ * you read the tooltip, in the vocabulary you already learned from those two
+ * surfaces. Everything else about the box stays the bar's default: this sits in a
+ * row of neutral controls and a filled or outlined variant would read as the
+ * bar's primary action, which it is not — the run controls are.
+ *
+ * **Deliberately no pulse**, unlike `.wt-inbox.attention` and
+ * `.pane-tab-activity.attention`. Those are 12px glyphs in a list you scan; this
+ * is a word in the densest row of the app, permanently in the corner of your eye,
+ * and a pulsing one there is a thing you learn to stop seeing. The rail is where
+ * the urgency lives; this is only how you get there. */
+.topbar-next.attention {
+  color: var(--warn);
+}
+.topbar-next.failed {
+  color: var(--danger);
+}
+.topbar-next.finished {
+  color: var(--accent);
+}
 /* `ide.extensions` status badges.
  *
  * **A Button, not a Badge.** These *are* controls — a click opens the pull

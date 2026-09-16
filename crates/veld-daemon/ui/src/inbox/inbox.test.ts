@@ -1205,6 +1205,125 @@ describe("a whole project's glyph", () => {
   });
 });
 
+/**
+ * Where a "take me to it" gesture lands — the top bar's Next unread button and ⌘⇧J.
+ *
+ * The set it is given is every project's worktrees, so this is the one reader of the
+ * store that is not scoped to a project or a row.
+ */
+describe("the next thing that needs you", () => {
+  const THIRD_WT = 11;
+  const ALL = new Set([WT, OTHER_WT, THIRD_WT]);
+
+  it("has nowhere to go when nothing is unread", () => {
+    const box = createInbox();
+    expect(box.nextUnread(ALL)).toBe(null);
+  });
+
+  it("names the worktree as well as the pane", () => {
+    // The gap this closes: `RowSummary.entries` carries only a session id, because a
+    // rail row already knows which worktree it is. A Veld-level control does not.
+    const box = createInbox();
+    box.report("p1", OTHER_WT, agent("blocked"), NOW);
+    expect(box.nextUnread(ALL)).toMatchObject({ worktreeId: OTHER_WT, sessionId: "p1" });
+  });
+
+  /** `PRECEDENCE`, the same order every other surface here uses: a blocked agent is
+   *  stopped work and a finished one is not, however long ago it finished. */
+  it("takes a waiting agent before a failure before a finish", () => {
+    const box = createInbox();
+    box.report("done", WT, agent("idle"), NOW + 3000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("done");
+    for (const signal of command(1)) box.report("failed", OTHER_WT, signal, NOW + 2000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("failed");
+    box.report("waiting", THIRD_WT, agent("blocked"), NOW + 1000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("waiting");
+  });
+
+  /** **Newest first within a kind**, the same order `entries` is sorted in — the
+   *  button appearing and the place it sends you are one event. */
+  it("takes the one that happened most recently", () => {
+    const box = createInbox();
+    box.report("old", WT, agent("blocked"), NOW);
+    box.report("new", OTHER_WT, agent("blocked"), NOW + 2000);
+    box.report("mid", THIRD_WT, agent("blocked"), NOW + 1000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("new");
+  });
+
+  /**
+   * The regression, reported against the first cut of this button.
+   *
+   * **An agent files two `finished` events per session** — `idle` when a turn ends,
+   * `done` when the session ends — so a pane that has already been read goes unread
+   * again later, correctly. Ordered oldest-first, a third agent finishing therefore
+   * made the button appear while pressing it opened the *first* agent, whose
+   * session-end event was older than the finish that had just arrived. The control
+   * had no visible cause any more, which is exactly how a user found it.
+   */
+  it("goes to the event that just arrived, not an older one that came back", () => {
+    const box = createInbox();
+    box.report("a1", WT, agent("idle"), NOW + 1000);
+    box.report("a2", WT, agent("idle"), NOW + 2000);
+    box.read("a1");
+    box.read("a2");
+    expect(box.nextUnread(ALL)).toBe(null);
+
+    // `a1`'s session ends — a second, independent event on a pane already read.
+    box.report("a1", WT, agent("done"), NOW + 3000);
+    // …and then the agent in the other worktree finishes.
+    box.report("a3", THIRD_WT, agent("idle"), NOW + 4000);
+
+    expect(box.nextUnread(ALL)?.sessionId).toBe("a3");
+  });
+
+  /**
+   * The one case that still sends you somewhere other than the newest event, and it
+   * is deliberate: a waiting agent is stopped work. It cannot surprise anyone the way
+   * the regression above did, because an unread `attention` was already keeping the
+   * button on screen — nothing *appears* in response to the finish.
+   */
+  it("still lets a waiting agent outrank a newer finish", () => {
+    const box = createInbox();
+    box.report("waiting", WT, agent("blocked"), NOW);
+    box.report("finished", OTHER_WT, agent("idle"), NOW + 5000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("waiting");
+  });
+
+  /** Arriving reads the event (`setWatching`), which is what walks the queue down —
+   *  there is no cursor, so this is the whole of the "next, then next" behaviour. */
+  it("moves on once the one it named has been read", () => {
+    const box = createInbox();
+    box.report("older", WT, agent("blocked"), NOW);
+    box.report("newer", OTHER_WT, agent("blocked"), NOW + 1000);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("newer");
+    box.read("newer");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("older");
+    box.read("older");
+    expect(box.nextUnread(ALL)).toBe(null);
+  });
+
+  /** The caller owns the population — a trashed worktree is excluded there, not
+   *  here — so an id outside the set has to be invisible to this too. */
+  it("ignores worktrees outside the set", () => {
+    const box = createInbox();
+    box.report("p1", THIRD_WT, agent("blocked"), NOW);
+    expect(box.nextUnread(new Set([WT, OTHER_WT]))).toBe(null);
+    expect(box.nextUnread(new Set())).toBe(null);
+  });
+
+  /**
+   * **`working` is never a destination.** It is not an event, there is nothing to go
+   * and see, and a button that took you to a busy pane would be sending you to watch
+   * a spinner. Falls out of only reading `unseen`, rather than needing a rule.
+   */
+  it("never sends you to a pane that is merely busy", () => {
+    const box = createInbox();
+    box.report("busy", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    expect(box.rowState(WT, true).state).toBe("working");
+    expect(box.nextUnread(ALL)).toBe(null);
+  });
+});
+
 describe("bookkeeping", () => {
   it("orders a worktree's events newest first", () => {
     const box = createInbox();

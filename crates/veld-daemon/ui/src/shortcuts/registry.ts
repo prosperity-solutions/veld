@@ -201,6 +201,29 @@ export function categoryLabel(category: ShortcutCategory): string {
 export const SHORTCUTS: ShortcutDef[] = [
   // ---- navigation ----------------------------------------------------------
   {
+    id: "next-attention",
+    category: "navigation",
+    title: "Go to what needs you",
+    description:
+      "Jump to the worktree and pane where an agent is waiting, or where something finished or failed — in any project, not only the one on screen. Same thing the Next unread button in the top bar does.",
+    combos: [{ mod: true, shift: true, keys: ["J"] }],
+    // Page-dispatched, and it reaches a focused terminal through
+    // `isAppShortcutChord`. `desktopOnly` because a browser claims this chord
+    // before the page sees it — `Ctrl+Shift+J` is the devtools console in Chrome
+    // and the browser console in Firefox, and mac Firefox binds `⌘⇧J` to the
+    // same thing. The letter is still the right one: it is layout-stable on
+    // every Latin keyboard, which the free punctuation chords are not.
+    //
+    // **Forwarded out of a browser pane** too (`desktop/src/browserViews.js`),
+    // which puts it with `⌃Tab`, `⌥Tab`, `⌘⇧D` and the worktree pair rather than
+    // with `⌘⇧L`/`⌘⇧X`/`⌘⇧K`. The line is not app-level versus navigation: it is
+    // whether a guest page loses anything it could use. This one leaves the pane
+    // entirely, usually for another worktree, and no page binds the chord — the
+    // same trade `browserViews.js` records for the split chord. `⌘⇧`+arrow is the
+    // counter-example that was reverted: it took text selection from every page.
+    desktopOnly: true,
+  },
+  {
     id: "navigate-worktrees",
     category: "navigation",
     title: "Previous / next worktree",
@@ -503,6 +526,37 @@ export function comboTokens(combo: KeyCombo, mac: boolean): string[] {
   if (combo.shift) tokens.push(mac ? "⇧" : "Shift");
   tokens.push(...combo.keys);
   return tokens;
+}
+
+/**
+ * One shortcut's chord as a single string, for a tooltip that wants to say how to
+ * do the same thing without the mouse — `⌘⇧J`, or `Ctrl+Shift+J`.
+ *
+ * **Looked up by id rather than spelled out at the call site**, which is the whole
+ * point: a tooltip with its own copy of the chord is a second definition, and the
+ * one that goes stale is the one nothing renders in a test. This file stays the
+ * single source the overview and every hint read from.
+ *
+ * Joined differently per platform because the tokens are: the mac symbols read as
+ * a chord run together, while the spelled-out modifiers do not — `CtrlShiftJ` is
+ * not a key combination anybody recognises. The overview needs no separator at all
+ * because each token gets its own `<Kbd>` box.
+ *
+ * **Empty string when this platform has no binding**, so a caller can append it
+ * unconditionally rather than testing first — the same reason `combosFor` returns
+ * a list and `ShortcutsDialog` hides an empty row instead of erroring on it.
+ *
+ * `desktopOnly` is **not** consulted, deliberately: this file knows about
+ * platforms, not about which shell is rendering it, and the overview shows those
+ * rows too (with a badge). A caller whose surface would be lying in a browser tab
+ * is the one holding that answer, and skips the call.
+ */
+export function shortcutHint(id: string, mac: boolean = isMac()): string {
+  const def = SHORTCUTS.find((s) => s.id === id);
+  const combo = def ? combosFor(def, mac)[0] : undefined;
+  if (!combo) return "";
+  const tokens = comboTokens(combo, mac);
+  return mac ? tokens.join("") : tokens.join("+");
 }
 
 /** Everything wrong with a shortcut definition, as human-readable lines.

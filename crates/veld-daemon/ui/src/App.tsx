@@ -57,7 +57,7 @@ import { usePromotions } from "./promotions/usePromotions";
 import { WhatsNewDialog } from "./promotions/WhatsNew";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog } from "./shortcuts/ShortcutsDialog";
-import { nextIndex } from "./shortcuts/registry";
+import { nextIndex, shortcutHint } from "./shortcuts/registry";
 import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { RowStateIcon } from "./rowstate/RowStateIcon";
@@ -111,6 +111,7 @@ import {
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
 import { usePointerDrag } from "./shared/pointerDrag";
+import { eventLocation } from "./shared/eventLocation";
 import { worktreeLabel } from "./shared/worktreeName";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
 import { NodeActions } from "./shared/NodeActions";
@@ -185,7 +186,6 @@ import {
   adoptTabs,
   adoptedTermTitle,
   allTabs,
-  findTab,
   browserIds,
   browserTab,
   closeTab,
@@ -200,7 +200,6 @@ import {
   loadLayouts,
   newTabId,
   nextFreeProfile,
-  paneTabBaseLabel,
   paneTakesPrompt,
   paneTabLabel,
   tabForTransport,
@@ -240,6 +239,7 @@ import {
 import { awayNote, openableWorktrees, worktreeSetKey } from "./ide/ownership";
 import {
   MAX_PROJECT_SHORTCUTS,
+  allProjectWorktreeIds,
   isProjectNews,
   otherProjectWorktreeIds,
   dropTargetIndex,
@@ -407,6 +407,7 @@ function holderNotice(w: Worktree, holder?: ClientInfo): string {
   }
   return `${label} is open in another window — switched to it`;
 }
+
 
 /**
  * Mark this page as wanted, for a client that cannot raise itself.
@@ -2619,6 +2620,8 @@ function AppInner(props: {
    *  the Electron accelerator are registered once at boot, so they reach the
    *  current closure through a ref rather than capturing a stale one. */
   const openPaletteRef = useRef<() => void>(() => {});
+  /** "Go to what needs me", likewise — the button and ⌘⇧J are one owner. */
+  const goNextRef = useRef<() => void>(() => {});
 
   const previousRepoRootRef = useRef<string | null>(null);
   const lastRepoRootRef = useRef<string | null>(null);
@@ -3427,6 +3430,42 @@ function AppInner(props: {
         if (e.key === "l" || e.key === "L") {
           e.preventDefault();
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
+          return;
+        }
+        // Go to whatever needs you, in any project — the top bar's Next unread
+        // button from the keyboard, through the same single owner (`goNextRef`).
+        //
+        // Not in the Tab-shaped navigation block a few lines up, deliberately:
+        // those step a list one place and this jumps to a specific destination
+        // in a project you may not have selected, which is a different gesture
+        // that happens to also move the selection.
+        if (e.key === "j" || e.key === "J") {
+          // Guarded like the split chord above, and for the same reason: landing
+          // on another worktree behind an open modal moves the whole app
+          // somewhere the user cannot see, and they close the dialog onto a
+          // screen they did not ask for.
+          if (
+            pageChordsBlocked({
+              dialogKind: dialogRef.current.kind,
+              promotionsOpen: promotionsOpenRef.current,
+            })
+          )
+            return;
+          e.preventDefault();
+          // A detached window renders one pane, no rail and no selection, so
+          // there is nothing here for this to move.
+          //
+          // **After `preventDefault`, matching ⌘⇧X below rather than the ⌥Tab arm
+          // above.** That arm returns *first*, and says so, because swallowing the
+          // key would leave it dead rather than merely inapplicable — but that
+          // reasoning is the Tab family's, not this chord's. `handleKeyEvent`
+          // hands ⌘⇧J to the window rather than to xterm (`terminalKeys.ts:253`,
+          // because `isAppShortcutChord` claims it), so a focused terminal has
+          // given the key up before this listener ever runs, and returning early
+          // would hand it to nothing but the browser's own binding. Cite ⌘⇧X, not
+          // ⌥Tab: same shape, same order, same reason.
+          if (chromeless) return;
+          goNextRef.current();
           return;
         }
         // Worktrees, **off macOS**: `Ctrl+Shift+B`/`N` — adjacent keys, left is
@@ -4241,6 +4280,12 @@ function AppInner(props: {
         // `browserViews.js`. Split carries no `chromeless` guard, matching its
         // keydown copy: a detached window is a dock and can split like any other.
         else if (accelerator === "split") paneHandleRef.current?.splitActiveTab();
+        // Guarded like the worktree pair below and for the same reason, matching
+        // this chord's own keydown copy: a detached window has no rail, no
+        // selection and no Next unread button, so there is nothing here to move.
+        else if (accelerator === "next-unread") {
+          if (!chromeless) goNextRef.current();
+        }
         // The worktree pair *is* guarded, also matching its keydown copy: a
         // detached window is a satellite of one worktree and must not move the
         // rail's selection.
@@ -4329,7 +4374,22 @@ function AppInner(props: {
   // Focus a terminal pane: select its worktree (which raises the window in the
   // desktop app) and activate its tab. Shared by the toast, the browser banner,
   // and the native-notification click below.
-  const focusPane = async (wtId: number, sessionId: string) => {
+  /**
+   * Returns whether **this window won the worktree** — false only when the claim
+   * was refused, which means another window was raised instead, or the socket is
+   * down and nothing happened at all.
+   *
+   * Deliberately not "the pane is now on screen": the `setPendingFocusPane` arm
+   * returns `true` before any layout has arrived, and the effect that drains it
+   * drops the request if the *granted claim* (`shownId`) has moved on by then —
+   * not the selection, which is a distinction that effect's own comment makes and
+   * this one had better not blur. What the caller
+   * actually needs to know is whether the navigation was *granted*, because that
+   * is what makes switching view earned. `goNext` is that caller; the two
+   * notification paths discard the answer, since a refusal has already raised the
+   * window that does have the worktree and said so.
+   */
+  const focusPane = async (wtId: number, sessionId: string): Promise<boolean> => {
     // **Every project's worktrees, not the selected project's.** An agent hook is
     // relayed to every client whatever it is showing, so the pane a notification
     // names is routinely in a project this window does not have selected — and
@@ -4357,7 +4417,7 @@ function AppInner(props: {
     // remove, arriving from the other direction.
     const alreadyHere = shownRef.current === wtId && worktreeRef.current?.id === wtId;
     if (worktree && !alreadyHere && !(await selectWorktree(worktree))) {
-      return;
+      return false;
     }
     // The layout is normally already here — the worktree was on screen, or its
     // panes were fetched on an earlier visit — and then this is the whole of it.
@@ -4368,7 +4428,7 @@ function AppInner(props: {
         const next = activateTab(cur, sessionId);
         return next === cur ? prev : { ...prev, [wtId]: next };
       });
-      return;
+      return true;
     }
     // **It is not, whenever the worktree was not already being shown here**, which
     // is now the ordinary case rather than an edge: a worktree in another project
@@ -4382,7 +4442,73 @@ function AppInner(props: {
     // for a fetch that has not been issued, and the request stays true until it is
     // either satisfied or provably unsatisfiable. Same shape as `diagnoseFor`.
     setPendingFocusPane({ worktreeId: wtId, sessionId });
+    return true;
   };
+
+  /**
+   * Go to the one place that needs you — in any project.
+   *
+   * The whole control is this plus a selector, because `focusPane` already does
+   * every hard part: it resolves the worktree in *any* project, claims it (which
+   * switches the project selection as a side effect of finding the row), raises
+   * the window that holds it when the claim is refused, and defers the tab
+   * activation until that worktree's panes have actually been fetched.
+   *
+   * **The target is recomputed at press time, never read off the render.** The
+   * button and ⌘⇧J share this one owner, and the keyboard path is registered once
+   * at boot — but the real reason is that events land asynchronously: an agent can
+   * block between the render that painted the button and the click that fires it,
+   * and pressing it should take you to what needs you *now*, not to what needed
+   * you when the bar last painted.
+   *
+   * The cost, stated because it is real: the tooltip names a destination, and an
+   * event arriving in the gap between that paint and the click can send you
+   * somewhere else. The gap is one render — `useInbox()` re-renders on every store
+   * mutation — so it is far shorter than a human click, and the alternative is
+   * worse in the case that actually recurs: a *waiting* agent landing while you
+   * reach for the button, and the button knowingly walking you past it.
+   *
+   * **No cursor, and none is wanted.** Arriving at a pane reads its event
+   * (`inbox.setWatching`, via the effect above), so pressing this repeatedly walks
+   * the queue down by emptying it rather than by remembering a position — which is
+   * also what makes it correct when the queue changes underneath you, when a pane
+   * is closed, or when a second window reads something first.
+   *
+   * The one case it cannot empty is a worktree held by *another* window: the claim
+   * is refused, that window is raised, and this window's store — the inbox is
+   * per-window, since the OSC 133 parser is xterm — still holds the event unread.
+   * Pressing again raises that window again, which is the honest answer (that *is*
+   * where the thing is) rather than a bug; marking it read here would be this
+   * window claiming somebody looked at something it cannot see.
+   */
+  const goNext = () => {
+    const target = inbox.nextUnread(allProjectWorktreeIds(reposRef.current));
+    if (!target) return;
+    // **Switch to the IDE, because the destination is a pane and panes only exist
+    // there.** Pressing this in Runs mode used to select the worktree, activate
+    // its tab and show the user none of it, which reads as a dead button.
+    //
+    // **After the jump lands, not before** — which is where this parts company
+    // with `openPalette`, whose own `setMode` cannot fail. This one can: a claim
+    // is refused whenever another window holds that worktree (the common case
+    // this feature exists for) or the socket is down, and `selectWorktree` then
+    // navigates nowhere. Switching first therefore moved this window to the IDE,
+    // showing an unrelated worktree, and rewrote the URL to `?view=ide` — for a
+    // jump that did not happen. The cost of waiting is one round trip before the
+    // view changes, which is the honest price of only changing it when there is
+    // something to change it for.
+    // The view this press started from. A claim can take a reconnect plus the
+    // daemon's ack timeout, and reading the mode at *resolution* meant a user who
+    // deliberately pressed ⌘⇧X to Runs while waiting got silently pulled back. So
+    // switch only if they have not moved since — their later choice outranks this
+    // one, and the old synchronous switch could not get this wrong because there
+    // was no gap to be wrong in.
+    const from = mode;
+    void focusPane(target.worktreeId, target.sessionId).then((landed) => {
+      if (landed && modeRef.current === from && from !== "ide") setModeRef.current("ide");
+    });
+  };
+  goNextRef.current = goNext;
 
   /**
    * A pane to activate as soon as its worktree's panes arrive.
@@ -4464,39 +4590,18 @@ function AppInner(props: {
     () =>
       inbox.onEvent(({ sessionId, worktreeId, unseen }) => {
         if (!notifyPrefsRef.current[notifyKey(unseen)]) return;
-        // Every project's, for the reason `focusPane` reads the same list.
-        const wt = allWorktreesRef.current.find((w) => w.id === worktreeId);
-        // **The project's name too, when the event is not from the one on screen.**
-        // Worktree markers and branch names repeat across repos by design — the
-        // assigner probes per repo (`markers_may_repeat_across_repos`) and two
-        // projects both checked out on `main` is the default case — so "main —
-        // waiting for you" names nothing a reader can act on once more than one
-        // project is in play. Omitted for the selected project, where it would be on
-        // every banner and say nothing.
-        const project =
-          wt && wt.repo_root !== activeRepoRootRef.current
-            ? (reposRef.current.find((r) => r.root === wt.repo_root)?.name ?? "")
-            : "";
-        const label = wt
-          ? project
-            ? `${project} · ${worktreeLabel(wt)}`
-            : worktreeLabel(wt)
-          : "Veld";
-        // The pane's name, when this window has that worktree's layout. It may not:
-        // an agent hook is relayed to every client, including ones showing something
-        // else, so the worktree alone has to be enough on its own.
-        const layout = layoutsRef.current[worktreeId];
-        const tab = layout ? findTab(layout, sessionId) : null;
-        // `paneTabBaseLabel`, never `paneTabLabel` — #272's fix, and shell integration
-        // makes it matter more rather than less. The pane's *displayed* label can be the
-        // title the process set for itself via OSC 0, and a shell's preexec hook writes
-        // the running command there: a banner reading "· sleep 5 && printf '\033]9;…'"
-        // names the noise instead of the pane. A notification is read out of the context
-        // that would have explained it, so it gets the pane's own name.
-        const heading =
-          tab && layout
-            ? `${label} · ${paneTabBaseLabel(layout, tab)}`
-            : label;
+        // Everything read through refs, so this subscriber can stay registered once
+        // at boot rather than being keyed on the 5s poll. See `eventLocation` for
+        // what the heading says and why — a notification is read out of the context
+        // that would have explained it, so it names the place in full.
+        const heading = eventLocation({
+          worktreeId,
+          sessionId,
+          worktrees: allWorktreesRef.current,
+          repos: reposRef.current,
+          activeRepoRoot: activeRepoRootRef.current,
+          layouts: layoutsRef.current,
+        });
         // `void`: focusing a pane is awaited internally (the claim, then the panes
         // arriving) and nothing here has anything to do with the outcome — a
         // refusal has already raised the window that does have the worktree.
@@ -5756,11 +5861,65 @@ function AppInner(props: {
   };
   openPaletteRef.current = openPalette;
 
+  /**
+   * Where the Next unread button would take you — the one unread event, anywhere.
+   *
+   * **Across every project, which is the whole point of the control.** Until now a
+   * worktree's state was only legible from the worktree itself: the rail glyph
+   * needs that project selected, and the project selector's dot says "something
+   * elsewhere" without saying what or where. An agent hook is relayed to *every*
+   * client whatever it is showing (`ide/channel.ts`), so this window already holds
+   * the events — nothing new is fetched here, it was only unreachable.
+   *
+   * Recomputed on every render rather than memoised: `useInbox()` above already
+   * re-renders this component whenever the store changes, which is exactly when
+   * this answer can change, and `nextUnread` is one pass over the sessions of the
+   * panes this window knows about. A `useMemo` would need the store's mutation as
+   * a dependency and it has no version to give one.
+   */
+  const nextTarget = inbox.nextUnread(allProjectWorktreeIds(repos));
+  // **Only in the desktop app**, where the chord is unambiguously ours.
+  //
+  // `isElectron`, not `clientKind()`. The latter is documented a screen up as "a
+  // capability, not a platform" — it reports `"browser"` for any shell whose
+  // preload predates `focusSelf`, which is the right answer for *can this window
+  // be raised* and the wrong one for *is this the desktop app*. Using it here
+  // would drop the hint on a shell where the chord works perfectly.
+  //
+  // Deliberately conservative rather than precise, and the imprecision is worth
+  // naming: on macOS only Firefox takes ⌘⇧J (its Browser Console) — Chrome and
+  // Edge put the console on ⌘⌥J, so the chord does reach the page there. Off
+  // macOS `Ctrl+Shift+J` is the console in Chrome, Edge and Firefox alike. So
+  // this suppresses a hint that would in fact work for a mac Chrome user, which
+  // is the cheaper mistake: naming a key that opens a devtools panel instead is
+  // the expensive one, and per-browser sniffing to recover one hint is not worth
+  // a user-agent test. The Shortcuts overview still lists the row, with the
+  // "Desktop app" badge saying why — the same under-promise `navigate-worktrees`
+  // makes, and `registry.ts`'s own note is the accurate wording.
+  const nextHint = isElectron ? shortcutHint("next-attention") : "";
   const topBarControls = (
     <TopBarControls
       settings={settings ?? {}}
       onSetting={(patch) => void saveSettings(patch)}
       onSearch={() => openPalette()}
+      next={
+        nextTarget && {
+          kind: nextTarget.unseen.kind,
+          // The event's own `detail` rather than the row vocabulary's `HEADLINE`:
+          // both say what happened, and only `detail` distinguishes an agent that
+          // finished from a command that did — which is the difference between
+          // "go and answer it" and "go and read it".
+          tooltip: `${eventLocation({
+            worktreeId: nextTarget.worktreeId,
+            sessionId: nextTarget.sessionId,
+            worktrees: allWorktrees,
+            repos,
+            activeRepoRoot: repo?.root ?? activeRepoRoot,
+            layouts,
+          })} — ${nextTarget.unseen.detail}${nextHint ? ` (${nextHint})` : ""}`,
+        }
+      }
+      onNext={() => goNext()}
     />
   );
 
@@ -7776,8 +7935,8 @@ function TopBar(props: {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
-  /** Search, keep-awake and focus mode — see `TopBarControls`, mounted by both
-   *  modes so the two bars cannot drift in what they offer. */
+  /** Next unread, search, keep-awake and focus mode — see `TopBarControls`,
+   *  mounted by both modes so the two bars cannot drift in what they offer. */
   controls: React.ReactNode;
   /** Theme, what's new and settings, as one menu at the end of the bar. */
   overflowMenu: React.ReactNode;

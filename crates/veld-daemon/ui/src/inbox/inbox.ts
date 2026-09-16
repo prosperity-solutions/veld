@@ -138,6 +138,19 @@ export interface RowSummary {
 
 const NOTHING: RowSummary = { state: null, entries: [], running: 0 };
 
+/**
+ * One unread event, with everything needed to go and look at it.
+ *
+ * The worktree id is what {@link RowSummary.entries} leaves out and this cannot: a
+ * rail row already knows which worktree it is, while a Veld-level control asking
+ * "where should I take you" is starting from nothing.
+ */
+export interface NextTarget {
+  worktreeId: number;
+  sessionId: string;
+  unseen: Unseen;
+}
+
 /** Agent states this build acts on. Anything else claims nothing — see `classify`. */
 const KNOWN_AGENT_STATES: AgentState[] = ["ready", "working", "blocked", "idle", "done"];
 
@@ -657,6 +670,61 @@ class WorktreeInbox {
   groupState(worktreeIds: ReadonlySet<number>, showWorking: boolean): RowSummary {
     if (worktreeIds.size === 0) return NOTHING;
     return this.summarize((id) => worktreeIds.has(id), showWorking);
+  }
+
+  /**
+   * The one unread event a "take me to it" gesture should land on.
+   *
+   * `PRECEDENCE` first, the same order every other surface here uses, so an agent
+   * that is *blocked* outranks one that merely finished however recently — a waiting
+   * agent is stopped work and a finished one is not. Then **newest first**, the same
+   * way {@link RowSummary.entries} is sorted and the same thing a notification does.
+   *
+   * **Newest, because the button's appearing and where it sends you are one event.**
+   * This shipped oldest-first — a queue-fairness argument, so the pane blocked
+   * longest got seen first — and that was wrong in a way a user hit immediately. An
+   * agent files *two* `finished` events per session, `idle` when a turn ends and
+   * `done` when the session ends, so a pane already read goes unread again later.
+   * With oldest-first, a third agent finishing made the button appear and pressing
+   * it opened the *first* agent, whose session-end event was older. The control had
+   * no visible cause any more. Precedence can still send you somewhere other than
+   * the newest event — but only to a *waiting* agent, and one of those was already
+   * keeping the button on screen, so nothing appears to jump.
+   *
+   * `working` can never be returned: it is not an event, there is nothing to go and
+   * see, and a button that took you to a busy pane would be sending you to watch a
+   * spinner. That falls out of only reading `unseen` rather than needing a rule.
+   *
+   * Like {@link groupState}, the caller passes the ids — the inbox has no opinion
+   * about which worktrees still exist, and a trashed one is the caller's to exclude.
+   *
+   * An exact tie on `at` — several agents finishing in the same millisecond, or
+   * events restored from one persisted record — keeps the first in `sessions`
+   * iteration order, which is insertion order and after a `restore()` is the
+   * order the document happened to be written in. Left arbitrary on purpose:
+   * arriving reads whichever was picked, so the other is still one press away,
+   * and a secondary key would be inventing a preference nobody expressed.
+   *
+   * Stateless: there is no cursor, and repeated calls return the same answer until
+   * something reads it. That is the intended shape — arriving at a pane reads its
+   * event (`setWatching`), so the queue empties by being walked rather than by this
+   * remembering where it got to, and nothing has to be reset when an event lands or
+   * a pane goes away.
+   */
+  nextUnread(worktreeIds: ReadonlySet<number>): NextTarget | null {
+    let best: NextTarget | null = null;
+    let bestRank = PRECEDENCE.length;
+    for (const [sessionId, session] of this.sessions) {
+      const unseen = session.unseen;
+      if (!unseen) continue;
+      if (!worktreeIds.has(session.worktreeId)) continue;
+      const rank = PRECEDENCE.indexOf(unseen.kind);
+      if (rank > bestRank) continue;
+      if (rank === bestRank && best !== null && unseen.at <= best.unseen.at) continue;
+      best = { worktreeId: session.worktreeId, sessionId, unseen };
+      bestRank = rank;
+    }
+    return best;
   }
 
   /**

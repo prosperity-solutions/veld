@@ -137,7 +137,7 @@ function isShiftEnter(e: KeyboardEvent): boolean {
 function isAppShortcutChord(e: KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey;
   if (mod && e.shiftKey && !e.altKey) {
-    if (["l", "x", "u", "o", "k", "d"].includes(e.key.toLowerCase())) return true;
+    if (["l", "x", "u", "o", "k", "d", "j"].includes(e.key.toLowerCase())) return true;
     if (e.key === "Enter") return true;
   }
   // **The navigation family**: `⌃Tab`/`⌃⇧Tab` (tabs) and `⌥Tab`/`⌥⇧Tab` or

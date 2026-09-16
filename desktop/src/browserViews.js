@@ -1287,13 +1287,25 @@ function attachListeners(window, viewId, entry) {
         return;
       }
     }
-    // Splitting the dock (`⌘⇧D`), and worktrees off macOS (`Ctrl+Shift+B`/`N`).
-    // Same trade as the Tab chords: nothing a guest page can meaningfully use.
+    // Splitting the dock (`⌘⇧D`), going to the next unread pane (`⌘⇧J`), and
+    // worktrees off macOS (`Ctrl+Shift+B`/`N`). Same trade as the Tab chords:
+    // nothing a guest page can meaningfully use.
     if ((input.control || input.meta) && input.shift && !input.alt) {
-      if ((input.key || "").toLowerCase() === "d") {
+      const letter = (input.key || "").toLowerCase();
+      if (letter === "d") {
         event.preventDefault();
         window.webContents.focus();
         send(window, "veld:browser:accelerator", { viewId, accelerator: "split" });
+        return;
+      }
+      // Forwarded for the same reason the *navigation* chords are, and it is one:
+      // it leaves this pane entirely, usually for another worktree. A pane that
+      // kept it would be the one place in the app where "go to what needs me"
+      // silently does nothing.
+      if (letter === "j") {
+        event.preventDefault();
+        window.webContents.focus();
+        send(window, "veld:browser:accelerator", { viewId, accelerator: "next-unread" });
         return;
       }
     }
