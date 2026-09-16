@@ -256,6 +256,13 @@
             ]
           ]
         },
+        "worktreeName": {
+          "$ref": "#/$defs/commandObject",
+          "description": "A command that names a new worktree from the prompt it was created from. The IDE's New worktree dialog sends the prompt with the create; the daemon runs this command AFTER the checkout exists \u2014 nothing waits on it \u2014 and applies the first line it prints as the worktree's display name. The prompt arrives on the command's stdin, never in its argument list: `{\"argv\": [\"claude\", \"-p\", \"Name this task in at most four words\"]}` is the shape, and `claude -p` and `codex exec` both read a prompt that way. Every failure is silent by design (no command, a timeout, a non-zero exit, output that is not a name): the checkout keeps the name the dialog already gave it, because it has already been created. It changes the display name only \u2014 never the alias, which picked the checkout's directory and defaults its run name and hostname. May use ${veld.worktree}, ${veld.root}, ${veld.branch}, ${veld.branch_raw} (argv only), ${veld.project} and ${veld.username}.",
+          "examples": [
+            { "argv": ["claude", "-p", "Reply with a 2-4 word title for this task and nothing else"] }
+          ]
+        },
         "git": {
           "type": "object",
           "description": "Per-project knobs for Veld's git-powered IDE surfaces. Only the keys below are interpreted; other keys here are RESERVED (parsed and stored, not rendered).",
@@ -512,6 +519,10 @@
               "resume": {
                 "$ref": "#/$defs/commandObject",
                 "description": "What to run instead of `argv`/`shell` when the pane is restored and its shell is gone — typically the tool's own resume flag with ${veld.pane.token}. Absent means the pane can only ever start fresh. A resume that fails is never silently retried as a fresh launch: that would start a new billable session and present to the user as data loss."
+              },
+              "agent": {
+                "type": "boolean",
+                "description": "Whether this pane is a coding agent \u2014 a program that takes a prompt and works on it. The IDE's New worktree dialog offers the project's agents and types your prompt into the one you pick; nothing else reads this. Absent is the useful state: the answer is then inferred from `resume`, because a pane that can pick its session up again is one holding a conversation, while a pane that cannot (a `git log`, a `tail -f`) is one where a typed prompt would be run as a command or lost with the pane. Set it only where that inference is wrong \u2014 `true` for an agent with no resume flag, `false` to keep a resumable pane out of the picker."
               },
               "auto_resume": {
                 "type": "boolean",

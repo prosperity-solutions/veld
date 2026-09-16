@@ -10,6 +10,29 @@
     "git": {
       "stalenessSensitivity": 2
     },
+    // Name a new worktree from the prompt that created it. The prompt arrives on
+    // this command's **stdin** — which is how `claude -p` takes one, and is what
+    // keeps a prompt (whatever the author happened to be working on) out of the
+    // world-readable process table.
+    //
+    // `haiku`, pinned: naming is the cheapest possible task and the whole point
+    // is that nobody is waiting for it. It runs *after* the create has answered,
+    // so a slow answer costs nothing — the dialog has already named the checkout
+    // from the prompt's first clause, and this replaces that label a few seconds
+    // later. Every failure is silent, including `claude` not being installed, and
+    // the fallback is that first-clause name.
+    //
+    // The instruction is written to survive a model that wants to be helpful:
+    // every "no …" clause in it is a shape that came back during testing.
+    "worktreeName": {
+      "argv": [
+        "claude",
+        "-p",
+        "--model",
+        "haiku",
+        "Reply with a 2-4 word title in sentence case for the task described on stdin. No punctuation, no quotes, no preamble, no explanation."
+      ]
+    },
     "quicklinks": [
       { "label": "veld.oss.life.li", "url": "https://veld.oss.life.li" },
       { "label": "GitHub", "url": "https://github.com/prosperity-solutions/veld" },

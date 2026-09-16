@@ -24,6 +24,16 @@ export type MarkerStyle = "color" | "emoji";
 /** Where a new worktree's branch is cut from. Mirrors the Rust `one_of` for
  *  `git.createFrom`; a value the daemon acts on. */
 export type GitCreateFrom = "origin" | "local";
+
+/**
+ * Which half of the New worktree dialog opens.
+ *
+ * `ask` is a real value, not an absent one: it is the state in which the dialog
+ * shows both modes with what each does and lets the user choose, and choosing
+ * records the choice. Somebody who wants the explanation back sets this to `ask`
+ * again.
+ */
+export type WorktreeNewMode = "ask" | "prompt" | "manual";
 /** Where a *new* worktree's checkout lands. Mirrors the Rust `one_of` for
  *  `worktree.storageMode`; a value the daemon acts on in `create_worktree`. */
 export type WorktreeStorageMode = "sibling" | "custom";
@@ -162,6 +172,12 @@ const FALLBACK = {
   // exception: the create dialog renders "based on the latest origin" unless an
   // older daemon says otherwise, which is the behaviour this setting ships with.
   gitCreateFrom: "origin" as GitCreateFrom,
+  // `ask`, matching the Rust default, and the file's "a new key that decides
+  // whether controls appear takes the shipped default" exception does not apply:
+  // there is no older behaviour to preserve, because before this key the dialog
+  // had no modes. An older daemon that cannot know the key gets the chooser,
+  // which is the honest answer — it has no recorded preference to honour.
+  worktreeNewMode: "ask" as WorktreeNewMode,
   // Sibling of the repo, matching the Rust default: today's only behaviour, and
   // what a fresh install already does before anyone has chosen a folder.
   worktreeStorageMode: "sibling" as WorktreeStorageMode,
@@ -830,6 +846,23 @@ export function showProjectColumn(doc: SettingsDoc): boolean {
 export function gitCreateFrom(doc: SettingsDoc): GitCreateFrom {
   const v = doc["git.createFrom"];
   return v === "local" ? "local" : "origin";
+}
+
+/**
+ * Which half of the New worktree dialog opens — see [`WorktreeNewMode`].
+ *
+ * Through `oneOf` rather than a ternary, unlike [`gitCreateFrom`] above: there
+ * are three values and one of them is the chooser, so a stored value this build
+ * does not recognise has to land on `ask` (show both, record what they pick)
+ * rather than silently on a mode nobody chose.
+ */
+export function worktreeNewMode(doc: SettingsDoc): WorktreeNewMode {
+  return oneOf<WorktreeNewMode>(
+    doc,
+    "worktree.newMode",
+    ["ask", "prompt", "manual"],
+    FALLBACK.worktreeNewMode,
+  );
 }
 
 /**

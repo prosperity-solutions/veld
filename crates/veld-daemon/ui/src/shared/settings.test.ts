@@ -30,6 +30,7 @@ import {
   extensionsSource,
   newsSource,
   gitCreateFrom,
+  worktreeNewMode,
   worktreeStorageMode,
   worktreeStorageDir,
   stalenessHue,
@@ -654,5 +655,24 @@ describe("autoWhileSharingKey", () => {
     // be a control that visibly does nothing.
     expect(autoWhileSharingKey("battery")).toBe(KEEP_AWAKE_SHARING_ON_BATTERY);
     expect(autoWhileSharingKey("mains")).toBe(KEEP_AWAKE_SHARING_ON_POWER);
+  });
+});
+
+describe("worktreeNewMode", () => {
+  it("defaults to the chooser, not to a mode", () => {
+    // `ask` is the state in which the dialog explains both modes and records
+    // what the user picks. Defaulting to either would spend the one chance to
+    // explain them.
+    expect(worktreeNewMode({})).toBe("ask");
+    expect(worktreeNewMode({ "worktree.newMode": "prompt" })).toBe("prompt");
+    expect(worktreeNewMode({ "worktree.newMode": "manual" })).toBe("manual");
+  });
+
+  it("falls back to the chooser for a value it does not recognise", () => {
+    // A newer build's mode name reaching an older bundle must not land on a
+    // mode nobody chose; the chooser asks again and re-records.
+    expect(worktreeNewMode({ "worktree.newMode": "telepathy" })).toBe("ask");
+    expect(worktreeNewMode({ "worktree.newMode": "" })).toBe("ask");
+    expect(worktreeNewMode({ "worktree.newMode": 3 })).toBe("ask");
   });
 });

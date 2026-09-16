@@ -1,13 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_WORKTREE_NAME,
   MAX_DERIVED_LEN,
   MAX_DISPLAY_NAME_LEN,
   aliasCollides,
   deriveAlias,
   deriveBranch,
   deriveDisplayName,
+  nameFromPrompt,
   takenExcluding,
+  uniqueName,
   worktreeLabel,
 } from "./worktreeName";
 
@@ -215,5 +218,127 @@ describe("takenExcluding", () => {
     // A pending alias never masks an unrelated, real collision.
     expect(takenExcluding(["main", "chk"], "main")).toEqual(["chk"]);
     expect(takenExcluding(["main", "chk"], "")).toEqual(["main", "chk"]);
+  });
+});
+
+describe("nameFromPrompt", () => {
+  it("takes the prompt's opening clause, whole words only", () => {
+    expect(
+      nameFromPrompt(
+        "Fix the login redirect loop so that expired sessions land on /login",
+      ),
+    ).toBe("Fix the login redirect loop");
+    // Under the cap, so the whole thing survives — capitals and all, because
+    // this becomes the display name and only the alias is lossy.
+    expect(nameFromPrompt("Add a --json flag")).toBe("Add a --json flag");
+  });
+
+  it("never cuts mid-word", () => {
+    // The character cap falls inside `everywhere`, so the whole word is dropped:
+    // a name ending mid-word reads as damage rather than as a summary.
+    expect(nameFromPrompt("Fix the login redirection behaviour everywhere")).toBe(
+      "Fix the login redirection behaviour",
+    );
+  });
+
+  it("cuts a single over-long word rather than returning nothing", () => {
+    const name = nameFromPrompt(`${"a".repeat(80)} and more`);
+    expect(name).toBe("a".repeat(36));
+  });
+
+  it("reads the first non-blank line and stops there", () => {
+    // A pasted prompt's later paragraphs are context, not subject.
+    expect(nameFromPrompt("\n\nRewrite the parser\n\nIt should also handle tags")).toBe(
+      "Rewrite the parser",
+    );
+  });
+
+  it("drops the punctuation the cut landed on", () => {
+    // The cut falls after `reconciliation,` — a name is not a clause.
+    expect(
+      nameFromPrompt("Rewrite the payment reconciliation, and then check the totals"),
+    ).toBe("Rewrite the payment reconciliation");
+    expect(nameFromPrompt("What broke?")).toBe("What broke");
+    // An opening bracket left dangling is worse than no bracket.
+    expect(nameFromPrompt("Update the docs (")).toBe("Update the docs");
+  });
+
+  it("does not end on a dangling conjunction", () => {
+    // `Fix the login redirect loop so that` fits the cap and reads as a
+    // sentence somebody gave up on halfway.
+    expect(
+      nameFromPrompt("Fix the login redirect loop so that sessions expire"),
+    ).toBe("Fix the login redirect loop");
+    // Only the trailing run, and never all of it: a one-word filler name is
+    // poor and still better than falling back to `Workspace`.
+    expect(nameFromPrompt("The")).toBe("The");
+    // Nothing is removed from the middle, where these words carry the meaning.
+    expect(nameFromPrompt("Move the cache out of the path")).toBe(
+      "Move the cache out of the path",
+    );
+  });
+
+  it("refuses to name a checkout after a line carrying control or bidi characters", () => {
+    // A prompt pasted out of terminal output is full of ESC, and the daemon
+    // *rejects* such a display name (`is_forbidden`) rather than stripping it —
+    // so borrowing one would 400 the whole create on a field the user was told
+    // to leave empty. `""` sends the caller to `DEFAULT_WORKTREE_NAME` instead.
+    expect(nameFromPrompt("\u001b[31mFix the redirect\u001b[0m")).toBe("");
+    // A right-to-left override reverses how the rail renders the whole label.
+    expect(nameFromPrompt("\u202eFix the redirect")).toBe("");
+    // The second line's junk does not disqualify a clean first line: only the
+    // line the name is taken from is read.
+    expect(nameFromPrompt("Fix the redirect\n\u001b[31mnoise")).toBe("Fix the redirect");
+  });
+
+  it("is not put off by the whitespace controls it is about to collapse anyway", () => {
+    // A tab is the common case the over-broad first version refused: a first
+    // line pasted from terminal output or an indented document has one, and the
+    // `\s+` split removes it a line later. Refusing the whole name over it
+    // named the checkout `Workspace` for no reason.
+    expect(nameFromPrompt("Fix the\tlogin redirect loop")).toBe(
+      "Fix the login redirect loop",
+    );
+    expect(nameFromPrompt("Fix\u000bthe\u000credirect")).toBe("Fix the redirect");
+  });
+
+  it("returns nothing for a prompt with nothing in it", () => {
+    // `""` is the caller's signal to fall back to `DEFAULT_WORKTREE_NAME`, not
+    // an error: an empty prompt is the supported way to use this dialog.
+    expect(nameFromPrompt("")).toBe("");
+    expect(nameFromPrompt("   \n\t ")).toBe("");
+  });
+
+  it("leaves a name a non-Latin prompt cannot supply to the caller", () => {
+    // `deriveAlias` slugs this to nothing, so the dialog must fall back rather
+    // than send an alias the daemon will refuse. Not this function's job to
+    // notice — it returns a name, and the alias derivation is the judge.
+    expect(nameFromPrompt("Исправь редирект")).toBe("Исправь редирект");
+    expect(deriveAlias(nameFromPrompt("Исправь редирект"))).toBe("");
+  });
+});
+
+describe("uniqueName", () => {
+  it("returns the base when nothing has taken it", () => {
+    expect(uniqueName(DEFAULT_WORKTREE_NAME, () => false)).toBe("Workspace");
+  });
+
+  it("numbers with a space, so the alias reads like the daemon's own", () => {
+    const taken = new Set(["Workspace", "Workspace 2"]);
+    expect(uniqueName("Workspace", (n) => taken.has(n))).toBe("Workspace 3");
+    // `deriveAlias` is what the number has to survive: `workspace-3` is the
+    // shape `unique_alias` produces server-side.
+    expect(deriveAlias("Workspace 3")).toBe("workspace-3");
+  });
+
+  it("gives up deterministically when every number is taken", () => {
+    // Deterministic is the requirement: this runs during render, so a fallback
+    // built from `Date.now()` gave a different name on every render — and the
+    // dialog's "identified as" receipt then named an alias the next render was
+    // not going to submit.
+    expect(uniqueName("Workspace", () => true)).toBe("Workspace 1000");
+    expect(uniqueName("Workspace", () => true)).toBe(
+      uniqueName("Workspace", () => true),
+    );
   });
 });
