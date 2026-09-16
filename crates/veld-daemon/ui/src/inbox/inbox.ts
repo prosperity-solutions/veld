@@ -138,6 +138,19 @@ export interface RowSummary {
 
 const NOTHING: RowSummary = { state: null, entries: [], running: 0 };
 
+/**
+ * One unread event, with everything needed to go and look at it.
+ *
+ * The worktree id is what {@link RowSummary.entries} leaves out and this cannot: a
+ * rail row already knows which worktree it is, while a Veld-level control asking
+ * "where should I take you" is starting from nothing.
+ */
+export interface NextTarget {
+  worktreeId: number;
+  sessionId: string;
+  unseen: Unseen;
+}
+
 /** Agent states this build acts on. Anything else claims nothing — see `classify`. */
 const KNOWN_AGENT_STATES: AgentState[] = ["ready", "working", "blocked", "idle", "done"];
 
@@ -657,6 +670,47 @@ class WorktreeInbox {
   groupState(worktreeIds: ReadonlySet<number>, showWorking: boolean): RowSummary {
     if (worktreeIds.size === 0) return NOTHING;
     return this.summarize((id) => worktreeIds.has(id), showWorking);
+  }
+
+  /**
+   * The one unread event a "take me to it" gesture should land on.
+   *
+   * Two orderings, and they answer different questions. `PRECEDENCE` first, the same
+   * order every other surface here uses, so an agent that is *blocked* outranks one
+   * that merely finished however long ago — a waiting agent is stopped work and a
+   * finished one is not. Then **oldest first** within a kind, which is where this
+   * deliberately parts company with {@link RowSummary.entries}: a tooltip lists what
+   * just happened, so newest-first is right there, while this is a queue you are
+   * working off, and newest-first would keep handing you whatever landed last while
+   * the agent that has been blocked longest waits longer still.
+   *
+   * `working` can never be returned: it is not an event, there is nothing to go and
+   * see, and a button that took you to a busy pane would be sending you to watch a
+   * spinner. That falls out of only reading `unseen` rather than needing a rule.
+   *
+   * Like {@link groupState}, the caller passes the ids — the inbox has no opinion
+   * about which worktrees still exist, and a trashed one is the caller's to exclude.
+   *
+   * Stateless: there is no cursor, and repeated calls return the same answer until
+   * something reads it. That is the intended shape — arriving at a pane reads its
+   * event (`setWatching`), so the queue empties by being walked rather than by this
+   * remembering where it got to, and nothing has to be reset when an event lands or
+   * a pane goes away.
+   */
+  nextUnread(worktreeIds: ReadonlySet<number>): NextTarget | null {
+    let best: NextTarget | null = null;
+    let bestRank = PRECEDENCE.length;
+    for (const [sessionId, session] of this.sessions) {
+      const unseen = session.unseen;
+      if (!unseen) continue;
+      if (!worktreeIds.has(session.worktreeId)) continue;
+      const rank = PRECEDENCE.indexOf(unseen.kind);
+      if (rank > bestRank) continue;
+      if (rank === bestRank && best !== null && unseen.at >= best.unseen.at) continue;
+      best = { worktreeId: session.worktreeId, sessionId, unseen };
+      bestRank = rank;
+    }
+    return best;
   }
 
   /**

@@ -6,6 +6,7 @@ import {
   nextIndex,
   type ShortcutDef,
   SHORTCUTS,
+  shortcutHint,
   shortcutProblems,
   visibleShortcuts,
 } from "./registry";
@@ -239,6 +240,35 @@ describe("comboTokens", () => {
     expect(comboTokens({ ctrl: true, keys: ["Tab"] }, true)).toEqual(["Ctrl", "Tab"]);
   });
 
+});
+
+describe("shortcutHint", () => {
+  it("runs the Mac glyphs together and joins the spelled-out modifiers", () => {
+    // The separator is the point: each token gets its own `<Kbd>` in the
+    // overview, but a tooltip is one run of text and "CtrlShiftJ" is not a key
+    // combination anybody recognises.
+    expect(shortcutHint("next-attention", true)).toBe("⌘⇧J");
+    expect(shortcutHint("next-attention", false)).toBe("Ctrl+Shift+J");
+  });
+
+  /** So a caller can append it unconditionally rather than testing first. */
+  it("is empty for an id that does not exist", () => {
+    expect(shortcutHint("no-such-shortcut", true)).toBe("");
+  });
+
+  /** `navigate-worktrees` binds `⌥Tab` on macOS and `Ctrl+Shift+B`/`N`
+   *  elsewhere, so the same id has to answer differently per platform — the
+   *  reason this reads `combosFor` rather than `combos[0]`. */
+  it("answers with the combo this platform actually has", () => {
+    expect(shortcutHint("navigate-worktrees", true)).toBe("⌥Tab");
+    expect(shortcutHint("navigate-worktrees", false)).toBe("Ctrl+Shift+B");
+  });
+
+  /** A row bound on one platform only is legitimate — `ShortcutsDialog` hides
+   *  it — and a hint for it has to come back empty rather than undefined. */
+  it("is empty for a row with no combo on this platform", () => {
+    expect(shortcutHint("terminal-kill-line", false)).toBe("");
+  });
 });
 
 describe("one action, one shortcut", () => {

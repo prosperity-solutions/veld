@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  allProjectWorktreeIds,
   isProjectNews,
   dropTargetIndex,
   otherProjectWorktreeIds,
@@ -63,6 +64,27 @@ describe("which worktrees are somewhere other than the selected project", () => 
   it("leaves out trashed worktrees here too", () => {
     const rows = [repo(A, [wt(1, A)]), repo(B, [wt(2, B, "2026-08-10T00:00:00Z"), wt(3, B)])];
     expect([...otherProjectWorktreeIds(rows, A)]).toEqual([3]);
+  });
+});
+
+describe("every worktree a Veld-level control can reach", () => {
+  const repos = [repo(A, [wt(1, A)]), repo(B, [wt(2, B), wt(3, B)]), repo(C, [wt(4, C)])];
+
+  /** The distinction from `otherProjectWorktreeIds`, and the whole reason this
+   *  exists: "take me to what needs me" means the nearest one, and skipping the
+   *  project already on screen would walk the user past a blocked agent two rows
+   *  down to reach one in another repo. */
+  it("keeps the selected project's worktrees, unlike the elsewhere set", () => {
+    expect([...allProjectWorktreeIds(repos)]).toEqual([1, 2, 3, 4]);
+  });
+
+  it("leaves out trashed worktrees", () => {
+    const rows = [repo(A, [wt(1, A, "2026-08-10T00:00:00Z")]), repo(B, [wt(2, B)])];
+    expect([...allProjectWorktreeIds(rows)]).toEqual([2]);
+  });
+
+  it("is empty with no projects", () => {
+    expect(allProjectWorktreeIds([]).size).toBe(0);
   });
 });
 

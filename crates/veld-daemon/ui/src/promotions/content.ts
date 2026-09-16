@@ -403,4 +403,27 @@ export const PROMOTIONS: Promotion[] = [
       "Update prompts now wait for a release to settle, and come at most once a day. Want them sooner, or rarer? Settings, under How eagerly to offer updates.",
     glyph: "inbox",
   },
+  {
+    // "A new way to move between worktrees" — the doc's own first example of
+    // what this channel is for, and the sequel to `worktree-inbox`: that card
+    // gave people permission to walk away, and this one is how they come back.
+    // Nobody goes looking for it, because until now the answer to "who needs me"
+    // was a glyph you had to have the right project selected to see.
+    //
+    // The headline is the move, not the control: "A Next button in the top bar"
+    // was the first draft and opens on the mechanism, which is the failure this
+    // doc spends a page on. No chord in it either — `keyboard-shortcuts` already
+    // established that Veld has them, and a key in a headline is a thing to
+    // learn rather than something to go and do.
+    //
+    // `inbox`, like the rest of the being-told family: this is the same news the
+    // rail carries, with somewhere to put it.
+    id: "next-button",
+    since: "2026-09-16",
+    eyebrow: "New",
+    headline: "Go straight to the agent waiting on you",
+    body:
+      "Agents running in three projects, and one of them is stuck on a question. Next, at the end of the top bar, takes you to it — then to the one after.",
+    glyph: "inbox",
+  },
 ];
