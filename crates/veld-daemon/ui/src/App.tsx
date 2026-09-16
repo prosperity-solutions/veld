@@ -3458,11 +3458,12 @@ function AppInner(props: {
           // **After `preventDefault`, matching ⌘⇧X below rather than the ⌥Tab arm
           // above.** That arm returns *first*, and says so, because swallowing the
           // key would leave it dead rather than merely inapplicable — but that
-          // reasoning is the Tab family's, not this chord's. `isAppShortcutChord`
-          // already answers `false` for ⌘⇧J (`terminalKeys.ts:253`), so a focused
-          // terminal has given the key up before this listener ever runs, and
-          // returning early would hand it to nothing but the browser's own
-          // binding. Cite ⌘⇧X, not ⌥Tab: same shape, same order, same reason.
+          // reasoning is the Tab family's, not this chord's. `handleKeyEvent`
+          // hands ⌘⇧J to the window rather than to xterm (`terminalKeys.ts:253`,
+          // because `isAppShortcutChord` claims it), so a focused terminal has
+          // given the key up before this listener ever runs, and returning early
+          // would hand it to nothing but the browser's own binding. Cite ⌘⇧X, not
+          // ⌥Tab: same shape, same order, same reason.
           if (chromeless) return;
           goNextRef.current();
           return;
@@ -4367,7 +4368,15 @@ function AppInner(props: {
   // Focus a terminal pane: select its worktree (which raises the window in the
   // desktop app) and activate its tab. Shared by the toast, the browser banner,
   // and the native-notification click below.
-  const focusPane = async (wtId: number, sessionId: string) => {
+  /**
+   * Returns whether this window is the one that ended up showing the pane — false
+   * when the claim was refused, which means another window was raised instead (or
+   * the socket is down and nothing happened at all). `goNext` needs the answer so
+   * it does not switch view for a jump that did not land; the notification paths
+   * discard it, because a refusal has already raised the window that does have
+   * the worktree and said so.
+   */
+  const focusPane = async (wtId: number, sessionId: string): Promise<boolean> => {
     // **Every project's worktrees, not the selected project's.** An agent hook is
     // relayed to every client whatever it is showing, so the pane a notification
     // names is routinely in a project this window does not have selected — and
@@ -4395,7 +4404,7 @@ function AppInner(props: {
     // remove, arriving from the other direction.
     const alreadyHere = shownRef.current === wtId && worktreeRef.current?.id === wtId;
     if (worktree && !alreadyHere && !(await selectWorktree(worktree))) {
-      return;
+      return false;
     }
     // The layout is normally already here — the worktree was on screen, or its
     // panes were fetched on an earlier visit — and then this is the whole of it.
@@ -4406,7 +4415,7 @@ function AppInner(props: {
         const next = activateTab(cur, sessionId);
         return next === cur ? prev : { ...prev, [wtId]: next };
       });
-      return;
+      return true;
     }
     // **It is not, whenever the worktree was not already being shown here**, which
     // is now the ordinary case rather than an edge: a worktree in another project
@@ -4420,6 +4429,7 @@ function AppInner(props: {
     // for a fetch that has not been issued, and the request stays true until it is
     // either satisfied or provably unsatisfiable. Same shape as `diagnoseFor`.
     setPendingFocusPane({ worktreeId: wtId, sessionId });
+    return true;
   };
 
   /**
@@ -4461,18 +4471,22 @@ function AppInner(props: {
   const goNext = () => {
     const target = inbox.nextUnread(allProjectWorktreeIds(reposRef.current));
     if (!target) return;
-    // **Switch to the IDE first, exactly as `openPalette` does, and for the same
-    // reason.** The destination is a *pane*, and panes only exist in the IDE — so
-    // pressing this in Runs mode selected the worktree, activated its tab, and
-    // showed the user none of it, which reads as a dead button. Switching first
-    // means the one handler behaves identically from either view instead of the
-    // button having to be absent from one of them: the control is about where you
-    // are needed, and where you are needed is somewhere this view cannot show.
-    if (mode !== "ide") setMode("ide");
-    // `void`: the claim and the panes arriving are awaited inside, and there is
-    // nothing here to do with the outcome — a refusal has already raised the
-    // window that does have the worktree, and said so.
-    void focusPane(target.worktreeId, target.sessionId);
+    // **Switch to the IDE, because the destination is a pane and panes only exist
+    // there.** Pressing this in Runs mode used to select the worktree, activate
+    // its tab and show the user none of it, which reads as a dead button.
+    //
+    // **After the jump lands, not before** — which is where this parts company
+    // with `openPalette`, whose own `setMode` cannot fail. This one can: a claim
+    // is refused whenever another window holds that worktree (the common case
+    // this feature exists for) or the socket is down, and `selectWorktree` then
+    // navigates nowhere. Switching first therefore moved this window to the IDE,
+    // showing an unrelated worktree, and rewrote the URL to `?view=ide` — for a
+    // jump that did not happen. The cost of waiting is one round trip before the
+    // view changes, which is the honest price of only changing it when there is
+    // something to change it for.
+    void focusPane(target.worktreeId, target.sessionId).then((landed) => {
+      if (landed && modeRef.current !== "ide") setModeRef.current("ide");
+    });
   };
   goNextRef.current = goNext;
 
@@ -5846,6 +5860,12 @@ function AppInner(props: {
   const nextTarget = inbox.nextUnread(allProjectWorktreeIds(repos));
   // **Only in the desktop app**, where the chord is unambiguously ours.
   //
+  // `isElectron`, not `clientKind()`. The latter is documented a screen up as "a
+  // capability, not a platform" — it reports `"browser"` for any shell whose
+  // preload predates `focusSelf`, which is the right answer for *can this window
+  // be raised* and the wrong one for *is this the desktop app*. Using it here
+  // would drop the hint on a shell where the chord works perfectly.
+  //
   // Deliberately conservative rather than precise, and the imprecision is worth
   // naming: on macOS only Firefox takes ⌘⇧J (its Browser Console) — Chrome and
   // Edge put the console on ⌘⌥J, so the chord does reach the page there. Off
@@ -5856,7 +5876,7 @@ function AppInner(props: {
   // a user-agent test. The Shortcuts overview still lists the row, with the
   // "Desktop app" badge saying why — the same under-promise `navigate-worktrees`
   // makes, and `registry.ts`'s own note is the accurate wording.
-  const nextHint = clientKind() === "electron" ? shortcutHint("next-attention") : "";
+  const nextHint = isElectron ? shortcutHint("next-attention") : "";
   const topBarControls = (
     <TopBarControls
       settings={settings ?? {}}
