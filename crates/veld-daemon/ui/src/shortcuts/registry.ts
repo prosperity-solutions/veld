@@ -213,6 +213,14 @@ export const SHORTCUTS: ShortcutDef[] = [
     // and the browser console in Firefox, and mac Firefox binds `⌘⇧J` to the
     // same thing. The letter is still the right one: it is layout-stable on
     // every Latin keyboard, which the free punctuation chords are not.
+    //
+    // **Not forwarded out of a browser pane** (`desktop/src/browserViews.js`), so
+    // it does nothing while one has the keyboard. That matches every other
+    // app-level chord — ⌘⇧L, ⌘⇧X and ⌘⇧K are not forwarded either; only ⌘F is,
+    // and it earns that by substituting the pane's own find bar. AGENTS.md's rule
+    // is that a forwarded chord has to leave the guest page something, and taking
+    // ⌘⇧J from every embedded page to save a keystroke in the one pane kind that
+    // is not a terminal is the wrong side of that trade.
     desktopOnly: true,
   },
   {

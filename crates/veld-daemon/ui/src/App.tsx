@@ -111,6 +111,7 @@ import {
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
 import { usePointerDrag } from "./shared/pointerDrag";
+import { eventLocation } from "./shared/eventLocation";
 import { worktreeLabel } from "./shared/worktreeName";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
 import { NodeActions } from "./shared/NodeActions";
@@ -185,7 +186,6 @@ import {
   adoptTabs,
   adoptedTermTitle,
   allTabs,
-  findTab,
   browserIds,
   browserTab,
   closeTab,
@@ -200,7 +200,6 @@ import {
   loadLayouts,
   newTabId,
   nextFreeProfile,
-  paneTabBaseLabel,
   paneTakesPrompt,
   paneTabLabel,
   tabForTransport,
@@ -409,57 +408,6 @@ function holderNotice(w: Worktree, holder?: ClientInfo): string {
   return `${label} is open in another window — switched to it`;
 }
 
-/**
- * Where an unseen event is, in words: the project, the worktree, and the pane.
- *
- * **One owner, because two surfaces now name the same place** — the notification
- * (toast or OS banner) and the Next unread button's tooltip — and they have to
- * agree.
- * They are read in sequence by the same person: a banner says a worktree needs
- * you, you come back, and the button beside the ⋯ menu is the thing you press to
- * get there. If one of them called it `feature/x` and the other `veld · main`,
- * the only way to know they meant the same pane is to click and find out.
- *
- * **The project's name only when it is not the one on screen.** Worktree markers
- * and branch names repeat across repos by design — the assigner probes per repo
- * (`markers_may_repeat_across_repos`) and two projects both checked out on `main`
- * is the default case — so "main" alone names nothing actionable once more than
- * one project is in play. Omitted for the selected project, where it would say
- * nothing and be on every line.
- *
- * **The pane's name only when this window has that worktree's layout.** It may
- * not: an agent hook is relayed to every client, including ones showing something
- * else, so the worktree alone has to be enough on its own.
- *
- * `paneTabBaseLabel`, never `paneTabLabel` — #272's fix, and shell integration
- * makes it matter more rather than less. A pane's *displayed* label can be the
- * title the process set for itself via OSC 0, and a shell's preexec hook writes
- * the running command there: a line reading "· sleep 5 && printf '\033]9;…'"
- * names the noise instead of the pane.
- */
-function eventLocation(args: {
-  worktreeId: number;
-  sessionId: string;
-  /** Every project's, never the selected one's — the event is routinely elsewhere. */
-  worktrees: readonly Worktree[];
-  repos: readonly Repo[];
-  activeRepoRoot: string | null;
-  layouts: Readonly<Record<number, PaneLayout>>;
-}): string {
-  const wt = args.worktrees.find((w) => w.id === args.worktreeId);
-  const project =
-    wt && wt.repo_root !== args.activeRepoRoot
-      ? (args.repos.find((r) => r.root === wt.repo_root)?.name ?? "")
-      : "";
-  const label = wt
-    ? project
-      ? `${project} · ${worktreeLabel(wt)}`
-      : worktreeLabel(wt)
-    : "Veld";
-  const layout = args.layouts[args.worktreeId];
-  const tab = layout ? findTab(layout, args.sessionId) : null;
-  return tab && layout ? `${label} · ${paneTabBaseLabel(layout, tab)}` : label;
-}
 
 /**
  * Mark this page as wanted, for a client that cannot raise itself.
@@ -3504,10 +3452,17 @@ function AppInner(props: {
           )
             return;
           e.preventDefault();
-          // A detached window renders one pane, no rail and no selection — the
-          // same reason the worktree chords stand down there. It has no Next
-          // button either, so the chord matching what the window cannot show
-          // would be the only way to reach it.
+          // A detached window renders one pane, no rail and no selection, so
+          // there is nothing here for this to move.
+          //
+          // **After `preventDefault`, matching ⌘⇧X below rather than the ⌥Tab arm
+          // above.** That arm returns *first*, and says so, because swallowing the
+          // key would leave it dead rather than merely inapplicable — but that
+          // reasoning is the Tab family's, not this chord's. `isAppShortcutChord`
+          // already answers `false` for ⌘⇧J (`terminalKeys.ts:253`), so a focused
+          // terminal has given the key up before this listener ever runs, and
+          // returning early would hand it to nothing but the browser's own
+          // binding. Cite ⌘⇧X, not ⌥Tab: same shape, same order, same reason.
           if (chromeless) return;
           goNextRef.current();
           return;
@@ -4480,8 +4435,15 @@ function AppInner(props: {
    * button and ⌘⇧J share this one owner, and the keyboard path is registered once
    * at boot — but the real reason is that events land asynchronously: an agent can
    * block between the render that painted the button and the click that fires it,
-   * and pressing "Next" should take you to what needs you *now*, not to what
-   * needed you when the bar last painted.
+   * and pressing it should take you to what needs you *now*, not to what needed
+   * you when the bar last painted.
+   *
+   * The cost, stated because it is real: the tooltip names a destination, and an
+   * event arriving in the gap between that paint and the click can send you
+   * somewhere else. The gap is one render — `useInbox()` re-renders on every store
+   * mutation — so it is far shorter than a human click, and the alternative is
+   * worse in the case that actually recurs: a *waiting* agent landing while you
+   * reach for the button, and the button knowingly walking you past it.
    *
    * **No cursor, and none is wanted.** Arriving at a pane reads its event
    * (`inbox.setWatching`, via the effect above), so pressing this repeatedly walks
@@ -5882,13 +5844,18 @@ function AppInner(props: {
    * a dependency and it has no version to give one.
    */
   const nextTarget = inbox.nextUnread(allProjectWorktreeIds(repos));
-  // **Only in the desktop app**, where the chord is actually ours — see the
-  // `desktopOnly` note on its registry row: every browser but Safari claims this
-  // combination for a devtools console before the page sees it. The tooltip then
-  // simply does not mention a key, rather than naming one that opens something
-  // else. Under-promising, the same call `navigate-worktrees` makes: the
-  // Shortcuts overview still lists the row, with its "Desktop app" badge saying
-  // why.
+  // **Only in the desktop app**, where the chord is unambiguously ours.
+  //
+  // Deliberately conservative rather than precise, and the imprecision is worth
+  // naming: on macOS only Firefox takes ⌘⇧J (its Browser Console) — Chrome and
+  // Edge put the console on ⌘⌥J, so the chord does reach the page there. Off
+  // macOS `Ctrl+Shift+J` is the console in Chrome, Edge and Firefox alike. So
+  // this suppresses a hint that would in fact work for a mac Chrome user, which
+  // is the cheaper mistake: naming a key that opens a devtools panel instead is
+  // the expensive one, and per-browser sniffing to recover one hint is not worth
+  // a user-agent test. The Shortcuts overview still lists the row, with the
+  // "Desktop app" badge saying why — the same under-promise `navigate-worktrees`
+  // makes, and `registry.ts`'s own note is the accurate wording.
   const nextHint = clientKind() === "electron" ? shortcutHint("next-attention") : "";
   const topBarControls = (
     <TopBarControls
@@ -7928,8 +7895,8 @@ function TopBar(props: {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
-  /** Search, keep-awake and focus mode — see `TopBarControls`, mounted by both
-   *  modes so the two bars cannot drift in what they offer. */
+  /** Next unread, search, keep-awake and focus mode — see `TopBarControls`,
+   *  mounted by both modes so the two bars cannot drift in what they offer. */
   controls: React.ReactNode;
   /** Theme, what's new and settings, as one menu at the end of the bar. */
   overflowMenu: React.ReactNode;

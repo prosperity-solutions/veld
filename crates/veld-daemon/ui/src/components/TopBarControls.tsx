@@ -85,7 +85,14 @@ export function TopBarControls(props: {
           reach ⌘⇧J — a chord costs no bar width, so the reason to switch the
           button off does not apply to it. */}
       {props.next !== null && showNextUnread(props.settings) && (
-        <Tooltip label={props.next.tooltip}>
+        // `multiline w={300}`: Mantine's tooltip is `white-space: nowrap` until
+        // `[data-multiline]` says otherwise, and this label is the longest in the
+        // bar — project, worktree, pane, what happened, and the chord. Worse, the
+        // `detail` half can be up to 200 characters of whatever a program printed
+        // (an OSC 9 notification), so unwrapped it renders as one strip wider than
+        // the window. 300 is `ConfigVars`' width for its own long help; the rail's
+        // tooltip uses 260 for a shorter string.
+        <Tooltip label={props.next.tooltip} multiline w={300}>
           <Button
             size="xs"
             variant="default"

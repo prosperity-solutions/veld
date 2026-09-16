@@ -698,6 +698,13 @@ class WorktreeInbox {
    * Like {@link groupState}, the caller passes the ids — the inbox has no opinion
    * about which worktrees still exist, and a trashed one is the caller's to exclude.
    *
+   * An exact tie on `at` — several agents finishing in the same millisecond, or
+   * events restored from one persisted record — keeps the first in `sessions`
+   * iteration order, which is insertion order and after a `restore()` is the
+   * order the document happened to be written in. Left arbitrary on purpose:
+   * arriving reads whichever was picked, so the other is still one press away,
+   * and a secondary key would be inventing a preference nobody expressed.
+   *
    * Stateless: there is no cursor, and repeated calls return the same answer until
    * something reads it. That is the intended shape — arriving at a pane reads its
    * event (`setWatching`), so the queue empties by being walked rather than by this
