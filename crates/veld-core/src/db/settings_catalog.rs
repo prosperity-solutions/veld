@@ -708,11 +708,12 @@ impl SettingKey {
             Self::UiShowNextUnread => toggle(
                 "Show the Next unread button",
                 "A button at the end of the top bar that takes you to the worktree and pane \
-                 where a coding agent is waiting for you — in any project, not only the one on \
-                 screen — and then to the one after it. It is shown only while something is \
-                 actually waiting, so turning this off is for someone who would rather reach \
-                 the same places from the rail. ⌘⇧J does the same thing from the keyboard and \
-                 keeps working with this off.",
+                 where a coding agent is waiting for you, or where something finished or \
+                 failed — in any project, not only the one on screen — and then to the one \
+                 after it. It is shown only while something is actually unread, so turning \
+                 this off is for someone who would rather reach the same places from the \
+                 rail. ⌘⇧J does the same thing from the keyboard and keeps working with \
+                 this off.",
                 General,
             ),
             Self::UiShowProjectNews => toggle(
