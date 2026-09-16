@@ -4381,7 +4381,9 @@ function AppInner(props: {
    *
    * Deliberately not "the pane is now on screen": the `setPendingFocusPane` arm
    * returns `true` before any layout has arrived, and the effect that drains it
-   * drops the request if the selection has moved on by then. What the caller
+   * drops the request if the *granted claim* (`shownId`) has moved on by then —
+   * not the selection, which is a distinction that effect's own comment makes and
+   * this one had better not blur. What the caller
    * actually needs to know is whether the navigation was *granted*, because that
    * is what makes switching view earned. `goNext` is that caller; the two
    * notification paths discard the answer, since a refusal has already raised the

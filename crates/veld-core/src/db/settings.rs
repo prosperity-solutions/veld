@@ -1898,7 +1898,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (SettingKey::UiShowProjectColumn, Value::from(false)),
         // On. The button costs nothing while nothing is unread — it is not there
         // at all — so the only install it charges is one where something genuinely
-        // wants somebody: an agent waiting, or a command that finished or failed.
+        // wants somebody: an agent waiting, or something finished or failed.
         // The switch is for someone who does not want the bar changing shape.
         (SettingKey::UiShowNextUnread, Value::from(true)),
         (SettingKey::FocusModeEnabled, Value::from(false)),
