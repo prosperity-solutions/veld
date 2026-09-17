@@ -1153,8 +1153,14 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
 /// whose only other detector is a failed release, the guaranteed load is worth
 /// three lines of `unsafe`.
 ///
-/// No test in this repo can catch a recurrence, which is why the guarantee
-/// matters rather than the barrier merely working today: the tests here and in
+/// **Test-only now.** The scanner compares in obfuscated space instead
+/// ([`is_version_record_magic`]), so nothing in a shipped binary builds this
+/// value — which is the difference between discouraging the fold and removing
+/// the thing that can be folded. What is left here is the other half of the
+/// equivalence the tests check.
+///
+/// No test in this repo could catch a recurrence of the *fold*, which is why the
+/// guarantee mattered rather than the barrier merely working today: the tests here and in
 /// `crates/veld-helper/tests/version_record.rs` build the **host** arch in the
 /// **debug** profile, where nothing folds, and the host *release* build did not
 /// fold either. The backstop is `release.yml`'s `Package client binaries` step,
@@ -1162,6 +1168,7 @@ pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
 /// — so a fold that ever gets through fails closed, before publishing rather
 /// than after installing. That is also why that step's tolerance must never be
 /// widened to silence a second record.
+#[cfg(test)]
 fn version_record_magic_at_runtime() -> [u8; 16] {
     // Derived from the same constant `version_record_magic` uses, so the two
     // halves cannot drift; `static` only so there is an address to read from.
@@ -1175,6 +1182,50 @@ fn version_record_magic_at_runtime() -> [u8; 16] {
         *out = obfuscated ^ key;
     }
     magic
+}
+
+/// Whether these 16 bytes are the version record's magic — **without ever
+/// building the plaintext magic as a value.**
+///
+/// This is the scanner's half of the needle problem, and it is a stronger answer
+/// than [`version_record_magic_at_runtime`] was on its own. That function
+/// returns a `[u8; 16]`, and the caller compared a slice against it; a slice
+/// comparison is a `memcmp` against an array, and an array the optimiser can
+/// compute is an array it may place in `.rodata` — which is a second copy of the
+/// needle in every binary that links the scanner, exactly what the obfuscation
+/// exists to prevent. The volatile key is what is supposed to stop that fold,
+/// and it held until a change elsewhere in `veld-core` moved the inlining
+/// decisions: a `veld-helper` built for `aarch64-unknown-linux-gnu` carried the
+/// folded plaintext again, in the linker's 16-byte string pool, immediately in
+/// front of two 16-character string literals that happened to spell a
+/// well-formed version field. Two records, and `version_in_signed_bytes` reads
+/// that as "no single answer" — i.e. as a helper no privileged install may
+/// update onto.
+///
+/// Comparing in **obfuscated space** removes the possibility rather than
+/// discouraging it: each candidate byte is XORed with the key and checked
+/// against [`VERSION_MAGIC_OBFUSCATED`], which is already in the file and is
+/// meant to be. There is no plaintext array anywhere in this function to fold,
+/// whatever the optimiser decides to inline. The key is still read volatile, so
+/// the per-byte XOR cannot be pre-computed into sixteen constants that the
+/// vectoriser could then reassemble.
+///
+/// Equivalent to `window == version_record_magic()` byte for byte:
+/// `b ^ key == obfuscated` ⟺ `b == obfuscated ^ key`. Pinned by
+/// `the_obfuscated_comparison_matches_the_record_magic` in this module's tests.
+fn is_version_record_magic(window: &[u8]) -> bool {
+    if window.len() != 16 {
+        return false;
+    }
+    // SAFETY: as in `version_record_magic_at_runtime` — a live, initialised,
+    // correctly-aligned `u8` in this binary's static data, read volatile only to
+    // deny the optimiser the constant.
+    static KEY_CELL: u8 = VERSION_MAGIC_KEY;
+    let key = unsafe { std::ptr::read_volatile(&KEY_CELL) };
+    window
+        .iter()
+        .zip(VERSION_MAGIC_OBFUSCATED)
+        .all(|(candidate, obfuscated)| candidate ^ key == obfuscated)
 }
 
 /// The version recorded inside `bytes`, or `None` when there isn't exactly one
@@ -1191,10 +1242,9 @@ fn version_record_magic_at_runtime() -> [u8; 16] {
 /// and refusing that would wedge the updater on the very artifacts it exists to
 /// install. Requiring one *value* keeps the strictness where it belongs.
 pub fn version_in_signed_bytes(bytes: &[u8]) -> Option<String> {
-    let magic = version_record_magic_at_runtime();
     let mut found: Option<String> = None;
     for start in 0..bytes.len().saturating_sub(VERSION_RECORD_LEN - 1) {
-        if bytes[start..start + 16] != magic {
+        if !is_version_record_magic(&bytes[start..start + 16]) {
             continue;
         }
         let Some(version) = parse_version_field(&bytes[start + 16..start + VERSION_RECORD_LEN])
@@ -1469,6 +1519,42 @@ mod tests {
     #[test]
     fn the_runtime_magic_matches_the_record_magic() {
         assert_eq!(version_record_magic_at_runtime(), version_record_magic());
+    }
+
+    /// The scanner's obfuscated-space comparison and the record's plaintext
+    /// magic are the same 16 bytes.
+    ///
+    /// [`is_version_record_magic`] never builds the plaintext — that is the
+    /// point of it, and it is what keeps a second needle out of every binary
+    /// that links the scanner. The cost of not building it is that nothing
+    /// forces the two halves to agree, so this is what does: the byte the
+    /// scanner accepts must be exactly the byte [`version_record`] writes, and a
+    /// change to either side that breaks that makes every signed binary
+    /// unreadable to every future helper.
+    #[test]
+    fn the_obfuscated_comparison_matches_the_record_magic() {
+        let magic = version_record_magic();
+        assert!(is_version_record_magic(&magic), "the real magic must match");
+
+        // Every single-byte deviation is refused — the comparison covers all 16
+        // positions, not a prefix.
+        for i in 0..16 {
+            let mut wrong = magic;
+            wrong[i] ^= 0xff;
+            assert!(
+                !is_version_record_magic(&wrong),
+                "byte {i} was not compared"
+            );
+        }
+
+        // A short window is not a match, so a hit at the very end of a file
+        // cannot read past it.
+        assert!(!is_version_record_magic(&magic[..15]));
+        assert!(!is_version_record_magic(&[]));
+        // And a longer one is not either: the caller passes exactly 16.
+        let mut long = magic.to_vec();
+        long.push(0);
+        assert!(!is_version_record_magic(&long));
     }
 
     /// A FIFO where the signature should be is refused, not waited on.
