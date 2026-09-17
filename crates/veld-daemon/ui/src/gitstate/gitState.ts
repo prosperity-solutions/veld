@@ -74,6 +74,17 @@ export function rowGitState(
   // checkout can be holding work that is not safe — and it is deliberately
   // checked before `unpushed`, though the two barely compete: a detached HEAD
   // has no upstream, so `ahead` is `null` in almost every case that reaches here.
+  //
+  // **The cost of that first line, recorded because it is not obvious and was
+  // chosen deliberately.** A conflicted rebase is dirty *by definition*, and a
+  // rebase is the motivating case for a detached checkout appearing at all — so
+  // in exactly that case the glyph shows a pencil and nothing on the row says
+  // "detached". The old virtual section shouted there and this does not. The
+  // tooltip and `aria-description` still carry both facts (they never collapse,
+  // see `gitFacts`), and the precedence is the maintainer's call: `dirty` is the
+  // one state with a consequence, and demoting it to surface a rarer one would
+  // trade a signal everyone sees daily for one most repos never produce. Revisit
+  // by flipping these two lines if the detached case turns out to matter more.
   if (git?.dirty) return "dirty";
   if (detached) return "detached";
   if (!git) return null;

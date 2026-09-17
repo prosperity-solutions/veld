@@ -649,7 +649,7 @@ export const UNGROUPED_LABEL = "Worktrees";
  * still needs somewhere to drop a worktree. The **trash is always kept too** — it
  * is the rail's permanent bottom anchor, rendered as an empty lane rather than
  * hidden — so the user always has a place that means "trash exists". The
- * The Deleting lane is conditional: it is a state, so an empty one would be
+ * Deleting lane is conditional: it is a state, so an empty one would be
  * permanent clutter.
  */
 export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
@@ -676,7 +676,14 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     .sort((a, b) =>
       a.trashed_at < b.trashed_at ? 1 : a.trashed_at > b.trashed_at ? -1 : 0,
     );
-  const known = new Set(lanes.map((l) => l.name));
+  // `realLanes`, not `lanes`: the reserved position row is in this list, and
+  // counting it as a known lane breaks the fallback two comments down. A worktree
+  // whose `lane` is that name would be neither ungrouped (the name is "known")
+  // nor a member of any section (the loop emits the bucket for it, never a
+  // group), so it would render in no section at all — the "a row the user cannot
+  // reach" failure this very filter exists to prevent. The daemon refuses to
+  // write that lane, and this is the read side holding the same line.
+  const known = new Set(realLanes(lanes).map((l) => l.name));
   // **A detached HEAD no longer moves a row anywhere.** It used to pull the
   // checkout out of its group and into a virtual "Detached" section, which meant
   // a rebase or a bisect made rows leave their group and come back — and left a
@@ -1000,19 +1007,6 @@ export function insertionTarget(
 }
 
 /**
- * The rail's orderable sections, in order, as the names the daemon stores.
- *
- * One list, and it is the coordinate space every ordering question in the rail
- * is asked in: the lanes in their stored `position` order, with the ungrouped
- * bucket at its own row ([`UNGROUPED_LANE`]).
- *
- * **A repo with no row for the bucket gets one synthesised at the front**, which
- * is both the pre-existing layout and the thing that lets the very first drag
- * express itself: the order handed to `reorder_lanes` always names the bucket,
- * so the daemon has somewhere to record a slot it has never stored before. That
- * is why this is not simply `lanes.map(l => l.name)` with a filter.
- */
-/**
  * The repo's actual groups — every row the daemon sent except the ungrouped
  * section's position marker.
  *
@@ -1031,6 +1025,19 @@ export function realLanes(lanes: Lane[]): Lane[] {
   return lanes.filter((l) => l.name !== UNGROUPED_LANE);
 }
 
+/**
+ * The rail's orderable sections, in order, as the names the daemon stores.
+ *
+ * One list, and it is the coordinate space every ordering question in the rail
+ * is asked in: the lanes in their stored `position` order, with the ungrouped
+ * bucket at its own row ([`UNGROUPED_LANE`]).
+ *
+ * **A repo with no row for the bucket gets one synthesised at the front**, which
+ * is both the pre-existing layout and the thing that lets the very first drag
+ * express itself: the order handed to `reorder_lanes` always names the bucket,
+ * so the daemon has somewhere to record a slot it has never stored before. That
+ * is why this is not simply `lanes.map(l => l.name)` with a filter.
+ */
 export function railOrder(lanes: Lane[]): string[] {
   const names = lanes.map((l) => l.name);
   return names.includes(UNGROUPED_LANE) ? names : [UNGROUPED_LANE, ...names];

@@ -729,11 +729,18 @@ impl Db {
         // alternative is a worktree the user cannot see in any group.
         if let Some(lane) = lane {
             if !lane.is_empty() {
+                // `name != ?3` excludes the ungrouped section's position row. It is
+                // in `lanes`, so a bare EXISTS accepts it — and a worktree filed
+                // there is in no section at all: `railGroups` counts the name as
+                // known, so the row is not ungrouped either, and nothing emits a
+                // group for it. That is the "a row the user cannot reach" failure
+                // the comment above exists to prevent, so it is refused at the
+                // write rather than tolerated at the read.
                 let known: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM lanes
                       WHERE repo_root = (SELECT repo_root FROM worktrees WHERE id = ?1)
-                        AND name = ?2)",
-                    params![id, lane],
+                        AND name = ?2 AND name != ?3)",
+                    params![id, lane, UNGROUPED_LANE],
                     |r| r.get(0),
                 )?;
                 if !known {
@@ -898,6 +905,14 @@ impl Db {
     /// rowid reuse out of a brand-new table.
     pub fn rename_lane(&self, repo_root: &Path, from: &str, to: &str) -> Result<bool, DbError> {
         let to = Self::valid_lane_name(to)?;
+        // `valid_lane_name` guards the destination; this guards the *source*.
+        // Without it the ungrouped section's position row could be renamed into a
+        // real group — which both leaves a phantom group in the bucket's slot and
+        // snaps the bucket back to the top. Reported as "no such lane", because to
+        // every user-facing caller that is exactly what it is.
+        if from == UNGROUPED_LANE {
+            return Ok(false);
+        }
         let root = root_key(repo_root);
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -936,6 +951,13 @@ impl Db {
     /// surrogate id. Doing it here means the two stores can never disagree about
     /// whether a lane exists.
     pub fn delete_lane(&self, repo_root: &Path, name: &str) -> Result<bool, DbError> {
+        // Same guard as `rename_lane`, and this path had none at all: deleting the
+        // position row silently snaps the ungrouped section back to the top of the
+        // rail. [`UNGROUPED_LANE`] claims it cannot be renamed or deleted, and this
+        // is half of what makes that true rather than aspirational.
+        if name == UNGROUPED_LANE {
+            return Ok(false);
+        }
         let root = root_key(repo_root);
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -2737,6 +2759,58 @@ mod tests {
         assert!(matches!(
             db.create_lane(root, "one-too-many"),
             Err(DbError::TooManyLanes(_))
+        ));
+    }
+
+    /// The reserved row cannot be renamed into a real lane, deleted, or filed
+    /// into — the three ways [`UNGROUPED_LANE`]'s doc claims it is unreachable
+    /// and, before this, only the first was actually enforced.
+    ///
+    /// `rename_lane` validated its destination but never its **source**, and
+    /// `delete_lane` validated nothing at all, so a caller naming the reserved row
+    /// could turn the ungrouped section's position marker into a group (leaving a
+    /// phantom section in its slot) or delete it and snap the bucket back to the
+    /// top. Filing a worktree *into* it was worse: `railGroups` counted the name
+    /// as known, so the row was neither ungrouped nor a member of any section and
+    /// rendered nowhere at all.
+    #[test]
+    fn the_ungrouped_row_is_not_a_lane_anyone_can_operate_on() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lguard");
+        db.upsert_repo(root, "lguard").unwrap();
+        db.create_lane(root, "review").unwrap();
+        db.reorder_lanes(root, &["review".into(), UNGROUPED_LANE.into()])
+            .unwrap();
+
+        // Renaming it away is refused as "no such lane", which is what it is to
+        // every user-facing caller.
+        assert!(!db.rename_lane(root, UNGROUPED_LANE, "hijacked").unwrap());
+        // Deleting it is refused the same way — otherwise the bucket silently
+        // jumps back to the top of the rail.
+        assert!(!db.delete_lane(root, UNGROUPED_LANE).unwrap());
+        assert_eq!(lane_names(&db, root), vec!["review", UNGROUPED_LANE]);
+
+        // And nothing can be filed into it.
+        let wt = db
+            .sync_worktrees(
+                root,
+                &[DiscoveredWorktree {
+                    path: root.join("wt").to_string_lossy().into_owned(),
+                    branch: "feature".into(),
+                    is_main: false,
+                }],
+            )
+            .unwrap();
+        let id = wt.first().map(|w| w.id).unwrap_or(1);
+        assert!(matches!(
+            db.patch_worktree(
+                id,
+                WorktreePatch {
+                    lane: Some(UNGROUPED_LANE),
+                    ..Default::default()
+                }
+            ),
+            Err(DbError::UnknownLane(_))
         ));
     }
 

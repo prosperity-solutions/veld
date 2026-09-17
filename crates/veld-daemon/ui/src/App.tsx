@@ -3011,7 +3011,7 @@ function AppInner(props: {
    * 404 on the departed.
    */
   const sectionMembers = (key: string): Worktree[] =>
-    railGroups(worktrees, lanes).find((g) => g.key === key)?.worktrees ?? [];
+    railGroups(worktrees, laneRows).find((g) => g.key === key)?.worktrees ?? [];
 
   /** What a section is called on screen — the rail's own header text. */
   const sectionLabel = (lane: string) =>
@@ -3058,7 +3058,7 @@ function AppInner(props: {
   /**
    * Move every worktree in one rail section into another group, in one go.
    *
-   * A client-side loop over `patchWorktree`, the same shape `trashAllDetached`
+   * A client-side loop over `patchWorktree`, the same shape the batch trash
    * uses below and for the same reason: `Db::patch_worktree` is the one owner of
    * worktree-row edits, so a bulk endpoint would be a second write path for a
    * gesture that is rare and never larger than one group. Sequential, because
@@ -5186,7 +5186,7 @@ function AppInner(props: {
     toIndex: number,
   ) => {
     if (!repo) return;
-    const move = moveWorktree(railGroups(worktrees, lanes), path, toLane, toIndex);
+    const move = moveWorktree(railGroups(worktrees, laneRows), path, toLane, toIndex);
     if (!move) return;
     const moved = worktrees.find((w) => w.path === path);
     try {
@@ -6369,8 +6369,14 @@ function AppInner(props: {
   // window is chromeless or in Runs view — which does not happen today because
   // this sits before both branches, but would be the failure mode of moving it
   // back down without moving the branches too.
-  const lanesRef = useRef(lanes);
-  lanesRef.current = lanes;
+  // **The raw rows, not `lanes`.** `railGroups` needs the bucket's stored
+  // position, and `realLanes` is exactly the list that has had it removed — so a
+  // ref holding the filtered list makes `railOrder` re-synthesise the bucket at
+  // the front and `stepWorktree` walk an order the rail is not drawing. That is
+  // the contract `stepWorktree`'s own doc claims to keep, and it broke the moment
+  // the bucket was dragged anywhere.
+  const laneRowsRef = useRef(laneRows);
+  laneRowsRef.current = laneRows;
   const selectWorktreeRef = useRef(selectWorktree);
   selectWorktreeRef.current = selectWorktree;
   const runsRef = useRef(runs);
@@ -6422,7 +6428,9 @@ function AppInner(props: {
   function stepWorktree(delta: number) {
     const wt = worktreeRef.current;
     if (!wt) return;
-    const order = railGroups(worktreesRef.current, lanesRef.current).flatMap((g) => g.worktrees);
+    const order = railGroups(worktreesRef.current, laneRowsRef.current).flatMap(
+      (g) => g.worktrees,
+    );
     const idx = order.findIndex((w) => w.id === wt.id);
     const next = order[nextIndex(idx, delta, order.length)];
     if (next) void selectWorktreeRef.current(next);
@@ -7161,7 +7169,7 @@ function AppInner(props: {
               worktrees.filter((w) => w.sort_position !== null).map((w) => w.path),
             );
             const order = moveWorktree(
-              railGroups([...worktrees, created], lanes),
+              railGroups([...worktrees, created], laneRows),
               created.path,
               dialog.lane,
               0,
@@ -9256,14 +9264,6 @@ function Rail(props: {
                    than on `e.target` itself, because the click usually lands on
                    the SVG *inside* the button.
 
-                   `.lane-help` is named here although it is not a control at
-                   all: the Detached lane's question mark is a hint wearing
-                   `cursor: help`, a `<span role="img">` that opens a tooltip and
-                   does nothing else, and a bar that folds under a cursor saying
-                   "this takes no click" contradicts itself. It has no element
-                   type to match on, so it is matched by class — the exception,
-                   not a second convention.
-
                    **This selector is the contract for anything added to this
                    header.** It is an allowlist, not a behavioural test: a new
                    control that is none of these fires its own handler *and*
@@ -9293,7 +9293,7 @@ function Rail(props: {
                 onClick={(e) => {
                   if (
                     (e.target as Element).closest(
-                      'button, a, input, select, textarea, [role="button"], [role="menuitem"], .lane-help',
+                      'button, a, input, select, textarea, [role="button"], [role="menuitem"]',
                     ) === null
                   ) {
                     props.onFold(group.key);

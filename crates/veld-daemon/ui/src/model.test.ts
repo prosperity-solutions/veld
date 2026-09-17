@@ -1075,6 +1075,38 @@ describe("railGroups", () => {
     ]);
   });
 
+  it("places the bucket where its stored row says, not always first", () => {
+    // The regression the keyboard traversal hit: `railGroups` must be given the
+    // RAW lane rows. Handed `realLanes`-filtered ones it silently re-synthesises
+    // the bucket at the front, so any consumer of the flattened order walks a
+    // rail nobody is drawing.
+    const groups = railGroups(
+      [rw("/wts/a"), rw("/wts/b", { lane: "review" })],
+      [lane("review", 0), lane(UNGROUPED_LANE, 1), lane("spikes", 2)],
+    );
+    const live = groups.filter(
+      (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
+    );
+    expect(live.map((g) => g.key)).toEqual(["review", "", "spikes"]);
+  });
+
+  it("keeps a worktree filed into the reserved name reachable", () => {
+    // `known` is built from `realLanes`, so the reserved name is NOT a placeable
+    // lane and such a row falls back to ungrouped. Built from the raw rows it was
+    // neither ungrouped nor a member of any section — it rendered nowhere, which
+    // is the one failure `railGroups` promises never to produce. The daemon
+    // refuses to write this lane; this is the read side holding the same line.
+    const groups = railGroups(
+      [rw("/wts/odd", { lane: UNGROUPED_LANE })],
+      [lane(UNGROUPED_LANE, 0), lane("review", 1)],
+    );
+    const seen = groups.flatMap((g) => g.worktrees).map((w) => w.path);
+    expect(seen).toContain("/wts/odd");
+    expect(groups.find((g) => g.key === "")!.worktrees.map((w) => w.path)).toEqual([
+      "/wts/odd",
+    ]);
+  });
+
   it("never renders a section for detached checkouts", () => {
     const groups = railGroups(
       [rw("/wts/det", { branch: "(detached)" })],
