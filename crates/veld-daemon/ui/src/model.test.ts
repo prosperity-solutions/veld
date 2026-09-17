@@ -1097,10 +1097,12 @@ describe("railGroups", () => {
   });
 
   it("places the bucket where its stored row says, not always first", () => {
-    // The regression the keyboard traversal hit: `railGroups` must be given the
-    // RAW lane rows. Handed `realLanes`-filtered ones it silently re-synthesises
-    // the bucket at the front, so any consumer of the flattened order walks a
-    // rail nobody is drawing.
+    // Pins the contract the rail's call sites depend on, not the call sites
+    // themselves — `railGroups`' body is unchanged for this input, so this cannot
+    // fail against the pre-fix code. The bug it belongs to (`stepWorktree` being
+    // handed the filtered list) lives in `App.tsx`, which has no component test;
+    // what guards it now is the `LaneRows` brand, and the hazard that makes the
+    // brand worth having is the test below.
     const groups = railGroups(
       [rw("/wts/a"), rw("/wts/b", { lane: "review" })],
       [lane("review", 0), lane(UNGROUPED_LANE, 1), lane("spikes", 2)],
@@ -1109,6 +1111,21 @@ describe("railGroups", () => {
       (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
     );
     expect(live.map((g) => g.key)).toEqual(["review", "", "spikes"]);
+  });
+
+  it("answers differently for raw rows than for a filtered list", () => {
+    // Why the `LaneRows` brand exists, stated as behaviour: the same repo renders
+    // a different section ORDER depending on which of the two lists you pass, and
+    // the wrong one silently restores the pinned-to-the-top behaviour this module
+    // was changed to remove. Passing the filtered list is a compile error now, so
+    // the cast is this test reaching past the guard on purpose.
+    const rows = [lane("review", 0), lane(UNGROUPED_LANE, 1), lane("b", 2)];
+    const keys = (ls: Lane[]) =>
+      railGroups([], ls)
+        .filter((g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE)
+        .map((g) => g.key);
+    expect(keys(rows)).toEqual(["review", "", "b"]);
+    expect(keys(realLanes(rows) as unknown as Lane[])).toEqual(["", "review", "b"]);
   });
 
   it("keeps a worktree filed into the reserved name reachable", () => {

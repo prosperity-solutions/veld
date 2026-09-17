@@ -3156,13 +3156,15 @@ function AppInner(props: {
   const laneMenu = (lane: string) => {
     const isLane = lanes.some((l) => l.name === lane);
     const order = railOrder(laneRows);
-    // The name this section is stored under in the order. `lane` is `""` for the
-    // ungrouped section and `lanes` never holds an empty name, so that is exactly
-    // the "not a real lane" test.
-    // `""` is the ungrouped section and nothing else — `lanes` never holds an
-    // empty name, and every pinned section's `lane` is its NUL-prefixed key. Read
-    // that way rather than as "not a lane, so it must be the bucket", which would
-    // hand a future pinned section that gains `bulk` a ⋮ that reorders Worktrees.
+    // The name this section is stored under in the rail order, or `null` for one
+    // that holds no place in it. `lanes` never holds an empty name, so `lane ===
+    // ""` is the test for the ungrouped section — but it is deliberately written
+    // as that test rather than as "not a real lane, so it must be the bucket",
+    // because `""` is **not** unique to the bucket: the pinned main-checkout
+    // section carries `lane: ""` too (`railGroups`). What keeps main out of here
+    // is `hasMenu` (`editable || bulk`), which it fails on both counts — so the
+    // `null` arm is unreachable today and exists so that a section which later
+    // gains `bulk` cannot silently inherit a ⋮ that reorders Worktrees.
     const orderKey = isLane ? lane : lane === "" ? UNGROUPED_LANE : null;
     const index = orderKey === null ? -1 : order.indexOf(orderKey);
     // One step is "swap places with that neighbour" — the same thing a drop onto
@@ -8977,8 +8979,9 @@ function Rail(props: {
    * makes. `dock` is also what makes it draw its own bar, since the last lane's
    * own bar lives inside the scroller and is out of sight in that very case.
    *
-   * `null` for a pointer outside both, and for a rail holding no lanes: nothing
-   * to draw, nothing to commit.
+   * `null` only for a pointer outside both. There is no "rail with nothing to aim
+   * at" case: [`railOrder`] always names the ungrouped section, so even a repo
+   * that has defined no groups has one orderable section.
    */
   const laneTargetAtPoint = (
     x: number,

@@ -85,16 +85,10 @@ export function rowGitState(
   detached = false,
 ): GitRowState | null {
   // `dirty` still outranks everything, for the reason the type doc gives: it is
-  // the state `git worktree remove` refuses on. `detached` comes next — commits
-  // made on a detached HEAD belong to no branch and are the other way this
-  // checkout can be holding work that is not safe — and it is deliberately
-  // checked before `unpushed`, though the two barely compete: a detached HEAD
-  // has no upstream, so `ahead` is `null` in almost every case that reaches here.
-  //
-  // The cost of that first line — a conflicted rebase is dirty, so the detached
-  // glyph is invisible in the case that most often produces it — is real, was
-  // accepted deliberately, and is argued in the type doc above. Flip these two
-  // lines if that judgement changes.
+  // the state `git worktree remove` refuses on. The ranking of all three, and the
+  // cost of putting `dirty` first, are argued in the type doc above — including
+  // the one case where this ordering hides `detached`. Flip these two lines if
+  // that judgement changes.
   if (git?.dirty) return "dirty";
   if (detached) return "detached";
   if (!git) return null;

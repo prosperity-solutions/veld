@@ -1025,7 +1025,8 @@ declare const realLanesBrand: unique symbol;
  *   destination, i.e. a menu entry labelled with an invisible control character.
  *
  * Neither is expressible now: each function demands its own brand, and the only
- * way across is [`realLanes`]. This is the same discipline [`MAIN_LANE`] applies to
+ * way across is [`realLanes`] — which is one-way, because [`asLaneRows`] takes a
+ * mutable array and `RealLanes` is `readonly`. This is the same discipline [`MAIN_LANE`] applies to
  * the key space — a guard by construction beats one every future caller has to
  * remember.
  */
@@ -1037,9 +1038,14 @@ export type RealLanes = readonly Lane[] & { readonly [realLanesBrand]: true };
 /**
  * Tag a list from the daemon as [`LaneRows`]. The single entry point to the
  * branded world, and the only cast: everything downstream is checked.
+ *
+ * Takes a **mutable** `Lane[]` on purpose. [`RealLanes`] is `readonly`, so
+ * narrowing the parameter this way is what stops `asLaneRows(realLanes(x))` —
+ * re-branding an already-filtered list back into raw rows and walking straight
+ * past the guard below. A daemon payload (`repo.lanes`) is mutable and still fits.
  */
-export function asLaneRows(lanes: readonly Lane[]): LaneRows {
-  return lanes as LaneRows;
+export function asLaneRows(lanes: Lane[]): LaneRows {
+  return lanes as unknown as LaneRows;
 }
 
 /**
