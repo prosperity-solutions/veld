@@ -54,12 +54,29 @@ import type { WorktreeGitSignals } from "../api";
  * branch whose upstream is `[gone]`, so `ahead` is `null` in exactly that case.
  * The ordering between them is therefore only a tie-break on paper.
  */
-export type GitRowState = "dirty" | "unpushed";
+export type GitRowState = "dirty" | "detached" | "unpushed";
 
-/** The one state a row's glyph shows, or `null` for no glyph at all. */
-export function rowGitState(git: WorktreeGitSignals | undefined): GitRowState | null {
+/**
+ * The one state a row's glyph shows, or `null` for no glyph at all.
+ *
+ * `detached` is **not** carried in {@link WorktreeGitSignals} — it is read from
+ * the worktree's `branch`, which the daemon already spells `(detached)`, so it is
+ * passed in rather than discovered here. Putting it on the wire as well would be a
+ * second spelling of a fact already sent, and the two could then disagree.
+ */
+export function rowGitState(
+  git: WorktreeGitSignals | undefined,
+  detached = false,
+): GitRowState | null {
+  // `dirty` still outranks everything, for the reason the type doc gives: it is
+  // the state `git worktree remove` refuses on. `detached` comes next — commits
+  // made on a detached HEAD belong to no branch and are the other way this
+  // checkout can be holding work that is not safe — and it is deliberately
+  // checked before `unpushed`, though the two barely compete: a detached HEAD
+  // has no upstream, so `ahead` is `null` in almost every case that reaches here.
+  if (git?.dirty) return "dirty";
+  if (detached) return "detached";
   if (!git) return null;
-  if (git.dirty) return "dirty";
   if (git.ahead !== null && git.ahead > 0) return "unpushed";
   // Nothing else is a state. In particular there is no "everything is pushed" —
   // see the type doc — so `dirty === null` (not measured) and `dirty === false`
@@ -106,12 +123,25 @@ interface GitFact {
  * leave a piece containing it). Counting the facts themselves is the only version
  * of that test that can fail for the right reason.
  */
-export function gitFacts(git: WorktreeGitSignals | undefined): GitFact[] {
-  if (!git) return [];
+export function gitFacts(
+  git: WorktreeGitSignals | undefined,
+  detached = false,
+): GitFact[] {
   const facts: GitFact[] = [];
-  if (git.dirty) {
+  if (git?.dirty) {
     facts.push({ tooltip: "Uncommitted changes", short: "uncommitted changes" });
   }
+  if (detached) {
+    // Said whether or not it won the glyph, like every other fact here — a row
+    // that is dirty *and* detached shows the pencil and still explains itself on
+    // hover. This is the sentence that replaced a whole rail section: the state
+    // is worth telling people about, moving the row to tell them was not.
+    facts.push({
+      tooltip: "Detached HEAD — not on a branch, so new commits belong to none",
+      short: "detached HEAD",
+    });
+  }
+  if (!git) return facts;
   const upstream = git.upstream ?? "its upstream";
   if (git.upstream_gone) {
     // **Kept even though no glyph renders `[gone]`.** Reachable only alongside
@@ -162,8 +192,11 @@ export function gitFacts(git: WorktreeGitSignals | undefined): GitFact[] {
  * row's tooltip — the activity lines come first (see `rowstate/rowState.ts`), and a
  * builder that had already prefixed a label could not be composed with them.
  */
-export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
-  return gitFacts(git).map((fact) => fact.tooltip);
+export function gitTooltipLines(
+  git: WorktreeGitSignals | undefined,
+  detached = false,
+): string[] {
+  return gitFacts(git, detached).map((fact) => fact.tooltip);
 }
 
 /**
@@ -174,13 +207,16 @@ export function gitTooltipLines(git: WorktreeGitSignals | undefined): string[] {
  * clause folded in there would be read before the worktree it belongs to. The row
  * puts this in `aria-description` instead, after the alias.
  */
-export function gitDescription(git: WorktreeGitSignals | undefined): string | undefined {
+export function gitDescription(
+  git: WorktreeGitSignals | undefined,
+  detached = false,
+): string | undefined {
   // **Gated on a glyph rendering, unlike the tooltip.** No glyph means no element
   // to hang a tooltip on, so there is nothing for this to annotate either — a row
   // that is merely `behind`, or merely has a deleted upstream, says nothing to
   // anybody. Past that gate it reports every fact, because this is the only
   // non-visual account of a row whose glyph is `aria-hidden`.
-  if (git === undefined || rowGitState(git) === null) return undefined;
-  const parts = gitFacts(git).map((fact) => fact.short);
+  if (rowGitState(git, detached) === null) return undefined;
+  const parts = gitFacts(git, detached).map((fact) => fact.short);
   return parts.length === 0 ? undefined : parts.join(", ");
 }

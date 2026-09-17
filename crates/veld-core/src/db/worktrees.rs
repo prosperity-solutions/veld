@@ -138,6 +138,28 @@ pub const MAX_LANE_NAME_LEN: usize = 32;
 /// being organised by it.
 pub const MAX_LANES_PER_REPO: usize = 32;
 
+/// The reserved `lanes.name` under which a repo records **where the ungrouped
+/// section ("Worktrees") sits in the rail order**.
+///
+/// Not a lane: nothing is filed into it (membership in the ungrouped section is
+/// `worktrees.lane = ''`), it is never listed as a group, and it cannot be
+/// renamed or deleted. It is a row here only because a *position* needs a home,
+/// and this table is already the one thing that orders rail sections.
+///
+/// The leading NUL is what keeps it out of the user's reach:
+/// [`Db::valid_lane_name`] rejects control characters, so neither `create_lane`
+/// nor `rename_lane` can mint a real lane that collides with it, and the
+/// `(repo_root, name)` primary key therefore cannot be contended for. The UI
+/// spells the same constant `UNGROUPED_LANE` in `model.ts`; the two are one wire
+/// value and must stay in step.
+///
+/// **A repo with no such row is not misconfigured — it is the default.** Its
+/// absence means "ungrouped first", which is where that section rendered for
+/// every repo before it could be moved, so no migration backfills it and no
+/// `user_version` moves. [`Db::reorder_lanes`] inserts it the first time an order
+/// actually names it, which is the first time the user has expressed an opinion.
+pub const UNGROUPED_LANE: &str = "\u{0}ungrouped";
+
 /// Longest accepted reorder payload, for worktrees or lanes.
 ///
 /// Generous against any real repo (a rail with a thousand checkouts is not a rail)
@@ -840,7 +862,11 @@ impl Db {
             .prepare("SELECT name, position FROM lanes WHERE repo_root = ?1")?
             .query_map(params![root], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
-        if existing.len() >= MAX_LANES_PER_REPO {
+        // The ungrouped section's position row is not a lane and must not spend
+        // one of the repo's allowance — a rail that has been reordered would
+        // otherwise hold one fewer group than one that has not, for a reason
+        // nothing on screen explains.
+        if existing.iter().filter(|(n, _)| n != UNGROUPED_LANE).count() >= MAX_LANES_PER_REPO {
             return Err(DbError::TooManyLanes(MAX_LANES_PER_REPO));
         }
         let folded = Self::lane_fold(name);
@@ -944,6 +970,20 @@ impl Db {
                 "UPDATE lanes SET position = ?1 WHERE repo_root = ?2 AND name = ?3",
                 params![next, root, name],
             )?;
+            // The ungrouped section is the one name that may legitimately have no
+            // row yet: its absence is the default "renders first", so the row is
+            // minted here, by the first order that places it somewhere. Only
+            // here — every other unknown name stays ignored, which is what stops
+            // a stale client resurrecting a lane deleted in another window.
+            let n = if n == 0 && name == UNGROUPED_LANE {
+                tx.execute(
+                    "INSERT INTO lanes (repo_root, name, position, created_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![root, UNGROUPED_LANE, next, now_str()],
+                )?
+            } else {
+                n
+            };
             if n > 0 {
                 next += 1;
             }
@@ -2625,6 +2665,97 @@ mod tests {
             .map(|l| l.name)
             .collect();
         assert_eq!(names, vec!["c", "a", "b"]);
+    }
+
+    fn lane_names(db: &Db, root: &Path) -> Vec<String> {
+        db.list_lanes(root)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect()
+    }
+
+    /// The ungrouped section ("Worktrees") has no row until an order places it,
+    /// and then it is an ordinary member of the lane order.
+    ///
+    /// Also the regression guard for the one property this design rests on that
+    /// is not obvious: `UNGROUPED_LANE` carries an embedded NUL, and
+    /// `reorder_lanes` filters the unmentioned lanes with
+    /// `name NOT IN (SELECT value FROM json_each(?))`. A NUL that did not survive
+    /// serde's JSON encoding and SQLite's decoding would not error — it would
+    /// quietly fail to match, so the bucket would be appended to the tail on every
+    /// write and the section would drift to the bottom of the rail by itself.
+    #[test]
+    fn reorder_lanes_places_the_ungrouped_bucket() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lbucket");
+        db.upsert_repo(root, "lbucket").unwrap();
+        for name in ["a", "b"] {
+            db.create_lane(root, name).unwrap();
+        }
+        // Absence is the default: nothing backfills a row, which is what lets
+        // this ship without a migration.
+        assert_eq!(lane_names(&db, root), vec!["a", "b"]);
+
+        // The first order that names it mints the row — a group above the bucket.
+        db.reorder_lanes(root, &["a".into(), UNGROUPED_LANE.into(), "b".into()])
+            .unwrap();
+        assert_eq!(lane_names(&db, root), vec!["a", UNGROUPED_LANE, "b"]);
+
+        // And it moves again like any other member, without a second row.
+        db.reorder_lanes(root, &[UNGROUPED_LANE.into(), "a".into(), "b".into()])
+            .unwrap();
+        assert_eq!(lane_names(&db, root), vec![UNGROUPED_LANE, "a", "b"]);
+    }
+
+    /// Only the bucket is minted by a reorder. Every other unknown name stays
+    /// ignored — that is what stops a stale client resurrecting a lane another
+    /// window deleted mid-drag.
+    #[test]
+    fn reorder_lanes_still_ignores_an_unknown_lane() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lghost");
+        db.upsert_repo(root, "lghost").unwrap();
+        db.create_lane(root, "a").unwrap();
+        db.reorder_lanes(root, &["ghost".into(), "a".into()])
+            .unwrap();
+        assert_eq!(lane_names(&db, root), vec!["a"]);
+    }
+
+    /// The bucket's row is not a lane and must not spend one of the repo's
+    /// allowance, or a rail that has been reordered would hold one fewer group
+    /// than one that has not.
+    #[test]
+    fn the_ungrouped_row_does_not_count_against_the_lane_cap() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lcap");
+        db.upsert_repo(root, "lcap").unwrap();
+        db.reorder_lanes(root, &[UNGROUPED_LANE.into()]).unwrap();
+        for i in 0..MAX_LANES_PER_REPO {
+            db.create_lane(root, &format!("lane{i}")).unwrap();
+        }
+        assert!(matches!(
+            db.create_lane(root, "one-too-many"),
+            Err(DbError::TooManyLanes(_))
+        ));
+    }
+
+    /// A user cannot mint, rename into, or otherwise reach the reserved name:
+    /// `valid_lane_name` rejects control characters.
+    #[test]
+    fn the_ungrouped_name_is_out_of_the_users_reach() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lreserved");
+        db.upsert_repo(root, "lreserved").unwrap();
+        assert!(matches!(
+            db.create_lane(root, UNGROUPED_LANE),
+            Err(DbError::InvalidLaneName(_))
+        ));
+        db.create_lane(root, "a").unwrap();
+        assert!(matches!(
+            db.rename_lane(root, "a", UNGROUPED_LANE),
+            Err(DbError::InvalidLaneName(_))
+        ));
     }
 
     // -----------------------------------------------------------------------

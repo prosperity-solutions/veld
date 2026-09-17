@@ -6,7 +6,6 @@ import {
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
-  detachedInSection,
   diagnosticsRun,
   freshRunName,
   fuzzyMatch,
@@ -15,6 +14,10 @@ import {
   liveRuns,
   MAIN_LANE,
   moveLane,
+  orderKeyOf,
+  railOrder,
+  realLanes,
+  UNGROUPED_LANE,
   moveWorktree,
   needsAttention,
   parsePendingKey,
@@ -39,7 +42,6 @@ import {
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
-  DETACHED_LANE,
   TRASH_LANE,
   TRASH_PREVIEW,
   trashPreview,
@@ -1042,14 +1044,16 @@ describe("railGroups", () => {
     expect(groups.some((g) => g.key === DELETING_LANE)).toBe(false);
   });
 
-  it("groups detached checkouts into their own lane, between ungrouped and lanes", () => {
-    // A detached HEAD is a state worth surfacing on its own, so detached
-    // checkouts get a virtual lane of their own after the ungrouped worktrees
-    // and before the real lanes.
+  it("leaves a detached checkout in its group", () => {
+    // The virtual "Detached" section is gone. It moved rows out of the group the
+    // user filed them into, so a rebase or a bisect made a row disappear and come
+    // back, and a group the user had just emptied still held checkouts it would
+    // not show them. The state is a glyph on the row now — see
+    // `gitstate/gitState.ts`.
     const groups = railGroups(
       [
         rw("/wts/a"),
-        rw("/wts/det", { branch: "(detached)" }),
+        rw("/wts/det", { branch: "(detached)", lane: "review" }),
         rw("/wts/b", { lane: "review" }),
       ],
       [lane("review", 0)],
@@ -1057,36 +1061,33 @@ describe("railGroups", () => {
     const live = groups.filter(
       (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
     );
-    expect(live.map((g) => g.key)).toEqual(["", DETACHED_LANE, "review"]);
-    const det = live.find((g) => g.key === DETACHED_LANE)!;
-    expect(det.label).toBe("Detached");
-    expect(det.pinned).toBe(true);
-    // Pinned and not a drop target — you cannot file a checkout *as* detached.
-    expect(det.addable).toBe(false);
-    expect(det.editable).toBe(false);
-    expect(det.worktrees.map((w) => w.path)).toEqual(["/wts/det"]);
+    expect(live.map((g) => g.key)).toEqual(["", "review"]);
+    expect(live.find((g) => g.key === "review")!.worktrees.map((w) => w.path)).toEqual([
+      "/wts/det",
+      "/wts/b",
+    ]);
   });
 
-  it("pulls a detached checkout out of its lane while it is detached", () => {
-    // Being detached overrides where the row belongs (same rule the trash
-    // applies to trashed rows): it leaves the lane and returns when a branch is
-    // checked out again.
+  it("leaves an ungrouped detached checkout in the ungrouped section", () => {
+    const groups = railGroups([rw("/wts/det", { branch: "(detached)" })], []);
+    expect(groups.find((g) => g.key === "")!.worktrees.map((w) => w.path)).toEqual([
+      "/wts/det",
+    ]);
+  });
+
+  it("never renders a section for detached checkouts", () => {
     const groups = railGroups(
-      [rw("/wts/det", { branch: "(detached)", lane: "review" })],
+      [rw("/wts/det", { branch: "(detached)" })],
       [lane("review", 0)],
     );
-    expect(groups.find((g) => g.key === DETACHED_LANE)?.worktrees).toHaveLength(1);
-    expect(groups.find((g) => g.key === "review")?.worktrees).toHaveLength(0);
+    expect(groups.map((g) => g.label)).not.toContain("Detached");
   });
 
-  it("omits the detached lane when nothing is detached", () => {
-    const groups = railGroups([rw("/wts/a")], []);
-    expect(groups.some((g) => g.key === DETACHED_LANE)).toBe(false);
-  });
-
-  it("keeps a detached main checkout out of the detached lane", () => {
+  it("leads the rail with a detached main checkout", () => {
     // git keeps a repo's main on a branch, so a detached main is not a real
     // state — but the row must not silently disappear from the rail either.
+    // Being detached no longer changes where it sits: it is the repository
+    // wherever its HEAD happens to be.
     const groups = railGroups([rw("/repo", { is_main: true, branch: "(detached)" })], []);
     const live = groups.filter(
       (g) => g.key !== TRASH_LANE && g.key !== DELETING_LANE,
@@ -1116,9 +1117,8 @@ describe("railGroups — batch actions", () => {
     expect(bulk.get("")).toBe(true);
     expect(bulk.get("review")).toBe(true);
     // Every pinned section says no, each for its own reason (one row and it is
-    // the repo; own header button; a lane move would be invisible; leaving).
+    // the repo; own header button; leaving).
     expect(bulk.get(MAIN_LANE)).toBe(false);
-    expect(bulk.get(DETACHED_LANE)).toBe(false);
     expect(bulk.get(DELETING_LANE)).toBe(false);
     expect(bulk.get(TRASH_LANE)).toBe(false);
     // The ungrouped section is the one that has `bulk` without `editable`, which
@@ -1207,49 +1207,6 @@ describe("bulkMoveTargets", () => {
     expect(bulkMoveTargets([lane("review", 0)], "review")).toEqual([
       { value: "", label: "No group" },
     ]);
-  });
-});
-
-describe("detachedInSection", () => {
-  const lanes = [lane("review", 0)];
-
-  it("finds the detached rows a lane's batch will leave behind", () => {
-    // They are filed into "review" but render under Detached, so the batch never
-    // sees them — and their `lane` still says "review", so checking a branch out
-    // again puts them back in a group the user emptied. Both dialogs say so.
-    const wts = [
-      rw("/wts/a", { id: 2, lane: "review" }),
-      rw("/wts/det", { id: 3, lane: "review", branch: "(detached)" }),
-    ];
-    expect(railGroups(wts, lanes).find((g) => g.key === "review")!.worktrees)
-      .toHaveLength(1);
-    expect(detachedInSection(wts, lanes, "review").map((w) => w.path)).toEqual([
-      "/wts/det",
-    ]);
-  });
-
-  it("counts a dangling lane as ungrouped, the way railGroups does", () => {
-    // A row whose lane no longer exists is ungrouped on the read path, so the
-    // ungrouped section's batch is the one that would leave it behind.
-    const wts = [rw("/wts/det", { id: 2, lane: "ghost", branch: "(detached)" })];
-    expect(detachedInSection(wts, lanes, "review")).toEqual([]);
-    expect(detachedInSection(wts, lanes, "").map((w) => w.path)).toEqual([
-      "/wts/det",
-    ]);
-  });
-
-  it("never counts the main checkout or a trashed row", () => {
-    // Main leads the rail even while detached and is a member of nothing; a
-    // trashed row is already out of every section.
-    const wts = [
-      rw("/repo", { id: 1, is_main: true, branch: "(detached)" }),
-      rw("/wts/bin", {
-        id: 2,
-        branch: "(detached)",
-        trashed_at: "2026-01-01T00:00:00Z",
-      }),
-    ];
-    expect(detachedInSection(wts, lanes, "")).toEqual([]);
   });
 });
 
@@ -1519,7 +1476,9 @@ describe("insertionTarget", () => {
 });
 
 describe("moveLane", () => {
-  const lanes = () => [lane("a", 0), lane("b", 1), lane("c", 2)];
+  // The resolved rail order, which is what `moveLane` takes — `railOrder` has
+  // already turned `Lane[]` into names and slotted the ungrouped bucket in.
+  const lanes = () => ["a", "b", "c"];
 
   it("takes the place of the lane it was dropped on, going up", () => {
     expect(moveLane(lanes(), "c", "b")).toEqual(["a", "c", "b"]);
@@ -1560,13 +1519,13 @@ describe("moveLane", () => {
   });
 
   it("has nothing to do with a single lane", () => {
-    expect(moveLane([lane("only", 0)], "only", "only")).toBeNull();
+    expect(moveLane(["only"], "only", "only")).toBeNull();
   });
 
   it("moves two lanes past each other in both directions", () => {
     // The case that read as completely dead: with two lanes there is only one
     // neighbour, so a defect in either direction removes half the feature.
-    const two = [lane("a", 0), lane("b", 1)];
+    const two = ["a", "b"];
     expect(moveLane(two, "a", "b")).toEqual(["b", "a"]);
     expect(moveLane(two, "b", "a")).toEqual(["b", "a"]);
   });
@@ -1574,8 +1533,112 @@ describe("moveLane", () => {
   it("moves a lane across several places in one go", () => {
     // A drag is not limited to a neighbour, which is the whole reason it exists
     // beside a menu that steps one at a time.
-    const four = [lane("a", 0), lane("b", 1), lane("c", 2), lane("d", 3)];
+    const four = ["a", "b", "c", "d"];
     expect(moveLane(four, "d", "a")).toEqual(["d", "a", "b", "c"]);
     expect(moveLane(four, "a", "d")).toEqual(["b", "c", "d", "a"]);
+  });
+
+  it("moves a group above the ungrouped bucket", () => {
+    // The whole point of the change: before it, the bucket held no place in this
+    // list at all, so there was no name to drop onto and the slot above it could
+    // not be expressed.
+    const order = [UNGROUPED_LANE, "a", "b"];
+    expect(moveLane(order, "a", UNGROUPED_LANE)).toEqual([
+      "a",
+      UNGROUPED_LANE,
+      "b",
+    ]);
+  });
+
+  it("moves the ungrouped bucket down past a group", () => {
+    // The same reachable orders from the other gesture — the maintainer chose
+    // both, so a defect in this direction silently removes half the feature.
+    const order = [UNGROUPED_LANE, "a", "b"];
+    expect(moveLane(order, UNGROUPED_LANE, "b")).toEqual([
+      "a",
+      "b",
+      UNGROUPED_LANE,
+    ]);
+  });
+
+  it("treats the bucket as an ordinary name, including dropping it on itself", () => {
+    const order = [UNGROUPED_LANE, "a"];
+    expect(moveLane(order, UNGROUPED_LANE, UNGROUPED_LANE)).toBeNull();
+  });
+});
+
+describe("realLanes", () => {
+  it("hides the ungrouped section's position row from the repo's groups", () => {
+    // The row is storage for an ordering fact, not a group. Every surface that
+    // lists groups — the lane submenu, a batch move's destinations, the taken
+    // -names check — reads this, so a leak here offers the user a group whose
+    // label is an invisible control character.
+    const rows = [lane("a", 0), lane(UNGROUPED_LANE, 1), lane("b", 2)];
+    expect(realLanes(rows).map((l) => l.name)).toEqual(["a", "b"]);
+  });
+
+  it("leaves a repo that has never reordered untouched", () => {
+    const rows = [lane("a", 0), lane("b", 1)];
+    expect(realLanes(rows)).toHaveLength(2);
+  });
+
+  it("keeps the reserved row out of a batch move's destinations", () => {
+    // The concrete leak: `bulkMoveTargets` maps whatever it is handed straight
+    // into picker options.
+    const rows = [lane("a", 0), lane(UNGROUPED_LANE, 1)];
+    const values = bulkMoveTargets(realLanes(rows), "a").map((t) => t.value);
+    expect(values).not.toContain(UNGROUPED_LANE);
+  });
+});
+
+describe("railOrder", () => {
+  it("leads with the bucket when the repo has never placed it", () => {
+    // Absence is the default, not a missing row to repair: this is exactly where
+    // the ungrouped section rendered before it could be moved, so every existing
+    // database is already correct and nothing has to migrate.
+    expect(railOrder([lane("a", 0), lane("b", 1)])).toEqual([
+      UNGROUPED_LANE,
+      "a",
+      "b",
+    ]);
+  });
+
+  it("names the bucket even in a repo with no lanes at all", () => {
+    // The first drag has to have something to send, or the daemon is never told
+    // where the bucket went and the very first reorder is unexpressible.
+    expect(railOrder([])).toEqual([UNGROUPED_LANE]);
+  });
+
+  it("keeps the stored place once the repo has one", () => {
+    expect(
+      railOrder([lane("a", 0), lane(UNGROUPED_LANE, 1), lane("b", 2)]),
+    ).toEqual(["a", UNGROUPED_LANE, "b"]);
+  });
+
+  it("does not insert a second bucket when one is already stored", () => {
+    const order = railOrder([lane(UNGROUPED_LANE, 0), lane("a", 1)]);
+    expect(order.filter((n) => n === UNGROUPED_LANE)).toHaveLength(1);
+  });
+});
+
+describe("orderKeyOf", () => {
+  const of = (lanes: Lane[], key: string) =>
+    orderKeyOf(railGroups([rw("/wts/a")], lanes).find((g) => g.key === key)!);
+
+  it("converts the bucket's group key to its stored name", () => {
+    // The bucket has two spellings on purpose — `""` for localStorage folds,
+    // UNGROUPED_LANE for the daemon — and this is the only place that crosses.
+    expect(of([], "")).toBe(UNGROUPED_LANE);
+  });
+
+  it("gives a real lane its own name", () => {
+    expect(of([lane("a", 0)], "a")).toBe("a");
+  });
+
+  it("gives a pinned section no place in the order", () => {
+    // Gated on `pinned`, not on `editable`: the bucket is not editable and must
+    // still get a key, which is the distinction the limitation was made of.
+    const groups = railGroups([rw("/wts/a", { trashed_at: "2026-01-01" })], []);
+    expect(orderKeyOf(groups.find((g) => g.key === TRASH_LANE)!)).toBeNull();
   });
 });

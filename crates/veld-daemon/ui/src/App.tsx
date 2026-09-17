@@ -71,7 +71,6 @@ import {
   bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
-  detachedInSection,
   freshRunName,
   fuzzyMatch,
   insertionTarget,
@@ -79,6 +78,9 @@ import {
   liveRuns,
   moveLane,
   moveWorktree,
+  orderKeyOf,
+  railOrder,
+  realLanes,
   needsAttention,
   parsePendingKey,
   pendingKey,
@@ -99,9 +101,9 @@ import {
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
-  DETACHED_LANE,
   isDetached,
   TRASH_LANE,
+  UNGROUPED_LANE,
   TRASH_PREVIEW,
   trashPreview,
   type PendingAction,
@@ -158,7 +160,6 @@ import {
   IconWorld,
   IconTools,
   IconX,
-  IconHelp,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -1239,7 +1240,14 @@ function AppInner(props: {
   // render rather than in an effect, for the reason given there.
   const worktreesRef = useRef(worktrees);
   worktreesRef.current = worktrees;
-  const lanes = useMemo(() => repo?.lanes ?? [], [repo]);
+  // Two views of one list, and the split is load-bearing. `laneRows` is what the
+  // daemon sent: the repo's groups *plus* the reserved row recording where the
+  // ungrouped section sits in the order (`UNGROUPED_LANE`). Only ordering wants
+  // that row, so only the three ordering call sites take `laneRows`; every
+  // surface that lists "the groups that exist" takes `lanes` and cannot
+  // accidentally offer a group whose label is an invisible control character.
+  const laneRows = useMemo(() => repo?.lanes ?? [], [repo]);
+  const lanes = useMemo(() => realLanes(laneRows), [laneRows]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
   // opening panes on a vanishing directory.
@@ -2954,7 +2962,10 @@ function AppInner(props: {
    */
   const moveLaneTo = async (lane: string, onto: string) => {
     if (!repo) return;
-    const order = moveLane(lanes, lane, onto);
+    // `railOrder` — not `lanes` — because the ungrouped section is one of the
+    // things that can move, and the order sent to the daemon has to name it
+    // whether or not this repo has ever stored a position for it.
+    const order = moveLane(railOrder(laneRows), lane, onto);
     if (!order) return;
     try {
       await api.reorderLanes(repo.root, order);
@@ -3129,22 +3140,32 @@ function AppInner(props: {
   /**
    * The ⋮ menu on a rail section header.
    *
-   * Two kinds of section reach it, and they get different halves. A **real
-   * lane** gets the identity entries (rename, reorder, delete) plus the batch
-   * ones; the **ungrouped section** gets only the batch ones, because there is no
-   * lane behind it to rename or delete — see `RailGroup.editable` vs
-   * `RailGroup.bulk`. `index < 0` is exactly "not a real lane", so it is what
-   * splits them: `lane` is `""` there and `lanes` never holds an empty name.
+   * Two kinds of section reach it, and they get different halves — but the split
+   * is no longer a single line. A **real lane** has an identity to rename and
+   * delete; the **ungrouped section** has none (see `RailGroup.editable`). Both,
+   * however, hold a place in the rail order, so both get the reorder entries —
+   * which is the ⋮ half of letting a group be dragged above "Worktrees", and the
+   * half a keyboard-only user has.
+   *
+   * `isLane` therefore gates *identity* only, and the reorder bounds come from
+   * `railOrder` rather than from `lanes`. Reading them off `lanes` is what made
+   * "Move group up" permanently disabled on the first group: index 0 there is the
+   * first *lane*, which is not the top of the rail.
    */
   const laneMenu = (lane: string) => {
-    const index = lanes.findIndex((l) => l.name === lane);
-    const isLane = index >= 0;
+    const isLane = lanes.some((l) => l.name === lane);
+    const order = railOrder(laneRows);
+    // The name this section is stored under in the order. `lane` is `""` for the
+    // ungrouped section and `lanes` never holds an empty name, so that is exactly
+    // the "not a real lane" test.
+    const orderKey = isLane ? lane : UNGROUPED_LANE;
+    const index = order.indexOf(orderKey);
     // One step is "swap places with that neighbour" — the same thing a drop onto
     // it says, which is why both go through `moveLane` by name. The bounds are
-    // the `disabled` flags below; a neighbour that is not there is `null` here
-    // and `moveLane` refuses it anyway.
-    const move = (neighbour: Lane | undefined) =>
-      void (neighbour && moveLaneTo(lane, neighbour.name));
+    // the `disabled` flags below; a neighbour that is not there is `undefined`
+    // here and `moveLane` refuses it anyway.
+    const move = (neighbour: string | undefined) =>
+      void (neighbour !== undefined && moveLaneTo(orderKey, neighbour));
     const members = sectionMembers(lane);
     return showContextMenu([
       ...(isLane
@@ -3154,17 +3175,25 @@ function AppInner(props: {
               title: "Rename group…",
               onClick: () => setDialog({ kind: "rename-lane", lane }),
             },
+          ]
+        : []),
+      ...(index >= 0
+        ? [
             {
               key: "lane-up",
-              title: "Move group up",
+              // "Move group up" is wrong on the ungrouped section for the same
+              // reason its ⋮ is labelled "Menu for Worktrees" and not "Menu for
+              // group Worktrees": it is not a group, and saying so contradicts
+              // the ＋ beside it, which means "not in a group".
+              title: isLane ? "Move group up" : "Move up",
               disabled: index <= 0,
-              onClick: () => move(lanes[index - 1]),
+              onClick: () => move(order[index - 1]),
             },
             {
               key: "lane-down",
-              title: "Move group down",
-              disabled: index < 0 || index >= lanes.length - 1,
-              onClick: () => move(lanes[index + 1]),
+              title: isLane ? "Move group down" : "Move down",
+              disabled: index >= order.length - 1,
+              onClick: () => move(order[index + 1]),
             },
             { key: "lane-batch-divider" },
           ]
@@ -5342,43 +5371,6 @@ function AppInner(props: {
     await refresh();
   };
 
-  /** Move every detached checkout to the trash, in one go (revertible).
-   *
-   *  The Detached lane exists because detached checkouts are usually
-   *  throwaways, so this is the action that matches the lane's point: clear them
-   *  out without deleting each one by hand.
-   *
-   *  **Every one of them bins, dirty or not.** Binning marks the row and returns
-   *  — it never runs `git worktree remove`, so there is nothing for uncommitted
-   *  changes to refuse. (This comment used to claim a dirty checkout refused
-   *  here; it does not. The refusal comes later, when the trash is emptied or the
-   *  retention sweep tries the actual removal.) The batch actions on a group
-   *  confirm first and say which rows carry uncommitted work for exactly that
-   *  reason — see `TrashLaneWorktreesDialog`; this one does not, because a
-   *  detached checkout is a throwaway by definition. */
-  const trashAllDetached = async () => {
-    const detached = worktrees.filter((w) => isDetached(w) && !w.trashed_at);
-    if (detached.length === 0) return;
-    let trashed = 0;
-    for (const w of detached) {
-      // Never the main checkout: it cannot be detached in the first place (git
-      // keeps a repo's main on a branch) and binning it would take the
-      // repository with it.
-      if (w.is_main) continue;
-      try {
-        await api.deleteWorktree(w.id, false);
-        trashed += 1;
-      } catch (e) {
-        notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
-      }
-    }
-    if (trashed > 0) {
-      notifyDone(
-        trashed === 1 ? "Moved 1 detached worktree to the trash" : `Moved ${trashed} detached worktrees to the trash`,
-      );
-    }
-    await refresh();
-  };
 
   // Above both bars so the crossfade survives ModeSwitch remounting as it moves
   // between them — see the component's own note. Focus does *not* survive that
@@ -6220,7 +6212,6 @@ function AppInner(props: {
       }))}
       targets={bulkMoveTargets(lanes, dialog.lane)}
       taken={lanes.map((l) => l.name)}
-      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
       onClose={closeDialog}
       onMove={async (target: BatchMoveTarget) => {
         await runBatch(async () => {
@@ -6271,7 +6262,6 @@ function AppInner(props: {
       /* Only ever true for a lane the main checkout was filed into — the
          ungrouped section never holds it (it has a pinned section of its own). */
       mainExcluded={sectionMembers(dialog.lane).some((w) => w.is_main)}
-      detached={detachedInSection(worktrees, lanes, dialog.lane).length}
       onStatus={(id) => api.worktreeGitStatus(id)}
       onClose={closeDialog}
       onTrash={async () => {
@@ -6872,7 +6862,7 @@ function AppInner(props: {
           )}
           <Rail
             worktrees={worktrees}
-            lanes={lanes}
+            lanes={laneRows}
             active={worktree}
             envs={envs}
             settings={settings}
@@ -6897,7 +6887,6 @@ function AppInner(props: {
             onMoveLane={(lane, onto) => void moveLaneTo(lane, onto)}
             onRestore={restoreWorktree}
             onEmptyTrash={emptyTrash}
-            onTrashAllDetached={trashAllDetached}
             onTrashDrop={trashWorktree}
             deleting={deletingIds}
             folded={foldedSections.folded}
@@ -8631,6 +8620,9 @@ function ProjectColumn(props: {
 
 function Rail(props: {
   worktrees: Worktree[];
+  /** The daemon's lane rows **as sent** — the repo's groups plus the reserved
+   *  row holding the ungrouped section's place in the order. The rail is the one
+   *  consumer that needs the latter, which is why this is not `realLanes`. */
   lanes: Lane[];
   active: Worktree | null;
   envs: EnvironmentList | null;
@@ -8669,9 +8661,6 @@ function Rail(props: {
   onMoveLane: (lane: string, onto: string) => void;
   onRestore: (w: Worktree) => void;
   onEmptyTrash: () => void;
-  /** Move every detached checkout to the trash (revertible) — the Detached
-   *  lane's one batch action. */
-  onTrashAllDetached: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
    *  not a lane move. Receives the dragged worktree's path. */
   onTrashDrop: (path: string) => void;
@@ -8777,28 +8766,38 @@ function Rail(props: {
       setTrashOpenFor(null);
     }
   }, [trashCount, trashOpenFor, railRepo]);
-  // Positions of the lane sections, by lane name.
-  const laneIndex = new Map(props.lanes.map((l, i) => [l.name, i]));
+  // The rail's orderable sections, in order — the lanes plus the ungrouped
+  // bucket, which holds a place among them. The one coordinate space every
+  // ordering question below is asked in; see `railOrder`.
+  const order = railOrder(props.lanes);
+  // Positions of the orderable sections, by the name the daemon stores.
+  const laneIndex = new Map(order.map((name, i) => [name, i]));
   /**
-   * This section's place in the lane order, or `undefined` for a section that
-   * holds none — the ungrouped section, the main checkout, and the two pending
-   * -removal lanes are neither draggable nor lane drop targets.
+   * This section's place in the rail order, or `undefined` for a section that
+   * holds none — the main checkout and the three virtual lanes (Detached,
+   * Deleting, Trash) are neither draggable nor lane drop targets.
    *
-   * Keyed on `lane` behind `editable`, never on `key`. This used to be the *only*
-   * thing standing between the rail and a lane called `main`: the main checkout's
-   * section carried the literal key `"main"`, and `main` is a legal lane name
-   * (`valid_lane_name` rejects only empty, over-long, control characters, `.` and
-   * `..`), so keying on it gave that pinned section the position of the lane —
-   * every drop over the top of the rail resolved there instead of to the first
-   * lane, and dragging that lane faded the main checkout row as if it were the one
-   * being carried. That collision is fixed at its source now ([`MAIN_LANE`]), so
-   * this is no longer a workaround; it stands on its own reason, which is that
-   * only a section with a lane behind it holds a place in the lane order at all.
-   * The related trap the header's `aria-label` documents for `UNGROUPED_LABEL` is
-   * still live, because a label is not a key space.
+   * **The ungrouped section is not among them.** It has no lane to rename and so
+   * is not `editable`, but it does hold a place in the order, and gating this on
+   * `editable` was exactly what stopped a group being dragged above it: a
+   * section with no index is a section the drop resolver cannot name. `pinned`
+   * is the flag that actually asks this question — its own doc says a pinned
+   * section "takes no part in ordering" — and `orderKeyOf` is what applies it.
+   *
+   * Keyed on `key` rather than `lane`, which is safe in a way it was not before
+   * [`MAIN_LANE`]. The main checkout's section used to carry the literal key
+   * `"main"`, and `main` is a legal lane name, so keying on it gave that pinned
+   * section the position of the lane — every drop over the top of the rail
+   * resolved there instead of to the first lane. Every virtual section now
+   * carries a NUL-prefixed key that no lane name can alias, and `pinned` excludes
+   * them before the lookup regardless. The related trap the header's `aria-label`
+   * documents for `UNGROUPED_LABEL` is still live, because a label is not a key
+   * space.
    */
-  const laneAtOf = (g: RailGroup) =>
-    g.editable ? laneIndex.get(g.lane) : undefined;
+  const laneAtOf = (g: RailGroup) => {
+    const key = orderKeyOf(g);
+    return key === null ? undefined : laneIndex.get(key);
+  };
   const listRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
   /**
@@ -8967,9 +8966,9 @@ function Rail(props: {
       const box = el.getBoundingClientRect();
       return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
     };
-    if (props.lanes.length === 0) return null;
+    if (order.length === 0) return null;
     if (inside(dockRef.current)) {
-      return { index: props.lanes.length - 1, dock: true };
+      return { index: order.length - 1, dock: true };
     }
     if (!inside(listRef.current)) return null;
     const to = laneTargetAt(y);
@@ -9021,11 +9020,11 @@ function Rail(props: {
     onDrop: (lane, x, y) => {
       const at = laneTargetAtPoint(x, y);
       endDrag();
-      const onto = at === null ? undefined : props.lanes[at.index];
-      if (!onto) return;
+      const onto = at === null ? undefined : order[at.index];
+      if (onto === undefined) return;
       // `moveLane` returns null for a lane dropped on itself, so a no-op drop
       // costs nothing here and needs no guard of its own.
-      props.onMoveLane(lane, onto.name);
+      props.onMoveLane(lane, onto);
     },
     onCancel: endDrag,
     scroller: () => listRef.current,
@@ -9039,6 +9038,10 @@ function Rail(props: {
    */
   const renderGroup = (group: RailGroup) => {
     const laneAt = laneAtOf(group);
+    // What this section is called in the rail order, or `null` if it holds no
+    // place in it. Also the drag's payload: the ungrouped bucket travels under
+    // its stored name, not under its (empty) group key.
+    const orderKey = orderKeyOf(group);
     // Two different sections carry a ⋮, and for two different reasons: a real
     // lane has an identity to rename and delete, and any section with worktrees
     // in it has a set to move or bin. `editable || bulk` is the union rather
@@ -9202,7 +9205,7 @@ function Rail(props: {
               // (`.trash-drop` below), and a wash underneath would be a second
               // outline saying the same thing in the same colour.
               dropInto && group.key !== TRASH_LANE ? " drop-in" : ""
-            }${group.editable && dragLane === group.lane ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
+            }${orderKey !== null && dragLane === orderKey ? " lane-dragging" : ""}${laneDropSide === "before" ? " lane-drop-before" : ""}${laneDropSide === "after" ? " lane-drop-after" : ""}`}
             /* What `rowTargetAt` measures a row drop against: the box is the
                section, and the rows inside it are the slots. Every section
                carries one, droppable or not — a pinned lane the drag cannot
@@ -9216,7 +9219,7 @@ function Rail(props: {
           >
             {hasHeader && (
               <div
-                className={`lane-head${group.editable && canDrag ? " draggable" : ""}${folded ? " folded" : ""}${holdsActive ? " holds-active" : ""}`}
+                className={`lane-head${orderKey !== null && canDrag ? " draggable" : ""}${folded ? " folded" : ""}${holdsActive ? " holds-active" : ""}`}
                 /* The header IS the handle — the whole bar, not a grip icon
                    beside the name. A lane's header is already the thing that
                    stands for the lane (it is where the menu and the ＋ live), and
@@ -9225,13 +9228,15 @@ function Rail(props: {
                    click, and a drag that starts on one is still a drag of the
                    lane it belongs to.
 
-                   Only a real lane, and only expanded: the ungrouped section and
-                   the trash hold no place in the lane order, and a collapsed rail
+                   Any section that holds a place in the rail order, and only
+                   expanded: that includes the ungrouped section, which is not a
+                   lane but does have a position, and excludes the pinned ones,
+                   which do not. A collapsed rail
                    renders no headers at all — so a header with no handler is how
                    "this one does not move" is said. */
                 onPointerDown={
-                  group.editable && canDrag
-                    ? (e) => laneDrag.start(e, group.lane)
+                  orderKey !== null && canDrag
+                    ? (e) => laneDrag.start(e, orderKey)
                     : undefined
                 }
                 onContextMenu={
@@ -9416,45 +9421,11 @@ function Rail(props: {
                     </button>
                   </Tooltip>
                 )}
-                {/* The Detached lane's own header actions: a question mark that
-                    says what the lane is, and the batch trash that matches its
-                    point (detached checkouts are usually throwaways). The trash
-                    button sits where a lane keeps its menu — like the trash lane,
-                    this section has no real menu, so its one action lives there. */}
-                {group.key === DETACHED_LANE && (
-                  <>
-                    <Tooltip
-                      label="Detached: these checkouts are not on any branch (a detached HEAD). They can’t be pulled or committed to a branch until one is checked out — usually they’re throwaway, so you can clear them all at once."
-                      maw={260}
-                    >
-                      <span
-                        className="lane-edit lane-help"
-                        role="img"
-                        aria-label="What are detached worktrees?"
-                      >
-                        <IconHelp size={12} />
-                      </span>
-                    </Tooltip>
-                    <Tooltip label="Move all detached worktrees to the trash">
-                      <button
-                        type="button"
-                        className="lane-edit"
-                        aria-label="Move all detached worktrees to the trash"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          props.onTrashAllDetached();
-                        }}
-                      >
-                        <IconTrash size={12} />
-                      </button>
-                    </Tooltip>
-                  </>
-                )}
                 {/* Right-click alone is not an affordance — nothing on screen says
                     the header has a menu. The same ⋮ the rows carry, so the two read
-                    as the same gesture. Not on the pinned sections: the trash and
-                    Detached lanes carry their own batch button instead, and a
-                    removal in flight has no menu at all. */}
+                    as the same gesture. Not on the pinned sections: the trash
+                    lane carries its own batch button instead, and a removal in
+                    flight has no menu at all. */}
                 {hasMenu && (
                   <Tooltip label={menuLabel}>
                     <button
@@ -9646,6 +9617,9 @@ function Rail(props: {
                     // deliberately hidden, i.e. a state no sighted reader could see
                     // and nobody can act on from a trash row.
                     trashed ? undefined : w.git,
+                    // Same gate, same reason: a trashed row's glyph is hidden, so
+                    // its state is not announced either.
+                    !trashed && isDetached(w),
                   )}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
@@ -9796,6 +9770,7 @@ function Rail(props: {
                       summary={inboxSummary}
                       git={w.git}
                       label={worktreeLabel(w)}
+                      detached={isDetached(w)}
                     />
                   )}
                   {showRunControl && (
@@ -10062,7 +10037,7 @@ function Rail(props: {
             // Not while the carried lane is already the last one: that drop is a
             // no-op, and a bar promising a move that will not happen is worse
             // than none.
-            onDock && dragLane !== null && props.lanes.at(-1)?.name !== dragLane
+            onDock && dragLane !== null && order.at(-1) !== dragLane
               ? " lane-drop-into"
               : ""
           }`}

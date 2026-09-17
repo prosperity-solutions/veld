@@ -40,9 +40,10 @@ export type RowGlyph =
 export function rowGlyph(
   summary: RowSummary,
   git: WorktreeGitSignals | undefined,
+  detached = false,
 ): RowGlyph | null {
   if (summary.state !== null) return { kind: "activity", state: summary.state };
-  const state = rowGitState(git);
+  const state = rowGitState(git, detached);
   return state === null ? null : { kind: "git", state };
 }
 
@@ -57,8 +58,9 @@ export function rowTooltip(
   label: string,
   activityLines: string[],
   git: WorktreeGitSignals | undefined,
+  detached = false,
 ): string {
-  const lines = [...activityLines, ...gitTooltipLines(git)];
+  const lines = [...activityLines, ...gitTooltipLines(git, detached)];
   return lines.length === 0 ? label : `${label} — ${lines.join("\n")}`;
 }
 
@@ -76,8 +78,9 @@ export function rowTooltip(
 export function rowDescription(
   activityDescription: string | undefined,
   git: WorktreeGitSignals | undefined,
+  detached = false,
 ): string | undefined {
-  const parts = [activityDescription, gitDescription(git)].filter(
+  const parts = [activityDescription, gitDescription(git, detached)].filter(
     (part): part is string => part !== undefined,
   );
   return parts.length === 0 ? undefined : parts.join(". ");

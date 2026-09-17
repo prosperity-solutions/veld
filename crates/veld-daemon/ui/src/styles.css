@@ -1910,6 +1910,19 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-git.dirty {
   color: var(--muted);
 }
+/* Not on a branch. Reads at `--fg` like `unpushed` rather than at `--muted` like
+   `dirty`, and for the same reason: a detached HEAD is not the normal condition of
+   a checkout you are working in, and it is the state whose *invisibility* is what
+   this glyph was added to fix — it used to be said by moving the row into a
+   section of its own, which is what made rows leave their group during a rebase.
+
+   Not amber, on the same rule as `unpushed`: nothing has failed, and `--warn` on a
+   row is spoken for by the two glyphs that mean "something stopped and wants you".
+   A detached checkout is a state to notice, not an error to escalate — which is
+   also why the glyph is a broken link rather than a warning shape. */
+.wt-git.detached {
+  color: var(--fg);
+}
 /* Committed but not pushed. Brighter than dirty because it is the one state with an
    action that is *finished being decided* — the work is done and it is still only on
    this machine. Not amber: nothing is wrong, and `--warn` on a row is already spoken
