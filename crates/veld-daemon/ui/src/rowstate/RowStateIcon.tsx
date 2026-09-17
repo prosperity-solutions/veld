@@ -1,4 +1,4 @@
-import { IconArrowUp, IconPencil } from "@tabler/icons-react";
+import { IconArrowUp, IconPencil, IconUnlink } from "@tabler/icons-react";
 
 import type { WorktreeGitSignals } from "../api";
 import type { GitRowState } from "../gitstate/gitState";
@@ -15,10 +15,17 @@ import { rowGlyph, rowTooltip } from "./rowState";
  * warning, which is right: having edits is the normal state of a checkout you are
  * working in, not something to escalate. `arrow-up` for commits not pushed, the
  * convention every git UI already uses (`↑2`), so it needs no tooltip to be
- * understood.
+ * understood. `unlink` for a detached HEAD — a broken link says "not attached to
+ * a branch" in the same neutral register as the pencil, because a detached
+ * checkout is a state to notice rather than an error to escalate.
  *
- * **Two glyphs, and every one of them means "this checkout is holding
- * something".** A branch glyph for everything-pushed was built and removed: it
+ * **Three glyphs, and every one of them means "this checkout is holding
+ * something".** A detached HEAD qualifies on the same terms as the other two:
+ * commits made on one belong to no branch and are lost the moment you check
+ * something else out. It replaced the virtual "Detached" rail section, which said
+ * the same thing by *moving the row out of its group* — so a rebase made rows
+ * leave their group and come back, and a group you had just emptied still held
+ * checkouts it would not show you. A branch glyph for everything-pushed was built and removed: it
  * does not communicate not-yet-saved work, and it sat permanently lit on the main
  * checkout, which never leaves that state. **There is deliberately no merged glyph
  * either.** A `git-merge` icon for a deleted
@@ -35,6 +42,7 @@ import { rowGlyph, rowTooltip } from "./rowState";
  */
 const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
   dirty: IconPencil,
+  detached: IconUnlink,
   unpushed: IconArrowUp,
 };
 
@@ -62,14 +70,21 @@ export function RowStateIcon(props: {
   summary: RowSummary;
   git: WorktreeGitSignals | undefined;
   label: string;
+  /** On a detached HEAD — read from the worktree's branch, not from `git`. */
+  detached: boolean;
 }): React.JSX.Element | null {
-  const glyph = rowGlyph(props.summary, props.git);
+  const glyph = rowGlyph(props.summary, props.git, props.detached);
   if (glyph === null) return null;
   const Icon = glyph.kind === "activity" ? ACTIVITY_ICONS[glyph.state] : GIT_ICONS[glyph.state];
   const className = glyph.kind === "activity" ? "wt-inbox" : "wt-git";
   return (
     <RailGlyphTooltip
-      label={rowTooltip(props.label, activityLines(props.summary), props.git)}
+      label={rowTooltip(
+        props.label,
+        activityLines(props.summary),
+        props.git,
+        props.detached,
+      )}
     >
       <span
         className={`${className} ${glyph.state}`}
