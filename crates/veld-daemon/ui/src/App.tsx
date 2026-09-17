@@ -6,7 +6,6 @@ import {
   type EmojiHolder,
   type EnvironmentList,
   type ExtensionSpec,
-  type Lane,
   type Preset,
   type Repo,
   type RepoGitStatus,
@@ -79,6 +78,7 @@ import {
   moveLane,
   moveWorktree,
   orderKeyOf,
+  asLaneRows,
   railOrder,
   realLanes,
   needsAttention,
@@ -108,6 +108,7 @@ import {
   trashPreview,
   type PendingAction,
   type RailGroup,
+  type LaneRows,
   type PendingMap,
   type WorktreeStatus,
 } from "./model";
@@ -1246,7 +1247,7 @@ function AppInner(props: {
   // that row, so only the three ordering call sites take `laneRows`; every
   // surface that lists "the groups that exist" takes `lanes` and cannot
   // accidentally offer a group whose label is an invisible control character.
-  const laneRows = useMemo(() => repo?.lanes ?? [], [repo]);
+  const laneRows = useMemo(() => asLaneRows(repo?.lanes ?? []), [repo]);
   const lanes = useMemo(() => realLanes(laneRows), [laneRows]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
@@ -8631,7 +8632,7 @@ function Rail(props: {
   /** The daemon's lane rows **as sent** — the repo's groups plus the reserved
    *  row holding the ungrouped section's place in the order. The rail is the one
    *  consumer that needs the latter, which is why this is not `realLanes`. */
-  lanes: Lane[];
+  lanes: LaneRows;
   active: Worktree | null;
   envs: EnvironmentList | null;
   /** Drives which marker face the rows render; `null` before the first read. */

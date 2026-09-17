@@ -4,7 +4,7 @@ import {
   activeRun,
   attentionStatus,
   bestFuzzyMatch,
-  bulkMoveTargets,
+  bulkMoveTargets as bulkMoveTargetsBranded,
   bulkTrashable,
   diagnosticsRun,
   freshRunName,
@@ -15,8 +15,8 @@ import {
   MAIN_LANE,
   moveLane,
   orderKeyOf,
-  railOrder,
-  realLanes,
+  railOrder as railOrderBranded,
+  realLanes as realLanesBranded,
   UNGROUPED_LANE,
   moveWorktree,
   needsAttention,
@@ -25,7 +25,7 @@ import {
   pickRun,
   proposeRunName,
   prunePending,
-  railGroups,
+  railGroups as railGroupsBranded,
   runSignature,
   runSignatureFor,
   runStatus,
@@ -45,7 +45,28 @@ import {
   TRASH_LANE,
   TRASH_PREVIEW,
   trashPreview,
+  asLaneRows,
+  type RealLanes,
 } from "./model";
+
+/**
+ * The branded-list functions, re-wrapped so a test can pass a plain `Lane[]`.
+ *
+ * `LaneRows` and `RealLanes` are brands (see `model.ts`): production code must
+ * say which of the two lists it holds, and that is a compile-time guard against
+ * the two misuses a review found — `railGroups` given a filtered list silently
+ * re-pins the ungrouped bucket to the top, and `bulkMoveTargets` given a raw one
+ * offers a menu entry labelled with a control character. Tests build fixtures by
+ * hand and have no daemon response to tag, so they tag here, once, rather than at
+ * every call site.
+ */
+const railGroups = (worktrees: Worktree[], lanes: Lane[] = []) =>
+  railGroupsBranded(worktrees, asLaneRows(lanes));
+const railOrder = (lanes: Lane[]) => railOrderBranded(asLaneRows(lanes));
+const realLanes = (lanes: Lane[]) => realLanesBranded(asLaneRows(lanes));
+const bulkMoveTargets = (lanes: readonly Lane[], from: string) =>
+  bulkMoveTargetsBranded(lanes as unknown as RealLanes, from);
+
 
 const wt = (path: string): Worktree => ({
   id: 1,
@@ -1599,6 +1620,28 @@ describe("moveLane", () => {
   });
 });
 
+describe("the reserved ungrouped name", () => {
+  it("is the exact bytes the daemon expects", () => {
+    // Declared twice — here in TS and in `crates/veld-core/src/db/worktrees.rs` —
+    // with nothing generating one from the other. A divergence is SILENT: the
+    // daemon's equality guard stops matching, the row is never minted, the drag
+    // looks like it worked and the bucket snaps back on the next refresh. Spelled
+    // here with `String.fromCharCode` rather than the `\u0000` escape the constant
+    // uses, so editing the constant alone fails this, and `the_ungrouped_name_is_
+    // the_bytes_the_ui_sends` is the twin that fails on the other side.
+    expect(UNGROUPED_LANE).toBe(String.fromCharCode(0) + "ungrouped");
+    expect(UNGROUPED_LANE).toHaveLength(10);
+    expect(UNGROUPED_LANE.charCodeAt(0)).toBe(0);
+  });
+
+  it("is rejected by the daemon's lane-name rules, which is what reserves it", () => {
+    // `valid_lane_name` refuses control characters. That is the whole guarantee
+    // that no user-made group can ever alias the bucket's slot, so if this stops
+    // being true the collision is back.
+    expect(/\p{Cc}/u.test(UNGROUPED_LANE)).toBe(true);
+  });
+});
+
 describe("realLanes", () => {
   it("hides the ungrouped section's position row from the repo's groups", () => {
     // The row is storage for an ordering fact, not a group. Every surface that
@@ -1612,6 +1655,16 @@ describe("realLanes", () => {
   it("leaves a repo that has never reordered untouched", () => {
     const rows = [lane("a", 0), lane("b", 1)];
     expect(realLanes(rows)).toHaveLength(2);
+  });
+
+  it("would offer the reserved row if handed the raw list — hence the brand", () => {
+    // Documents *why* `bulkMoveTargets` takes `RealLanes` and not `Lane[]`.
+    // Passing raw rows is a compile error now; this is what it produced before,
+    // and is the reason the type is branded rather than the misuse being left to
+    // a comment. The cast is the test reaching past the guard on purpose.
+    const raw = [lane("a", 0), lane(UNGROUPED_LANE, 1)];
+    const values = bulkMoveTargets(raw, "a").map((t) => t.value);
+    expect(values).toContain(UNGROUPED_LANE);
   });
 
   it("keeps the reserved row out of a batch move's destinations", () => {

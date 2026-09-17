@@ -248,7 +248,19 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     })
 }
 
-/// The rail's render order, shared by every query that returns worktrees.
+/// The order worktree rows are returned in, shared by every query that returns
+/// them.
+///
+/// **No longer the rail's section order, and deliberately not chased.** The
+/// ungrouped section can now be dragged below a group ([`UNGROUPED_LANE`]), and
+/// this still sorts `lane = ''` first — so the flat array is in an order the rail
+/// may not draw. That is harmless because nothing derives section order from it:
+/// the client's `railGroups` *segments* this list by lane rather than reading its
+/// cross-section order, and the keyboard traversal flattens `railGroups`' output
+/// rather than this. What this ordering is still load-bearing for is the order
+/// *within* a section, where `lane != ''` is constant and contributes nothing.
+/// Teaching it the bucket's position would mean a correlated subquery on a
+/// reserved name in every worktree query, to fix an order no reader consults.
 ///
 /// Ungrouped worktrees (`lane = ''`) come first, so a repo with no lanes defined
 /// sorts exactly as it did before v10; then lanes in their own `position` order,
@@ -973,6 +985,15 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Whether a repo row exists — the foreign key `lanes.repo_root` points at.
+    fn repo_exists(tx: &rusqlite::Transaction<'_>, root: &str) -> Result<bool, DbError> {
+        Ok(tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM repos WHERE root = ?1)",
+            params![root],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Rewrite lane order from a full ordered list of names.
     ///
     /// Takes the whole list rather than a move-this-one delta so the write is
@@ -997,7 +1018,15 @@ impl Db {
             // minted here, by the first order that places it somewhere. Only
             // here — every other unknown name stays ignored, which is what stops
             // a stale client resurrecting a lane deleted in another window.
-            let n = if n == 0 && name == UNGROUPED_LANE {
+            //
+            // Guarded on the repo still existing. `lanes.repo_root` is a foreign
+            // key, so inserting for a repo removed in another window mid-drag
+            // raises a constraint error and rolls the whole transaction back —
+            // turning what used to be a silent no-op (every statement was an
+            // UPDATE matching nothing) into a 500 that also discards the lane
+            // moves that did match. A missing repo has no order to record, so
+            // skipping is the honest answer.
+            let n = if n == 0 && name == UNGROUPED_LANE && Self::repo_exists(&tx, &root)? {
                 tx.execute(
                     "INSERT INTO lanes (repo_root, name, position, created_at)
                      VALUES (?1, ?2, ?3, ?4)",
@@ -1011,14 +1040,36 @@ impl Db {
             }
         }
         // Anything the caller did not mention lands after the listed lanes,
-        // keeping its own relative order.
+        // keeping its own relative order — **except the ungrouped section**, whose
+        // row is left exactly where it is.
+        //
+        // "Not mentioned" reads in two opposite directions here, and that is the
+        // whole reason for the exception. For a lane it means "you did not move
+        // it, so it follows the ones you did". For the bucket, absence of the
+        // *row* already means "renders first", so sweeping an absent *name* to the
+        // tail makes the same word mean first and last in one function. Worse, the
+        // only clients that omit the name are ones that have never heard of it —
+        // a long-lived browser tab on pre-upgrade JS, or an integrator following
+        // the documented payload — so one drag from a stale tab silently moved
+        // "Worktrees" to the bottom of the rail for every other window. Leaving the
+        // row alone means such a client reorders the lanes it knows about and
+        // nothing else, which is what it was trying to do.
+        //
+        // A position it keeps may now tie with a listed lane's. That is fine and
+        // deterministic: `list_lanes` breaks ties on `name COLLATE NOCASE`, and the
+        // leading NUL sorts the bucket ahead of any real name.
         let rest: Vec<String> = tx
             .prepare(
                 "SELECT name FROM lanes WHERE repo_root = ?1 AND name NOT IN
-                   (SELECT value FROM json_each(?2)) ORDER BY position, name COLLATE NOCASE",
+                   (SELECT value FROM json_each(?2)) AND name != ?3
+                 ORDER BY position, name COLLATE NOCASE",
             )?
             .query_map(
-                params![root, serde_json::to_string(order).unwrap_or_default()],
+                params![
+                    root,
+                    serde_json::to_string(order).unwrap_or_default(),
+                    UNGROUPED_LANE
+                ],
                 |r| r.get(0),
             )?
             .collect::<rusqlite::Result<_>>()?;
@@ -2760,6 +2811,75 @@ mod tests {
             db.create_lane(root, "one-too-many"),
             Err(DbError::TooManyLanes(_))
         ));
+    }
+
+    /// The reserved name's exact bytes, pinned on both sides of the wire.
+    ///
+    /// `UNGROUPED_LANE` is declared twice — here and as `UNGROUPED_LANE` in
+    /// `crates/veld-daemon/ui/src/model.ts` — and nothing generates one from the
+    /// other. A divergence would not error: the daemon's `name == UNGROUPED_LANE`
+    /// guard would simply stop matching, so the row is never minted, the drag
+    /// appears to work, and the bucket snaps back on the next refresh. This test
+    /// and its twin in `model.test.ts` spell the same bytes a different way from
+    /// the constants, so editing either constant alone fails its own side's suite
+    /// and the doc pointing at the other side is right there.
+    #[test]
+    fn the_ungrouped_name_is_the_bytes_the_ui_sends() {
+        assert_eq!(UNGROUPED_LANE.as_bytes(), b"\0ungrouped");
+        assert_eq!(UNGROUPED_LANE.chars().next(), Some('\0'));
+        assert_eq!(UNGROUPED_LANE.len(), 10);
+    }
+
+    /// An order that does not mention the bucket leaves its position alone.
+    ///
+    /// "Not mentioned" means opposite things for a lane and for the bucket — a
+    /// lane follows the ones the caller listed, while the *absence of the bucket's
+    /// row* already means "renders first". Sweeping an absent bucket name to the
+    /// tail therefore relocated it, and the only callers that omit the name are
+    /// ones that have never heard of it: a long-lived browser tab on pre-upgrade
+    /// JS, or an integrator following the documented payload. One drag from such a
+    /// client moved "Worktrees" to the bottom of the rail for every other window.
+    #[test]
+    fn an_order_without_the_bucket_does_not_move_it() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/lstale");
+        db.upsert_repo(root, "lstale").unwrap();
+        for name in ["a", "b"] {
+            db.create_lane(root, name).unwrap();
+        }
+        // The user puts the bucket between the two groups.
+        db.reorder_lanes(root, &["a".into(), UNGROUPED_LANE.into(), "b".into()])
+            .unwrap();
+        assert_eq!(lane_names(&db, root), vec!["a", UNGROUPED_LANE, "b"]);
+
+        // A client that has never heard of the bucket drags `b` above `a`.
+        db.reorder_lanes(root, &["b".into(), "a".into()]).unwrap();
+        let names = lane_names(&db, root);
+        assert_eq!(names.first().map(String::as_str), Some("b"));
+        assert_ne!(
+            names.last().map(String::as_str),
+            Some(UNGROUPED_LANE),
+            "a stale client must not sweep the bucket to the bottom of the rail"
+        );
+    }
+
+    /// A reorder for a repo that no longer exists is a no-op, not a 500.
+    ///
+    /// `lanes.repo_root` is a foreign key, so the lazy INSERT would raise a
+    /// constraint error and roll back the whole transaction — where before this
+    /// path existed every statement was an UPDATE matching nothing and the call
+    /// was silently fine. Reachable by dragging while another window removes the
+    /// repo.
+    #[test]
+    fn reordering_an_unregistered_repo_is_a_no_op() {
+        let (_dir, db) = test_db();
+        let ghost = Path::new("/tmp/lghost-repo");
+        assert!(
+            db.reorder_lanes(ghost, &[UNGROUPED_LANE.into(), "a".into()])
+                .is_ok(),
+            "a removed repo must not turn a drag into a database error"
+        );
+        assert!(lane_names(&db, ghost).is_empty());
     }
 
     /// The reserved row cannot be renamed into a real lane, deleted, or filed

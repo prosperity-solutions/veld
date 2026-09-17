@@ -652,7 +652,7 @@ export const UNGROUPED_LABEL = "Worktrees";
  * Deleting lane is conditional: it is a state, so an empty one would be
  * permanent clutter.
  */
-export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
+export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] {
   const live = worktrees.filter((w) => !w.trashed_at);
   // A worktree whose removal is actively running leaves the trash for the
   // terminal deleting lane: it is still a trashed row until the worker drops it,
@@ -863,7 +863,7 @@ export function trashPreview(
  * the same top-to-bottom the user is looking at while they choose.
  */
 export function bulkMoveTargets(
-  lanes: Lane[],
+  lanes: RealLanes,
   from: string,
 ): Array<{ value: string; label: string }> {
   const targets = lanes
@@ -1006,6 +1006,42 @@ export function insertionTarget(
   return boxes.length;
 }
 
+declare const laneRowsBrand: unique symbol;
+declare const realLanesBrand: unique symbol;
+
+/**
+ * The daemon's lane rows **exactly as sent** — the user's groups *plus* the
+ * reserved row holding the ungrouped section's place ([`UNGROUPED_LANE`]).
+ *
+ * Branded, and the brand is the whole point. This list and [`RealLanes`] are both
+ * arrays of `Lane`, so before the brands existed the two were freely
+ * interchangeable and passing the wrong one compiled, linted and tested clean
+ * while being wrong in two specific ways a reviewer found:
+ *
+ * - [`railGroups`] or [`railOrder`] handed a *filtered* list cannot know where the
+ *   bucket was, so it synthesises it at the front — silently restoring the very
+ *   behaviour this module was changed to remove, with no error anywhere.
+ * - [`bulkMoveTargets`] handed a *raw* list offers the reserved row as a
+ *   destination, i.e. a menu entry labelled with an invisible control character.
+ *
+ * Neither is expressible now: each function demands its own brand, and the only
+ * way across is [`realLanes`]. This is the same discipline [`MAIN_LANE`] applies to
+ * the key space — a guard by construction beats one every future caller has to
+ * remember.
+ */
+export type LaneRows = readonly Lane[] & { readonly [laneRowsBrand]: true };
+
+/** The repo's real groups — [`LaneRows`] with the reserved row removed. */
+export type RealLanes = readonly Lane[] & { readonly [realLanesBrand]: true };
+
+/**
+ * Tag a list from the daemon as [`LaneRows`]. The single entry point to the
+ * branded world, and the only cast: everything downstream is checked.
+ */
+export function asLaneRows(lanes: readonly Lane[]): LaneRows {
+  return lanes as LaneRows;
+}
+
 /**
  * The repo's actual groups — every row the daemon sent except the ungrouped
  * section's position marker.
@@ -1021,8 +1057,8 @@ export function insertionTarget(
  * arrangement `MAIN_LANE` above was introduced to get rid of: a guard you have to
  * remember at every future lookup is one a future lookup will not have.
  */
-export function realLanes(lanes: Lane[]): Lane[] {
-  return lanes.filter((l) => l.name !== UNGROUPED_LANE);
+export function realLanes(lanes: LaneRows): RealLanes {
+  return lanes.filter((l) => l.name !== UNGROUPED_LANE) as unknown as RealLanes;
 }
 
 /**
@@ -1038,7 +1074,7 @@ export function realLanes(lanes: Lane[]): Lane[] {
  * so the daemon has somewhere to record a slot it has never stored before. That
  * is why this is not simply `lanes.map(l => l.name)` with a filter.
  */
-export function railOrder(lanes: Lane[]): string[] {
+export function railOrder(lanes: LaneRows): string[] {
   const names = lanes.map((l) => l.name);
   return names.includes(UNGROUPED_LANE) ? names : [UNGROUPED_LANE, ...names];
 }
