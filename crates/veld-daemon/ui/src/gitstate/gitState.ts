@@ -8,10 +8,14 @@ import type { WorktreeGitSignals } from "../api";
  * shows — `rowstate/rowState.ts` decides whether the *activity* vocabulary takes
  * the slot instead, which it does whenever there is any activity at all.
  *
- * # The two states, and why there are only two
+ * # The three states, and why there are only three
  *
  * - **`dirty`** — uncommitted work. It exists in this checkout and nowhere else,
  *   and it is what `git worktree remove` refuses on.
+ * - **`detached`** — a detached HEAD. Commits made here belong to no branch, so
+ *   they are unreachable the moment something else is checked out. Read from the
+ *   worktree's `branch`, not from {@link WorktreeGitSignals} — see
+ *   [`rowGitState`].
  * - **`unpushed`** — a clean tree with commits its upstream does not have. The work
  *   is committed but has not left the machine.
  *
@@ -45,10 +49,22 @@ import type { WorktreeGitSignals } from "../api";
  *
  * # Worst-state-wins, and `dirty` is the worst
  *
- * `dirty` outranks the others because it is the only one with a *consequence*:
- * every other state describes work that is safely somewhere else, and this one
- * describes work that is not. So a merged-and-deleted worktree with a stray edit in
- * it reads as dirty, which is the reading that stops someone throwing it away.
+ * `dirty` outranks the others because it is the one with the sharpest
+ * *consequence*: it is what `git worktree remove` refuses on, so it is the reading
+ * that stops someone throwing a checkout away. A merged-and-deleted worktree with
+ * a stray edit in it reads as dirty for exactly that reason.
+ *
+ * `detached` ranks second, and **the cost of that is real and was accepted rather
+ * than missed.** A conflicted rebase is dirty by definition, and a rebase is the
+ * usual reason a checkout is detached at all — so in that case the row shows the
+ * pencil and nothing visibly says "detached". The tooltip and the screen-reader
+ * description still carry both facts, because [`gitFacts`] never collapses the way
+ * the glyph does. The alternative, demoting `dirty`, trades a signal every user
+ * meets daily for one most repos never produce. Flip the first two lines of
+ * [`rowGitState`] if that judgement ever changes.
+ *
+ * `detached` sits above `unpushed` only on paper: a detached HEAD has no upstream,
+ * so `ahead` is `null` in nearly every case where both could apply.
  *
  * `unpushed` and `gone` cannot co-occur: git reports no ahead/behind counts for a
  * branch whose upstream is `[gone]`, so `ahead` is `null` in exactly that case.
@@ -75,16 +91,10 @@ export function rowGitState(
   // checked before `unpushed`, though the two barely compete: a detached HEAD
   // has no upstream, so `ahead` is `null` in almost every case that reaches here.
   //
-  // **The cost of that first line, recorded because it is not obvious and was
-  // chosen deliberately.** A conflicted rebase is dirty *by definition*, and a
-  // rebase is the motivating case for a detached checkout appearing at all — so
-  // in exactly that case the glyph shows a pencil and nothing on the row says
-  // "detached". The old virtual section shouted there and this does not. The
-  // tooltip and `aria-description` still carry both facts (they never collapse,
-  // see `gitFacts`), and the precedence is the maintainer's call: `dirty` is the
-  // one state with a consequence, and demoting it to surface a rarer one would
-  // trade a signal everyone sees daily for one most repos never produce. Revisit
-  // by flipping these two lines if the detached case turns out to matter more.
+  // The cost of that first line — a conflicted rebase is dirty, so the detached
+  // glyph is invisible in the case that most often produces it — is real, was
+  // accepted deliberately, and is argued in the type doc above. Flip these two
+  // lines if that judgement changes.
   if (git?.dirty) return "dirty";
   if (detached) return "detached";
   if (!git) return null;

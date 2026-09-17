@@ -1136,6 +1136,23 @@ describe("railGroups", () => {
     expect(groups.map((g) => g.label)).not.toContain("Detached");
   });
 
+  it("keeps a detached main checkout in the lane it was filed into", () => {
+    // The one input class whose *placement* changed beyond the glyph. Before,
+    // being detached pulled the main checkout out of its lane and into the pinned
+    // MAIN section; now detachment changes nothing about where anything sits, so
+    // it renders inside its group exactly as a non-detached filed main does.
+    const groups = railGroups(
+      [rw("/repo", { is_main: true, branch: "(detached)", lane: "review" })],
+      [lane("review", 0)],
+    );
+    expect(groups.some((g) => g.key === MAIN_LANE)).toBe(false);
+    expect(groups.find((g) => g.key === "review")!.worktrees.map((w) => w.path)).toEqual([
+      "/repo",
+    ]);
+    // Still never binnable in a batch, detached or not — it is the repository.
+    expect(bulkTrashable([rw("/repo", { is_main: true, branch: "(detached)" })])).toEqual([]);
+  });
+
   it("leads the rail with a detached main checkout", () => {
     // git keeps a repo's main on a branch, so a detached main is not a real
     // state — but the row must not silently disappear from the rail either.

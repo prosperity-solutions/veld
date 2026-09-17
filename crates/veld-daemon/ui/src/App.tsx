@@ -3159,14 +3159,18 @@ function AppInner(props: {
     // The name this section is stored under in the order. `lane` is `""` for the
     // ungrouped section and `lanes` never holds an empty name, so that is exactly
     // the "not a real lane" test.
-    const orderKey = isLane ? lane : UNGROUPED_LANE;
-    const index = order.indexOf(orderKey);
+    // `""` is the ungrouped section and nothing else — `lanes` never holds an
+    // empty name, and every pinned section's `lane` is its NUL-prefixed key. Read
+    // that way rather than as "not a lane, so it must be the bucket", which would
+    // hand a future pinned section that gains `bulk` a ⋮ that reorders Worktrees.
+    const orderKey = isLane ? lane : lane === "" ? UNGROUPED_LANE : null;
+    const index = orderKey === null ? -1 : order.indexOf(orderKey);
     // One step is "swap places with that neighbour" — the same thing a drop onto
     // it says, which is why both go through `moveLane` by name. The bounds are
     // the `disabled` flags below; a neighbour that is not there is `undefined`
     // here and `moveLane` refuses it anyway.
     const move = (neighbour: string | undefined) =>
-      void (neighbour !== undefined && moveLaneTo(orderKey, neighbour));
+      void (orderKey !== null && neighbour !== undefined && moveLaneTo(orderKey, neighbour));
     const members = sectionMembers(lane);
     return showContextMenu([
       ...(isLane
@@ -3178,7 +3182,13 @@ function AppInner(props: {
             },
           ]
         : []),
-      ...(index >= 0
+      // `order.length > 1`, not `index >= 0`: a repo that has defined no groups has
+      // exactly one orderable section — the bucket — and offering it "Move up" and
+      // "Move down", both permanently disabled, is two dead entries and a divider
+      // in the menu every such repo opens. The file's "disabled rather than hidden"
+      // rule is about an action that exists and is momentarily unavailable; here
+      // there is no second position to move to at all.
+      ...(index >= 0 && order.length > 1
         ? [
             {
               key: "lane-up",
@@ -8822,8 +8832,12 @@ function Rail(props: {
   const dockScrollRef = useRef<HTMLDivElement>(null);
 
   /**
-   * The lane a pointer at `clientY` is aiming at, or `null` when the rail holds
-   * no lanes.
+   * The section a pointer at `clientY` is aiming at, or `null` when the pointer is
+   * outside both the list and the dock.
+   *
+   * Never `null` for want of somewhere to land: [`railOrder`] always names the
+   * ungrouped section, so even a repo that has defined no groups has exactly one
+   * orderable section and the rail is never a column with no targets in it.
    *
    * Measured against the sections' geometry rather than resolved from the
    * element under the pointer, and that is the whole point. Per-element hit
@@ -8975,7 +8989,6 @@ function Rail(props: {
       const box = el.getBoundingClientRect();
       return x >= box.left && x <= box.right && y >= box.top && y <= box.bottom;
     };
-    if (order.length === 0) return null;
     if (inside(dockRef.current)) {
       return { index: order.length - 1, dock: true };
     }
@@ -9221,9 +9234,11 @@ function Rail(props: {
                enter has to be able to say so, and a section that carried no key
                would instead be looked straight through. */
             data-group-key={group.key}
-            /* What `laneTargetAt` measures. Only a real lane carries one, so the
-               ungrouped section and the pinned lanes are not lane targets — a
-               pointer over them resolves to the nearest lane instead. */
+            /* What `laneTargetAt` measures. Every section that holds a place in
+               the rail order carries one — which now includes the ungrouped
+               section, and is the whole of letting a group be dropped above it.
+               The pinned sections carry none, so a pointer over the trash or a
+               pending removal resolves to the nearest orderable section instead. */
             data-lane-index={laneAt}
           >
             {hasHeader && (
