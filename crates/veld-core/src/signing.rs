@@ -1077,6 +1077,7 @@ pub const VERSION_RECORD_LEN: usize = 16 + VERSION_FIELD_LEN;
 /// functions is the fix for a shipped bug rather than duplication somebody
 /// forgot to fold together. `the_runtime_magic_matches_the_record_magic` in this
 /// module's tests is what holds them to the same 16 bytes.
+#[cfg(test)]
 const fn version_record_magic() -> [u8; 16] {
     let mut magic = [0u8; 16];
     let mut i = 0;
@@ -1096,12 +1097,39 @@ const fn version_record_magic() -> [u8; 16] {
 ///
 /// Panics at compile time if `version` does not fit, which is the right moment:
 /// a version too long to record is a build that must not ship.
+/// **`#[inline]` is load-bearing and is not a performance hint.**
+///
+/// Without it rustc emits a standalone runtime copy of this function into
+/// `veld-core`'s rlib, because it is `pub`. Nothing calls it at run time — every
+/// use is a `const` context — so the linker dead-strips that copy, but the
+/// 16-byte plaintext magic it folded out of the loop below lands in
+/// `.rodata.cst16`, the *mergeable constant pool*, which survives because other
+/// constants in it are live. The shipped helper then carries two plaintext
+/// magics: the record, and that orphan. Whether that fails the release is luck —
+/// the gate only rejects it when the 32 bytes the linker parks behind the orphan
+/// happen to be printable — and it is how v16.74.0's `linux-arm64` build broke.
+/// With `#[inline]` there is no standalone copy to fold anything out of.
+///
+/// Measured on the exact shape that failed — `aarch64-unknown-linux-gnu`, release
+/// profile, cross-linked from an x86_64 host, whole workspace — where the count
+/// goes 2 → 1. `just helper-record-check` reproduces it in about three minutes;
+/// `record_construction_is_inlined_so_no_orphan_magic_is_emitted` is what stops
+/// the attribute being removed as decoration.
+#[inline]
 pub const fn version_record(version: &str) -> [u8; VERSION_RECORD_LEN] {
     let mut out = [0u8; VERSION_RECORD_LEN];
-    let magic = version_record_magic();
+    // **De-obfuscated straight into `out`, with no intermediate `[u8; 16]`.**
+    // `let magic = version_record_magic();` is the obvious spelling and it is
+    // the one that put a second needle in every binary: a named 16-byte
+    // plaintext value is a constant the compiler may materialise on its own,
+    // separately from the record it was supposed to be copied into, and that is
+    // exactly what a `veld-helper` cross-compiled for
+    // `aarch64-unknown-linux-gnu` as part of a workspace build carried. The
+    // plaintext magic must exist in a shipped file exactly once — inside this
+    // record — so it is only ever written where it belongs.
     let mut i = 0;
     while i < 16 {
-        out[i] = magic[i];
+        out[i] = VERSION_MAGIC_OBFUSCATED[i] ^ VERSION_MAGIC_KEY;
         i += 1;
     }
     let bytes = version.as_bytes();
@@ -1519,6 +1547,29 @@ mod tests {
     #[test]
     fn the_runtime_magic_matches_the_record_magic() {
         assert_eq!(version_record_magic_at_runtime(), version_record_magic());
+    }
+
+    /// `version_record` must stay `#[inline]`, and no unit test can prove why.
+    ///
+    /// The property that matters — that a *cross-compiled release* helper holds
+    /// exactly one plaintext magic — is invisible to a host debug build, which
+    /// is the only kind a test here gets. So this guards the cause instead of
+    /// the symptom: the attribute whose absence puts an orphan copy of the magic
+    /// in `.rodata.cst16`. It reads like a performance hint, which is exactly
+    /// why somebody will delete it.
+    ///
+    /// A source-text assertion, in the idiom `terminalPaste.test.ts` and
+    /// `registry.test.ts` already use for invariants no type can carry.
+    #[test]
+    fn record_construction_is_inlined_so_no_orphan_magic_is_emitted() {
+        let source = include_str!("signing.rs");
+        assert!(
+            source.contains("#[inline]\npub const fn version_record("),
+            "`version_record` lost its `#[inline]`: rustc will emit a standalone \
+             runtime copy, whose folded 16-byte magic lands in the mergeable \
+             constant pool and ships as a second version record. See the doc \
+             comment on that function, and `just helper-record-check`."
+        );
     }
 
     /// The scanner's obfuscated-space comparison and the record's plaintext
