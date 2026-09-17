@@ -738,5 +738,40 @@ desktop: desktop-deps
 # commit the result whenever Cargo.lock changes.
 # `tr -d '\r'` normalizes CRLF that some upstream license texts carry, so the
 # committed file is pure LF and the CI drift diff is byte-stable across OSes.
+# Count the plaintext version-record magics in a helper built the way the
+# release actually builds it: aarch64-unknown-linux-gnu, release profile,
+# cross-linked from an x86_64 host, whole workspace. Must print exactly 1.
+#
+# This exists because the property is invisible everywhere else. A host build
+# does not fold the magic, a debug build does not either, and building only
+# `-p veld-helper` does not reproduce the feature unification that does — so
+# `cargo test`, `just test` and a local release build all pass on a tree whose
+# shipped helper carries two records and which therefore no privileged install
+# can ever update onto. Until now the only detector was a failed release; this
+# is that detector, on demand, in about three minutes.
+#
+# Needs Docker. Excludes veld-daemon (its build script needs node); that does
+# not change what veld-core's rlib contributes, which is where the orphan magic
+# comes from.
+helper-record-check:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    docker run --rm --platform linux/amd64 -v "$PWD":/w -w /w -e CARGO_TARGET_DIR=/t rust:latest bash -c '
+      apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq gcc-aarch64-linux-gnu >/dev/null 2>&1
+      rustup target add aarch64-unknown-linux-gnu >/dev/null 2>&1
+      printf "[target.aarch64-unknown-linux-gnu]\nlinker = \"aarch64-linux-gnu-gcc\"\n" >> "$CARGO_HOME/config.toml"
+      cargo build --release --target aarch64-unknown-linux-gnu --workspace --exclude veld-daemon 2>&1 | tail -1
+      python3 - /t/aarch64-unknown-linux-gnu/release/veld-helper <<PY
+    import sys
+    magic = bytes(b ^ 0xA5 for b in bytes.fromhex("ffa3297e793eedb20f1120c7f79c5cc2"))
+    d = open(sys.argv[1], "rb").read()
+    hits = [i for i in range(len(d) - 47) if d[i:i + 16] == magic]
+    for i in hits:
+        print("  record at", hex(i), "->", d[i + 16:i + 48])
+    print("version records:", len(hits))
+    sys.exit(0 if len(hits) == 1 else 1)
+    PY
+    '
+
 licenses:
     cargo about generate about.hbs | tr -d '\r' > THIRD-PARTY-LICENSES.md
