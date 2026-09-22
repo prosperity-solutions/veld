@@ -824,10 +824,11 @@ async fn positional_for(
         )),
         (Some(ActionAccepts::File), Some(file)) => {
             // Bounded before anything touches the filesystem or spawns a
-            // subprocess. Every real path is far under this — `PATH_MAX` is 4096 on
-            // Linux and 1024 on macOS — and the request body's own limit is 2 MB,
-            // which is four hundred times more path than can exist. Without a bound
-            // here a single request made the suffix search do megabytes of work per
+            // subprocess. Every real path is far under it — `PATH_MAX` is 4096 on
+            // Linux and 1024 on macOS — while the only limit underneath is axum's
+            // 2 MiB request body, which is 256 times this bound and 512 times the
+            // longest path any filesystem will accept. Without something here a
+            // single request made the suffix search do megabytes of comparison per
             // file in the checkout.
             if file.len() > MAX_CLICKED_PATH_BYTES {
                 return Err(err(
@@ -867,6 +868,15 @@ async fn positional_for(
 /// knows which editor it is talking to. The documented pattern is a `[ -d "$1" ]`
 /// branch; what is refused here is a path that is neither, or one outside the root.
 fn resolve_within(root: &str, path: &str) -> Option<String> {
+    // **Empty is not "the root", it is nothing.** `Path::join("")` yields the root
+    // back, which then canonicalizes, passes containment trivially and is a
+    // directory — so without this an activation carrying `"file": ""` opened the
+    // whole worktree, silently, against a contract that says every mismatch is
+    // refused. The UI cannot produce it (`findFilePaths` never yields an empty
+    // path), but this endpoint is reachable from any page a local run serves.
+    if path.is_empty() {
+        return None;
+    }
     let root = FsPath::new(root).canonicalize().ok()?;
     let joined = {
         let p = FsPath::new(path);
@@ -1773,6 +1783,24 @@ mod tests {
         /// editor this exists for opens one. Which flags suit a directory is the
         /// declaration's problem (`[ -d "$1" ]`), not this layer's — `code -g dir:1`
         /// is wrong where `code dir` is right, and only the config knows the editor.
+        /// **An empty path is nothing, not the root.** `Path::join("")` gives the
+        /// root back, which canonicalizes, passes containment trivially and is a
+        /// directory — so this resolved to the whole worktree until it was refused
+        /// explicitly. The UI cannot send it; the endpoint can be reached by any
+        /// page a local run serves.
+        #[tokio::test]
+        async fn an_empty_path_is_refused_rather_than_opening_the_worktree() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(resolve_within(&root, "").is_none());
+            // And through the whole activation, which is where the contract is
+            // stated — the suffix fallback must not rescue it either.
+            let failure = positional_for(&action(Some("file")), &body(Some(""), None), &root)
+                .await
+                .expect_err("an empty path names no file");
+            assert_eq!(failure.0, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
         #[test]
         fn a_directory_is_a_target_but_a_missing_path_is_not() {
             let dir = worktree();

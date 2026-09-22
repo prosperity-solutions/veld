@@ -23,7 +23,8 @@ export interface LinkCell {
 }
 
 /**
- * How many rows of one wrapped block this will assemble.
+ * How many rows of one wrapped block this will assemble — **the count, not an
+ * index**: a block of exactly this many rows is assembled, one more is declined.
  *
  * A logical line is normally a handful of rows, and then somebody prints a minified
  * bundle, a base64 blob or a single-line JSON log. With `terminal.scrollback` at its
@@ -81,23 +82,30 @@ export function logicalBlockAt(
   // width cannot be trusted: no links here.
   let back = 0;
   while (startY > 0 && getRow(startY)?.isWrapped) {
-    if (++back > MAX_BLOCK_ROWS) {
+    if (++back >= MAX_BLOCK_ROWS) {
       return null;
     }
     startY -= 1;
   }
   let text = "";
-  for (let y = startY; y - startY <= MAX_BLOCK_ROWS; y += 1) {
+  for (let y = startY; ; y += 1) {
     const row = getRow(y);
     if (!row || (y > startY && !row.isWrapped)) {
+      // The block ended on its own, within the cap. This is the only success exit.
       return { text, startY };
     }
     if (row.text.length !== cols) {
       return null;
     }
+    // Checked *before* appending and only once a row is known to belong to the
+    // block, so a block of exactly `MAX_BLOCK_ROWS` assembles and one of
+    // `MAX_BLOCK_ROWS + 1` declines. Bounding the loop itself instead conflated
+    // "ran out of budget" with "reached the end", and refused the exact-cap case.
+    if (y - startY >= MAX_BLOCK_ROWS) {
+      return null;
+    }
     text += row.text;
   }
-  return null;
 }
 
 /**

@@ -1725,11 +1725,6 @@ fn parse_extension_command(
     parse_command_in_scope(entry, location, "extension", EXTENSION_BUILTINS, out)
 }
 
-/// `accepts` on an `action`, or `Some(None)` when it declares none.
-///
-/// The doubled `Option` follows this module's convention: the outer `None` means
-/// *skip this extension* and a problem has been recorded, the inner means the key
-/// was absent, which is the ordinary case.
 /// Whether `arg` names a shell positional parameter.
 ///
 /// Both spellings, because `${1}` does not contain `$1`. Deliberately a plain
@@ -1740,6 +1735,11 @@ fn mentions_positional(arg: &str) -> bool {
     ["$1", "$2", "${1}", "${2}"].iter().any(|p| arg.contains(p))
 }
 
+/// `accepts` on an `action`, or `Some(None)` when it declares none.
+///
+/// The doubled `Option` follows this module's convention: the outer `None` means
+/// *skip this extension* and a problem has been recorded, the inner means the key
+/// was absent, which is the ordinary case.
 fn parse_action_accepts(
     entry: &serde_json::Map<String, serde_json::Value>,
     at: &str,

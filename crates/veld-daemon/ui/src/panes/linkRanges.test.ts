@@ -73,6 +73,22 @@ describe("logicalBlockAt", () => {
       expect(logicalBlockAt(get, 2, 5)).toBeNull();
     });
 
+    // The cap is a count, and both loops have to agree on that — they did not, and
+    // each admitted one row more than the constant says. Pinned at the boundary
+    // because that is the only place an off-by-one is visible.
+    it.each([
+      ["exactly the cap", 256, false],
+      ["one past the cap", 257, true],
+    ])("assembles a block of %s rows -> null: %s", (_what, rows, expectNull) => {
+      const get = (y: number): WrappedRow | undefined =>
+        y < rows ? { text: "ab", isWrapped: y > 0 } : undefined;
+      const block = logicalBlockAt(get, rows - 1, 2);
+      expect(block === null).toBe(expectNull);
+      if (block) {
+        expect(block.text.length).toBe(rows * 2);
+      }
+    });
+
     it("accepts a row whose emoji happens to cancel out", () => {
       // A non-BMP emoji is two UTF-16 units and two cells, so the length still
       // matches and the arithmetic stays right.
