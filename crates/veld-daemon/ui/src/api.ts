@@ -563,6 +563,16 @@ export interface ExtensionSpec {
    *  replace will render at, rather than narrowing from a label to a glyph the
    *  moment the first run answers. Absent for the other kinds. */
   display?: "text" | "icon";
+  /** An `action`'s declared `accepts` — the click-time context it wants. Absent
+   *  for an action that takes none, which is what a top-bar button clicks. A
+   *  file click offers exactly the actions whose `accepts` is `"file"`.
+   *
+   *  **Hand-mirrored from `veld_core::ide::EXTENSION_ACCEPTS`, with no check tying
+   *  the two.** The Rust side is an exhaustive enum, so a new variant compiles only
+   *  once every `match` handles it — and then stops, because this union is a
+   *  string literal the compiler is perfectly happy with. Widen it here in the same
+   *  change, or the new kind exists on the wire and the UI never offers it. */
+  accepts?: "file";
 }
 
 /** Mirrors `StatusView` in `crates/veld-daemon/src/extensions.rs`. */
@@ -1983,10 +1993,18 @@ export const api = {
    * missing or the command fails within its grace window — an editor launcher
    * that is still running when the window closes counts as success.
    */
-  activateExtension: (worktreeId: number, id: string) =>
+  activateExtension: (
+    worktreeId: number,
+    id: string,
+    // `file`/`line`: only for an action whose `accepts` is `"file"`. The daemon
+    // refuses the mismatch in both directions rather than ignoring it, so do not
+    // send these speculatively. `file` may be relative to the worktree root; what
+    // the command receives is always the resolved absolute path.
+    context?: { file: string; line?: number },
+  ) =>
     request<{ state: string }>(
       `/api/worktrees/${worktreeId}/extensions/activate`,
-      { method: "POST", body: JSON.stringify({ id }) },
+      { method: "POST", body: JSON.stringify({ id, ...context }) },
     ),
   /** Launch the *operating system's* terminal app at a path. Unrelated to the
    *  in-app terminal panes below, which never leave the browser. */

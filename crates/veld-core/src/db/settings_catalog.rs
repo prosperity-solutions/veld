@@ -1395,6 +1395,35 @@ impl SettingKey {
                     Links,
                 )
             },
+            Self::TerminalClickableFilePaths => toggle(
+                "Make file paths in the terminal clickable",
+                "A path an agent or a compiler printed — src/api.ts, or \
+                 crates/veld-daemon/src/pty.rs:2529 — becomes a link, and clicking it opens \
+                 that file in the editor your project declares under ide.extensions (the same \
+                 declarations the \"Open this worktree in\" menu uses, with accepts: \"file\" \
+                 added). With no such action declared a path still underlines, and \
+                       clicking one tells you what to add. Veld checks the \
+                 file is really in the worktree before running anything, so a wrong guess \
+                 reports that instead of opening something. Turn this off if your output is \
+                 full of path-shaped text that is not paths; only http(s) links stay \
+                 clickable then. Applies immediately, including to terminals already open.",
+                Links,
+            ),
+            Self::TerminalFileAction => Spec {
+                title: "Open a clicked file path with",
+                help: "The `ide.extensions` action a click on a file path runs, by its id. Veld \
+                       fills this in the first time you click one and a project offers more than \
+                       one editor \u{2014} it asks once, then stops asking. Clear it to be asked \
+                       again, or type another action\u{2019}s id. It is one answer for every \
+                       project, so an id a project does not declare simply means you are asked \
+                       once in that project and told what it chose; the value is only replaced \
+                       when you pick.",
+                group: Links,
+                section: None,
+                shape: ValueShape::Text,
+                choices: Choices::Free,
+                requires: requires_true("terminal.clickableFilePaths"),
+            },
             Self::BrowserExternalOrigins => Spec {
                 title: "Always open these in the system browser",
                 help: "One origin per line — `https://accounts.google.com`, \

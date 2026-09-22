@@ -359,6 +359,47 @@ pub const EXTENSION_OPEN_IN: &[&str] = &["pane", "system"];
 /// How a status extension's badge renders: a label, or its glyph alone.
 pub const EXTENSION_DISPLAY: &[&str] = &["icon", "text"];
 
+/// Click-time context an `action` extension can be handed, one of which it may
+/// declare with `accepts`.
+///
+/// An action with no `accepts` is the only shape that existed before, runs with no
+/// context, and is what a top-bar button clicks. Declaring one does **not** move the
+/// value into the interpolation table: the value arrives as a *positional parameter*
+/// (`$1`, `$2`), because `${veld.*}` is a closed set and because the whole point is
+/// to carry a string veld did not choose. See [`ACTION_ACCEPTS_FILE`].
+///
+/// **Mirrored by hand in `crates/veld-daemon/ui/src/api.ts`** (`accepts?: "file"` on
+/// `ExtensionSpec`), and nothing ties the two together. Every Rust `match` on
+/// [`ActionAccepts`] is exhaustive, so the compiler walks an author through the
+/// server side of a new variant and then stops — the TypeScript still builds, and
+/// the UI silently never offers the new kind. Widen the union there in the same
+/// change.
+pub const EXTENSION_ACCEPTS: &[&str] = &[ACTION_ACCEPTS_FILE];
+
+/// `accepts: "file"` — the action is offered for a file the user clicked, and is
+/// handed that file's path as `$1` and its line number as `$2`.
+///
+/// **Why a positional parameter and not a `${veld.file}`.** The path comes out of
+/// terminal output, so whatever an agent or a build tool printed chose it — the same
+/// class of value as [`SHELL_REFUSED_BUILTINS`]'s `branch_raw`, and for the same
+/// reason unsafe to interpolate into a `shell` string. But unlike `branch_raw` the
+/// answer cannot be "argv only": the commands that want a file are exactly the ones
+/// that need `shell`, because launching an editor means a `command -v code` fallback
+/// chain ending in `open -a`. A positional parameter resolves that instead of
+/// trading it off — `/bin/sh -c '<script>' veld <path> <line>` binds `$1` *after*
+/// the script has been tokenized, so `$(id)`, a backtick, a quote, `;` and a newline
+/// in the path are inert text in one word, which is the property `argv` has and the
+/// reason it was safe there.
+///
+/// Two consequences an author should know, and which the docs state:
+///
+/// - **Quote it.** `code "$1"` is right; `code $1` word-splits on a path containing
+///   a space. That is a correctness bug rather than the injection hole, since an
+///   unquoted expansion still does not re-parse `$(...)` — measured, not assumed.
+/// - **Write `$1`, not `${1}`.** The latter collides with veld's own `${...}`
+///   interpolation and is reported as an unresolved variable.
+pub const ACTION_ACCEPTS_FILE: &str = "file";
+
 /// Keys every extension may declare, whatever its type, in sorted order.
 pub const EXTENSION_COMMON_KEYS: &[&str] = &[
     "align",
@@ -378,7 +419,7 @@ pub const STATUS_EXTENSION_KEYS: &[&str] =
     &["argv", "display", "open_in", "refresh_seconds", "shell"];
 
 /// Extra keys an `action` extension may declare, in sorted order.
-pub const ACTION_EXTENSION_KEYS: &[&str] = &["argv", "shell"];
+pub const ACTION_EXTENSION_KEYS: &[&str] = &["accepts", "argv", "shell"];
 
 /// Extra keys a `menu` extension may declare, in sorted order.
 pub const MENU_EXTENSION_KEYS: &[&str] = &["items"];
@@ -727,6 +768,23 @@ pub struct StatusExtension {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ActionExtension {
     pub command: crate::config::CommandSpec,
+    /// Click-time context this action asks for, or `None` for one that runs with
+    /// none. See [`EXTENSION_ACCEPTS`].
+    ///
+    /// Load-bearing for *where the action is offered*, not only for what it is
+    /// handed: an action accepting a file is not a top-bar button's job, and a
+    /// top-bar button cannot be handed a file. Keeping the two apart is what stops
+    /// every existing declaration becoming ambiguous about whether it wanted one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepts: Option<ActionAccepts>,
+}
+
+/// What an `action` extension is handed when it is activated.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActionAccepts {
+    /// A file path as `$1`, its line number as `$2`. See [`ACTION_ACCEPTS_FILE`].
+    File,
 }
 
 /// A group: one control in the slot whose members appear in a popover.
@@ -1331,10 +1389,18 @@ fn parse_extensions(value: &serde_json::Value, out: &mut IdeSection) {
 /// nothing when clicked. A menu left with no members at all is dropped entirely,
 /// because an empty popover is worse than an absent one.
 fn check_extension_references(out: &mut IdeSection) {
-    let declared: Vec<(String, &'static str)> = out
+    // `accepts` rides along because a member that asks for click-time context is
+    // as unusable in a menu as a badge is — see the `Some((_, _, true))` arm.
+    let declared: Vec<(String, &'static str, bool)> = out
         .extensions
         .iter()
-        .map(|e| (e.id.clone(), e.kind()))
+        .map(|e| {
+            let wants_context = matches!(
+                &e.body,
+                ExtensionBody::Action(a) if a.accepts.is_some()
+            );
+            (e.id.clone(), e.kind(), wants_context)
+        })
         .collect();
 
     let mut problems = Vec::new();
@@ -1345,7 +1411,7 @@ fn check_extension_references(out: &mut IdeSection) {
         };
         let at = format!("ide.extensions[{}]", ext.id);
         menu.items.retain(|item| {
-            match declared.iter().find(|(id, _)| id == item) {
+            match declared.iter().find(|(id, _, _)| id == item) {
                 None => {
                     problems.push(IdeProblem {
                         location: format!("{at}.items"),
@@ -1358,12 +1424,30 @@ fn check_extension_references(out: &mut IdeSection) {
                 }
                 // A menu of menus is the two-levels-of-popover shape this type
                 // refuses, and a menu member that is a badge has no click to run.
-                Some((_, kind)) if *kind != "action" => {
+                Some((_, kind, _)) if *kind != "action" => {
                     problems.push(IdeProblem {
                         location: format!("{at}.items"),
                         message: format!(
                             "references {item:?}, which is a {kind:?} extension — a menu's items \
                              must be `action` extensions; the entry was dropped"
+                        ),
+                    });
+                    false
+                }
+                // **The same hole `slot` is refused for, reached by the other door.**
+                // A menu is a control the user clicks with nothing selected, so a
+                // member wanting a file would run with an empty `$1` and fail inside
+                // the editor. Refusing `accepts` + `slot` while allowing `accepts` in
+                // `items` would just move the dead button one popover along — and
+                // "omit `slot` and reference it instead" is the documented way to
+                // declare an action, so this is the natural author mistake.
+                Some((_, _, true)) => {
+                    problems.push(IdeProblem {
+                        location: format!("{at}.items"),
+                        message: format!(
+                            "references {item:?}, which declares `accepts` — such an action is \
+                             offered where its context exists (a file click), not from a menu \
+                             clicked with nothing selected; the entry was dropped"
                         ),
                     });
                     false
@@ -1521,6 +1605,7 @@ fn parse_extension(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> 
         "status" => ExtensionBody::Status(parse_status_extension(entry, at, out)?),
         "action" => ExtensionBody::Action(ActionExtension {
             command: parse_extension_command(entry, at, out)?,
+            accepts: parse_action_accepts(entry, at, out)?,
         }),
         "menu" => ExtensionBody::Menu(parse_menu_extension(entry, at, out)?),
         other => {
@@ -1535,6 +1620,51 @@ fn parse_extension(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> 
             return None;
         }
     };
+
+    // **`$1` in an `argv` element is inert text, and looks exactly like the thing
+    // that works.** There is no shell to bind a positional parameter, so
+    // `"argv": ["code", "-g", "$1:$2"]` passes those four characters through
+    // literally and veld appends the real path and line *after* them — the editor
+    // gets `code -g $1:$2 <path> <line>` and fails on its own, far from this file.
+    // It is the natural mistake for somebody copying the `shell` form, and nothing
+    // downstream catches it: not the schema, not the daemon (which only checks that
+    // `accepts` and the request agree), not a test. So it is caught here.
+    if let ExtensionBody::Action(action) = &body
+        && action.accepts.is_some()
+        && let crate::config::CommandSpec::Argv(argv) = &action.command
+        && let Some(bad) = argv.iter().find(|arg| mentions_positional(arg))
+    {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.argv"),
+            message: format!(
+                "{bad:?} looks like a positional parameter, but `argv` has no shell \
+                 to bind one \u{2014} it would reach the command as those literal \
+                 characters, with the real path and line appended after them. An \
+                 `argv` action is handed the two values as its last two arguments, so \
+                 name neither; use `shell` if you need them joined"
+            ),
+        });
+        return None;
+    }
+
+    // A slot renders a control the user clicks with nothing selected, so there is no
+    // file to hand an action that asked for one. Reported rather than ignored,
+    // because the alternative is a top-bar button that looks live and runs a command
+    // whose `$1` is empty — the failure lands in the editor, not here.
+    if slot.is_some()
+        && matches!(
+            &body,
+            ExtensionBody::Action(a) if a.accepts == Some(ActionAccepts::File)
+        )
+    {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.slot"),
+            message: "cannot be set on an action that declares `accepts`: it is offered where \
+                      its context exists (a file click), not as a button in a slot"
+                .to_owned(),
+        });
+        return None;
+    }
 
     // Only an `action` can be referenced, so anything else without a slot would be
     // declared and unreachable — silently, which is the shape worth reporting.
@@ -1593,6 +1723,47 @@ fn parse_extension_command(
     out: &mut IdeSection,
 ) -> Option<crate::config::CommandSpec> {
     parse_command_in_scope(entry, location, "extension", EXTENSION_BUILTINS, out)
+}
+
+/// Whether `arg` names a shell positional parameter.
+///
+/// Both spellings, because `${1}` does not contain `$1`. Deliberately a plain
+/// substring test on the four forms that matter rather than shell parsing, which
+/// would be the wrong tool for a check whose whole job is catching one copy-paste.
+///
+/// It is therefore **broader than a positional parameter**: `"$100"` contains `$1`,
+/// and awk's `{print $1}` is a field reference, not a shell parameter. Both are
+/// refused, and the escape is to declare the action with `shell`, where that text
+/// means what its author intended anyway. Accepted as the cheaper error — the
+/// alternative lets the copy-paste through, and *that* fails inside the user's
+/// editor with nothing pointing back here.
+fn mentions_positional(arg: &str) -> bool {
+    ["$1", "$2", "${1}", "${2}"].iter().any(|p| arg.contains(p))
+}
+
+/// `accepts` on an `action`, or `Some(None)` when it declares none.
+///
+/// The doubled `Option` follows this module's convention: the outer `None` means
+/// *skip this extension* and a problem has been recorded, the inner means the key
+/// was absent, which is the ordinary case.
+fn parse_action_accepts(
+    entry: &serde_json::Map<String, serde_json::Value>,
+    at: &str,
+    out: &mut IdeSection,
+) -> Option<Option<ActionAccepts>> {
+    match entry.get("accepts") {
+        None => Some(None),
+        Some(v) => match v.as_str().map(str::trim) {
+            Some(ACTION_ACCEPTS_FILE) => Some(Some(ActionAccepts::File)),
+            _ => {
+                out.problems.push(IdeProblem {
+                    location: format!("{at}.accepts"),
+                    message: format!("must be one of: {}", EXTENSION_ACCEPTS.join(", ")),
+                });
+                None
+            }
+        },
+    }
 }
 
 /// Every key this extension type may declare, sorted — the union of the common set
@@ -2436,7 +2607,13 @@ fn parse_requires_bin(
     Some(names)
 }
 
-fn valid_pane_id(id: &str) -> bool {
+/// The id grammar shared by `ide.panes` and `ide.extensions` entries.
+///
+/// `pub(crate)` so the `terminal.fileAction` setting validates against **this**
+/// rather than a second copy of the same rule: that setting stores an extension id,
+/// and a grammar that widened here while a hand-rolled copy elsewhere did not would
+/// turn a legitimate id into a 400 with nothing pointing at the cause.
+pub(crate) fn valid_pane_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 64
         && id
@@ -4639,6 +4816,167 @@ mod tests {
             "the message should point at the veld version, not at a typo: {}",
             parsed.problems[0].message
         );
+    }
+
+    /// `accepts` decides *where* an action is offered, so the values it may take are
+    /// a contract and an unknown one must not be shrugged off — a config written for
+    /// a newer veld would otherwise declare an action that silently runs on nothing.
+    #[test]
+    fn an_action_accepts_only_the_contexts_this_veld_knows() {
+        let parsed = one_extension(json!({
+            "id": "edit", "type": "action", "accepts": "file", "shell": "code -g \"$1:$2\"",
+        }));
+        assert_eq!(parsed.problems, vec![], "`file` is a context veld knows");
+        let ExtensionBody::Action(action) = &parsed.extensions[0].body else {
+            panic!("expected an action");
+        };
+        assert_eq!(action.accepts, Some(ActionAccepts::File));
+
+        let unknown = one_extension(json!({
+            "id": "edit", "type": "action", "accepts": "selection", "shell": "x",
+        }));
+        assert!(
+            unknown.extensions.is_empty(),
+            "an unknown context is refused"
+        );
+        assert!(problem_at(&unknown, ".accepts"));
+    }
+
+    /// An action with no `accepts` keeps working exactly as before — the field is
+    /// additive, and every existing declaration in every project omits it.
+    #[test]
+    fn an_action_without_accepts_is_unchanged() {
+        let parsed = one_extension(json!({
+            "id": "pr", "slot": "topBar", "type": "action", "argv": ["gh", "pr", "create"],
+        }));
+        assert_eq!(parsed.problems, vec![]);
+        let ExtensionBody::Action(action) = &parsed.extensions[0].body else {
+            panic!("expected an action");
+        };
+        assert_eq!(action.accepts, None);
+    }
+
+    /// A slot renders a control clicked with nothing selected, so there is no file to
+    /// hand it. Refused rather than rendered, because the alternative is a live-looking
+    /// button whose `$1` is empty and whose failure surfaces inside the editor.
+    #[test]
+    fn an_action_that_accepts_a_file_cannot_also_claim_a_slot() {
+        let parsed = one_extension(json!({
+            "id": "edit", "slot": "topBar", "type": "action",
+            "accepts": "file", "shell": "code \"$1\"",
+        }));
+        assert!(parsed.extensions.is_empty());
+        assert!(problem_at(&parsed, ".slot"));
+        assert!(
+            parsed.problems[0].message.contains("accepts"),
+            "the message should say which half to remove: {}",
+            parsed.problems[0].message
+        );
+    }
+
+    /// **The trap `argv` sets for somebody copying the `shell` form.** `$1` in an
+    /// `argv` element is inert — no shell binds it — and the real values are
+    /// appended *after* it, so the editor receives both the literal and the path.
+    /// Nothing downstream catches it, which is why lint does.
+    #[test]
+    fn a_positional_parameter_in_argv_is_refused_for_an_accepts_action() {
+        for argv in [
+            json!(["code", "-g", "$1:$2"]),
+            json!(["code", "$1"]),
+            json!(["code", "${1}"]),
+            json!(["code", "--line", "$2"]),
+        ] {
+            let parsed = one_extension(json!({
+                "id": "edit", "type": "action", "accepts": "file", "argv": argv,
+            }));
+            assert!(parsed.extensions.is_empty(), "{argv} must be refused");
+            assert!(!parsed.problems.is_empty(), "{argv} must say why");
+        }
+    }
+
+    /// The counterpart, so the check does not simply forbid `argv` here: an `argv`
+    /// action that names neither is the correct shape, and gets the values appended.
+    #[test]
+    fn an_accepts_action_may_use_argv_when_it_names_no_positional() {
+        let parsed = one_extension(json!({
+            "id": "edit", "type": "action", "accepts": "file",
+            "argv": ["my-editor", "--wait"],
+        }));
+        assert_eq!(parsed.problems, vec![]);
+        assert_eq!(parsed.extensions.len(), 1);
+    }
+
+    /// And the check is scoped to `accepts` actions — an ordinary action's `argv`
+    /// gets no positional values, so `$1` there is a literal its author chose.
+    #[test]
+    fn a_plain_action_may_still_write_a_dollar_one() {
+        let parsed = one_extension(json!({
+            "id": "echo", "slot": "topBar", "type": "action", "argv": ["echo", "$1"],
+        }));
+        assert_eq!(parsed.problems, vec![]);
+        assert_eq!(parsed.extensions.len(), 1);
+    }
+
+    /// **The same hole as `slot`, reached through a menu.** Found by review: the
+    /// `slot` refusal was in place and three tests deep, while `items` — the
+    /// *documented* way to declare a referenced action — let the identical dead
+    /// control through, since the reference check only looked at `kind`.
+    #[test]
+    fn a_menu_cannot_offer_an_action_that_wants_a_file() {
+        let parsed = extensions(json!([
+            { "id": "open-in", "slot": "topBar", "type": "menu", "items": ["edit", "plain"] },
+            { "id": "edit", "type": "action", "accepts": "file", "shell": "code \"$1\"" },
+            { "id": "plain", "type": "action", "argv": ["true"] },
+        ]));
+        let ExtensionBody::Menu(menu) = &parsed.extension("open-in").unwrap().body else {
+            panic!("expected a menu");
+        };
+        assert_eq!(
+            menu.items,
+            vec!["plain".to_owned()],
+            "the `accepts` member is dropped"
+        );
+        assert!(
+            parsed
+                .problems
+                .iter()
+                .any(|p| p.message.contains("accepts")),
+            "and it says why: {:?}",
+            parsed.problems
+        );
+    }
+
+    /// A menu whose only member wanted a file has nothing left, so it goes the way
+    /// any other empty menu goes rather than rendering an empty popover.
+    #[test]
+    fn a_menu_of_only_file_actions_is_dropped_whole() {
+        let parsed = extensions(json!([
+            { "id": "open-in", "slot": "topBar", "type": "menu", "items": ["edit"] },
+            { "id": "edit", "type": "action", "accepts": "file", "shell": "code \"$1\"" },
+        ]));
+        assert!(parsed.extension("open-in").is_none());
+        assert!(
+            parsed.extension("edit").is_some(),
+            "the action itself still stands"
+        );
+    }
+
+    /// The counterpart to `branch_raw`'s rule, and the reason `accepts` needs no such
+    /// rule of its own: a clicked path never enters the interpolated string, so a
+    /// `shell` command is the *expected* shape here rather than a refused one.
+    #[test]
+    fn an_accepts_action_may_use_shell_because_the_path_is_not_interpolated() {
+        let parsed = one_extension(json!({
+            "id": "edit", "type": "action", "accepts": "file",
+            "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" \
+                      || exec open -a \"Visual Studio Code\" \"$1\"",
+        }));
+        assert_eq!(
+            parsed.problems,
+            vec![],
+            "a fallback chain is why these commands need `shell` at all"
+        );
+        assert_eq!(parsed.extensions.len(), 1);
     }
 
     #[test]

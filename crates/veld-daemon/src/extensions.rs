@@ -449,6 +449,7 @@ async fn run_status(
         builtins,
         STATUS_TIMEOUT,
         None,
+        &[],
     )
     .await;
     let out = match outcome {
@@ -642,7 +643,13 @@ fn resolve_actions(items: &[Value], section: &IdeSection) -> Vec<StatusActionVie
         let Some(ext) = section.extension(id) else {
             continue;
         };
-        if !matches!(ext.body, ExtensionBody::Action(_)) {
+        // Same rule as a menu's `items` (`ide::check_extension_references`): a badge
+        // offers its actions from the top bar, with nothing selected, so one that
+        // declares `accepts` would run with an empty `$1`. Skipped silently because
+        // this list comes from a *command's stdout* at runtime — there is no config
+        // location to report a problem against, and `veld lint` already refuses the
+        // two places a config can name one.
+        if !matches!(&ext.body, ExtensionBody::Action(a) if a.accepts.is_none()) {
             continue;
         }
         if out.iter().any(|a: &StatusActionView| a.id == id) {
@@ -660,6 +667,19 @@ fn resolve_actions(items: &[Value], section: &IdeSection) -> Vec<StatusActionVie
 pub(crate) struct ActivateBody {
     /// The extension to run. A name — see the module docs.
     id: String,
+    /// The file a click was on, for an action declaring `accepts: "file"`.
+    ///
+    /// Absolute, or relative to the worktree root. Either way it is canonicalized
+    /// and prefix-checked here and the command receives the **resolved absolute**
+    /// path, never this string — so a path pointing out of the worktree is refused
+    /// rather than passed on, and a leading `-` becomes impossible by construction
+    /// (a canonical absolute path starts with `/`). That closes, for free, the hole
+    /// `worktree_builtins` closes for `branch_raw` by omitting the variable.
+    #[serde(default)]
+    file: Option<String>,
+    /// The line within `file`, 1-based. Handed to the command as `$2`.
+    #[serde(default)]
+    line: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -719,6 +739,7 @@ pub(crate) async fn activate(
         ));
     }
 
+    let positional = positional_for(action, &body, &root).await?;
     let builtins = worktree_builtins(FsPath::new(&root), &branch, &config);
     let out = spawn_command(
         &action.command,
@@ -727,6 +748,7 @@ pub(crate) async fn activate(
         &builtins,
         ACTIVATE_GRACE,
         None,
+        &positional,
     )
     .await
     .map_err(|message| err(StatusCode::UNPROCESSABLE_ENTITY, message))?;
@@ -753,6 +775,239 @@ pub(crate) async fn activate(
     Ok(Json(ActivateResponse {
         state: if out.timed_out { "started" } else { "finished" },
     }))
+}
+
+/// How long the suffix lookup waits for `git ls-files`.
+///
+/// Generous for the walk and short enough that a pathological worktree fails the
+/// click instead of hanging it.
+///
+/// Independent of `ACTIVATE_GRACE`, and sequential with it rather than nested: this
+/// deadline expires *before* anything is spawned and answers 422, where the grace
+/// window decides whether an already-running child counts as started. Raising one
+/// does not constrain the other.
+const SUFFIX_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The longest `file` an activation will look at.
+///
+/// Generous against every real path — `PATH_MAX` is 4096 on Linux and 1024 on
+/// macOS — and the point is not to be exact. It is to stop a caller turning one
+/// request into unbounded work: the suffix search compares the needle against every
+/// tracked and untracked file in the checkout, so cost is `len(needle) × files`, and
+/// `file` arrives in a request body that any page served by a local run can send.
+const MAX_CLICKED_PATH_BYTES: usize = 8 * 1024;
+
+/// The click-time values this activation hands the command, in `$1`, `$2` order.
+///
+/// Mismatches are refused rather than shrugged off in either direction. An action
+/// declaring `accepts: "file"` and activated without one would run with an empty
+/// `$1` — which fails inside the editor, far from the cause. An action declaring
+/// nothing and activated *with* a file is a client that thinks this declaration does
+/// something it does not, and silently dropping the file hides that.
+async fn positional_for(
+    action: &veld_core::ide::ActionExtension,
+    body: &ActivateBody,
+    root: &str,
+) -> Result<Vec<String>, ApiError> {
+    use veld_core::ide::ActionAccepts;
+    match (action.accepts, body.file.as_deref()) {
+        (None, None) => Ok(Vec::new()),
+        (None, Some(_)) => Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "extension {:?} declares no `accepts`, so it cannot be run against a file",
+                body.id
+            ),
+        )),
+        (Some(ActionAccepts::File), None) => Err(err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "extension {:?} declares `accepts: \"file\"` and needs one to run",
+                body.id
+            ),
+        )),
+        (Some(ActionAccepts::File), Some(file)) => {
+            // Bounded before anything touches the filesystem or spawns a
+            // subprocess. Every real path is far under it — `PATH_MAX` is 4096 on
+            // Linux and 1024 on macOS — while the only limit underneath is axum's
+            // 2 MiB request body, which is 256 times this bound and 512 times the
+            // longest path any filesystem will accept. Without something here a
+            // single request made the suffix search do megabytes of comparison per
+            // file in the checkout.
+            if file.len() > MAX_CLICKED_PATH_BYTES {
+                return Err(err(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "that path is too long to be a file in this worktree",
+                ));
+            }
+            let resolved = match resolve_within(root, file) {
+                Some(path) => path,
+                // Not where the text said, which is the common case rather than the
+                // error case — see `resolve_by_suffix`.
+                None => resolve_by_suffix(root, file).await?,
+            };
+            let mut out = vec![resolved];
+            // `$2` is always present when `$1` is, so a script can write `"$2"`
+            // without guarding for an unset parameter. Line 1 is the honest default
+            // for a path that named no line: it is where a file opens anyway.
+            out.push(body.line.filter(|l| *l > 0).unwrap_or(1).to_string());
+            Ok(out)
+        }
+    }
+}
+
+/// `path` — absolute, or relative to `root` — canonicalized, and `None` unless the
+/// result is inside `root` and is a file or a directory.
+///
+/// Same shape and the same reasoning as `pty::relative_within`, which guards the
+/// file-serving route: both sides canonicalized, so a symlinked worktree and a
+/// symlink *pointing out* of one both resolve to the comparison that matters. It
+/// returns the absolute path rather than the relative one because an editor is
+/// launched with a cwd of its own and a relative path would be read against that.
+///
+/// **A directory resolves too**, because a path in output is as often a directory as
+/// a file (`ls crates/veld-daemon/ui/src/panes/`) and every editor this exists for
+/// opens one. Telling the two apart is the *command's* job, not this function's —
+/// `code -g dir:1` is wrong where `code dir` is right, and only the declaration
+/// knows which editor it is talking to. The documented pattern is a `[ -d "$1" ]`
+/// branch; what is refused here is a path that is neither, or one outside the root.
+fn resolve_within(root: &str, path: &str) -> Option<String> {
+    // **Empty is not "the root", it is nothing.** `Path::join("")` yields the root
+    // back, which then canonicalizes, passes containment trivially and is a
+    // directory — so without this an activation carrying `"file": ""` opened the
+    // whole worktree, silently, against a contract that says every mismatch is
+    // refused. The UI cannot produce it (`findFilePaths` never yields an empty
+    // path), but this endpoint is reachable from any page a local run serves.
+    if path.is_empty() {
+        return None;
+    }
+    let root = FsPath::new(root).canonicalize().ok()?;
+    let joined = {
+        let p = FsPath::new(path);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        }
+    };
+    let full = joined.canonicalize().ok()?;
+    if !full.starts_with(&root) {
+        return None;
+    }
+    let kind = full.metadata().ok()?.file_type();
+    if !kind.is_file() && !kind.is_dir() {
+        return None;
+    }
+    full.to_str().map(str::to_owned)
+}
+
+/// The one file in the worktree whose path **ends with** `needle`, when the text as
+/// written does not resolve against the root.
+///
+/// # Why this exists
+///
+/// Because a path in terminal output is very often not relative to the worktree
+/// root, and nothing on the page can know what it *is* relative to. `ls
+/// crates/veld-daemon/ui/src/panes/` prints `tabKeys.ts`, which is a real file whose
+/// name is meaningless against the root; a compiler run from a subdirectory prints
+/// paths relative to that subdirectory. Resolving the shell's live cwd was
+/// considered and rejected (see `docs/extensions-vision.md`, 2026-09-21): the cwd
+/// moves, veld does not track it, and it would still be wrong for the `ls` case,
+/// where the base is an *argument* rather than a directory anybody is standing in.
+///
+/// Identity is the answer instead. `git ls-files` knows every path in the checkout,
+/// so "which file is this" becomes a lookup rather than an inference, and the
+/// **uniqueness requirement is what makes it safe to act on**: exactly one match
+/// opens, several refuse and say how many. Measured on this repo — 555 tracked
+/// files, of which only 48 basenames out of 470 collide (`Cargo.toml` ×9, `mod.rs`
+/// ×5) — so the ambiguous case is real but uncommon, and full repo-relative paths
+/// are unique outright.
+///
+/// Untracked-but-not-ignored files are included (`--others --exclude-standard`),
+/// because a file an agent created thirty seconds ago and then printed is precisely
+/// what somebody wants to click. Ignored files are not: `target/` and
+/// `node_modules/` would swamp the answer and make collisions the norm.
+///
+/// This runs **only after** the literal path has failed, so the ordinary case costs
+/// no subprocess.
+async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError> {
+    let ambiguous_or_missing = |detail: String| err(StatusCode::UNPROCESSABLE_ENTITY, detail);
+    // A needle with a leading `./` would never suffix-match a `git ls-files` entry.
+    let needle = needle.trim_start_matches("./");
+    if needle.is_empty() || needle.starts_with('/') {
+        // An absolute path that did not resolve is simply not here; there is nothing
+        // for a suffix search to add, and searching would be a lie about scope.
+        return Err(ambiguous_or_missing(
+            "that file is not inside this worktree".to_owned(),
+        ));
+    }
+    // **Deadlined and cancellable, unlike `desktop::git` itself.** That helper awaits
+    // `output()` with no deadline and passes `kill_on_drop: false`, which is right
+    // where it is called on a click somebody is waiting on — but this call is the
+    // *fallback* path, so it runs on the common case (an `ls` listing, a compiler's
+    // subdirectory-relative path), and `--others` walks every untracked file: an
+    // extracted tarball, or a `vendor/` nobody gitignored, turns one click into a
+    // hang with no client-side timeout, and repeated clicks stack more `git`
+    // processes. `git_cancellable` rather than `git`, so the walk is *reaped* on
+    // expiry rather than left running: failing fast must not trade a hang for a pile
+    // of orphans. That variant exists for this call and is deliberately not the
+    // default, because most `git` callers here write and a kill partway through a
+    // `read-tree -u --reset` is worse than an orphan. Expiry reads as
+    // "not found" rather than an error, because from the caller's side that is what
+    // happened: veld could not identify the file.
+    let listing = tokio::time::timeout(
+        SUFFIX_LOOKUP_TIMEOUT,
+        super::desktop::git_cancellable(
+            FsPath::new(root),
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        ),
+    )
+    .await
+    .map_err(|_| ambiguous_or_missing(format!("took too long to look for {needle}")))?
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+
+    // Hoisted out of the closure on purpose. Built inside it, this allocated once
+    // *per index entry* — and `needle` arrives in a request body, so a large one
+    // turned a click into megabytes of memcpy per file in the checkout. The length
+    // bound in `positional_for` closes the other half.
+    let suffix = format!("/{needle}");
+    let mut matches: Vec<&str> = listing
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .filter(|entry| *entry == needle || entry.ends_with(&suffix))
+        .collect();
+    // **An unmerged index lists a conflicted path once per stage.** During a merge
+    // conflict `git ls-files --cached` prints the same path three times (stages
+    // 1-3), and a conflict is a prime moment to click a path something just printed
+    // — so without this the click is refused with "3 files are called f.rs". A
+    // symlinked directory, the other thing that looks like it should duplicate, does
+    // *not*: git lists the link itself as one blob entry.
+    matches.sort_unstable();
+    matches.dedup();
+
+    match matches.as_slice() {
+        [] => Err(ambiguous_or_missing(format!(
+            "no file called {needle} in this worktree"
+        ))),
+        [only] => {
+            // Back through the containment check rather than trusted: git printed a
+            // repo-relative path, but a symlinked entry can still resolve outside
+            // the root, and this is the one function that decides that.
+            resolve_within(root, only).ok_or_else(|| {
+                ambiguous_or_missing(format!("{needle} is not a readable file in this worktree"))
+            })
+        }
+        several => Err(ambiguous_or_missing(format!(
+            "{} files are called {needle} in this worktree, so it is not clear which one to open",
+            several.len()
+        ))),
+    }
 }
 
 pub(crate) struct Output {
@@ -822,6 +1077,17 @@ pub(crate) async fn spawn_command(
     // filled, and the whole point of the deadline is that nothing here waits
     // forever.
     input: Option<&str>,
+    // `positional`: click-time values an `accepts` action is handed, in order. Empty
+    // for every command that declares no `accepts`, which is all of them but one.
+    //
+    // **These deliberately do not go through interpolation**, and that is the whole
+    // mechanism. A value here was chosen by whatever printed it — an agent, a
+    // compiler — so building it into a `shell` string is the hole
+    // `ide::SHELL_REFUSED_BUILTINS` exists to close for `branch_raw`. Binding it
+    // *after* `/bin/sh -c` has tokenized the script gives `shell` the property that
+    // made `argv` safe there: `$(id)`, a backtick, `;`, a quote and a newline are
+    // inert text in one word. `argv` needs no such care and simply appends them.
+    positional: &[String],
 ) -> Result<Output, String> {
     let ctx = veld_core::variables::VariableContext {
         builtins: builtins.clone(),
@@ -838,11 +1104,18 @@ pub(crate) async fn spawn_command(
                 .ok_or_else(|| "the command runs nothing".to_owned())?;
             let mut c = tokio::process::Command::new(resolve_program(program, declare_root));
             c.args(args);
+            c.args(positional);
             c
         }
         veld_core::config::CommandSpec::Shell(script) => {
             let mut c = tokio::process::Command::new("/bin/sh");
             c.arg("-c").arg(script);
+            if !positional.is_empty() {
+                // `$0`. A shell wants one before `$1`, and it is what the script's
+                // own error messages name themselves with.
+                c.arg("veld");
+                c.args(positional);
+            }
             c
         }
     };
@@ -852,7 +1125,18 @@ pub(crate) async fn spawn_command(
     // `extensions.source` can point declarations at a different checkout than
     // the one the command runs in, `declared_in` answers the other question a
     // maintainer asks debugging this: whose `veld.json` decided this ran at all.
-    tracing::info!(worktree = %root, declared_in = %declare_root, command = %spec.display(), "running ide extension command");
+    // `positional` is logged separately because it is **not** part of `spec`: the
+    // values are appended to `cmd` after interpolation, which is the whole point of
+    // the design. Without this field the one input veld did not choose — a path out
+    // of terminal output — would be the one thing missing from the record of what
+    // ran, which is the opposite of what this line is for.
+    tracing::info!(
+        worktree = %root,
+        declared_in = %declare_root,
+        command = %spec.display(),
+        positional = ?positional,
+        "running ide extension command"
+    );
 
     // Directory-scoped, not the process-wide cache: an extension command runs
     // this specific worktree's own tooling (build/lint/version-check
@@ -1236,6 +1520,7 @@ pub(crate) async fn run_worktree_name(
         builtins,
         NAME_TIMEOUT,
         Some(capped),
+        &[],
     )
     .await;
     let out = match out {
@@ -1342,6 +1627,438 @@ mod tests {
         parse_badge(stdout, &ext, &section, base)
     }
 
+    /// The click-time file a `accepts: "file"` action is handed.
+    ///
+    /// **Every test here could be deleted without breaking a compile**, and each one
+    /// stands for a hole that quoting cannot close. The whole reason a clicked path
+    /// is a positional parameter rather than a `${veld.*}` variable is the first
+    /// test in this module; the rest guard the boundary that decides *which* path
+    /// gets that far.
+    mod clicked_file {
+        use super::*;
+
+        /// The load-bearing property of the whole design, against a real `/bin/sh`.
+        ///
+        /// A path comes from whatever an agent or a compiler printed, so it can carry
+        /// `$(...)`, a backtick, a quote, a semicolon or a newline. Bound as `$1`
+        /// *after* the script is tokenized, all of those are one inert word — which
+        /// is exactly the property `argv` has, and the reason `${veld.branch_raw}` is
+        /// refused in `shell` while this is not.
+        #[tokio::test]
+        async fn a_hostile_path_reaches_the_command_as_one_inert_word() {
+            for hostile in [
+                "a$(id)b", "a`id`b", "a;id;b", "a|id", "a&&id", "a'b", "a\"b", "a b", "a\nb", "-rf",
+            ] {
+                let out = spawn_command(
+                    // `printf %s` rather than `echo`, so the assertion reads the
+                    // argument itself and not a shell's word splitting of it.
+                    &veld_core::config::CommandSpec::Shell("printf '%s' \"$1\"".to_owned()),
+                    "/tmp",
+                    "/tmp",
+                    &HashMap::new(),
+                    Duration::from_secs(5),
+                    None,
+                    &[hostile.to_owned()],
+                )
+                .await
+                .expect("spawned");
+                assert_eq!(
+                    out.stdout, hostile,
+                    "{hostile:?} must arrive verbatim, never evaluated"
+                );
+            }
+        }
+
+        /// `$0` is set so a script's own diagnostics have a name, and so `$1` is the
+        /// first *value* rather than the program name.
+        #[tokio::test]
+        async fn the_first_positional_is_the_path_not_the_program_name() {
+            let out = spawn_command(
+                &veld_core::config::CommandSpec::Shell("printf '%s|%s' \"$1\" \"$2\"".to_owned()),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_secs(5),
+                None,
+                &["/tmp/a.rs".to_owned(), "12".to_owned()],
+            )
+            .await
+            .expect("spawned");
+            assert_eq!(out.stdout, "/tmp/a.rs|12");
+        }
+
+        /// `argv` needs no shell to protect against, so the values are simply
+        /// appended — and the count is fixed by the declaration plus a known two, so
+        /// this never changes an argument count the way an interpolation could.
+        #[tokio::test]
+        async fn argv_gets_the_values_appended() {
+            let out = spawn_command(
+                &veld_core::config::CommandSpec::Argv(vec!["printf".into(), "%s|%s".into()]),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_secs(5),
+                None,
+                &["a$(id)b".to_owned(), "7".to_owned()],
+            )
+            .await
+            .expect("spawned");
+            assert_eq!(out.stdout, "a$(id)b|7");
+        }
+
+        /// A command declaring no `accepts` must keep its old invocation exactly —
+        /// no `$0`, no extra arguments — or every existing project's actions change
+        /// shape under them.
+        #[tokio::test]
+        async fn no_positional_values_leaves_the_invocation_untouched() {
+            let out = spawn_command(
+                &veld_core::config::CommandSpec::Shell("printf '%s' \"$#\"".to_owned()),
+                "/tmp",
+                "/tmp",
+                &HashMap::new(),
+                Duration::from_secs(5),
+                None,
+                &[],
+            )
+            .await
+            .expect("spawned");
+            assert_eq!(out.stdout, "0", "no arguments were added");
+        }
+
+        fn worktree() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            std::fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+            std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").expect("write");
+            dir
+        }
+
+        #[test]
+        fn a_relative_path_resolves_against_the_worktree_and_comes_back_absolute() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            let resolved = resolve_within(&root, "src/main.rs").expect("inside the worktree");
+            assert!(resolved.ends_with("src/main.rs"));
+            assert!(
+                std::path::Path::new(&resolved).is_absolute(),
+                "an editor is launched with a cwd of its own, so relative would be read \
+                 against the wrong directory: {resolved}"
+            );
+        }
+
+        #[test]
+        fn an_absolute_path_inside_the_worktree_is_accepted() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            let abs = dir.path().join("src/main.rs").to_string_lossy().to_string();
+            assert!(resolve_within(&root, &abs).is_some());
+        }
+
+        /// The boundary. A path that escapes the worktree is refused however it is
+        /// spelled — and `..` is the spelling that does *not* need a symlink.
+        #[test]
+        fn a_path_outside_the_worktree_is_refused() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            for outside in ["../etc/passwd", "/etc/passwd", "src/../../etc/passwd"] {
+                assert!(
+                    resolve_within(&root, outside).is_none(),
+                    "{outside} must not resolve"
+                );
+            }
+        }
+
+        /// Canonicalized on **both** sides, so a symlink pointing out of the worktree
+        /// is refused even though `..` never appears in the request — the same
+        /// property `pty::relative_within` documents for the file-serving route.
+        #[cfg(unix)]
+        #[test]
+        fn a_symlink_out_of_the_worktree_is_refused() {
+            let dir = worktree();
+            let outside = tempfile::tempdir().expect("tempdir");
+            std::fs::write(outside.path().join("secret.rs"), "let key = 1;").expect("write");
+            std::os::unix::fs::symlink(
+                outside.path().join("secret.rs"),
+                dir.path().join("src/link.rs"),
+            )
+            .expect("symlink");
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(
+                resolve_within(&root, "src/link.rs").is_none(),
+                "a symlink is a path out of the worktree that contains no `..`"
+            );
+        }
+
+        /// A directory **is** a click target: `ls some/dir/` prints them and every
+        /// editor this exists for opens one. Which flags suit a directory is the
+        /// declaration's problem (`[ -d "$1" ]`), not this layer's — `code -g dir:1`
+        /// is wrong where `code dir` is right, and only the config knows the editor.
+        /// **An empty path is nothing, not the root.** `Path::join("")` gives the
+        /// root back, which canonicalizes, passes containment trivially and is a
+        /// directory — so this resolved to the whole worktree until it was refused
+        /// explicitly. The UI cannot send it; the endpoint can be reached by any
+        /// page a local run serves.
+        #[tokio::test]
+        async fn an_empty_path_is_refused_rather_than_opening_the_worktree() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(resolve_within(&root, "").is_none());
+            // And through the whole activation, which is where the contract is
+            // stated — the suffix fallback must not rescue it either.
+            let failure = positional_for(&action(Some("file")), &body(Some(""), None), &root)
+                .await
+                .expect_err("an empty path names no file");
+            assert_eq!(failure.0, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[test]
+        fn a_directory_is_a_target_but_a_missing_path_is_not() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            let resolved = resolve_within(&root, "src").expect("a directory");
+            assert!(resolved.ends_with("/src"));
+            // A missing file must stay refused: handing it over has the editor open
+            // an empty buffer, which looks exactly like the click having worked.
+            assert!(resolve_within(&root, "src/gone.rs").is_none(), "absent");
+        }
+
+        /// A git worktree, so `git ls-files` has something to say. Separate from
+        /// `worktree()` because most tests here want no subprocess at all.
+        async fn git_worktree() -> tempfile::TempDir {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let at = dir.path();
+            std::fs::create_dir_all(at.join("deep/nested/panes")).expect("mkdir");
+            std::fs::write(at.join("deep/nested/panes/tabKeys.ts"), "export {};").expect("write");
+            std::fs::create_dir_all(at.join("a")).expect("mkdir");
+            std::fs::create_dir_all(at.join("b")).expect("mkdir");
+            std::fs::write(at.join("a/mod.rs"), "").expect("write");
+            std::fs::write(at.join("b/mod.rs"), "").expect("write");
+            for args in [
+                vec!["init", "-q"],
+                vec!["config", "user.email", "t@example.com"],
+                vec!["config", "user.name", "t"],
+            ] {
+                let out = tokio::process::Command::new("git")
+                    .args(&args)
+                    .current_dir(at)
+                    .output()
+                    .await
+                    .expect("git");
+                assert!(out.status.success(), "git {args:?}");
+            }
+            dir
+        }
+
+        /// **The case a pattern cannot solve.** `ls deep/nested/panes/` prints
+        /// `tabKeys.ts`, which is meaningless against the worktree root — and the
+        /// shell's cwd would not help either, because the base was an *argument* to
+        /// `ls`, not a directory anybody stood in. Identity resolves it.
+        #[tokio::test]
+        async fn a_bare_filename_resolves_when_exactly_one_file_has_that_name() {
+            let dir = git_worktree().await;
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(
+                resolve_within(&root, "tabKeys.ts").is_none(),
+                "it is not at the root, which is why the fallback exists"
+            );
+            let resolved = resolve_by_suffix(&root, "tabKeys.ts")
+                .await
+                .expect("one match");
+            assert!(resolved.ends_with("deep/nested/panes/tabKeys.ts"));
+        }
+
+        /// A partial path is the same lookup, and is what makes a compiler's
+        /// subdirectory-relative output work.
+        #[tokio::test]
+        async fn a_partial_path_resolves_by_its_suffix() {
+            let dir = git_worktree().await;
+            let root = dir.path().to_string_lossy().to_string();
+            let resolved = resolve_by_suffix(&root, "panes/tabKeys.ts")
+                .await
+                .expect("one match");
+            assert!(resolved.ends_with("deep/nested/panes/tabKeys.ts"));
+        }
+
+        /// **Uniqueness is what makes acting on a suffix safe**, so an ambiguous name
+        /// refuses and says how many rather than opening whichever git listed first.
+        #[tokio::test]
+        async fn an_ambiguous_filename_refuses_and_counts() {
+            let dir = git_worktree().await;
+            let root = dir.path().to_string_lossy().to_string();
+            let (code, body) = resolve_by_suffix(&root, "mod.rs")
+                .await
+                .expect_err("two files are called mod.rs");
+            assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
+            let message = body.0.to_string();
+            assert!(message.contains('2'), "should count them: {message}");
+        }
+
+        /// An untracked file an agent wrote thirty seconds ago is exactly what
+        /// somebody clicks, so it counts — but an ignored one does not, or `target/`
+        /// and `node_modules/` would make collisions the normal case.
+        #[tokio::test]
+        async fn an_untracked_file_is_found_but_an_ignored_one_is_not() {
+            let dir = git_worktree().await;
+            let at = dir.path();
+            std::fs::write(at.join(".gitignore"), "ignored/\n").expect("write");
+            std::fs::create_dir_all(at.join("ignored")).expect("mkdir");
+            std::fs::write(at.join("ignored/hidden.rs"), "").expect("write");
+            std::fs::write(at.join("deep/brandNew.rs"), "").expect("write");
+            let root = at.to_string_lossy().to_string();
+
+            assert!(
+                resolve_by_suffix(&root, "brandNew.rs").await.is_ok(),
+                "untracked but not ignored"
+            );
+            assert!(
+                resolve_by_suffix(&root, "hidden.rs").await.is_err(),
+                "ignored files stay out of the index"
+            );
+        }
+
+        /// **A conflicted path is listed once per merge stage**, so the suffix
+        /// search sees it three times and would refuse it as ambiguous — during a
+        /// merge conflict, which is exactly when somebody is clicking paths an agent
+        /// printed. The dedupe is what makes it one match; this is the test that
+        /// says so, because the behaviour is otherwise held up by a comment.
+        #[tokio::test]
+        async fn a_path_conflicted_in_an_unmerged_index_still_resolves() {
+            let dir = git_worktree().await;
+            let at = dir.path();
+            let run = |args: Vec<&str>| {
+                let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+                let at = at.to_path_buf();
+                async move {
+                    tokio::process::Command::new("git")
+                        .args(&args)
+                        .current_dir(&at)
+                        .output()
+                        .await
+                        .expect("git")
+                }
+            };
+            std::fs::write(at.join("conflicted.rs"), "base\n").expect("write");
+            run(vec!["add", "-A"]).await;
+            run(vec!["commit", "-qm", "base"]).await;
+            run(vec!["checkout", "-qb", "other"]).await;
+            std::fs::write(at.join("conflicted.rs"), "theirs\n").expect("write");
+            run(vec!["commit", "-qam", "theirs"]).await;
+            run(vec!["checkout", "-q", "-"]).await;
+            std::fs::write(at.join("conflicted.rs"), "ours\n").expect("write");
+            run(vec!["commit", "-qam", "ours"]).await;
+            let merge = run(vec!["merge", "other"]).await;
+            assert!(!merge.status.success(), "the merge should conflict");
+
+            let listing = run(vec!["ls-files", "--cached", "-z"]).await;
+            let raw = String::from_utf8_lossy(&listing.stdout);
+            assert!(
+                raw.matches("conflicted.rs").count() > 1,
+                "the premise: git lists it once per stage"
+            );
+
+            let root = at.to_string_lossy().to_string();
+            let resolved = resolve_by_suffix(&root, "conflicted.rs")
+                .await
+                .expect("one file, however many stages");
+            assert!(resolved.ends_with("conflicted.rs"));
+        }
+
+        /// An absolute path that did not resolve is simply not here. Searching by its
+        /// suffix would answer a question nobody asked, about a tree that is not this
+        /// worktree.
+        #[tokio::test]
+        async fn an_absolute_path_is_never_suffix_searched() {
+            let dir = git_worktree().await;
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(resolve_by_suffix(&root, "/etc/passwd").await.is_err());
+        }
+
+        fn action(accepts: Option<&str>) -> veld_core::ide::ActionExtension {
+            let mut entry = serde_json::json!({
+                "id": "edit", "type": "action", "shell": "code \"$1\"",
+            });
+            if let Some(a) = accepts {
+                entry["accepts"] = serde_json::json!(a);
+            }
+            let section = veld_core::ide::parse(Some(&serde_json::json!({
+                "extensions": [entry]
+            })));
+            let ExtensionBody::Action(a) = &section.extension("edit").expect("declared").body
+            else {
+                panic!("expected an action");
+            };
+            a.clone()
+        }
+
+        fn body(file: Option<&str>, line: Option<u32>) -> ActivateBody {
+            ActivateBody {
+                id: "edit".to_owned(),
+                file: file.map(str::to_owned),
+                line,
+            }
+        }
+
+        /// Both directions are errors, not shrugs. Running an `accepts` action with
+        /// no file gives it an empty `$1` and the failure surfaces in the editor;
+        /// sending a file to an action that declares none means the caller believes
+        /// something false, and dropping it quietly keeps them believing it.
+        #[tokio::test]
+        async fn a_mismatch_between_accepts_and_the_request_is_refused() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            assert!(
+                positional_for(&action(Some("file")), &body(None, None), &root)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                positional_for(&action(None), &body(Some("src/main.rs"), None), &root)
+                    .await
+                    .is_err()
+            );
+        }
+
+        /// `$2` is always set when `$1` is, so a script can write `"$2"` without
+        /// guarding for an unset parameter. Line 1 is where a file opens anyway.
+        #[tokio::test]
+        async fn a_path_with_no_line_still_gets_a_line() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            let values = positional_for(
+                &action(Some("file")),
+                &body(Some("src/main.rs"), None),
+                &root,
+            )
+            .await
+            .expect("resolved");
+            assert_eq!(values.len(), 2);
+            assert_eq!(values[1], "1");
+
+            let zero = positional_for(
+                &action(Some("file")),
+                &body(Some("src/main.rs"), Some(0)),
+                &root,
+            )
+            .await
+            .expect("resolved");
+            assert_eq!(
+                zero[1], "1",
+                "line 0 does not exist; 1 is the honest answer"
+            );
+        }
+
+        #[tokio::test]
+        async fn an_action_with_no_accepts_gets_no_positional_values() {
+            let dir = worktree();
+            let root = dir.path().to_string_lossy().to_string();
+            assert_eq!(
+                positional_for(&action(None), &body(None, None), &root)
+                    .await
+                    .expect("fine"),
+                Vec::<String>::new()
+            );
+        }
+    }
+
     /// The child-process hygiene, against real processes.
     ///
     /// **These bounds are what veld shipped instead of a consent prompt**
@@ -1364,6 +2081,7 @@ mod tests {
                 &HashMap::new(),
                 timeout,
                 None,
+                &[],
             )
             .await
             .expect("spawned")
@@ -1466,6 +2184,7 @@ mod tests {
                 &HashMap::new(),
                 Duration::from_secs(5),
                 None,
+                &[],
             )
             .await
             .expect("spawned");
@@ -1498,6 +2217,7 @@ mod tests {
                 &HashMap::new(),
                 Duration::from_secs(5),
                 None,
+                &[],
             )
             .await
             .expect("spawned");
@@ -1528,6 +2248,7 @@ mod tests {
                 &HashMap::new(),
                 Duration::from_secs(5),
                 Some("Fix the login redirect loop"),
+                &[],
             )
             .await
             .expect("spawned");
@@ -1546,6 +2267,7 @@ mod tests {
                 &HashMap::new(),
                 Duration::from_secs(5),
                 Some("a prompt nobody reads"),
+                &[],
             )
             .await
             .expect("spawned");
@@ -1568,6 +2290,7 @@ mod tests {
                 &HashMap::new(),
                 Duration::from_millis(600),
                 Some(&huge),
+                &[],
             )
             .await
             .expect("spawned");

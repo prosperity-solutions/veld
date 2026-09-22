@@ -15,7 +15,9 @@
 
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { Terminal } from "@xterm/xterm";
+import { findFilePaths } from "./filePaths";
+import { cellOf, logicalBlockAt } from "./linkRanges";
+import { type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api, type PaneLaunchMode } from "../api";
 import { inbox, isOsc9Notification, parseOsc133 } from "../inbox/inbox";
@@ -778,6 +780,11 @@ function ensure(
       void activateLink(id, uri, event);
     }),
   );
+  // File paths in the output become links too, when the user has asked for it.
+  // Registered rather than loaded as an addon because the matching rule is ours
+  // (`filePaths.ts`) and the thing a click does is ours as well — the daemon runs a
+  // project-declared editor action against the path, which no addon could express.
+  term.registerLinkProvider(filePathLinkProvider(term, id, worktreeId));
 
   // Attached below, once the session object the handler sends through exists.
 
@@ -1353,6 +1360,132 @@ async function activateLink(sessionId: string, url: string, event: MouseEvent): 
     notifyError("Could not ask Veld where to open that link", e);
     openExternally(url);
   }
+}
+
+/**
+ * An xterm link provider for the file paths in a row of output.
+ *
+ * # Why this assembles a logical line first
+ *
+ * xterm asks about one *visual* row, and a terminal wraps. `crates/veld-daemon/src/
+ * extensions.rs:445` is 44 characters and a narrow pane breaks it in half, so a
+ * provider that reads one row sees two fragments and links neither — the exact
+ * reason `WebLinksAddon` is kept for URLs (see where it is loaded). The assembly and
+ * the offset→cell arithmetic live in `linkRanges.ts`, where they are testable; this
+ * keeps the matches that touch the row asked about.
+ */
+function filePathLinkProvider(
+  term: Terminal,
+  sessionId: string,
+  worktreeId: number,
+): ILinkProvider {
+  return {
+    provideLinks(bufferLineNumber, callback) {
+      // Read per call, not at registration: `prefs()` is live, so turning the
+      // setting off stops underlining in terminals that are already open. A shell
+      // keeps the *environment* it started with, but this decision is the page's.
+      if (!prefs().clickableFilePaths) {
+        callback(undefined);
+        return;
+      }
+      const buf = term.buffer.active;
+      const cols = term.cols;
+      // xterm counts buffer lines from 1; the buffer API from 0.
+      const block = logicalBlockAt(
+        (y) => {
+          const row = buf.getLine(y);
+          // `translateToString(false)` — untrimmed, so a row is exactly `cols`
+          // characters wide whenever the arithmetic in `linkRanges` is valid. That
+          // is the property it checks; see its doc comment.
+          return row && { text: row.translateToString(false), isWrapped: row.isWrapped };
+        },
+        bufferLineNumber - 1,
+        cols,
+      );
+      if (!block) {
+        callback(undefined);
+        return;
+      }
+      const { text, startY } = block;
+      const cell = (offset: number) => cellOf(offset, startY, cols);
+      const links: ILink[] = [];
+      for (const match of findFilePaths(text)) {
+        const start = cell(match.start);
+        // `end` is inclusive in an xterm range, so it names the last character.
+        const end = cell(match.end - 1);
+        if (bufferLineNumber < start.y || bufferLineNumber > end.y) {
+          // Belongs to a different row of this same wrapped block. Skipping it
+          // rather than returning it keeps one row's answer about that row, and
+          // xterm asks again for the others.
+          continue;
+        }
+        links.push({
+          range: { start, end },
+          text: match.path,
+          activate: (event) => {
+            // xterm fires this from **mouseup** (`Linkifier._handleMouseUp`), and the
+            // mousedown that preceded it already armed a selection drag — so a click
+            // that travels even one cell leaves a highlight behind, on a click that
+            // changed nothing else on screen. Its own `SelectionService` has torn the
+            // drag down by now (it does that unconditionally), so clearing is all
+            // that is left to do, and it is why this handler does *not* call
+            // `preventDefault`: xterm never reads that flag, and setting it only
+            // suppressed the browser behaviour nobody asked about.
+            term.clearSelection();
+            activateFilePath({
+              sessionId,
+              worktreeId,
+              path: match.path,
+              line: match.line,
+              event,
+            });
+          },
+        });
+      }
+      callback(links.length > 0 ? links : undefined);
+    },
+  };
+}
+
+/** A file path a user clicked in terminal output. */
+export interface FilePathClick {
+  sessionId: string;
+  worktreeId: number;
+  /** As printed — relative to the worktree root unless it is absolute. The daemon
+   *  resolves and containment-checks it; this is not a path to trust or display. */
+  path: string;
+  line?: number;
+  /** The click itself, so a subscriber with several editors declared can anchor a
+   *  menu where the user clicked. It is a **mouseup** — see where this is raised. */
+  event: MouseEvent;
+}
+
+/** Subscribers to a file-path click — see `onTerminalFilePath`. */
+const filePathListeners = new Set<(click: FilePathClick) => void>();
+
+/**
+ * A file path clicked in a terminal, and which terminal it came from.
+ *
+ * Handed out rather than handled here for the same reason `onTerminalOpenUrl` is:
+ * deciding what to do needs the worktree's `ide.extensions` list, which lives in
+ * React state, while a terminal's session outlives every mount of its pane. The
+ * subscriber picks the action — there may be several editors declared — and calls
+ * `api.activateExtension`.
+ */
+export function onTerminalFilePath(fn: (click: FilePathClick) => void): () => void {
+  filePathListeners.add(fn);
+  return () => filePathListeners.delete(fn);
+}
+
+/**
+ * A click on a file path.
+ *
+ * A modifier is *not* an override here, unlike `activateLink`. There is no
+ * second destination to escape to: the path goes to whichever editor the project
+ * declared, and a browser has nothing to offer instead.
+ */
+function activateFilePath(click: FilePathClick): void {
+  for (const fn of filePathListeners) fn(click);
 }
 
 /**

@@ -727,6 +727,13 @@
               "type"
             ],
             "properties": {
+              "accepts": {
+                "type": "string",
+                "enum": [
+                  "file"
+                ],
+                "description": "Click-time context this action is offered with, instead of being a button that runs with none. `file` puts it on a file path clicked in terminal output, and hands the command the file's absolute path as `$1` and its line number as `$2` — positional parameters, not `${veld.*}` variables, because the path comes from whatever printed it and so must not be interpolated into a shell string (the same hazard that makes `${veld.branch_raw}` argv-only). Quote them: \"$1\", since a checkout path can contain spaces. Write `$1`, not `${1}`, which collides with Veld's own interpolation. Veld canonicalizes the path and refuses one outside the worktree before running anything. Cannot be combined with `slot`: a control in a slot is clicked with no file selected."
+              },
               "align": {
                 "type": "string",
                 "enum": [

@@ -73,6 +73,37 @@
         "type": "action",
         "label": "WebStorm",
         "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\""
+      },
+      // `accepts: "file"` puts an action on a **file path clicked in terminal
+      // output** instead of on a control. Three things follow from that:
+      //
+      // - No `slot`, and veld refuses one here: a button in the top bar is
+      //   clicked with no file selected, so there would be nothing to hand it.
+      // - The path arrives as `$1` and the line as `$2` — positional parameters,
+      //   *not* `${veld.*}`. An agent or a compiler chose that string, so
+      //   interpolating it into a shell command would run whatever it contains;
+      //   `sh -c` binds `$1` after this script is tokenized, which makes `$(id)`
+      //   and friends inert text. It is the same hazard `${veld.branch_raw}`
+      //   answers by being argv-only, and this is the answer for a command that
+      //   needs `shell` — as an editor launcher with a fallback chain does.
+      // - **Quote them** (`"$1"`): a checkout path can contain spaces. And write
+      //   `$1`, never `${1}`, which veld's own interpolation would claim.
+      //
+      // veld canonicalizes the path and refuses one outside the worktree before
+      // running any of this, so the script never has to check.
+      {
+        "id": "vscode-file",
+        "type": "action",
+        "label": "VS Code",
+        "accepts": "file",
+        "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" || exec open -a \"Visual Studio Code\" \"$1\""
+      },
+      {
+        "id": "webstorm-file",
+        "type": "action",
+        "label": "WebStorm",
+        "accepts": "file",
+        "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm --line \"$2\" \"$1\" || exec open -a WebStorm \"$1\""
       }
     ]
   },

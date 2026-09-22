@@ -1010,7 +1010,7 @@ string. `type` discriminates the shape.
 |---|---|
 | `id` | Required. Unique among this project's extensions, `[A-Za-z0-9_-]`, ≤64. What a menu's `items` and a badge's `actions` name |
 | `type` | Required. `status` \| `action` \| `menu` |
-| `slot` | `topBar` today. **Omit on an `action`** for one that only exists to be referenced; required for `status`/`menu` |
+| `slot` | `topBar` today. **Omit on an `action`** for one that only exists to be referenced; required for `status`/`menu`; **refused on an `action` that declares `accepts`** |
 | `align` | `start` (default) \| `end` — left cluster is the project's, right is the app's |
 | `label` | Defaults to `id`. An `action` with no `icon` renders its label as text |
 | `description` | Tooltip |
@@ -1022,7 +1022,8 @@ string. `type` discriminates the shape.
 | `refresh_seconds` | `status` only. Default 60, floored at 15 |
 | `open_in` | `status` only. `system` (default) \| `pane` — where `href` opens |
 | `display` | `status` only. `text` (default) \| `icon` — render the glyph alone as the whole badge, label kept as the accessible name |
-| `items` | `menu` only. Ids of declared `action` extensions, ≥1 |
+| `items` | `menu` only. Ids of declared `action` extensions, ≥1. An action declaring `accepts` is refused here for the same reason `slot` is |
+| `accepts` | `action` only. `file` — offered on a file path clicked in terminal output instead of as a control, and handed that file's absolute path as `$1` and its line as `$2` (positional parameters, **not** `${veld.*}`: quote them, and write `$1` not `${1}`) |
 
 A `status` command's stdout is the badge:
 `{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "display", "actions": [{ "id", "label" }] }`.

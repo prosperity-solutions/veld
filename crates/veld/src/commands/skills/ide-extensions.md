@@ -147,6 +147,9 @@ malformed config, it is adding four badges nobody needed to a 42px bar.
 - `type` says what it is: **`status`** (a badge backed by a command veld re-runs on
   a timer), **`action`** (a button that runs a command on a click), **`menu`** (one
   control whose members are `action` entries).
+- An `action` can carry **`accepts: "file"`** instead of a `slot`, which offers it
+  on a file path clicked in terminal output and hands it the path as `$1` and the
+  line as `$2`. See `veld skills ide-extensions` → Opening a clicked file.
 - A badge's command **prints a small JSON contract on stdout** and veld renders it.
   That is the whole extension mechanism: **veld never learns your code host's
   name.** The provider-specific knowledge lives in your command.
@@ -172,7 +175,11 @@ malformed config, it is adding four badges nobody needed to a 42px bar.
     { "id": "vscode", "type": "action", "label": "VS Code",
       "shell": "command -v code >/dev/null 2>&1 && exec code \"${veld.root}\" || exec open -a \"Visual Studio Code\" \"${veld.root}\"" },
     { "id": "webstorm", "type": "action", "label": "WebStorm",
-      "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\"" }
+      "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\" || exec open -a WebStorm \"${veld.root}\"" },
+
+    // `accepts`, not `slot`: offered on a clicked file path, not as a button.
+    { "id": "vscode-file", "type": "action", "label": "VS Code", "accepts": "file",
+      "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" || exec open -a \"Visual Studio Code\" \"$1\"" }
   ]
 }
 ```
@@ -444,6 +451,80 @@ No script needed at all:
 
 The second one is worth studying: `2>/dev/null` plus a missing file gives exit
 1 — a red badge. Add `|| exit 0` if "no coverage yet" should simply show nothing.
+
+---
+
+## Opening a clicked file
+
+Veld underlines file paths in terminal output and hands a clicked one to an
+`action` declaring `accepts: "file"`. The path arrives as `$1`, absolute; the line
+as `$2`.
+
+```jsonc
+{ "id": "vscode-file", "type": "action", "label": "VS Code", "accepts": "file",
+  "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" || exec open -a \"Visual Studio Code\" \"$1\"" }
+```
+
+Declare none and a click says so. **Declare several and the user is asked once**:
+the first click offers a menu, the answer is kept in their *Open a clicked file
+path with* setting, and every click after it goes straight there. Do not expect a
+menu per click — a menu's dismiss overlay swallows the following click, so asking
+every time makes every second click dead.
+
+**`accepts` and `slot` are mutually exclusive, and veld refuses both.** A control
+in the top bar is clicked with no file selected, so there would be nothing to hand
+it. An `accepts` action needs no `slot` for the same reason a menu member does not.
+
+Four rules about `$1`, each of which has a wrong obvious answer:
+
+1. **Never `${veld.file}` — there is no such variable, deliberately.** The path is
+   whatever an agent or a compiler printed, so interpolating it into a `shell`
+   string would execute what it contains: `$(id)` would run. `/bin/sh -c` binds
+   `$1` *after* tokenizing your script, so `$(...)`, backticks, `;`, `|`, quotes
+   and newlines are inert text in a single word. This is the same hazard that makes
+   `${veld.branch_raw}` argv-only, and the positional parameter is the answer for a
+   command that needs `shell` — which an editor launcher does, for its `command -v`
+   fallback chain.
+2. **Quote it**: `"$1"`. Unquoted, a path with a space word-splits. That is a
+   correctness bug, not the injection hole — an unquoted expansion still does not
+   re-parse `$(...)` — but it fails on plenty of real checkouts.
+3. **`$1`, never `${1}`.** The braced form collides with veld's own `${...}`
+   interpolation and is reported as an unresolved variable.
+4. **`$2` is always set.** A path with no line number gets `1`, so nothing has to
+   guard for an unset parameter. A branch that cannot express a line — `open -a` has
+   no line addressing — just ignores it.
+
+An `argv` action gets the two values **appended** as its last two arguments
+instead. Use it when your editor takes the path and the line as separate arguments,
+and `shell` when it wants them joined (`code -g file:line`).
+
+**Do not write `$1` or `$2` in an `argv` element.** There is no shell there to bind
+one, so it reaches the command as those literal characters *and* the real values
+arrive after it — `["code", "-g", "$1:$2"]` runs `code -g $1:$2 <path> <line>`, and
+the editor is what complains. `veld lint` refuses it.
+
+**`$1` can be a directory** (`ls some/dir/` prints them). Veld does not branch for
+you, because `code -g dir:1` is wrong where `code dir` is right and only the
+declaration knows the editor — so test for it: `[ -d "$1" ] && exec code "$1";
+exec code -g "$1:$2"`.
+
+**A path that is not root-relative still resolves when it is unambiguous.** `ls
+crates/.../panes/` prints a bare `tabKeys.ts`, and a compiler run in a
+subdirectory prints paths relative to that one; neither means anything against the
+root. When the literal path fails, veld asks `git ls-files` which checked-in or
+untracked file has it as a **suffix** — one match opens, several refuse and say
+how many, because uniqueness is what makes a suffix safe to act on. A literal
+path always wins.
+
+Veld canonicalizes the path and refuses one outside the worktree, or one that is
+neither a file nor a directory, before running anything — including a symlink
+pointing out of the checkout, which contains no `..` to spot. Your command never
+has to check.
+
+What gets underlined is narrow on purpose: a token with a directory or a
+recognised source extension, and not `example.com`, `v1.2.3` or `foo.bar()`. A
+user who still finds it noisy turns off the "Make file paths in the terminal
+clickable" setting.
 
 ---
 

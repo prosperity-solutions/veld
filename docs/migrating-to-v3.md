@@ -554,6 +554,15 @@ A `status` badge also gained `display` (`text`, the default, or `icon`, which
 renders the glyph alone with the label kept as the accessible name) — additive
 the same way, and overridable per value the same way `open_in` is.
 
+An `action` gained `accepts`, likewise additive: `accepts: "file"` offers it on a
+file path clicked in terminal output rather than as a control, and hands the
+command that file's path as `$1` and its line as `$2`. An action without the key
+is unchanged, including its invocation — no `$0` is set and no arguments are
+appended, so an existing declaration sees exactly the argument list it saw
+before. `slot` is refused alongside `accepts`, since a control in a slot is
+clicked with no file selected. See
+[configuration.md](configuration.md#opening-a-clicked-file).
+
 It has its own page, because it is a menu rather than a migration:
 **[docs/adopting-long-running-and-ports.md](adopting-long-running-and-ports.md)**.
 

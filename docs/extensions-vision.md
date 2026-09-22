@@ -1370,9 +1370,10 @@ idea.
 |---|---|---|---|
 | PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog, and now the *only* route to this — core deliberately renders no merged glyph (decision log, 2026-09-08). Rendering is half-built already: per-value `icon` override plus `display: "icon"`; missing is `rail` in `EXTENSION_SLOTS` and the per-worktree fan-out |
 | Open a worktree in an external IDE (WebStorm, VS Code, …) | a local binary per editor | top bar | **Tier 1 round 1** (`type: "action"`) |
+| Open a **clicked file or directory** in an external IDE, at its line | a local binary per editor | a file path in terminal output | **shipped** (`type: "action"` + `accepts: "file"`) — see both 2026-09-21 decision log entries |
 | CI check status for a worktree's branch | provider API | top bar, worktree detail | backlog — expressible as a second `type: "status"` today |
 | Per-worktree staleness ("branch is N behind origin") | **already exposed as core data** — see note | rail row, worktree detail | core data shipped; badge = extension |
-| Inline file blame / "who touched this" | provider API or tool output | editor surfaces | backlog |
+| Inline file blame / "who touched this" | provider API or tool output | editor surfaces | backlog — still no in-app file *viewer* to hang it on; `accepts: "file"` hands a path to an external editor and renders nothing itself |
 | Custom project health badges (coverage, lint gate) | project commands | rail row | backlog — needs the `rail` slot |
 | Per-project setup/teardown on worktree create/delete | lifecycle hooks (Tier 1) | n/a (background) | backlog — home is the reserved `hooks` key |
 | Launch a local review tool and open it in a browser pane (e.g. [difit](https://github.com/yoshiko-pg/difit)) | a local binary that serves HTTP on a port | top bar action + browser pane | backlog — needs an action that can *start a server and route a pane at it*, which round 1's fire-and-forget action cannot express |
@@ -1445,3 +1446,137 @@ bugfix in an existing one):
    shared across every present and future extension kind, including the lifecycle
    hooks that will live under `hooks`. Adding a field is fine; renaming or
    repurposing one of those breaks every project that adopted it.
+
+### 2026-09-21 — A clicked file reaches a command as `$1`, not as `${veld.file}`
+
+**Chosen:** `accepts: "file"` on an `action`, and the path delivered as a
+**positional parameter** — `/bin/sh -c '<declared script>' veld <path> <line>`,
+or appended to `argv`.
+
+The fork exists because two established rules point opposite ways. A path scraped
+out of terminal output is chosen by whatever printed it, so it is the same class
+of value as `${veld.branch_raw}`, which `SHELL_REFUSED_BUILTINS` refuses in
+`shell` because "quoting cannot fix it". But the commands that want a file are
+exactly the ones that *need* `shell`: an editor launcher is a `command -v code`
+fallback chain ending in `open -a`, and this repo's own config has carried that
+shape since the feature existed. A variable would therefore have been refused to
+its only callers.
+
+A positional parameter dissolves that instead of trading it off. `sh -c`
+tokenizes the script — committed config — and binds `$1` afterwards, so `$(id)`,
+a backtick, `;`, `|`, a quote and a newline arrive as one inert word. Verified
+against a real `/bin/sh` rather than argued:
+`extensions.rs`'s `a_hostile_path_reaches_the_command_as_one_inert_word`.
+
+Two holes it closes for free. A canonical absolute path always begins with `/`,
+so the leading-`-` problem that `worktree_builtins` solves for `branch_raw` (by
+omitting the variable entirely) cannot arise. And because the value never enters
+the interpolated string, `${veld.*}` stays the closed set `AGENTS.md` says it is.
+
+Rejected, with reasons:
+
+- **`${veld.file}` / `${veld.line}` in the interpolation table** (the obvious
+  answer). Reopens a set this repo's config rules declare closed, and then has to
+  be added to `SHELL_REFUSED_BUILTINS` for the `branch_raw` reason — which
+  refuses it to every editor declaration that motivated it. The `argv`-only half
+  is not a workaround either: `code -g file:line` needs the two values *joined*,
+  which is string composition, which is what a shell is for.
+- **A daemon-owned editor launcher**, with config naming only an enum
+  (`"editor": "vscode"`). Safe by construction and reports which launcher it
+  found, but it hardcodes an editor compatibility matrix into the daemon — the
+  exact thing the extension system exists to prevent — per platform, forever. The
+  first user on Helix-in-Kitty or a remote container would have to ship a daemon.
+- **A daemon-minted symlink surrogate** under its state directory, so the command
+  receives a path guaranteed free of hostile characters. Reads as the most
+  elegant of the four and fails on contact with the branch that matters: `open -a`
+  has no line addressing and no symlink-resolution guarantee, so the fallback
+  every editor declaration depends on opens a window rooted in veld's state
+  directory, with the wrong workspace and no line. The daemon must also still
+  fully validate the client's string before minting, so the validation was
+  renamed rather than removed, and a symlink farm with process-group-lifetime GC
+  is new state to get wrong.
+- **Writing an `open <path>` into the terminal's stdin** as a synthetic
+  keystroke — the shim veld puts on each terminal's `PATH`, not a veld
+  subcommand — reusing the one thing that already resolves a relative path
+  correctly, because it runs in the shell's live cwd. Needs no new contract at all, and is the only mechanism here
+  that is always right about a relative path. Rejected because what is usually
+  running in the pane is an interactive agent TUI: gated on an idle prompt
+  (OSC 133) it is disabled exactly when somebody wants it — you click a path
+  *while reading output*, mid-run — and ungated it corrupts that agent's input.
+  It also writes machine-authored commands into scrollback, which is the shared
+  artifact between the human and the agent.
+
+**And the matching non-decision: no cwd tracking.** OSC 7 would report the
+shell's live directory, and the shim precedent (`open_url.rs`: "`./deck.html` is
+meaningless by the time the request arrives") says a relative path needs the real
+cwd. It was still rejected, because the paths this feature is for are
+*repo-root-relative* — `crates/veld-daemon/src/pty.rs:2529` is what an agent and
+a compiler both print — so resolving against the worktree root is right for them
+and a correct cwd would make resolution *less* accurate. OSC 7 also fires at the
+prompt, not while a long-running agent is printing, and veld's OSC parsing only
+runs while a window is showing it (`inbox.ts`). Revisit only if real output turns
+out to be cwd-relative in practice.
+
+**Known limitation, recorded rather than fixed:** detection is a pattern, so a
+path that exists will occasionally not underline and a token that does not exist
+occasionally will. The considered alternative was to ship the worktree's file
+list to the browser and match on *existence*, which inverts the failure into a
+strictly milder one. Measured on this repo before rejecting it for scope: 555
+tracked files, 21 KB raw, **3.6 KB gzipped**, and full repo-relative paths are
+100% unique (only bare basenames collide — `Cargo.toml` ×9, `mod.rs` ×5). So it
+is cheap and it works; it needs a watcher and a push channel, which this change
+did not. That is the follow-up, and this paragraph is its evidence.
+
+### 2026-09-21 — Same day, after driving it: identity resolves the path, on the daemon
+
+The entry above closed with a "known limitation, recorded rather than fixed": a
+pattern occasionally misses a real path, and the answer was a file index shipped
+to the browser, left as a measured follow-up. **Ten minutes of real use overtook
+that.** `ls crates/veld-daemon/ui/src/panes/` prints a bare `tabKeys.ts`, the
+maintainer clicked it, and it failed — because the name is meaningless against
+the worktree root.
+
+**Chosen:** when the literal path does not resolve, the daemon asks `git ls-files
+--cached --others --exclude-standard` which file has it as a **suffix**. One
+match opens; several refuse and name the count.
+
+What changed versus the plan in the entry above, and why it is better:
+
+- **The lookup lives on the daemon, not in the browser.** No index is shipped, no
+  watcher, no push channel, and no staleness — the three things that made it a
+  follow-up rather than part of this change. It costs one `git ls-files` on the
+  *failure* path only, so the ordinary case spawns nothing.
+- **It fixes a case no cwd would have fixed.** The entry above rejected OSC 7 on
+  the grounds that agent paths are root-relative; the `ls` case is stronger than
+  that argument, because its base is an **argument to a command**, not a directory
+  anybody was standing in. No cwd tracking of any kind could resolve it. Identity
+  can, which retires the cwd question rather than reopening it.
+- **Uniqueness is the safety property**, and it is why this is not a guess: the
+  measurement in the entry above (48 of 470 basenames collide; full repo-relative
+  paths are unique outright) is exactly what says "act on one match, refuse two".
+  A literal path still wins, so root-level `Cargo.toml` opens the root one instead
+  of becoming a nine-way tie.
+
+**Also chosen, same session, same reason:** a **directory** resolves. `ls` prints
+those too and every editor opens one. Veld deliberately does not branch on it —
+`code -g dir:1` is wrong where `code dir` is right, and only the declaration knows
+which editor it is talking to — so the documented pattern is `[ -d "$1" ]` in the
+command, and this repo's own two entries carry it.
+
+**And three matcher bugs the same session found**, all of which a pattern-based
+detector was always going to have and none of which a test written from
+imagination had caught. Recorded because they are the argument for keeping the
+rule narrow, not for widening it:
+
+- `token.includes("://")` as the URL guard matched `src/ide.rs:377:///`, so every
+  grep hit whose line began at column 1 with a Rust doc comment silently stopped
+  being a link — while the indented ones beside it worked, which is what made it
+  look arbitrary rather than broken.
+- `///` and `//` satisfied "explicitly a path" and underlined on their own.
+- Worst: a bare word whose whole spelling is an extension in the table matched, so
+  **`go`, `log`, `env`, `conf`, `c` and `h` underlined in ordinary prose.**
+
+The fix for the third is that rule (b) now requires an actual dot, which means an
+extensionless file (`Makefile`) is reachable only through rule (a) (`./Makefile`).
+That is the trade, taken deliberately: a missed path costs a copy-paste, a wrong
+underline costs trust in every other one.

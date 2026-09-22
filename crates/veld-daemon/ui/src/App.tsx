@@ -125,6 +125,7 @@ import {
   Loader,
   MantineProvider,
   Menu,
+  Text,
   Tooltip,
   TextInput,
 } from "@mantine/core";
@@ -265,6 +266,7 @@ import {
 } from "./ide/layoutStore";
 import {
   applyTerminalTheme,
+  onTerminalFilePath,
   onTerminalOpenUrl,
   onTerminalTitleChange,
   reannounceTerminalTitles,
@@ -1980,6 +1982,18 @@ function AppInner(props: {
    */
   const allWorktreesRef = useRef(allWorktrees);
   allWorktreesRef.current = allWorktrees;
+  /**
+   * Settings, and the writer, through refs for the same reason.
+   *
+   * The file-path subscriber below is registered once and lives as long as the
+   * page, so reading `settings` from its closure would pin it to the document as
+   * it was at mount — and the one value it cares about is written *by that very
+   * handler*, so a stale read would ask the same question forever.
+   */
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+  // The writer already has a ref further down this component, mirrored the same
+  // way; the subscriber below uses that one rather than declaring a second.
   /** Projects through a ref, so the notification path can name the one an event
    *  came from without being keyed on the 5s poll. */
   const reposRef = useRef(repos);
@@ -4300,6 +4314,127 @@ function AppInner(props: {
         });
       }),
     [],
+  );
+
+  /**
+   * A file path clicked in a terminal, handed to the project's editor action.
+   *
+   * `allWorktreesRef`, not `worktreesRef`, for the reason that ref exists: a second
+   * window can be showing another project's worktree, and resolving the click in
+   * only the selected project's list is what makes it a silent no-op there.
+   *
+   * The daemon does the resolving and the containment check, so `path` is passed
+   * along as printed and never joined to anything here.
+   *
+   * **The menu is a one-time question, not a toll.** A context menu puts a
+   * full-screen dismiss overlay over the page, so while one is open the *next*
+   * click anywhere is swallowed to close it — the terminal never sees it and no
+   * link fires. Asking on every click therefore makes every second click dead,
+   * which is the opposite of what a one-click feature promises. So the answer is
+   * remembered in `terminal.fileAction` and the question is not asked again.
+   */
+  useEffect(
+    () =>
+      onTerminalFilePath(({ worktreeId, path, line, event }) => {
+        const worktree = allWorktreesRef.current.find((w) => w.id === worktreeId);
+        const declared = (worktree?.ide.extensions ?? []).filter(
+          (e) => e.kind === "action" && e.accepts === "file",
+        );
+        const actions = declared.filter((e) => e.available);
+        const run = (chosen: { id: string; label: string }) => {
+          void api
+            .activateExtension(worktreeId, chosen.id, {
+              file: path,
+              ...(line ? { line } : {}),
+            })
+            .catch((e) => notifyError(`Could not open ${path} in ${chosen.label}`, e));
+        };
+        if (actions.length === 0) {
+          // **Declared-but-unavailable is a different problem from not declared**,
+          // and collapsing them told a correctly-configured project to configure
+          // itself. `available: false` means a `requires_bin` entry is missing, so
+          // the honest advice is to install it — and the daemon already words that
+          // well, so the click is let through to produce its own 422 rather than
+          // guessed at here. Only a genuinely empty list gets the authoring hint.
+          if (declared.length > 0) {
+            run(declared[0]);
+            return;
+          }
+          notifyRedirect(
+            `Nothing is declared to open ${path} — add an ide.extensions action with accepts: "file"`,
+          );
+          return;
+        }
+        // One declared action is not a choice, so it is not a question — and it is
+        // deliberately *not* remembered either: writing a preference nobody
+        // expressed would silently decide the next project that offers two.
+        if (actions.length === 1) {
+          run(actions[0]);
+          return;
+        }
+        // The remembered answer, when this project still offers it. One value
+        // serves every project, so an id this one does not declare is an ordinary
+        // outcome — ask again here — rather than something to repair.
+        const remembered = settingsRef.current?.["terminal.fileAction"];
+        const already = actions.find((a) => a.id === remembered);
+        if (already) {
+          run(already);
+          return;
+        }
+        // The cast is nominal, not a shrug. `showContextMenu` returns a handler typed
+        // for a React synthetic event, and xterm hands a native one; the handler reads
+        // `clientX`/`clientY` and calls `preventDefault`/`stopPropagation`, all of
+        // which a native MouseEvent has — checked against the installed build, not
+        // assumed. What it does *not* have is `nativeEvent` and the `isDefaultPrevented`
+        // family, which that code never touches.
+        showContextMenu([
+          // **The menu says what it is about to do, because it only appears once.**
+          // A picker that quietly turns one click into a permanent preference is a
+          // trap: the next click behaves differently and nothing ever explained
+          // why, or where to undo it. An item with no `onClick` is not clickable,
+          // and one with only a `key` is a divider.
+          {
+            key: "what",
+            disabled: true,
+            style: { cursor: "default" },
+            // Required by the type on any titled entry; `disabled` is what stops it
+            // firing, so this is never called.
+            onClick: () => {},
+            title: (
+              <Text size="xs" c="dimmed">
+                Open this file with
+              </Text>
+            ),
+          },
+          { key: "divider-top" },
+          ...actions.map((a) => ({
+            key: a.id,
+            title: a.label,
+            onClick: () => {
+              // Remembered before the run, and the failure is swallowed on purpose:
+              // the click's job is to open the file, and a settings write that did
+              // not land must not turn into an error about the file.
+              void saveSettingsRef.current({ "terminal.fileAction": a.id }).catch(() => {});
+              run(a);
+            },
+          })),
+          { key: "divider-bottom" },
+          {
+            key: "remembered",
+            disabled: true,
+            style: { cursor: "default" },
+            onClick: () => {},
+            title: (
+              <Text size="xs" c="dimmed">
+                Remembered for next time.
+                <br />
+                Change it in Settings → Links.
+              </Text>
+            ),
+          },
+        ])(event as unknown as React.MouseEvent<Element, MouseEvent>);
+      }),
+    [showContextMenu],
   );
 
   // A focused native view swallows every keystroke, so the shell forwards the

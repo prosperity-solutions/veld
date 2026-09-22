@@ -94,6 +94,10 @@ const FALLBACK = {
   scrollback: 10000,
   bellVolume: 75,
   shiftEnterNewline: true,
+  // On: a path that does not underline is invisible, so nobody would go looking for
+  // the switch that turns it on. The escape hatch points the other way — see the
+  // setting's own help text.
+  clickableFilePaths: true,
   reconnectTries: 3,
   reconnectBackoffSeconds: 5,
   reconnectFirstDelaySeconds: 1,
@@ -276,6 +280,9 @@ export interface TerminalPrefs {
   scrollback: number;
   bellVolume: number;
   shiftEnterNewline: boolean;
+  /** Underline file paths in the output and hand a clicked one to the project's
+   *  editor action. Off leaves the terminal with URL links only. */
+  clickableFilePaths: boolean;
   /** How many times a dropped socket reconnects to the same shell by itself
    *  before waiting for a click. `0` disables auto-reconnect. */
   reconnectTries: number;
@@ -304,6 +311,11 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
       doc,
       "terminal.shiftEnterNewline",
       FALLBACK.shiftEnterNewline,
+    ),
+    clickableFilePaths: bool(
+      doc,
+      "terminal.clickableFilePaths",
+      FALLBACK.clickableFilePaths,
     ),
     reconnectTries: num(doc, "terminal.reconnectTries", FALLBACK.reconnectTries),
     reconnectBackoffSeconds: num(
