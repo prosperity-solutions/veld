@@ -777,6 +777,13 @@ pub(crate) async fn activate(
     }))
 }
 
+/// How long the suffix lookup waits for `git ls-files`.
+///
+/// Generous for the walk and short enough that a pathological worktree fails the
+/// click instead of hanging it. Deliberately well under `ACTIVATE_GRACE`, so a slow
+/// lookup can never be mistaken for an editor that started.
+const SUFFIX_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// The longest `file` an activation will look at.
 ///
 /// Generous against every real path — `PATH_MAX` is 4096 on Linux and 1024 on
@@ -920,17 +927,30 @@ async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError>
             "that file is not inside this worktree".to_owned(),
         ));
     }
-    let listing = super::desktop::git(
-        FsPath::new(root),
-        &[
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ],
+    // **Deadlined, unlike `desktop::git` itself.** That helper is a bare
+    // `cmd.output().await` with no timeout and no `kill_on_drop`, which is fine
+    // where it is called on a click somebody is waiting on — but this call is the
+    // *fallback* path, so it runs on the common case (an `ls` listing, a compiler's
+    // subdirectory-relative path), and `--others` walks every untracked file: an
+    // extracted tarball, or a `vendor/` nobody gitignored, turns one click into a
+    // hang with no client-side timeout, and repeated clicks stack more `git`
+    // processes. Expiry reads as "not found" rather than an error, because from the
+    // caller's side that is what happened: veld could not identify the file.
+    let listing = tokio::time::timeout(
+        SUFFIX_LOOKUP_TIMEOUT,
+        super::desktop::git(
+            FsPath::new(root),
+            &[
+                "ls-files",
+                "--cached",
+                "--others",
+                "--exclude-standard",
+                "-z",
+            ],
+        ),
     )
     .await
+    .map_err(|_| ambiguous_or_missing(format!("took too long to look for {needle}")))?
     .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     // Hoisted out of the closure on purpose. Built inside it, this allocated once
@@ -943,8 +963,12 @@ async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError>
         .filter(|entry| !entry.is_empty())
         .filter(|entry| *entry == needle || entry.ends_with(&suffix))
         .collect();
-    // Two entries can name one file through a symlinked directory; the paths
-    // themselves are distinct strings, so dedupe on what git printed.
+    // **An unmerged index lists a conflicted path once per stage.** During a merge
+    // conflict `git ls-files --cached` prints the same path three times (stages
+    // 1-3), and a conflict is a prime moment to click a path something just printed
+    // — so without this the click is refused with "3 files are called f.rs". A
+    // symlinked directory, the other thing that looks like it should duplicate, does
+    // *not*: git lists the link itself as one blob entry.
     matches.sort_unstable();
     matches.dedup();
 
@@ -1852,6 +1876,53 @@ mod tests {
                 resolve_by_suffix(&root, "hidden.rs").await.is_err(),
                 "ignored files stay out of the index"
             );
+        }
+
+        /// **A conflicted path is listed once per merge stage**, so the suffix
+        /// search sees it three times and would refuse it as ambiguous — during a
+        /// merge conflict, which is exactly when somebody is clicking paths an agent
+        /// printed. The dedupe is what makes it one match; this is the test that
+        /// says so, because the behaviour is otherwise held up by a comment.
+        #[tokio::test]
+        async fn a_path_conflicted_in_an_unmerged_index_still_resolves() {
+            let dir = git_worktree().await;
+            let at = dir.path();
+            let run = |args: Vec<&str>| {
+                let args: Vec<String> = args.into_iter().map(str::to_owned).collect();
+                let at = at.to_path_buf();
+                async move {
+                    tokio::process::Command::new("git")
+                        .args(&args)
+                        .current_dir(&at)
+                        .output()
+                        .await
+                        .expect("git")
+                }
+            };
+            std::fs::write(at.join("conflicted.rs"), "base\n").expect("write");
+            run(vec!["add", "-A"]).await;
+            run(vec!["commit", "-qm", "base"]).await;
+            run(vec!["checkout", "-qb", "other"]).await;
+            std::fs::write(at.join("conflicted.rs"), "theirs\n").expect("write");
+            run(vec!["commit", "-qam", "theirs"]).await;
+            run(vec!["checkout", "-q", "-"]).await;
+            std::fs::write(at.join("conflicted.rs"), "ours\n").expect("write");
+            run(vec!["commit", "-qam", "ours"]).await;
+            let merge = run(vec!["merge", "other"]).await;
+            assert!(!merge.status.success(), "the merge should conflict");
+
+            let listing = run(vec!["ls-files", "--cached", "-z"]).await;
+            let raw = String::from_utf8_lossy(&listing.stdout);
+            assert!(
+                raw.matches("conflicted.rs").count() > 1,
+                "the premise: git lists it once per stage"
+            );
+
+            let root = at.to_string_lossy().to_string();
+            let resolved = resolve_by_suffix(&root, "conflicted.rs")
+                .await
+                .expect("one file, however many stages");
+            assert!(resolved.ends_with("conflicted.rs"));
         }
 
         /// An absolute path that did not resolve is simply not here. Searching by its

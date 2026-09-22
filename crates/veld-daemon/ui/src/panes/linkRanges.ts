@@ -22,6 +22,18 @@ export interface LinkCell {
   y: number;
 }
 
+/**
+ * How many rows of one wrapped block this will assemble.
+ *
+ * A logical line is normally a handful of rows, and then somebody prints a minified
+ * bundle, a base64 blob or a single-line JSON log. With `terminal.scrollback` at its
+ * default of 10000, that is one block of ten thousand rows — and xterm re-asks the
+ * provider on **every row the pointer crosses** (it caches only same-row moves), so
+ * dragging down a viewport would rebuild an ~800 KB string forty times on the main
+ * thread. No path is wrapped across more rows than this.
+ */
+const MAX_BLOCK_ROWS = 256;
+
 /** A logical line, and the 0-based row it starts on. */
 export interface LogicalBlock {
   text: string;
@@ -64,22 +76,28 @@ export function logicalBlockAt(
     return null;
   }
   let startY = asked;
-  // A wrapped row continues the one above, so walk back to the row that began it.
+  // A wrapped row continues the one above, so walk back to the row that began it —
+  // but only so far. Past the cap the honest answer is the same as for a row whose
+  // width cannot be trusted: no links here.
+  let back = 0;
   while (startY > 0 && getRow(startY)?.isWrapped) {
+    if (++back > MAX_BLOCK_ROWS) {
+      return null;
+    }
     startY -= 1;
   }
   let text = "";
-  for (let y = startY; ; y += 1) {
+  for (let y = startY; y - startY <= MAX_BLOCK_ROWS; y += 1) {
     const row = getRow(y);
     if (!row || (y > startY && !row.isWrapped)) {
-      break;
+      return { text, startY };
     }
     if (row.text.length !== cols) {
       return null;
     }
     text += row.text;
   }
-  return { text, startY };
+  return null;
 }
 
 /**

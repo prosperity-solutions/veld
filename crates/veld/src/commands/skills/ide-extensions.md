@@ -495,9 +495,13 @@ Four rules about `$1`, each of which has a wrong obvious answer:
    no line addressing — just ignores it.
 
 An `argv` action gets the two values **appended** as its last two arguments
-instead, which needs none of this care; use it when your editor takes the path and
-the line as separate arguments, and `shell` when it wants them joined
-(`code -g file:line`).
+instead. Use it when your editor takes the path and the line as separate arguments,
+and `shell` when it wants them joined (`code -g file:line`).
+
+**Do not write `$1` or `$2` in an `argv` element.** There is no shell there to bind
+one, so it reaches the command as those literal characters *and* the real values
+arrive after it — `["code", "-g", "$1:$2"]` runs `code -g $1:$2 <path> <line>`, and
+the editor is what complains. `veld lint` refuses it.
 
 **`$1` can be a directory** (`ls some/dir/` prints them). Veld does not branch for
 you, because `code -g dir:1` is wrong where `code dir` is right and only the

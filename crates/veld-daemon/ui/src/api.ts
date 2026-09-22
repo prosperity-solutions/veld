@@ -565,7 +565,13 @@ export interface ExtensionSpec {
   display?: "text" | "icon";
   /** An `action`'s declared `accepts` — the click-time context it wants. Absent
    *  for an action that takes none, which is what a top-bar button clicks. A
-   *  file click offers exactly the actions whose `accepts` is `"file"`. */
+   *  file click offers exactly the actions whose `accepts` is `"file"`.
+   *
+   *  **Hand-mirrored from `veld_core::ide::EXTENSION_ACCEPTS`, with no check tying
+   *  the two.** The Rust side is an exhaustive enum, so a new variant compiles only
+   *  once every `match` handles it — and then stops, because this union is a
+   *  string literal the compiler is perfectly happy with. Widen it here in the same
+   *  change, or the new kind exists on the wire and the UI never offers it. */
   accepts?: "file";
 }
 

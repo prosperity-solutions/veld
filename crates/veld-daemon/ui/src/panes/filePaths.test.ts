@@ -264,6 +264,27 @@ describe("findFilePaths — regressions from driving it", () => {
     expect(findFilePaths(`${huge} src/api.ts`).map((m) => m.path)).toEqual(["src/api.ts"]);
   });
 
+  // The daemon's `line` is a `u32`, and serde rejects the **whole body** on an
+  // out-of-range integer — so an oversized tail does not degrade to "line 1", it
+  // fails the click on a file that resolves perfectly well.
+  it.each([
+    ["epoch milliseconds", "trace.json:1758499200000", "trace.json"],
+    ["a timestamp", "build.log:20260922120000", "build.log"],
+  ])("treats %s as not a line, keeping the path clickable", (_what, line, path) => {
+    const [m] = findFilePaths(line);
+    expect(m.path).toBe(path);
+    expect(m.line).toBeUndefined();
+    // And the underline stops before the digits, because they are not a line.
+    expect(line.slice(m.start, m.end)).toBe(path);
+  });
+
+  it("still takes a line at the top of the range", () => {
+    const [m] = findFilePaths("a.ts:4294967295");
+    expect(m.line).toBe(4_294_967_295);
+    const [over] = findFilePaths("a.ts:4294967296");
+    expect(over.line).toBeUndefined();
+  });
+
   it("stays linear on a long run of punctuation", () => {
     // The shape that backtracked quadratically through an anchored character class
     // (measured 1.6s at 64k before `punctuationSpan` walked from the ends instead).

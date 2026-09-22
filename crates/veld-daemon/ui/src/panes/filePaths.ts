@@ -202,6 +202,19 @@ const EXPLICIT_PATH = /^(?:\.\.?\/|\/)/u;
 const ALL_DIGITS = /^\d+$/u;
 
 /**
+ * The largest `:N` this will read as a line number.
+ *
+ * `u32::MAX`, because that is what the daemon's `ActivateBody.line` is — and serde
+ * rejects the **whole request body** on an out-of-range integer, so a number past
+ * this does not degrade to "open at line 1", it fails the click outright with a
+ * deserializer message. The shape that produces one is ordinary: epoch
+ * milliseconds after a linkable extension, as in `trace.json:1758499200000` or
+ * `build.log:20260922120000`. Treating it as *not a line* keeps the path clickable
+ * and stops the underline before the digits, which is what it is.
+ */
+const MAX_LINE = 4_294_967_295;
+
+/**
  * The longest whitespace-free run this will even look at.
  *
  * Past every real path (`PATH_MAX` is 4096) and well short of where the anchored
@@ -229,13 +242,16 @@ function splitLineTail(body: string): {
   /** Characters of `body` the path and its numbers occupy. */
   width: number;
 } {
+  const isLine = (part: string | undefined) =>
+    part !== undefined && ALL_DIGITS.test(part) && Number(part) <= MAX_LINE;
+
   const parts = body.split(":");
   const path = parts[0];
-  if (parts.length < 2 || !ALL_DIGITS.test(parts[1])) {
+  if (!isLine(parts[1])) {
     return { path, width: path.length };
   }
   const line = Number(parts[1]);
-  if (parts.length < 3 || !ALL_DIGITS.test(parts[2])) {
+  if (!isLine(parts[2])) {
     return { path, line, width: `${path}:${parts[1]}`.length };
   }
   return {

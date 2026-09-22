@@ -367,6 +367,13 @@ pub const EXTENSION_DISPLAY: &[&str] = &["icon", "text"];
 /// value into the interpolation table: the value arrives as a *positional parameter*
 /// (`$1`, `$2`), because `${veld.*}` is a closed set and because the whole point is
 /// to carry a string veld did not choose. See [`ACTION_ACCEPTS_FILE`].
+///
+/// **Mirrored by hand in `crates/veld-daemon/ui/src/api.ts`** (`accepts?: "file"` on
+/// `ExtensionSpec`), and nothing ties the two together. Every Rust `match` on
+/// [`ActionAccepts`] is exhaustive, so the compiler walks an author through the
+/// server side of a new variant and then stops — the TypeScript still builds, and
+/// the UI silently never offers the new kind. Widen the union there in the same
+/// change.
 pub const EXTENSION_ACCEPTS: &[&str] = &[ACTION_ACCEPTS_FILE];
 
 /// `accepts: "file"` — the action is offered for a file the user clicked, and is
@@ -1614,6 +1621,32 @@ fn parse_extension(item: &serde_json::Value, at: &str, out: &mut IdeSection) -> 
         }
     };
 
+    // **`$1` in an `argv` element is inert text, and looks exactly like the thing
+    // that works.** There is no shell to bind a positional parameter, so
+    // `"argv": ["code", "-g", "$1:$2"]` passes those four characters through
+    // literally and veld appends the real path and line *after* them — the editor
+    // gets `code -g $1:$2 <path> <line>` and fails on its own, far from this file.
+    // It is the natural mistake for somebody copying the `shell` form, and nothing
+    // downstream catches it: not the schema, not the daemon (which only checks that
+    // `accepts` and the request agree), not a test. So it is caught here.
+    if let ExtensionBody::Action(action) = &body
+        && action.accepts.is_some()
+        && let crate::config::CommandSpec::Argv(argv) = &action.command
+        && let Some(bad) = argv.iter().find(|arg| mentions_positional(arg))
+    {
+        out.problems.push(IdeProblem {
+            location: format!("{at}.argv"),
+            message: format!(
+                "{bad:?} looks like a positional parameter, but `argv` has no shell \
+                 to bind one \u{2014} it would reach the command as those literal \
+                 characters, with the real path and line appended after them. An \
+                 `argv` action is handed the two values as its last two arguments, so \
+                 name neither; use `shell` if you need them joined"
+            ),
+        });
+        return None;
+    }
+
     // A slot renders a control the user clicks with nothing selected, so there is no
     // file to hand an action that asked for one. Reported rather than ignored,
     // because the alternative is a top-bar button that looks live and runs a command
@@ -1697,6 +1730,16 @@ fn parse_extension_command(
 /// The doubled `Option` follows this module's convention: the outer `None` means
 /// *skip this extension* and a problem has been recorded, the inner means the key
 /// was absent, which is the ordinary case.
+/// Whether `arg` names a shell positional parameter.
+///
+/// Both spellings, because `${1}` does not contain `$1`. Deliberately a plain
+/// substring test on the four forms that matter rather than shell parsing: an
+/// `argv` element of an `accepts` action has no legitimate reason to contain any of
+/// them, so precision costs nothing and a parser would be the wrong tool.
+fn mentions_positional(arg: &str) -> bool {
+    ["$1", "$2", "${1}", "${2}"].iter().any(|p| arg.contains(p))
+}
+
 fn parse_action_accepts(
     entry: &serde_json::Map<String, serde_json::Value>,
     at: &str,
@@ -4823,6 +4866,49 @@ mod tests {
             "the message should say which half to remove: {}",
             parsed.problems[0].message
         );
+    }
+
+    /// **The trap `argv` sets for somebody copying the `shell` form.** `$1` in an
+    /// `argv` element is inert — no shell binds it — and the real values are
+    /// appended *after* it, so the editor receives both the literal and the path.
+    /// Nothing downstream catches it, which is why lint does.
+    #[test]
+    fn a_positional_parameter_in_argv_is_refused_for_an_accepts_action() {
+        for argv in [
+            json!(["code", "-g", "$1:$2"]),
+            json!(["code", "$1"]),
+            json!(["code", "${1}"]),
+            json!(["code", "--line", "$2"]),
+        ] {
+            let parsed = one_extension(json!({
+                "id": "edit", "type": "action", "accepts": "file", "argv": argv,
+            }));
+            assert!(parsed.extensions.is_empty(), "{argv} must be refused");
+            assert!(!parsed.problems.is_empty(), "{argv} must say why");
+        }
+    }
+
+    /// The counterpart, so the check does not simply forbid `argv` here: an `argv`
+    /// action that names neither is the correct shape, and gets the values appended.
+    #[test]
+    fn an_accepts_action_may_use_argv_when_it_names_no_positional() {
+        let parsed = one_extension(json!({
+            "id": "edit", "type": "action", "accepts": "file",
+            "argv": ["my-editor", "--wait"],
+        }));
+        assert_eq!(parsed.problems, vec![]);
+        assert_eq!(parsed.extensions.len(), 1);
+    }
+
+    /// And the check is scoped to `accepts` actions — an ordinary action's `argv`
+    /// gets no positional values, so `$1` there is a literal its author chose.
+    #[test]
+    fn a_plain_action_may_still_write_a_dollar_one() {
+        let parsed = one_extension(json!({
+            "id": "echo", "slot": "topBar", "type": "action", "argv": ["echo", "$1"],
+        }));
+        assert_eq!(parsed.problems, vec![]);
+        assert_eq!(parsed.extensions.len(), 1);
     }
 
     /// **The same hole as `slot`, reached through a menu.** Found by review: the

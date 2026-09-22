@@ -3335,6 +3335,13 @@ of each is wrong:
 - **`$2` is always set.** A path printed without a line number gets `1`, so a
   script never has to guard for an unset parameter. A fallback branch that cannot
   express a line — `open -a` has no line addressing — can simply ignore it.
+- **These are `shell`'s parameters. Never write `$1` or `$2` in an `argv`
+  element.** There is no shell there to bind one, so it arrives as those literal
+  characters *and* the real values are appended after it —
+  `["code", "-g", "$1:$2"]` runs `code -g $1:$2 <path> <line>`, and the editor is
+  what complains. An `argv` action is simply handed the two values as its last two
+  arguments; `veld lint` refuses one that names them, because nothing downstream
+  would.
 
 **`$1` can be a directory.** `ls some/dir/` prints those too, and every editor
 this exists for opens one — but veld does not branch for you, because `code -g
