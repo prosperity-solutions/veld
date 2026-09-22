@@ -3983,7 +3983,15 @@ async fn create_worktree(
     // accepted would otherwise cost a checkout on disk filed in the wrong place.
     if let Some(lane) = body.lane.as_deref().filter(|l| !l.is_empty()) {
         let lanes = db.list_lanes(&repo_root).map_err(db_err)?;
-        if !lanes.iter().any(|l| l.name == lane) {
+        // Not `l.name == lane` alone: `list_lanes` also returns the ungrouped
+        // section's position row (`UNGROUPED_LANE`), which is not a lane and is
+        // not somewhere a checkout can be filed. `Db::patch_worktree` refuses it
+        // too; this is the pre-check that keeps a rejected lane from costing a
+        // `git worktree add` first.
+        if !lanes
+            .iter()
+            .any(|l| l.name == lane && l.name != veld_core::db::UNGROUPED_LANE)
+        {
             return Err(err(
                 StatusCode::BAD_REQUEST,
                 "no such lane in this repo — nothing was created",

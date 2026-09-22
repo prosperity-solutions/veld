@@ -1160,17 +1160,6 @@ button.lane-empty {
   background: var(--elev);
   color: var(--text);
 }
-/* The Detached lane's question mark is informational, not a button — it opens a
-   tooltip but takes no action, so it reads as a hint rather than a control and
-   must not invite a click that does nothing. The header's fold guard names this
-   class for that reason — the bar folds under a click anywhere else along it,
-   and a cursor promising nothing must not be the one place it lies. */
-.lane-help {
-  cursor: help;
-}
-.lane-help:hover {
-  background: none;
-}
 /* Pending removal is a state, not a lane — coloured so it does not read as a
    group the user made. */
 .rail-group.trash .lane-head {
@@ -1909,6 +1898,19 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    should be dimmer than this. */
 .wt-git.dirty {
   color: var(--muted);
+}
+/* Not on a branch. Reads at `--fg` like `unpushed` rather than at `--muted` like
+   `dirty`, and for the same reason: a detached HEAD is not the normal condition of
+   a checkout you are working in, and it is the state whose *invisibility* is what
+   this glyph was added to fix — it used to be said by moving the row into a
+   section of its own, which is what made rows leave their group during a rebase.
+
+   Not amber, on the same rule as `unpushed`: nothing has failed, and `--warn` on a
+   row is spoken for by the two glyphs that mean "something stopped and wants you".
+   A detached checkout is a state to notice, not an error to escalate — which is
+   also why the glyph is a broken link rather than a warning shape. */
+.wt-git.detached {
+  color: var(--fg);
 }
 /* Committed but not pushed. Brighter than dirty because it is the one state with an
    action that is *finished being decided* — the work is done and it is still only on

@@ -18,8 +18,11 @@
  *   what makes the two windows agree — see `useFoldedSections` in `App.tsx`.
  * - **The stored value is a set of section keys** ([`RailGroup.key`]) — the lane
  *   name for a real lane, `""` for the ungrouped section, and the NUL-prefixed
- *   sentinels for Detached and the trash. `""` is a legal member, which is why
- *   this is a `Set` and not a delimited string with an "empty means none" reading.
+ *   sentinels for the trash and the Deleting lane. `""` is a legal member, which
+ *   is why this is a `Set` and not a delimited string with an "empty means none"
+ *   reading. A key that no section renders any more is inert, not an error — the
+ *   Detached section was removed and every fold stored against it simply stops
+ *   matching, which is why nothing prunes them.
  * - **A lane has no id** (`api.ts`: identified by `(repo root, name)`), so a fold
  *   does not survive a rename on its own — [`renameFoldedSection`] moves it and
  *   [`forgetFoldedSection`] drops it on delete. Without the second one, deleting a

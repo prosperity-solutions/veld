@@ -512,9 +512,8 @@ export interface RailGroup {
    * that set into a group in one gesture is the whole point of the action.
    *
    * False for every pinned section, each for its own reason: the main checkout
-   * is one row and is the repository, the Detached and Trash lanes already carry
-   * their batch action as a header button, and a removal in flight is not a set
-   * to re-file.
+   * is one row and is the repository, the Trash lane already carries its batch
+   * action as a header button, and a removal in flight is not a set to re-file.
    */
   bulk: boolean;
   worktrees: Worktree[];
@@ -529,7 +528,7 @@ export interface RailGroup {
  * cannot collide.
  *
  * **Also a stored value, not only a runtime constant.** This string, along with
- * [`DELETING_LANE`] and [`DETACHED_LANE`] below, is what `ide/foldedSections.ts`
+ * [`DELETING_LANE`] below, is what `ide/foldedSections.ts`
  * persists in `localStorage` for a folded virtual section, so renaming one
  * silently orphans every existing user's fold for it — no error, no migration,
  * the section just quietly comes back open. Change one only with a read-time
@@ -550,21 +549,6 @@ export const TRASH_LANE = "\u0000trash";
  * name, so a repo lane can never collide with it.
  */
 export const DELETING_LANE = "\u0000deleting";
-
-/**
- * Group key for the virtual "Detached" lane — checkouts with a detached HEAD.
- *
- * Like [`TRASH_LANE`] / [`DELETING_LANE`], not a lane name: a leading NUL cannot
- * occur in a lane name, so a repo lane can never collide with it.
- *
- * A detached checkout is a git state, not a lane the user filed something into,
- * so it gets a section of its own (between the ungrouped worktrees and the real
- * lanes) and never joins the lane it was assigned while detached — being detached
- * is the more important thing to say about it. `branch === "(detached)"` is the
- * daemon's spelling (`crates/veld-daemon/src/desktop.rs`); the constant below is
- * the one place the UI names it, so a rename lives here rather than at call sites.
- */
-export const DETACHED_LANE = "\u0000detached";
 
 /**
  * Group key for the main checkout's own pinned section.
@@ -588,10 +572,47 @@ export const DETACHED_LANE = "\u0000detached";
  */
 export const MAIN_LANE = "\u0000main";
 
+/**
+ * The name under which the **ungrouped bucket's place in the rail order** is
+ * stored, as an ordinary row in the daemon's `lanes` table.
+ *
+ * The bucket ("Worktrees") is not a lane: membership in it is `worktrees.lane =
+ * ''` and there is nothing to rename or delete. But it does hold a *position*
+ * among the lanes, because a group can be dragged above it — and a position has
+ * to live somewhere. It lives in the one column that already orders sections,
+ * rather than in a second store that every present and future lane operation
+ * would then have to remember to keep in step.
+ *
+ * NUL-prefixed like the reserved keys above, and here the collision it rules out
+ * is not hypothetical: this string is written to a table whose primary key is
+ * `(repo_root, name)` and whose other rows are named by the user.
+ * `valid_lane_name` rejects control characters, so `create_lane` and
+ * `rename_lane` cannot produce it and no repo can grow a real lane that aliases
+ * the bucket's slot. It is also the first of these constants to reach SQLite
+ * rather than only `localStorage`; `reorder_lanes_places_the_ungrouped_bucket`
+ * pins that an embedded NUL survives the `json_each` filter that `reorder_lanes`
+ * uses, which is the one operation where it could plausibly have not.
+ *
+ * **Absence is meaningful, and is what makes this need no migration.** A repo
+ * with no such row renders the bucket first — where it sat for every repo before
+ * it could be moved at all — so every existing database is already in the
+ * correct default state, and the row is created lazily by the first reorder that
+ * mentions it (`Db::reorder_lanes`). Nothing bumps `user_version`, so no
+ * installed binary meets a schema it refuses to open.
+ *
+ * Deliberately **not** the bucket's [`RailGroup.key`], which stays `""`. That key
+ * is a stored value too — `ide/foldedSections.ts` persists it in `localStorage` —
+ * so respelling it would silently reopen a folded Worktrees section for every
+ * existing user, exactly as [`TRASH_LANE`] warns. Two spellings for one section
+ * is the cheaper of the two wrongs, and [`orderKeyOf`] is the only place that
+ * converts between them.
+ */
+export const UNGROUPED_LANE = "\u0000ungrouped";
+
 /** The branch a checkout carries when its HEAD is detached. Mirrors the daemon. */
 export const DETACHED_BRANCH = "(detached)";
 
-/** Whether a worktree is on a detached HEAD — the thing the Detached lane groups. */
+/** Whether a worktree is on a detached HEAD — what the row's `detached` glyph marks. */
 export function isDetached(w: Worktree): boolean {
   return w.branch === DETACHED_BRANCH;
 }
@@ -614,8 +635,8 @@ export function isDetached(w: Worktree): boolean {
 export const UNGROUPED_LABEL = "Worktrees";
 
 /**
- * Split a repo's worktrees into rail sections: ungrouped first, then the detached
- * checkouts, then each lane in its own order, then the terminal "Deleting" lane,
+ * Split a repo's worktrees into rail sections: the ungrouped bucket and the
+ * lanes in the order the user arranged them, then the terminal "Deleting" lane,
  * then the trash.
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
@@ -628,10 +649,10 @@ export const UNGROUPED_LABEL = "Worktrees";
  * still needs somewhere to drop a worktree. The **trash is always kept too** — it
  * is the rail's permanent bottom anchor, rendered as an empty lane rather than
  * hidden — so the user always has a place that means "trash exists". The
- * Deleting lane and the Detached lane are conditional: each is a state, so an
- * empty one would be permanent clutter.
+ * Deleting lane is conditional: it is a state, so an empty one would be
+ * permanent clutter.
  */
-export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
+export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] {
   const live = worktrees.filter((w) => !w.trashed_at);
   // A worktree whose removal is actively running leaves the trash for the
   // terminal deleting lane: it is still a trashed row until the worker drops it,
@@ -655,26 +676,38 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
     .sort((a, b) =>
       a.trashed_at < b.trashed_at ? 1 : a.trashed_at > b.trashed_at ? -1 : 0,
     );
-  // Detached checkouts come out of every other section, whatever lane they were
-  // filed into: a detached HEAD is a state that overrides where a row belongs
-  // (same rule the trash applies to trashed rows).
-  const detached = live.filter((w) => isDetached(w) && !w.is_main);
-  const known = new Set(lanes.map((l) => l.name));
+  // `realLanes`, not `lanes`: the reserved position row is in this list, and
+  // counting it as a known lane breaks the fallback two comments down. A worktree
+  // whose `lane` is that name would be neither ungrouped (the name is "known")
+  // nor a member of any section (the loop emits the bucket for it, never a
+  // group), so it would render in no section at all — the "a row the user cannot
+  // reach" failure this very filter exists to prevent. The daemon refuses to
+  // write that lane, and this is the read side holding the same line.
+  const known = new Set(realLanes(lanes).map((l) => l.name));
+  // **A detached HEAD no longer moves a row anywhere.** It used to pull the
+  // checkout out of its group and into a virtual "Detached" section, which meant
+  // a rebase or a bisect made rows leave their group and come back — and left a
+  // group the user had just emptied holding checkouts it would not show them,
+  // which needed a warning paragraph in both batch dialogs to explain. The state
+  // is worth saying; relocating the row was the wrong way to say it. It is a
+  // glyph on the row now (`gitstate/gitState.ts`), beside "dirty" and
+  // "unpushed" — a standing property of the checkout, which is exactly what that
+  // vocabulary is for.
+  //
   // A worktree whose lane no longer exists counts as ungrouped rather than
   // vanishing. `delete_lane` clears assignments in the same transaction, so this
   // should not arise — but a row the client cannot place is a row the user cannot
   // reach, and that is the worse failure.
   const ungrouped = live.filter(
-    (w) => !w.is_main && !isDetached(w) && (!w.lane || !known.has(w.lane)),
+    (w) => !w.is_main && (!w.lane || !known.has(w.lane)),
   );
   // The main checkout gets a section of its own — it is the repository, not one of
   // the branches you are juggling, and a divider under it says so. Only while it is
   // ungrouped: assigned to a lane it belongs in that lane, because the user put it
-  // there on purpose. A *detached* main leads the rail too (and is never a
-  // throwaway in the Detached lane — it is the repo), but is not a lane member
-  // while detached, because detached overrides lane like every other row.
+  // there on purpose. Being detached no longer changes that either — it is the
+  // repository wherever its HEAD happens to be.
   const main = live.filter(
-    (w) => w.is_main && (isDetached(w) || !w.lane || !known.has(w.lane)),
+    (w) => w.is_main && (!w.lane || !known.has(w.lane)),
   );
   const groups: RailGroup[] = [];
   if (main.length > 0) {
@@ -693,52 +726,41 @@ export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
       worktrees: main,
     });
   }
-  groups.push({
+  const ungroupedSection: RailGroup = {
     key: "",
     lane: "",
     label: UNGROUPED_LABEL,
     pinned: false,
     addable: true,
-    // Not a lane: there is nothing here to rename or delete.
+    // Not a lane: there is nothing here to rename or delete. It *does* hold a
+    // place in the order — see [`UNGROUPED_LANE`] — which is why the rail gates
+    // dragging on `pinned` and not on this.
     editable: false,
     // But there IS a set of worktrees here — the whole rail, in a repo that has
     // defined no lanes — so the batch actions apply. See [`RailGroup.bulk`].
     bulk: true,
     worktrees: ungrouped.filter((w) => !w.is_main),
-  });
-  // The virtual Detached lane, between the ungrouped worktrees and the real
-  // lanes. Conditional like Deleting: an empty one would be permanent clutter.
-  // Pinned and not a drop target — a checkout cannot be *filed* as detached, it
-  // is detected. It carries the group's action (trash all) in its header, so
-  // `addable`/`editable` both stay false and the section renders header actions
-  // by `key` instead.
-  if (detached.length > 0) {
+  };
+  // The ungrouped bucket and the real lanes are **one ordered run**, walked in
+  // the order [`railOrder`] resolves — which is the lanes' stored `position`
+  // order with the bucket slotted in at its own row, or leading when it has
+  // none. Before the bucket could be moved these were two separate pushes, and
+  // that was the whole of the limitation: a section emitted before a loop can
+  // never be reached by reordering what the loop walks.
+  for (const name of railOrder(lanes)) {
+    if (name === UNGROUPED_LANE) {
+      groups.push(ungroupedSection);
+      continue;
+    }
     groups.push({
-      key: DETACHED_LANE,
-      lane: DETACHED_LANE,
-      label: "Detached",
-      pinned: true,
-      addable: false,
-      editable: false,
-      // Its "trash all" is a header button already, and a lane move would be
-      // invisible: a detached checkout is pulled out of whatever lane it is
-      // filed into, so the rows would not leave this section.
-      bulk: false,
-      worktrees: detached,
-    });
-  }
-  for (const l of lanes) {
-    // A detached checkout stays out of its lane while it is detached; it returns
-    // when it is put back on a branch.
-    groups.push({
-      key: l.name,
-      lane: l.name,
-      label: l.name,
+      key: name,
+      lane: name,
+      label: name,
       pinned: false,
       addable: true,
       editable: true,
       bulk: true,
-      worktrees: live.filter((w) => w.lane === l.name && !isDetached(w)),
+      worktrees: live.filter((w) => w.lane === name),
     });
   }
   if (deleting.length > 0) {
@@ -826,8 +848,8 @@ export function trashPreview(
  * `from` is the source section's lane — `""` for ungrouped, a lane name
  * otherwise. The virtual sections are absent by construction, because none of
  * them is in `lanes` and none of them is somewhere a checkout can be *filed*:
- * Detached and Deleting are states, and the trash has its own action because
- * binning is not a lane move.
+ * Deleting is a state, and the trash has its own action because binning is not
+ * a lane move.
  *
  * An **empty** result happens in exactly one case — the ungrouped section of a
  * repo that has defined no lanes — and it does **not** disable the gesture: the
@@ -841,7 +863,7 @@ export function trashPreview(
  * the same top-to-bottom the user is looking at while they choose.
  */
 export function bulkMoveTargets(
-  lanes: Lane[],
+  lanes: RealLanes,
   from: string,
 ): Array<{ value: string; label: string }> {
   const targets = lanes
@@ -866,37 +888,6 @@ export function bulkMoveTargets(
   return targets;
 }
 
-/**
- * The detached checkouts filed into one rail section that a batch action will
- * **not** touch.
- *
- * A detached HEAD overrides where a row belongs, so [`railGroups`] pulls those
- * rows out of their lane and into the virtual Detached section — which means they
- * are not in the section's member list and a batch never sees them. Their `lane`
- * column still names the section, though, so checking a branch out again puts the
- * row back into a group the user believes they emptied. This is what lets both
- * batch dialogs say so up front rather than surprising them later.
- *
- * `lane` is the section's key. For the ungrouped section (`""`) a row counts if
- * its lane is empty *or* names a lane this repo no longer defines — the same
- * "cannot be placed, so it is ungrouped" rule [`railGroups`] applies.
- */
-export function detachedInSection(
-  worktrees: Worktree[],
-  lanes: Lane[],
-  lane: string,
-): Worktree[] {
-  const known = new Set(lanes.map((l) => l.name));
-  return worktrees.filter(
-    (w) =>
-      !w.trashed_at &&
-      // The main checkout leads the rail even while detached and is never a
-      // member of anything — see `railGroups`.
-      !w.is_main &&
-      isDetached(w) &&
-      (lane === "" ? !w.lane || !known.has(w.lane) : w.lane === lane),
-  );
-}
 
 /**
  * The worktrees of a section that a batch trash may actually bin.
@@ -1015,6 +1006,106 @@ export function insertionTarget(
   return boxes.length;
 }
 
+declare const laneRowsBrand: unique symbol;
+declare const realLanesBrand: unique symbol;
+
+/**
+ * The daemon's lane rows **exactly as sent** — the user's groups *plus* the
+ * reserved row holding the ungrouped section's place ([`UNGROUPED_LANE`]).
+ *
+ * Branded, and the brand is the whole point. This list and [`RealLanes`] are both
+ * arrays of `Lane`, so before the brands existed the two were freely
+ * interchangeable and passing the wrong one compiled, linted and tested clean
+ * while being wrong in two specific ways a reviewer found:
+ *
+ * - [`railGroups`] or [`railOrder`] handed a *filtered* list cannot know where the
+ *   bucket was, so it synthesises it at the front — silently restoring the very
+ *   behaviour this module was changed to remove, with no error anywhere.
+ * - [`bulkMoveTargets`] handed a *raw* list offers the reserved row as a
+ *   destination, i.e. a menu entry labelled with an invisible control character.
+ *
+ * Neither is expressible now: each function demands its own brand, and the only
+ * way across is [`realLanes`] — which is one-way, because [`asLaneRows`] takes a
+ * mutable array and `RealLanes` is `readonly`. This is the same discipline [`MAIN_LANE`] applies to
+ * the key space — a guard by construction beats one every future caller has to
+ * remember.
+ */
+export type LaneRows = readonly Lane[] & { readonly [laneRowsBrand]: true };
+
+/** The repo's real groups — [`LaneRows`] with the reserved row removed. */
+export type RealLanes = readonly Lane[] & { readonly [realLanesBrand]: true };
+
+/**
+ * Tag a list from the daemon as [`LaneRows`]. The single entry point to the
+ * branded world, and the only cast: everything downstream is checked.
+ *
+ * Takes a **mutable** `Lane[]` on purpose. [`RealLanes`] is `readonly`, so
+ * narrowing the parameter this way is what stops `asLaneRows(realLanes(x))` —
+ * re-branding an already-filtered list back into raw rows and walking straight
+ * past the guard below. A daemon payload (`repo.lanes`) is mutable and still fits.
+ */
+export function asLaneRows(lanes: Lane[]): LaneRows {
+  return lanes as unknown as LaneRows;
+}
+
+/**
+ * The repo's actual groups — every row the daemon sent except the ungrouped
+ * section's position marker.
+ *
+ * `lanes` as the daemon serves it is **two things in one list**: the groups a
+ * user made, and one reserved row recording where the ungrouped section sits
+ * ([`UNGROUPED_LANE`]). Ordering wants both; every other question — which groups
+ * exist, what names are taken, where a batch move may go — wants only the first,
+ * and must not offer a row whose label is an invisible control character.
+ *
+ * So the raw list stays confined to [`railOrder`] and [`railGroups`], and
+ * everything else reads this. Filtering at each call site instead is the
+ * arrangement `MAIN_LANE` above was introduced to get rid of: a guard you have to
+ * remember at every future lookup is one a future lookup will not have.
+ */
+export function realLanes(lanes: LaneRows): RealLanes {
+  return lanes.filter((l) => l.name !== UNGROUPED_LANE) as unknown as RealLanes;
+}
+
+/**
+ * The rail's orderable sections, in order, as the names the daemon stores.
+ *
+ * One list, and it is the coordinate space every ordering question in the rail
+ * is asked in: the lanes in their stored `position` order, with the ungrouped
+ * bucket at its own row ([`UNGROUPED_LANE`]).
+ *
+ * **A repo with no row for the bucket gets one synthesised at the front**, which
+ * is both the pre-existing layout and the thing that lets the very first drag
+ * express itself: the order handed to `reorder_lanes` always names the bucket,
+ * so the daemon has somewhere to record a slot it has never stored before. That
+ * is why this is not simply `lanes.map(l => l.name)` with a filter.
+ */
+export function railOrder(lanes: LaneRows): string[] {
+  const names = lanes.map((l) => l.name);
+  return names.includes(UNGROUPED_LANE) ? names : [UNGROUPED_LANE, ...names];
+}
+
+/**
+ * A section's name in [`railOrder`], or `null` for one that holds no place in
+ * the order.
+ *
+ * The single converter between the bucket's two spellings — `RailGroup.key` is
+ * `""` because `localStorage` folds are keyed on it, while the daemon stores its
+ * position under [`UNGROUPED_LANE`]. Keying on `key` rather than `lane` is safe
+ * here in a way it was not before [`MAIN_LANE`] existed: every pinned section now
+ * carries a NUL-prefixed key that no lane name can alias, and `pinned` filters
+ * them out first regardless.
+ *
+ * Gated on `pinned`, never on `editable`. Those are different questions — the
+ * bucket has no lane to rename and so is not `editable`, but it does hold a
+ * place in the order — and conflating them is precisely what kept a group from
+ * being dragged above it.
+ */
+export function orderKeyOf(g: RailGroup): string | null {
+  if (g.pinned) return null;
+  return g.key === "" ? UNGROUPED_LANE : g.lane;
+}
+
 /**
  * The lane order after moving the lane `name` onto the place currently held by
  * the lane `onto`.
@@ -1034,25 +1125,31 @@ export function insertionTarget(
  * `reorder_lanes`, so the write is idempotent. `null` when either lane is unknown
  * or the move changes nothing — dropping a lane on itself is a normal gesture and
  * must not cost a request and a refresh.
+ *
+ * Takes the resolved order from [`railOrder`] rather than `Lane[]`, so the
+ * ungrouped bucket is simply one more name in it and needs no special case. The
+ * names-not-indices discipline above is exactly what made that substitution free:
+ * had the signature been positional, "the bucket" would have had to become an
+ * index into a list it is not a member of.
  */
 export function moveLane(
-  lanes: Lane[],
+  order: readonly string[],
   name: string,
   onto: string,
 ): string[] | null {
-  const from = lanes.findIndex((l) => l.name === name);
-  const at = lanes.findIndex((l) => l.name === onto);
+  const from = order.indexOf(name);
+  const at = order.indexOf(onto);
   // An unknown lane is a stale render — one deleted or renamed by another window
   // between this drag starting and the drop.
   if (from < 0 || at < 0 || from === at) return null;
-  const order = lanes.map((l) => l.name);
-  order.splice(from, 1);
+  const next = [...order];
+  next.splice(from, 1);
   // `at` is the index the dragged lane must *hold* afterwards — that is what
   // taking the target's place means — so it indexes the final list directly. No
   // shift for having removed the lane first: an insertion point would need one,
   // and confusing the two is the bug this signature exists to make unsayable.
-  order.splice(at, 0, name);
-  return order;
+  next.splice(at, 0, name);
+  return next;
 }
 
 /**

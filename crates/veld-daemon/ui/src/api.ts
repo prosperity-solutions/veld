@@ -785,7 +785,9 @@ export interface Repo {
   available: boolean;
   worktrees: Worktree[];
   /**
-   * The repo's rail lanes, in their own order.
+   * The repo's lane rows, in their own order — the user's groups **plus** the
+   * reserved row holding the ungrouped section's place, if this repo has one.
+   * See {@link Lane}; pass it through `realLanes` for anything but ordering.
    *
    * Sent with the repo rather than fetched separately so the rail never has a
    * frame where a worktree's `lane` names a group it has not heard of.
@@ -863,7 +865,17 @@ export interface RepoGitStatus {
  */
 export const MAX_LANE_NAME_LEN = 32;
 
-/** A user-defined rail lane. Identified by `(repo root, name)` — there is no id. */
+/**
+ * A row of the daemon's `lanes` table. Identified by `(repo root, name)` — there
+ * is no id.
+ *
+ * **Not always a user-defined group.** One reserved row per repo may carry the
+ * name `UNGROUPED_LANE` (`model.ts`), which is not a lane at all: it records
+ * where the ungrouped "Worktrees" section sits in the rail order. Only
+ * `railGroups`/`railOrder` want it; everything that lists the groups a repo has
+ * must read `realLanes` first, or it offers the user a group whose label is an
+ * invisible control character.
+ */
 export interface Lane {
   repo_root: string;
   name: string;

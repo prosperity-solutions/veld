@@ -206,8 +206,10 @@ describe("the tooltip and the description cannot drift apart", () => {
   it("keeps short forms free of the separator the description joins with", () => {
     for (const dirty of dirties) {
       for (const up of upstreams) {
-        for (const fact of gitFacts(signals({ dirty, ...up }))) {
-          expect(fact.short).not.toContain(", ");
+        for (const detached of [false, true]) {
+          for (const fact of gitFacts(signals({ dirty, ...up }), detached)) {
+            expect(fact.short).not.toContain(", ");
+          }
         }
       }
     }
@@ -216,16 +218,21 @@ describe("the tooltip and the description cannot drift apart", () => {
   it("reports the same facts in both registers, for every emittable shape", () => {
     for (const dirty of dirties) {
       for (const up of upstreams) {
-        const git = signals({ dirty, ...up });
-        const facts = gitFacts(git);
-        // Both projections must account for every fact, counted at the source
-        // rather than by parsing a rendered string.
-        expect(gitTooltipLines(git)).toHaveLength(facts.length);
-        const description = gitDescription(git);
-        // The description is additionally gated on a glyph rendering; past that
-        // gate it must carry every fact.
-        if (description === undefined) continue;
-        expect(description.split(", ")).toHaveLength(facts.length);
+        // `detached` is the third dimension because it is a fact like any other
+        // here — it reaches both projections, so it has to be under the same
+        // guard, or the drift this test exists to prevent simply moves to it.
+        for (const detached of [false, true]) {
+          const git = signals({ dirty, ...up });
+          const facts = gitFacts(git, detached);
+          // Both projections must account for every fact, counted at the source
+          // rather than by parsing a rendered string.
+          expect(gitTooltipLines(git, detached)).toHaveLength(facts.length);
+          const description = gitDescription(git, detached);
+          // The description is additionally gated on a glyph rendering; past that
+          // gate it must carry every fact.
+          if (description === undefined) continue;
+          expect(description.split(", ")).toHaveLength(facts.length);
+        }
       }
     }
   });
@@ -267,5 +274,33 @@ describe("gitDescription", () => {
     expect(
       gitDescription(signals({ ahead: null, behind: null, upstream_gone: true })),
     ).toBeUndefined();
+  });
+
+  it("marks a detached HEAD, under dirty and over unpushed", () => {
+    // The precedence the maintainer chose: `dirty` keeps the top slot because it
+    // is the state `git worktree remove` refuses on.
+    expect(rowGitState(signals(), true)).toBe("detached");
+    expect(rowGitState(signals({ dirty: true }), true)).toBe("dirty");
+    expect(rowGitState(signals({ ahead: 3 }), true)).toBe("detached");
+    expect(rowGitState(signals({ ahead: 3 }), false)).toBe("unpushed");
+  });
+
+  it("marks a detached checkout the daemon has told it nothing else about", () => {
+    // The glyph must not depend on the git sweep having reached this row: a
+    // detached HEAD is read from the branch, which arrives with the worktree.
+    expect(rowGitState(undefined, true)).toBe("detached");
+    expect(rowGitState(undefined, false)).toBeNull();
+  });
+
+  it("says detached in both registers, even when another state holds the glyph", () => {
+    // The glyph collapses to one; the tooltip and the screen-reader account do
+    // not. A dirty detached checkout shows a pencil and still explains itself.
+    expect(gitTooltipLines(signals({ dirty: true }), true)).toContain(
+      "Detached HEAD — not on a branch, so new commits belong to none",
+    );
+    expect(gitDescription(signals({ dirty: true }), true)).toBe(
+      "uncommitted changes, detached HEAD",
+    );
+    expect(gitDescription(signals(), true)).toBe("detached HEAD");
   });
 });

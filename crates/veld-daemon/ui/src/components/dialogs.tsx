@@ -2597,28 +2597,6 @@ function BatchList(props: { children: ReactNode }) {
   );
 }
 
-/**
- * The line both batch dialogs show when the section holds detached checkouts.
- *
- * They are filed into this section but are not members of it — a detached HEAD
- * moves a row into the virtual Detached lane — so a batch cannot act on them,
- * and their `lane` keeps pointing here. Said up front, because the surprise
- * otherwise arrives much later: check a branch out again and the row is back in
- * a group you emptied. See `detachedInSection`.
- */
-function DetachedNote(props: { count: number; verb: string }) {
-  if (props.count === 0) return null;
-  return (
-    <Text size="sm" c="dimmed">
-      {props.count === 1
-        ? "One detached checkout is filed here"
-        : `${props.count} detached checkouts are filed here`}{" "}
-      but listed under <b>Detached</b> instead, so this cannot {props.verb}{" "}
-      {props.count === 1 ? "it" : "them"}. Check a branch out again and{" "}
-      {props.count === 1 ? "it comes" : "they come"} back here.
-    </Text>
-  );
-}
 
 /** What a batch move is aimed at: an existing group, or one to be created. */
 export type BatchMoveTarget = { lane: string } | { newLane: string };
@@ -2647,8 +2625,6 @@ export function MoveLaneWorktreesDialog(props: {
   targets: Array<{ value: string; label: string }>;
   /** Every lane name in the repo — the collision check for a new group. */
   taken: string[];
-  /** Detached checkouts filed here that this cannot move — see `DetachedNote`. */
-  detached: number;
   onMove: (target: BatchMoveTarget) => Promise<void>;
   onClose: () => void;
 }) {
@@ -2709,7 +2685,6 @@ export function MoveLaneWorktreesDialog(props: {
                 position you dragged it to, because a position only means
                 something inside one group.
               </Text>
-              <DetachedNote count={props.detached} verb="move" />
               <Radio.Group value={to} onChange={setTo} label="Move to">
                 <Stack gap={6} mt={6}>
                   {props.targets.map((t) => (
@@ -2785,8 +2760,6 @@ export function TrashLaneWorktreesDialog(props: {
   worktrees: Array<{ id: number; label: string }>;
   /** Whether the section also holds the main checkout, which is never binned. */
   mainExcluded: boolean;
-  /** Detached checkouts filed here that this cannot bin — see `DetachedNote`. */
-  detached: number;
   /** Fetch one worktree's git dirty state (the files blocking a later delete). */
   onStatus: (id: number) => Promise<WorktreeGitStatus>;
   onTrash: () => Promise<void>;
@@ -2905,7 +2878,6 @@ export function TrashLaneWorktreesDialog(props: {
                   itself, so it is never trashed.
                 </Text>
               )}
-              <DetachedNote count={props.detached} verb="trash" />
               {checking && (
                 <Group gap="xs">
                   <Loader size="xs" />
