@@ -1495,9 +1495,10 @@ Rejected, with reasons:
   fully validate the client's string before minting, so the validation was
   renamed rather than removed, and a symlink farm with process-group-lifetime GC
   is new state to get wrong.
-- **Writing `veld open <path>` into the terminal's stdin** as a synthetic
-  keystroke, reusing the shim that already resolves paths correctly in the
-  shell's live cwd. Needs no new contract at all, and is the only mechanism here
+- **Writing an `open <path>` into the terminal's stdin** as a synthetic
+  keystroke — the shim veld puts on each terminal's `PATH`, not a veld
+  subcommand — reusing the one thing that already resolves a relative path
+  correctly, because it runs in the shell's live cwd. Needs no new contract at all, and is the only mechanism here
   that is always right about a relative path. Rejected because what is usually
   running in the pane is an interactive agent TUI: gated on an idle prompt
   (OSC 133) it is disabled exactly when somebody wants it — you click a path
