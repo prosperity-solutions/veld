@@ -780,8 +780,12 @@ pub(crate) async fn activate(
 /// How long the suffix lookup waits for `git ls-files`.
 ///
 /// Generous for the walk and short enough that a pathological worktree fails the
-/// click instead of hanging it. Deliberately well under `ACTIVATE_GRACE`, so a slow
-/// lookup can never be mistaken for an editor that started.
+/// click instead of hanging it.
+///
+/// Independent of `ACTIVATE_GRACE`, and sequential with it rather than nested: this
+/// deadline expires *before* anything is spawned and answers 422, where the grace
+/// window decides whether an already-running child counts as started. Raising one
+/// does not constrain the other.
 const SUFFIX_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// The longest `file` an activation will look at.
@@ -944,8 +948,11 @@ async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError>
     // subdirectory-relative path), and `--others` walks every untracked file: an
     // extracted tarball, or a `vendor/` nobody gitignored, turns one click into a
     // hang with no client-side timeout, and repeated clicks stack more `git`
-    // processes. Expiry reads as "not found" rather than an error, because from the
-    // caller's side that is what happened: veld could not identify the file.
+    // processes. The walk is *reaped* on expiry rather than left running — see the
+    // `kill_on_drop` in `desktop::git_raw_with_index`, which this call is what added
+    // — so failing fast does not trade a hang for a pile of orphans. Expiry reads as
+    // "not found" rather than an error, because from the caller's side that is what
+    // happened: veld could not identify the file.
     let listing = tokio::time::timeout(
         SUFFIX_LOOKUP_TIMEOUT,
         super::desktop::git(

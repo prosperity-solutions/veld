@@ -217,10 +217,10 @@ const MAX_LINE = 4_294_967_295;
 /**
  * The longest whitespace-free run this will even look at.
  *
- * Past every real path (`PATH_MAX` is 4096) and well short of where the anchored
- * punctuation classes start costing real time. A token longer than this is not a
- * path somebody wants to click; it is a base64 blob, a minified line, or output
- * built to be expensive.
+ * Past every real path (`PATH_MAX` is 4096), and comfortably inside the range where
+ * the per-token work left here — a `split(":")` and its allocations — stays cheap.
+ * A token longer than this is not a path somebody wants to click; it is a base64
+ * blob, a minified line, or output built to be expensive.
  */
 const MAX_TOKEN_CHARS = 8 * 1024;
 
@@ -324,13 +324,14 @@ function isPathShaped(token: string): boolean {
  */
 export function findFilePaths(text: string): PathMatch[] {
   const out: PathMatch[] = [];
-  // **A token is bounded before the punctuation patterns see it.** Those are
-  // anchored character classes, and on a long run of their own characters they
-  // backtrack badly — measured at 1.6s for a single 64k-character token, on the
-  // main thread, re-run for every row of a wrapped block the mouse crosses. The
-  // text comes from whatever wrote the terminal, which this file already treats as
-  // untrusted, so the length of one token is not veld's to assume. Nothing real is
-  // lost: the longest path any filesystem will accept is 4096 bytes.
+  // **A token is bounded before anything else looks at it.** The quadratic cost
+  // this started as defence against is gone — `punctuationSpan` walks from the ends
+  // instead of backtracking through an anchored class — so this is now
+  // defence-in-depth against the linear-but-real work that remains: a `split(":")`
+  // and its allocations, run per token, re-run for every row of a wrapped block the
+  // mouse crosses. The text comes from whatever wrote the terminal, which this file
+  // already treats as untrusted, so the length of one token is not veld's to assume.
+  // Nothing real is lost: the longest path any filesystem accepts is 4096 bytes.
   const oversized = (token: string) => token.length > MAX_TOKEN_CHARS;
   // Whitespace is the only separator. A path containing a space cannot be found in
   // rendered output at all — nothing distinguishes it from two tokens — and guessing

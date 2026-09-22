@@ -715,6 +715,15 @@ async fn git_raw_with_index(
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE");
+    // **Reaped rather than orphaned**, matching every other bounded command in this
+    // repo (`veld_core::values`, `shell`, `user_path` all set it and say why). It
+    // does nothing on the ordinary path, where `output()` is awaited to completion —
+    // it matters when the future is dropped, which now happens: the suffix lookup in
+    // `extensions::resolve_by_suffix` puts a deadline on a `git ls-files --others`
+    // that walks every untracked file, and without this the timeout would return
+    // while the walk carried on, so repeated clicks stacked `git` processes exactly
+    // as the deadline was added to prevent.
+    cmd.kill_on_drop(true);
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }

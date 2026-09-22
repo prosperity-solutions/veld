@@ -1728,9 +1728,15 @@ fn parse_extension_command(
 /// Whether `arg` names a shell positional parameter.
 ///
 /// Both spellings, because `${1}` does not contain `$1`. Deliberately a plain
-/// substring test on the four forms that matter rather than shell parsing: an
-/// `argv` element of an `accepts` action has no legitimate reason to contain any of
-/// them, so precision costs nothing and a parser would be the wrong tool.
+/// substring test on the four forms that matter rather than shell parsing, which
+/// would be the wrong tool for a check whose whole job is catching one copy-paste.
+///
+/// It is therefore **broader than a positional parameter**: `"$100"` contains `$1`,
+/// and awk's `{print $1}` is a field reference, not a shell parameter. Both are
+/// refused, and the escape is to declare the action with `shell`, where that text
+/// means what its author intended anyway. Accepted as the cheaper error — the
+/// alternative lets the copy-paste through, and *that* fails inside the user's
+/// editor with nothing pointing back here.
 fn mentions_positional(arg: &str) -> bool {
     ["$1", "$2", "${1}", "${2}"].iter().any(|p| arg.contains(p))
 }

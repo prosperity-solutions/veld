@@ -82,10 +82,15 @@ describe("logicalBlockAt", () => {
     ])("assembles a block of %s rows -> null: %s", (_what, rows, expectNull) => {
       const get = (y: number): WrappedRow | undefined =>
         y < rows ? { text: "ab", isWrapped: y > 0 } : undefined;
-      const block = logicalBlockAt(get, rows - 1, 2);
-      expect(block === null).toBe(expectNull);
-      if (block) {
-        expect(block.text.length).toBe(rows * 2);
+      // **Both ends, because there are two loops and they are capped separately.**
+      // Asking only from the last row exercises the backward walk alone — the
+      // forward bound could be reintroduced off by one and this stayed green.
+      for (const asked of [rows - 1, 0]) {
+        const block = logicalBlockAt(get, asked, 2);
+        expect(block === null, `asked from row ${asked}`).toBe(expectNull);
+        if (block) {
+          expect(block.text.length).toBe(rows * 2);
+        }
       }
     });
 
