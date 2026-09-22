@@ -941,21 +941,23 @@ async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError>
             "that file is not inside this worktree".to_owned(),
         ));
     }
-    // **Deadlined, unlike `desktop::git` itself.** That helper is a bare
-    // `cmd.output().await` with no timeout and no `kill_on_drop`, which is fine
+    // **Deadlined and cancellable, unlike `desktop::git` itself.** That helper awaits
+    // `output()` with no deadline and passes `kill_on_drop: false`, which is right
     // where it is called on a click somebody is waiting on — but this call is the
     // *fallback* path, so it runs on the common case (an `ls` listing, a compiler's
     // subdirectory-relative path), and `--others` walks every untracked file: an
     // extracted tarball, or a `vendor/` nobody gitignored, turns one click into a
     // hang with no client-side timeout, and repeated clicks stack more `git`
-    // processes. The walk is *reaped* on expiry rather than left running — see the
-    // `kill_on_drop` in `desktop::git_raw_with_index`, which this call is what added
-    // — so failing fast does not trade a hang for a pile of orphans. Expiry reads as
+    // processes. `git_cancellable` rather than `git`, so the walk is *reaped* on
+    // expiry rather than left running: failing fast must not trade a hang for a pile
+    // of orphans. That variant exists for this call and is deliberately not the
+    // default, because most `git` callers here write and a kill partway through a
+    // `read-tree -u --reset` is worse than an orphan. Expiry reads as
     // "not found" rather than an error, because from the caller's side that is what
     // happened: veld could not identify the file.
     let listing = tokio::time::timeout(
         SUFFIX_LOOKUP_TIMEOUT,
-        super::desktop::git(
+        super::desktop::git_cancellable(
             FsPath::new(root),
             &[
                 "ls-files",

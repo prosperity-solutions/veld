@@ -82,9 +82,13 @@ describe("logicalBlockAt", () => {
     ])("assembles a block of %s rows -> null: %s", (_what, rows, expectNull) => {
       const get = (y: number): WrappedRow | undefined =>
         y < rows ? { text: "ab", isWrapped: y > 0 } : undefined;
-      // **Both ends, because there are two loops and they are capped separately.**
-      // Asking only from the last row exercises the backward walk alone — the
-      // forward bound could be reintroduced off by one and this stayed green.
+      // **Asked from both ends, because the walk reaches the same block two ways.**
+      // What this pins is the *forward* bound, which owns the answer: mutation-tested
+      // both directions, and loosening the forward check by one fails here while
+      // loosening the backward one does not — the forward check recomputes the span
+      // from whatever `startY` the backward walk produced, so it backstops it. The
+      // backward cap bounds `getRow` calls rather than the result, and the test below
+      // is what pins that.
       for (const asked of [rows - 1, 0]) {
         const block = logicalBlockAt(get, asked, 2);
         expect(block === null, `asked from row ${asked}`).toBe(expectNull);
@@ -92,6 +96,22 @@ describe("logicalBlockAt", () => {
           expect(block.text.length).toBe(rows * 2);
         }
       }
+    });
+
+    // The backward cap exists to bound *work*, not the answer — loosening it cannot
+    // change what comes back, because the forward check recomputes from whatever
+    // `startY` it lands on. So it is pinned the only way it is observable: by
+    // counting how far the walk is willing to look.
+    it("stops walking backwards instead of scanning the whole scrollback", () => {
+      let reads = 0;
+      const get = (y: number): WrappedRow | undefined => {
+        reads += 1;
+        // Every row continues the one above, so nothing ever ends the block.
+        return y >= 0 && y < 100_000 ? { text: "ab", isWrapped: y > 0 } : undefined;
+      };
+      expect(logicalBlockAt(get, 99_999, 2)).toBeNull();
+      // Bounded by the cap and a small constant, not by the scrollback.
+      expect(reads).toBeLessThan(1_000);
     });
 
     it("accepts a row whose emoji happens to cancel out", () => {

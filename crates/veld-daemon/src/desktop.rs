@@ -678,7 +678,7 @@ pub(crate) fn open_desktop_db() -> Result<Db, ApiError> {
 /// `.trim()` would silently destroy — which is exactly the bug that shipped
 /// when `git_status` used [`git`] and plain edits went undetected.
 async fn git_raw(dir: &FsPath, args: &[&str]) -> Result<Vec<u8>, String> {
-    git_raw_with_index(dir, None, args).await
+    git_raw_with_index(dir, None, args, false).await
 }
 
 /// [`git_raw`], plus the option of pointing git at an index file that is not
@@ -692,6 +692,18 @@ async fn git_raw_with_index(
     dir: &FsPath,
     index: Option<&FsPath>,
     args: &[&str],
+    // `kill_on_drop`: reap the child if this future is dropped before it resolves.
+    //
+    // **False for every caller but one, and that is not conservatism.** Axum drops a
+    // handler's future when the client disconnects — a page reload, a closed window,
+    // a quit app (see `extensions::GroupKill`, which documents the same fact) — and
+    // most callers here *write*: `worktree add`, `read-tree -u --reset`,
+    // `merge --ff-only`, `restore --worktree`, `clean -fd`. Killing one of those
+    // partway leaves a checkout matching neither the old tree nor the new one, where
+    // letting the orphan finish leaves it correct and merely unobserved. So the flag
+    // is opt-in, held by the one read-only caller that runs under a deadline and
+    // would otherwise keep walking after its timeout answered.
+    kill_on_drop: bool,
 ) -> Result<Vec<u8>, String> {
     let path_env = cached_user_path().await;
     let mut cmd = tokio::process::Command::new("git");
@@ -715,15 +727,7 @@ async fn git_raw_with_index(
         .env_remove("GIT_WORK_TREE")
         .env_remove("GIT_COMMON_DIR")
         .env_remove("GIT_INDEX_FILE");
-    // **Reaped rather than orphaned**, matching every other bounded command in this
-    // repo (`veld_core::values`, `shell`, `user_path` all set it and say why). It
-    // does nothing on the ordinary path, where `output()` is awaited to completion —
-    // it matters when the future is dropped, which now happens: the suffix lookup in
-    // `extensions::resolve_by_suffix` puts a deadline on a `git ls-files --others`
-    // that walks every untracked file, and without this the timeout would return
-    // while the walk carried on, so repeated clicks stacked `git` processes exactly
-    // as the deadline was added to prevent.
-    cmd.kill_on_drop(true);
+    cmd.kill_on_drop(kill_on_drop);
     if let Some(index) = index {
         cmd.env("GIT_INDEX_FILE", index);
     }
@@ -745,6 +749,21 @@ async fn git_raw_with_index(
 
 /// Run `git -C <dir> <args…>` with the user's login-shell PATH. Returns
 /// trimmed stdout, or the trimmed stderr as the error message.
+/// `git`, reaped if the caller's future is dropped.
+///
+/// For a **read-only** command run under a deadline. `git` itself deliberately does
+/// not do this — see `git_raw_with_index`'s `kill_on_drop` parameter — because most
+/// callers write, and a write killed partway is worse than one nobody waited for.
+/// Use this only where both halves hold: the command changes nothing, and something
+/// above it can give up while it is still running.
+pub(super) async fn git_cancellable(dir: &FsPath, args: &[&str]) -> Result<String, String> {
+    Ok(
+        String::from_utf8_lossy(&git_raw_with_index(dir, None, args, true).await?)
+            .trim()
+            .to_string(),
+    )
+}
+
 pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&git_raw(dir, args).await?)
         .trim()
@@ -754,7 +773,7 @@ pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
 /// [`git`], run against a scratch index file. See [`git_raw_with_index`].
 async fn git_with_index(dir: &FsPath, index: &FsPath, args: &[&str]) -> Result<String, String> {
     Ok(
-        String::from_utf8_lossy(&git_raw_with_index(dir, Some(index), args).await?)
+        String::from_utf8_lossy(&git_raw_with_index(dir, Some(index), args, false).await?)
             .trim()
             .to_string(),
     )
