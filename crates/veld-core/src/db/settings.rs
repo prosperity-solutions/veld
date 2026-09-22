@@ -657,6 +657,8 @@ pub enum SettingKey {
     TerminalReconnectFirstDelaySeconds,
     TerminalOpenUrlsInApp,
     TerminalInterceptSystemOpen,
+    TerminalClickableFilePaths,
+    TerminalFileAction,
     TerminalShellIntegration,
     TerminalAgentIntegration,
     KeepAwakeSharingOnPower,
@@ -815,6 +817,8 @@ impl SettingKey {
         // ── Links ────────────────────────────────────────────────────────────
         Self::TerminalOpenUrlsInApp,
         Self::TerminalInterceptSystemOpen,
+        Self::TerminalClickableFilePaths,
+        Self::TerminalFileAction,
         Self::BrowserExternalOrigins,
         // ── Browser panes ────────────────────────────────────────────────────
         Self::BrowserQuickSwitchResponsive,
@@ -848,6 +852,8 @@ impl SettingKey {
             Self::TerminalReconnectFirstDelaySeconds => "terminal.reconnectFirstDelaySeconds",
             Self::TerminalOpenUrlsInApp => "terminal.openUrlsInApp",
             Self::TerminalInterceptSystemOpen => "terminal.interceptSystemOpen",
+            Self::TerminalClickableFilePaths => "terminal.clickableFilePaths",
+            Self::TerminalFileAction => "terminal.fileAction",
             Self::TerminalShellIntegration => "terminal.shellIntegration",
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
             Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
@@ -921,6 +927,8 @@ impl SettingKey {
             "terminal.reconnectFirstDelaySeconds" => Self::TerminalReconnectFirstDelaySeconds,
             "terminal.openUrlsInApp" => Self::TerminalOpenUrlsInApp,
             "terminal.interceptSystemOpen" => Self::TerminalInterceptSystemOpen,
+            "terminal.clickableFilePaths" => Self::TerminalClickableFilePaths,
+            "terminal.fileAction" => Self::TerminalFileAction,
             "terminal.shellIntegration" => Self::TerminalShellIntegration,
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
             "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
@@ -1060,6 +1068,7 @@ impl SettingKey {
             | Self::TerminalShiftEnterNewline
             | Self::TerminalOpenUrlsInApp
             | Self::TerminalInterceptSystemOpen
+            | Self::TerminalClickableFilePaths
             | Self::TerminalShellIntegration
             | Self::TerminalAgentIntegration
             | Self::ExtensionsAutoRefresh
@@ -1215,6 +1224,24 @@ impl SettingKey {
             Self::BrowserSearchUrl => {
                 let s = value.as_str().ok_or_else(bad)?;
                 Value::from(parse_search_template(s).map_err(because)?)
+            }
+            // The id of an `ide.extensions` action, or empty for "not chosen yet",
+            // which is the state that makes the first click ask. Validated on the
+            // id *grammar* rather than against any project: one answer is shared by
+            // every project, so an id this one does not declare is an ordinary
+            // outcome (you are asked once more there), not a bad value to refuse.
+            Self::TerminalFileAction => {
+                let s = value.as_str().ok_or_else(bad)?.trim();
+                // `ide::valid_pane_id` rather than a second copy of the rule — it is
+                // the same grammar `ide.extensions[].id` is parsed with, and two
+                // spellings of one grammar drift silently.
+                if !s.is_empty() && !crate::ide::valid_pane_id(s) {
+                    return Err(because(
+                        "an extension id is 1-64 characters of letters, digits, `-` or `_`"
+                            .to_owned(),
+                    ));
+                }
+                Value::from(s)
             }
             // Extra globs naming files a pane may open. Validated by shape only:
             // there is no such thing as an unparseable glob in
@@ -1697,6 +1724,14 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // It is the only setting that puts veld in a shell's startup, which is why
         // it is a setting at all — see the key's own docs.
         (SettingKey::TerminalInterceptSystemOpen, Value::from(true)),
+        // On by default: an underline nobody sees is a feature nobody enables, and a
+        // wrong one is a click that reports "not a file in this worktree" rather than
+        // doing anything. The switch is for a project whose output is path-shaped prose.
+        (SettingKey::TerminalClickableFilePaths, Value::from(true)),
+        // Empty means *not chosen yet*, which is what makes the first click ask
+        // and every click after it go straight to the answer. There is no sensible
+        // default to ship: the value is an id out of somebody's `veld.json`.
+        (SettingKey::TerminalFileAction, Value::from("")),
         // On: the feature it feeds — the rail's unread badge — is worthless if the
         // events that fill it are opt-in, because nobody switches on a signal they
         // have never seen. What it costs is two `precmd`/`PROMPT_COMMAND` hooks that

@@ -2537,6 +2537,11 @@ struct ExtensionView {
     /// answers. `None` for the kinds that have no `display`.
     #[serde(skip_serializing_if = "Option::is_none")]
     display: Option<&'static str>,
+    /// An `action`'s declared `accepts`, so the client knows which actions it may
+    /// offer for a clicked file. `None` for an action that takes no context, and
+    /// for the kinds that cannot declare one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    accepts: Option<&'static str>,
 }
 
 fn extension_view(ext: &veld_core::ide::Extension) -> ExtensionView {
@@ -2573,6 +2578,12 @@ fn extension_view(ext: &veld_core::ide::Extension) -> ExtensionView {
             ExtensionBody::Status(status) => Some(match status.display {
                 veld_core::ide::BadgeDisplay::Text => "text",
                 veld_core::ide::BadgeDisplay::Icon => "icon",
+            }),
+            _ => None,
+        },
+        accepts: match &ext.body {
+            ExtensionBody::Action(action) => action.accepts.map(|a| match a {
+                veld_core::ide::ActionAccepts::File => veld_core::ide::ACTION_ACCEPTS_FILE,
             }),
             _ => None,
         },

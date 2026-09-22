@@ -155,6 +155,44 @@
         "type": "action",
         "label": "WebStorm",
         "shell": "command -v webstorm >/dev/null 2>&1 && exec webstorm \"${veld.root}\"; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'webstorm' launcher (JetBrains Toolbox \u2192 Settings \u2192 Shell scripts)\" >&2; exit 1; }; exec open -a WebStorm \"${veld.root}\""
+      },
+      // The same two editors again, for a **file** rather than the worktree \u2014
+      // what a click on a path in terminal output runs. Four things about these
+      // that are not obvious from the shape:
+      //
+      // - `accepts: "file"` is what offers them on a path click, and it is also
+      //   why they carry no `slot`: there is no file to hand a button in the top
+      //   bar, so veld refuses the combination rather than rendering a control
+      //   that cannot work.
+      // - **`$1` and `$2`, not `${veld.file}`.** The path comes from whatever an
+      //   agent or a compiler printed, so it is not veld's string to interpolate
+      //   into a shell command \u2014 `$(id)` inside one would run. Positional
+      //   parameters are bound after `/bin/sh -c` has tokenized this script, so
+      //   hostile characters are inert text in one word. Same reason
+      //   `${veld.branch_raw}` is argv-only; this is the answer for the commands
+      //   that need `shell` and therefore cannot use argv.
+      // - **Quote them.** `"$1"` \u2014 a repo path contains spaces on plenty of
+      //   machines, and an unquoted expansion word-splits.
+      // - `$2` is always set (veld defaults it to line 1), so neither script has
+      //   to guard for it. The `open -a` fallback drops it: a bundle launch has
+      //   no line addressing, and arriving at the right file is most of it.
+      // - **`$1` can be a directory**, because `ls some/dir/` prints those too.
+      //   Veld does not branch for you: `code -g dir:1` is wrong where `code dir`
+      //   is right, and only this declaration knows which editor it is talking
+      //   to. Hence the `[ -d "$1" ]` test in front of the line-addressed form.
+      {
+        "id": "vscode-file",
+        "type": "action",
+        "label": "VS Code",
+        "accepts": "file",
+        "shell": "if command -v code >/dev/null 2>&1; then [ -d \"$1\" ] && exec code \"$1\"; exec code -g \"$1:$2\"; fi; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'code' command (VS Code: Shell Command: Install 'code' command in PATH)\" >&2; exit 1; }; exec open -a \"Visual Studio Code\" \"$1\""
+      },
+      {
+        "id": "webstorm-file",
+        "type": "action",
+        "label": "WebStorm",
+        "accepts": "file",
+        "shell": "if command -v webstorm >/dev/null 2>&1; then [ -d \"$1\" ] && exec webstorm \"$1\"; exec webstorm --line \"$2\" \"$1\"; fi; [ \"$(uname -s)\" = Darwin ] || { echo \"install the 'webstorm' launcher (JetBrains Toolbox \u2192 Settings \u2192 Shell scripts)\" >&2; exit 1; }; exec open -a WebStorm \"$1\""
       }
     ],
     // Dogfooding, and the worked examples: this is a repo whose contributors

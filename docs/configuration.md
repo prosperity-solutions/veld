@@ -3161,7 +3161,8 @@ Every entry takes these:
 |---|---|
 | `id` | Required. Stable, unique among this project's extensions, `[A-Za-z0-9_-]`, ≤64 chars. What a menu's `items` and a badge's `actions` name. |
 | `type` | Required. `status`, `action` or `menu`. |
-| `slot` | Where it renders — `topBar` today. **Omit it on an `action`** to declare one that is only reachable by reference. Required for `status` and `menu`. |
+| `slot` | Where it renders — `topBar` today. **Omit it on an `action`** to declare one that is only reachable by reference. Required for `status` and `menu`. Refused on an `action` that declares `accepts`. |
+| `accepts` | `action` only, and optional. `file` offers this action on a **file path clicked in terminal output** instead of as a control — see [Opening a clicked file](#opening-a-clicked-file). |
 | `align` | `start` (default) or `end`. The bar's left cluster is what this project does and the right is what the app does, so a project's own things default left. |
 | `label` | The text or tooltip. Defaults to `id`. |
 | `description` | One line, used as the tooltip. |
@@ -3287,6 +3288,91 @@ missing is the case that matters.
 A click runs the command. There is no output contract and no refresh; a failure
 inside the first few seconds is reported as a toast with the command's message,
 and something still running after that (an editor starting up) counts as success.
+
+#### Opening a clicked file
+
+Veld underlines file paths in terminal output — `src/api.ts`, or a compiler's
+`crates/veld-daemon/src/pty.rs:2529:17` — and a click hands that file to an
+`action` you declare with **`accepts: "file"`**:
+
+```jsonc
+{ "id": "vscode-file", "type": "action", "label": "VS Code", "accepts": "file",
+  "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" || exec open -a \"Visual Studio Code\" \"$1\"" }
+```
+
+The file's **absolute** path arrives as `$1` and its line number as `$2`. Declare
+none and a click says so rather than doing nothing. There is no `slot` on one of
+these, and veld refuses the combination: a control in the top bar is clicked with
+no file selected, so there would be nothing to hand it.
+
+**Declare several and the user is asked once.** The first click offers them as a
+menu; the answer is kept in the *Open a clicked file path with* setting and every
+click after it goes straight there. Asking every time would be worse than it
+sounds: a menu puts a full-screen dismiss overlay over the page, so while one is
+open the next click anywhere is swallowed to close it — the terminal never sees it
+and no link fires. A user who wants to switch clears that setting, or types
+another action's id. The setting holds one id for every project, so a project that
+does not declare it simply asks once more.
+
+Four things about `$1` that are worth the paragraph, because the obvious spelling
+of each is wrong:
+
+- **It is a positional parameter, not `${veld.file}`.** The path is whatever an
+  agent or a compiler happened to print, so it is not veld's string to build a
+  command out of — `$(id)` inside one would *run*. This is the same hazard that
+  makes [`${veld.branch_raw}`](#quote-your-interpolations) `argv`-only, and a
+  variable would have had to be refused in `shell` for the same reason. But an
+  editor launcher needs `shell`, because it needs a `command -v` fallback chain.
+  A positional parameter resolves that instead of trading it off: `/bin/sh -c`
+  binds `$1` *after* tokenizing your script, so `$(...)`, a backtick, `;`, a
+  quote and a newline are inert text in one word.
+- **Quote it.** `code "$1"` is right; `code $1` word-splits on any path with a
+  space in it. That one is a correctness bug rather than the injection hole — an
+  unquoted expansion still does not re-parse `$(...)` — but it breaks on plenty of
+  real machines.
+- **Write `$1`, not `${1}`.** The braced form collides with veld's own `${...}`
+  interpolation and is reported as an unresolved variable.
+- **`$2` is always set.** A path printed without a line number gets `1`, so a
+  script never has to guard for an unset parameter. A fallback branch that cannot
+  express a line — `open -a` has no line addressing — can simply ignore it.
+
+**`$1` can be a directory.** `ls some/dir/` prints those too, and every editor
+this exists for opens one — but veld does not branch for you, because `code -g
+dir:1` is wrong where `code dir` is right and only your declaration knows which
+editor it is talking to. Test for it:
+
+```jsonc
+"shell": "[ -d \"$1\" ] && exec code \"$1\"; exec code -g \"$1:$2\""
+```
+
+**A path that is not relative to the worktree root still resolves, if it is
+unambiguous.** `ls crates/veld-daemon/ui/src/panes/` prints a bare `tabKeys.ts`,
+and a compiler run in a subdirectory prints paths relative to *that* — neither is
+meaningful against the root, and nothing on the page can know what they were
+relative to. So when the text as written does not resolve, veld asks `git
+ls-files` which file in the checkout has that path as a **suffix**. Exactly one
+match opens it; several refuse and say how many (`5 files are called mod.rs…`),
+because uniqueness is what makes acting on a suffix safe. A literal path always
+wins, so `Cargo.toml` at the root opens the root one rather than becoming a
+nine-way tie — **and that cuts both ways**: a subdirectory-relative path that also
+exists at the root opens the root one, silently. A compiler run in `crates/foo`
+printing `src/main.rs`, in a repo that also has a top-level `src/main.rs`, is the
+case; there is no signal, because from here the literal path resolved and nothing
+looked further. Untracked-but-not-ignored files count — a file an agent wrote
+thirty seconds ago and then printed is exactly what you want to click — while
+ignored ones do not, or `target/` and `node_modules/` would make collisions the
+normal case.
+
+Veld canonicalizes the path and refuses one outside the worktree, or one that is
+neither a file nor a directory, *before* running anything — so your command never
+has to check. That covers `..`, an absolute path elsewhere, and a symlink pointing
+out of the checkout, which is the case that contains no `..` at all.
+
+Which paths get underlined is deliberately narrow — a path with a directory or a
+recognised source extension, and not `example.com`, `v1.2.3` or `foo.bar()` —
+because a link that underlines and then cannot open is worse than no link. The
+user's **Make file paths in the terminal clickable** setting turns the whole thing
+off for a project whose output is full of path-shaped prose.
 
 #### `type: "menu"` — a group
 

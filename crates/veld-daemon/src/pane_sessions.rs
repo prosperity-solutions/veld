@@ -454,6 +454,7 @@ async fn run_one(
         // anything. Only `ide.worktreeName` writes to a project command's
         // stdin — see `spawn_command`.
         None,
+        &[],
     )
     .await
     {

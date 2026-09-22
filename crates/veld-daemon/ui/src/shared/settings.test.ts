@@ -47,6 +47,7 @@ describe("terminalPrefs", () => {
       "terminal.scrollback": 1000,
       "terminal.bellVolume": 60,
       "terminal.shiftEnterNewline": false,
+      "terminal.clickableFilePaths": false,
       "terminal.reconnectTries": 5,
       "terminal.reconnectBackoffSeconds": 12,
       "terminal.reconnectFirstDelaySeconds": 2,
@@ -60,10 +61,18 @@ describe("terminalPrefs", () => {
       scrollback: 1000,
       bellVolume: 60,
       shiftEnterNewline: false,
+      clickableFilePaths: false,
       reconnectTries: 5,
       reconnectBackoffSeconds: 12,
       reconnectFirstDelaySeconds: 2,
     });
+  });
+
+  it("defaults clickable file paths on", () => {
+    // On, because an underline nobody sees is a feature nobody goes looking for
+    // the switch to enable. The escape hatch points the other way: a project whose
+    // output is path-shaped prose turns it off.
+    expect(terminalPrefs({}).clickableFilePaths).toBe(true);
   });
 
   it("defaults auto-reconnect on at three near-immediate tries", () => {
