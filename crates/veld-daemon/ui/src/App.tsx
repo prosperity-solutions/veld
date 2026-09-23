@@ -249,7 +249,7 @@ import {
   projectForShortcut,
   projectHolder,
   projectShortcutDigit,
-  projectInitials,
+  projectLabels,
   projectWorktreeIds,
   reorderedRoots,
   toggleTarget,
@@ -8590,8 +8590,11 @@ function ProjectCaret() {
  * # Identity without a migration
  *
  * Projects have no marker of their own and are not getting one: the square is
- * `projectInitials(name)` and nothing else, so an import needs no picker and there is
- * no per-project marker column to add, migrate, or keep in step with a rename.
+ * `projectLabels` over every project's name and nothing else, so an import needs no
+ * picker and there is no per-project marker column to add, migrate, or keep in step
+ * with a rename. Labels are decided across the column because a shared prefix
+ * (`SE-azure-cdn`, `SE-azure-identity`) would otherwise give every square in the
+ * family the same two letters.
  *
  * **Greyscale, deliberately.** An earlier version filled each square with a hue
  * derived from the repo root. It was louder than anything else on screen and it
@@ -8630,6 +8633,7 @@ function ProjectColumn(props: {
   const [dragRoot, setDragRoot] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const roots = props.repos.map((r) => r.root);
+  const labels = projectLabels(props.repos);
   const colRef = useRef<HTMLDivElement>(null);
   const endDrag = () => {
     setDragRoot(null);
@@ -8744,7 +8748,7 @@ function ProjectColumn(props: {
               onContextMenu={(e) => props.onMenu(e, r)}
             >
               <span className="project-sq-initials" aria-hidden="true">
-                {projectInitials(r.name)}
+                {labels[index]}
               </span>
               {/* The accessible name, since the initials are decorative and the
                   tooltip is not read out. */}
