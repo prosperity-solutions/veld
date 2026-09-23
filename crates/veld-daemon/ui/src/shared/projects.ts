@@ -247,6 +247,130 @@ function take(word: string, n: number): string {
 }
 
 /**
+ * Every project's square label, in the order given, decided across the whole list.
+ *
+ * `projectInitials` looks at one name, so a family of repos sharing a prefix —
+ * `SE-azure-infrastructure`, `SE-azure-cdn`, `SE-azure-identity` — all came out
+ * `SA`, and the column could not tell them apart. This keeps every label that is
+ * already unique exactly as `projectInitials` has it, and only re-derives the ones
+ * that collide:
+ *
+ * 1. Split each colliding name into words, camelCase boundaries included
+ *    (`SEAzureCdn` → `SE`, `Azure`, `Cdn`), and drop the leading words the whole
+ *    colliding group shares.
+ * 2. Take two letters from the first word left (`infrastructure` → `IN`,
+ *    `cdn` → `CD`, `identity` → `ID`). A one-character word borrows the first
+ *    character of the word after it, or failing that of the shared word before it
+ *    (`v-1` → `V1`, `proj-1` → `P1`). A name with nothing left — it *is* the
+ *    shared prefix, or two repos have the same name — keeps its initials.
+ * 3. Anything still taken becomes its first character plus the first free one of
+ *    `2`–`9`, then `A`–`Z` (`A2`), so the square never holds more than two
+ *    characters. Past that the label is left duplicated rather than widened.
+ *
+ * Ties in step 3 go to the lexically first **root**, not the first position, so
+ * dragging two clashing squares past each other does not swap their labels. A
+ * label can still change when a project is imported or removed; that is the price
+ * of labels that tell projects apart, and the tooltip still names each one in full.
+ */
+export function projectLabels(
+  repos: readonly { name: string; root: string }[],
+): string[] {
+  const base = repos.map((r) => projectInitials(r.name));
+  const count = new Map<string, number>();
+  for (const b of base) count.set(b, (count.get(b) ?? 0) + 1);
+  const collides = (i: number) => (count.get(base[i] ?? "") ?? 0) > 1;
+
+  const groups = new Map<string, number[]>();
+  base.forEach((b, i) => {
+    if (collides(i)) groups.set(b, [...(groups.get(b) ?? []), i]);
+  });
+
+  const wanted = [...base];
+  for (const members of groups.values()) {
+    const words = members.map((i) => labelWords(repos[i]?.name ?? ""));
+    const shared = sharedPrefixLength(words);
+    members.forEach((i, m) => {
+      const label = distinguishing(words[m] ?? [], shared);
+      if (label) wanted[i] = label;
+    });
+  }
+
+  // Unique initials are claimed first, so a re-derived label never takes a square
+  // from a project that did not collide in the first place.
+  const taken = new Set(base.filter((_, i) => !collides(i)));
+  const labels = [...base];
+  const byRoot = base
+    .map((_, i) => i)
+    .filter(collides)
+    .sort((a, b) => {
+      const ra = repos[a]?.root ?? "";
+      const rb = repos[b]?.root ?? "";
+      return ra < rb ? -1 : ra > rb ? 1 : 0;
+    });
+  for (const i of byRoot) {
+    const label = wanted[i] ?? "";
+    const lead = [...label][0] ?? "";
+    const pick =
+      [label, ...[...FALLBACK_MARKS].map((c) => `${lead}${c}`)].find(
+        (c) => !taken.has(c),
+      ) ?? label;
+    taken.add(pick);
+    labels[i] = pick;
+  }
+  return labels;
+}
+
+/** The second characters `projectLabels` falls back to, in order. */
+const FALLBACK_MARKS = "23456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+
+/** Two characters from the first word after the `shared` prefix, or `null` when the
+ *  name has no word left. See `projectLabels` step 2. */
+function distinguishing(words: readonly string[], shared: number): string | null {
+  const next = words[shared];
+  if (!next) return null;
+  const label = take(next, 2);
+  if ([...label].length > 1) return label;
+  const after = words[shared + 1];
+  if (after) return label + firstChar(after);
+  const before = words[shared - 1];
+  if (before) return firstChar(before) + label;
+  return label;
+}
+
+/**
+ * A name's words for `projectLabels`: the separators `projectInitials` splits on,
+ * plus camelCase and acronym boundaries (`SEAzure` → `SE`, `Azure`).
+ *
+ * The boundaries are marked with a space and split on, rather than matched with a
+ * lookbehind, because Safari before 16.4 rejects lookbehind outright and this runs
+ * inside the render. NFC first, so a decomposed `é` from a macOS file name counts
+ * as the one character it shows.
+ */
+function labelWords(name: string): string[] {
+  return name
+    .normalize("NFC")
+    .replace(/(\p{Ll}|\p{N})(\p{Lu})/gu, "$1 $2")
+    .replace(/(\p{Lu})(\p{Lu}\p{Ll})/gu, "$1 $2")
+    .trim()
+    .split(/[\s._\-/\\]+/u)
+    .filter(Boolean);
+}
+
+/** How many leading words every list has in common, ignoring case. */
+function sharedPrefixLength(lists: readonly string[][]): number {
+  const [first, ...rest] = lists;
+  if (!first) return 0;
+  let n = 0;
+  while (
+    n < first.length &&
+    rest.every((l) => l[n]?.toLowerCase() === first[n]?.toLowerCase())
+  ) {
+    n++;
+  }
+  return n;
+}
+
+/**
  * Move a project to a new index, producing the full order to send.
  *
  * The daemon takes the whole displayed order, so this returns the whole list
