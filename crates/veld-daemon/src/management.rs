@@ -302,7 +302,15 @@ fn available_actions(cfg: Option<&config::VeldConfig>, ns: &NodeState) -> Vec<Ac
         .unwrap_or_default()
 }
 
+// These four handlers are synchronous all the way down — database reads and file
+// reads, no awaits — and the UI polls them. Each runs on the blocking pool so a
+// `Db::open()` waiting out a GC pass's write lock parks no worker (see
+// `crate::offload`).
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
+    crate::offload::blocking(list_environments_blocking).await
+}
+
+fn list_environments_blocking() -> Result<Json<EnvironmentList>, StatusCode> {
     let db = open_db()?;
     let registry = db.registry().map_err(|e| {
         warn!("failed to load global registry: {e}");
@@ -539,6 +547,10 @@ impl From<&veld_core::stats::MemoryBreakdown> for MemoryClasses {
 }
 
 async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
+    crate::offload::blocking(get_stats_blocking).await
+}
+
+fn get_stats_blocking() -> Result<Json<StatsResponse>, StatusCode> {
     let db = open_db()?;
     let registry = db.registry().map_err(|e| {
         warn!("failed to load registry for stats: {e}");
@@ -815,6 +827,12 @@ struct StatsHistoryResponse {
 }
 
 async fn get_stats_history(
+    query: Query<HistoryQuery>,
+) -> Result<Json<StatsHistoryResponse>, StatusCode> {
+    crate::offload::blocking(move || get_stats_history_blocking(query)).await
+}
+
+fn get_stats_history_blocking(
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<StatsHistoryResponse>, StatusCode> {
     use veld_core::stats::StatsWindow;
@@ -998,6 +1016,13 @@ pub(super) fn resolve_run_project(
 }
 
 async fn get_logs(
+    run_name: Path<String>,
+    query: Query<LogQuery>,
+) -> Result<Json<LogResponse>, StatusCode> {
+    crate::offload::blocking(move || get_logs_blocking(run_name, query)).await
+}
+
+fn get_logs_blocking(
     Path(run_name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<LogResponse>, StatusCode> {

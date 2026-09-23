@@ -180,7 +180,15 @@ struct LayoutResponse {
 /// Safe, so it carries no CSRF header (the UI sends one only on mutations) and
 /// is protected by the daemon sending no `Access-Control-Allow-Origin`: another
 /// origin can issue this request and never read the answer.
+///
+/// On the blocking pool, as is `put_layout`: every pane mount reads a layout and
+/// every drag writes one, and a `Db::open()` waiting out a GC pass's write lock
+/// must not park a worker the terminals need (see `crate::offload`).
 async fn get_layout(Path(worktree_id): Path<i64>) -> Result<Json<LayoutResponse>, ApiError> {
+    crate::offload::blocking(move || read_layout(worktree_id)).await
+}
+
+fn read_layout(worktree_id: i64) -> Result<Json<LayoutResponse>, ApiError> {
     let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
     let stored = db.pane_layout(worktree_id).map_err(|e| {
         warn!("layout read: database error: {e}");
@@ -250,7 +258,13 @@ async fn put_layout(
 ) -> Result<Json<LayoutResponse>, ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    crate::offload::blocking(move || write_layout(worktree_id, body)).await
+}
 
+fn write_layout(
+    worktree_id: i64,
+    body: PutLayoutRequest,
+) -> Result<Json<LayoutResponse>, ApiError> {
     let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
 
     // A worktree with no panes left has no row, so the next client to open it
@@ -444,17 +458,22 @@ async fn get_state() -> Json<StateResponse> {
 
     // Outside the lock: this opens the database and does two reads per worktree,
     // and nothing in this module may hold the registry across that.
-    let db = open_db()
-        // Reported inside `open_db` itself (`management::open_db`), and again by
-        // `Db::open`'s observer — this arm only has a `StatusCode` by the time it
-        // runs, which is the tell that the classification already happened.
-        .inspect_err(|e| warn!("ide state: cannot open the database: {e}"))
-        .ok();
-    let worktrees = interesting
-        .into_iter()
-        .take(MAX_STATE_WORKTREES)
-        .map(|worktree_id| worktree_state(db.as_ref(), worktree_id))
-        .collect();
+    // And on the blocking pool, so a `Db::open()` waiting out a GC pass's write lock
+    // parks no worker (see `crate::offload`).
+    let worktrees = crate::offload::blocking(move || {
+        let db = open_db()
+            // Reported inside `open_db` itself (`management::open_db`), and again by
+            // `Db::open`'s observer — this arm only has a `StatusCode` by the time it
+            // runs, which is the tell that the classification already happened.
+            .inspect_err(|e| warn!("ide state: cannot open the database: {e}"))
+            .ok();
+        interesting
+            .into_iter()
+            .take(MAX_STATE_WORKTREES)
+            .map(|worktree_id| worktree_state(db.as_ref(), worktree_id))
+            .collect()
+    })
+    .await;
 
     Json(StateResponse {
         epoch: EPOCH.clone(),
@@ -1658,23 +1677,30 @@ async fn forget(worktree_ids: Vec<i64>) {
     if asked.is_empty() {
         return;
     }
-    let Ok(db) = open_db() else {
-        // Without the database there is no way to check, and clearing on trust
-        // is the failure above. Leaving the entries costs a greyed rail row that
-        // the next poll corrects.
-        warn!("ide channel: cannot verify forgotten worktrees without a database");
-        return;
-    };
-    let mut gone: HashSet<i64> = HashSet::new();
-    for id in asked {
-        match db.get_worktree(id) {
-            Ok(None) => {
-                gone.insert(id);
+    // On the blocking pool: this runs from the IDE channel's own task, and a
+    // `Db::open()` waiting out a GC pass's write lock must park no worker (see
+    // `crate::offload`).
+    let gone = crate::offload::blocking(move || {
+        let Ok(db) = open_db() else {
+            // Without the database there is no way to check, and clearing on trust
+            // is the failure above. Leaving the entries costs a greyed rail row that
+            // the next poll corrects.
+            warn!("ide channel: cannot verify forgotten worktrees without a database");
+            return HashSet::new();
+        };
+        let mut gone: HashSet<i64> = HashSet::new();
+        for id in asked {
+            match db.get_worktree(id) {
+                Ok(None) => {
+                    gone.insert(id);
+                }
+                Ok(Some(_)) => {}
+                Err(e) => warn!(worktree_id = id, "ide channel: worktree lookup failed: {e}"),
             }
-            Ok(Some(_)) => {}
-            Err(e) => warn!(worktree_id = id, "ide channel: worktree lookup failed: {e}"),
         }
-    }
+        gone
+    })
+    .await;
     if gone.is_empty() {
         return;
     }

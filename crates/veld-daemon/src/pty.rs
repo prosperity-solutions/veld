@@ -405,12 +405,15 @@ pub fn clear_unbacked_shims() {
 async fn list_pane_sessions(
     Path(worktree_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
-    let rows = db.resumable_panes(worktree_id).map_err(|e| {
-        warn!("pane sessions: database error: {e}");
-        crate::dbhealth::note_error(&e);
-        err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
-    })?;
+    let rows = crate::offload::blocking(move || {
+        let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+        db.resumable_panes(worktree_id).map_err(|e| {
+            warn!("pane sessions: database error: {e}");
+            crate::dbhealth::note_error(&e);
+            err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+        })
+    })
+    .await?;
     let resumable: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|(session_id, spec_id)| serde_json::json!({ "session_id": session_id, "pane": spec_id }))
@@ -426,7 +429,10 @@ pub fn spawn_session_reaper() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(REAP_INTERVAL).await;
-            reap_detached(configured_detach_grace()).await;
+            // A database read, so off the workers (see `offload`) — the
+            // terminals this reaper looks after run on them.
+            let grace = crate::offload::blocking(configured_detach_grace).await;
+            reap_detached(grace).await;
         }
     });
 }
@@ -1737,14 +1743,18 @@ fn declares_sessions_at(db: &veld_core::db::Db, worktree_id: i64, spec_id: &str)
 /// conversation is perfectly fine to reopen — so liveness is the question, and
 /// only the registry can answer it.
 pub(crate) async fn live_pane_tokens(worktree_id: i64) -> std::collections::HashSet<String> {
-    let Ok(db) = veld_core::db::Db::open() else {
-        // Fail *open*, deliberately. This gate exists to prevent an accident, not
-        // an attack — the same user could run `claude --resume X` twice in two
-        // terminals — so a database that will not open must not also stop
-        // somebody resuming a conversation.
-        return std::collections::HashSet::new();
-    };
-    let Ok(rows) = db.pane_tokens(worktree_id) else {
+    // Fail *open*, deliberately — on a database that will not open as much as on
+    // a query that fails. This gate exists to prevent an accident, not an attack
+    // — the same user could run `claude --resume X` twice in two terminals — so a
+    // database that will not open must not also stop somebody resuming a
+    // conversation.
+    let rows = crate::offload::blocking(move || {
+        veld_core::db::Db::open()
+            .ok()
+            .and_then(|db| db.pane_tokens(worktree_id).ok())
+    })
+    .await;
+    let Some(rows) = rows else {
         return std::collections::HashSet::new();
     };
     let sessions = SESSIONS.lock().await;
@@ -2086,15 +2096,22 @@ async fn mint_ticket(
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
 
-    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
-    let wt = db
-        .get_worktree(body.worktree_id)
-        .map_err(|e| {
+    // Off the runtime: `Db::open()` migrates, and it waits out a GC pass holding the
+    // write lock for up to the full busy_timeout (see `crate::offload`). Opening a
+    // terminal is the last place that wait should park a worker, since every other
+    // terminal's relay runs on the same ones.
+    let worktree_id = body.worktree_id;
+    let (db, wt) = crate::offload::blocking(move || {
+        let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+        let wt = db.get_worktree(worktree_id).map_err(|e| {
             warn!("pty ticket: database error: {e}");
             crate::dbhealth::note_error(&e);
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
-        })?
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+        })?;
+        Ok::<_, ApiError>((db, wt))
+    })
+    .await?;
+    let wt = wt.ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
     // A live session is claimed by the worktree it was started in. Without
     // this check a pane could name another worktree's session and adopt a
     // shell running somewhere the user isn't looking.
@@ -2434,10 +2451,17 @@ async fn open_url(
     // sense AGENTS.md warns about — this is user-initiated and rare — and the
     // alternative is caching a preference that must then be invalidated when the
     // settings screen writes it.
-    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
-    let mut external = db.external_origins();
-    external.extend(project_external_origins(&db, session.worktree_id));
-    let open_in_app = db.terminal_open_urls_in_app();
+    //
+    // On the blocking pool all the same (see `crate::offload`): rare, but it is
+    // invoked from inside a terminal, and must not stall the others.
+    let worktree_id = session.worktree_id;
+    let (external, open_in_app) = crate::offload::blocking(move || {
+        let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+        let mut external = db.external_origins();
+        external.extend(project_external_origins(&db, worktree_id));
+        Ok::<_, ApiError>((external, db.terminal_open_urls_in_app()))
+    })
+    .await?;
 
     match veld_core::ide::route_url(web.canonical.as_str(), open_in_app, &external) {
         veld_core::ide::UrlTarget::System => Ok(Json(OpenUrlResponse {
@@ -2552,35 +2576,54 @@ async fn open_file(
         .get(&id)
         .cloned()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such terminal session"))?;
-    let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
-
-    // The worktree this terminal belongs to is the only root its files may come
-    // from. The session decides that, never the request — the same property the PTY
-    // ticket has, and what stops one project's terminal opening another's files.
-    let Some(worktree) = db
-        .get_worktree(session.worktree_id)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
-    else {
-        return quiet();
-    };
-    let Some(rel) = relative_within(&worktree.path, &body.path) else {
-        // Outside the worktree — a file in ~/Downloads, or another project's. The
-        // system opener is the honest answer and needs no explanation.
-        return quiet();
-    };
-    if !veld_core::files::is_viewable(&rel, &db.view_policy()) {
-        return quiet();
+    // The database reads and the canonicalising both block, so they run off the
+    // worker; only the push to the pane, which needs the session, stays here.
+    let worktree_id = session.worktree_id;
+    /// What the lookup found, decided before anything touches the session.
+    enum Found {
+        /// Not a file Veld would show: the system opener, silently.
+        Quiet,
+        /// A file Veld would show, but cannot serve right now.
+        Unserved,
+        Url(String),
     }
-    // Viewable, so from here on a failure is worth a sentence.
-    let Some(url) = super::files::url_for(&db, &worktree.path, &rel) else {
-        return Ok(Json(OpenUrlResponse {
-            target: veld_core::ide::UrlTarget::System,
-            reason: Some(
-                "veld cannot serve local files right now (the files.* route is not \
-                 registered — is the helper running?)"
-                    .to_owned(),
-            ),
-        }));
+    let found = crate::offload::blocking(move || -> Result<Found, ApiError> {
+        let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+        // The worktree this terminal belongs to is the only root its files may come
+        // from. The session decides that, never the request — the same property the
+        // PTY ticket has, and what stops one project's terminal opening another's
+        // files.
+        let Some(worktree) = db
+            .get_worktree(worktree_id)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))?
+        else {
+            return Ok(Found::Quiet);
+        };
+        let Some(rel) = relative_within(&worktree.path, &body.path) else {
+            // Outside the worktree — a file in ~/Downloads, or another project's.
+            // The system opener is the honest answer and needs no explanation.
+            return Ok(Found::Quiet);
+        };
+        if !veld_core::files::is_viewable(&rel, &db.view_policy()) {
+            return Ok(Found::Quiet);
+        }
+        Ok(super::files::url_for(&db, &worktree.path, &rel).map_or(Found::Unserved, Found::Url))
+    })
+    .await?;
+    let url = match found {
+        Found::Url(url) => url,
+        Found::Quiet => return quiet(),
+        // Viewable, so this failure is worth a sentence.
+        Found::Unserved => {
+            return Ok(Json(OpenUrlResponse {
+                target: veld_core::ide::UrlTarget::System,
+                reason: Some(
+                    "veld cannot serve local files right now (the files.* route is not \
+                     registered — is the helper running?)"
+                        .to_owned(),
+                ),
+            }));
+        }
     };
     // Parsed rather than trusted, so the frame carries a `CanonicalUrl` built the
     // one way that type can be built. A URL veld just composed failing this check
@@ -3786,7 +3829,7 @@ async fn obtain_session(
     // writing a second one would offer a resume for a conversation this attach
     // did not start.
     if let Some(pane) = ticket.pane.as_ref().filter(|p| p.record_token && !adopted) {
-        record_pane_launch(ticket, pane);
+        record_pane_launch(ticket, pane).await;
     }
     if adopted {
         info!(
@@ -3815,16 +3858,19 @@ async fn obtain_session(
 /// written is not a reason to tear it down. The cost of the failure is that the
 /// pane cannot be resumed later, which is the same position every pane without a
 /// `resume` command is in.
-fn record_pane_launch(ticket: &Ticket, pane: &PaneLaunch) {
-    let outcome = veld_core::db::Db::open().and_then(|db| {
-        db.record_pane_session(
-            &ticket.session_id,
-            ticket.worktree_id,
-            &pane.spec_id,
-            &pane.token,
-        )
-        .map(|_| ())
-    });
+///
+/// Off the worker, like every database call here: a terminal starting while GC
+/// holds the write lock would otherwise park a runtime worker for the busy timeout.
+async fn record_pane_launch(ticket: &Ticket, pane: &PaneLaunch) {
+    let (session_id, worktree_id) = (ticket.session_id.clone(), ticket.worktree_id);
+    let (spec_id, token) = (pane.spec_id.clone(), pane.token.clone());
+    let outcome = crate::offload::blocking(move || {
+        veld_core::db::Db::open().and_then(|db| {
+            db.record_pane_session(&session_id, worktree_id, &spec_id, &token)
+                .map(|_| ())
+        })
+    })
+    .await;
     if let Err(e) = outcome {
         warn!(
             session = %ticket.session_id,
