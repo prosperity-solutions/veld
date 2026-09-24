@@ -1139,12 +1139,20 @@ function AppInner(props: {
   //
   // The rail's drops are the exception, because they paint their result before
   // the write is answered (`optimisticRepos`) and a revert there reads as the
-  // row jumping back to where it was picked up. Two refs close that for them:
+  // row jumping back to where it was picked up. Three refs close that for them:
   // every refresh takes a ticket and only the newest one to *start* may write
-  // the repo list, and while a drop's write is in flight its patch is replayed
-  // over whatever a poll brings back.
+  // the repo list (`repoApplied`); while a drop's write is in flight its patch
+  // is replayed over whatever a poll brings back; and once the write is
+  // answered, every refresh issued before that moment is fenced out
+  // (`repoFence`), because it may carry the pre-drop list.
+  //
+  // A fenced refresh asks again rather than returning. Callers `await
+  // refresh()` and then act on the list — the import dialog selects the project
+  // it just added — so it must not resolve until a list at least as new as the
+  // call is on screen. One that lost to a newer applied list has that already.
   const repoTicket = useRef(0);
-  const repoFloor = useRef(0);
+  const repoApplied = useRef(0);
+  const repoFence = useRef(0);
   const repoPatches = useRef<Array<(list: RepoList) => RepoList>>([]);
   // `historyDays` is a dependency: a change to the horizon must reach the next poll,
   // and re-creating `refresh` is what restarts the interval effect below with it.
@@ -1164,19 +1172,25 @@ function AppInner(props: {
     // `null` on a daemon that has never answered, which `noticeFor` treats as
     // "nothing to say".
     const healthRequest = api.dbHealth();
-    const ticket = ++repoTicket.current;
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
       // so out-of-app `git worktree add/remove` appears on the next poll.
-      const [repos, environments] = await Promise.all([
-        api.refreshRepos(),
-        api.environments(),
-      ]);
-      if (ticket > repoFloor.current) {
-        repoFloor.current = ticket;
+      for (;;) {
+        const ticket = ++repoTicket.current;
+        const [repos, environments] = await Promise.all([
+          api.refreshRepos(),
+          api.environments(),
+        ]);
+        if (ticket <= repoApplied.current) {
+          setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+          break;
+        }
+        if (ticket <= repoFence.current) continue;
+        repoApplied.current = ticket;
         setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
+        setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+        break;
       }
-      setEnvs(pruneRunHistory(environments, historyDays, new Date()));
       setOffline(false);
     } catch {
       setOffline(true);
@@ -1219,7 +1233,7 @@ function AppInner(props: {
    * and the refresh after them take. It must be idempotent: it is replayed over
    * any poll that lands while `write` is running, which may already include it.
    *
-   * On the way out the floor is raised past every refresh already in flight.
+   * On the way out every refresh already in flight is fenced out (`repoFence`).
    * Those were issued before the write was answered, so any of them can carry the
    * pre-drop list, and with the patch no longer replayed that would be a visible
    * jump back — once, a moment before the refresh below corrects it. A failed
@@ -1236,9 +1250,9 @@ function AppInner(props: {
       await write();
     } finally {
       repoPatches.current = repoPatches.current.filter((p) => p !== patch);
-      repoFloor.current = ++repoTicket.current;
+      repoFence.current = repoTicket.current;
+      await refresh();
     }
-    await refresh();
   };
 
   /** A patch for [`optimisticRepos`] that rewrites one project and no other. */
