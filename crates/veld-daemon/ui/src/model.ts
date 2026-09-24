@@ -1153,6 +1153,74 @@ export function moveLane(
 }
 
 /**
+ * The worktree list as the daemon will send it back once [`moveWorktree`]'s
+ * write lands: `path` in `lane`, and the placed rows in `order`.
+ *
+ * What a rail drop paints *before* that write has been answered, so the row is
+ * where it was released rather than back where it started for a round-trip.
+ * [`railGroups`] only segments, never sorts, so array order is the within-lane
+ * order and that is all this has to get right. The main checkout leads, as
+ * `is_main DESC` makes it lead in `WT_ORDER`; rows the order does not name —
+ * trashed ones, or one another window added — keep their relative place after
+ * the placed ones, which is where `sort_position IS NULL` sorts them too.
+ *
+ * Idempotent, because it is also replayed over any poll that lands while the
+ * write is still in flight, and that poll may or may not already include it.
+ */
+export function withWorktreeMoved(
+  worktrees: Worktree[],
+  path: string,
+  lane: string,
+  order: readonly string[],
+): Worktree[] {
+  const rank = new Map(order.map((p, i) => [p, i]));
+  const key = (w: Worktree) =>
+    w.is_main ? -1 : (rank.get(w.path) ?? Number.POSITIVE_INFINITY);
+  return worktrees
+    .map((w) => (w.path === path && w.lane !== lane ? { ...w, lane } : w))
+    .sort((a, b) => key(a) - key(b));
+}
+
+/**
+ * The worktree list with `path` in the trash since `at` — the optimistic half of
+ * a drop onto the trash, for the same reason as [`withWorktreeMoved`]. A row
+ * already binned keeps its own timestamp, so replaying this over a poll that has
+ * the daemon's answer does not reorder the trash by the client's clock.
+ */
+export function withWorktreeTrashed(
+  worktrees: Worktree[],
+  path: string,
+  at: string,
+): Worktree[] {
+  return worktrees.map((w) =>
+    w.path === path && !w.trashed_at ? { ...w, trashed_at: at } : w,
+  );
+}
+
+/**
+ * The lane rows in the order [`moveLane`] produced — the optimistic half of a
+ * lane drag.
+ *
+ * The order may name [`UNGROUPED_LANE`] for a repo that has never stored a row
+ * for it ([`railOrder`] synthesises one at the front). Leaving it out here would
+ * make that synthesis put the bucket back at the front, undoing exactly the drop
+ * being painted, so a row is made for it the way `reorder_lanes` makes one.
+ */
+export function withLaneOrder(
+  lanes: Lane[],
+  repoRoot: string,
+  order: readonly string[],
+): Lane[] {
+  const byName = new Map(lanes.map((l) => [l.name, l]));
+  const named = order.map((name, position) => ({
+    ...(byName.get(name) ?? { repo_root: repoRoot, name, created_at: "" }),
+    position,
+  }));
+  const seen = new Set(order);
+  return [...named, ...lanes.filter((l) => !seen.has(l.name))];
+}
+
+/**
  * A value that changes whenever a fired action has visibly landed — what the
  * optimistic pending markers watch.
  *

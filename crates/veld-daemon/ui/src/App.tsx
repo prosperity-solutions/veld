@@ -106,6 +106,9 @@ import {
   UNGROUPED_LANE,
   TRASH_PREVIEW,
   trashPreview,
+  withLaneOrder,
+  withWorktreeMoved,
+  withWorktreeTrashed,
   type PendingAction,
   type RailGroup,
   type LaneRows,
@@ -1129,12 +1132,20 @@ function AppInner(props: {
   // below are fetched only while IDE mode is the one on screen.
   const wantRunState = mode === "ide";
 
-  // Known, accepted: refreshes are not sequenced. A poll issued before a
-  // mutation but resolving after it writes the pre-mutation payload back, so
-  // a rename or emoji change can visibly revert for up to one poll before
-  // settling. Fixing it needs a monotonic request counter guarding the
-  // setters; not worth it while every mutation is followed by its own
-  // `refresh()`.
+  // Known, accepted: refreshes are not sequenced against mutations in general.
+  // A poll issued before a rename or emoji change but resolving after it writes
+  // the pre-mutation payload back, so the change can visibly revert for up to
+  // one poll before settling.
+  //
+  // The rail's drops are the exception, because they paint their result before
+  // the write is answered (`optimisticRepos`) and a revert there reads as the
+  // row jumping back to where it was picked up. Two refs close that for them:
+  // every refresh takes a ticket and only the newest one to *start* may write
+  // the repo list, and while a drop's write is in flight its patch is replayed
+  // over whatever a poll brings back.
+  const repoTicket = useRef(0);
+  const repoFloor = useRef(0);
+  const repoPatches = useRef<Array<(list: RepoList) => RepoList>>([]);
   // `historyDays` is a dependency: a change to the horizon must reach the next poll,
   // and re-creating `refresh` is what restarts the interval effect below with it.
   const refresh = useCallback(async () => {
@@ -1153,6 +1164,7 @@ function AppInner(props: {
     // `null` on a daemon that has never answered, which `noticeFor` treats as
     // "nothing to say".
     const healthRequest = api.dbHealth();
+    const ticket = ++repoTicket.current;
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
       // so out-of-app `git worktree add/remove` appears on the next poll.
@@ -1160,7 +1172,10 @@ function AppInner(props: {
         api.refreshRepos(),
         api.environments(),
       ]);
-      setRepoList(repos);
+      if (ticket > repoFloor.current) {
+        repoFloor.current = ticket;
+        setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
+      }
       setEnvs(pruneRunHistory(environments, historyDays, new Date()));
       setOffline(false);
     } catch {
@@ -1195,6 +1210,44 @@ function AppInner(props: {
     }, POLL_MS);
     return () => window.clearInterval(t);
   }, [refresh]);
+
+  /**
+   * Paint `patch` now, run `write`, then refresh — a rail drop's whole life.
+   *
+   * The patch lands in the same commit as the drag ending, so the row is where it
+   * was released rather than back where it started for however long the writes
+   * and the refresh after them take. It must be idempotent: it is replayed over
+   * any poll that lands while `write` is running, which may already include it.
+   *
+   * On the way out the floor is raised past every refresh already in flight.
+   * Those were issued before the write was answered, so any of them can carry the
+   * pre-drop list, and with the patch no longer replayed that would be a visible
+   * jump back — once, a moment before the refresh below corrects it. A failed
+   * write needs nothing special: the refresh is the daemon's truth, and it
+   * replaces the patch like any other answer.
+   */
+  const optimisticRepos = async (
+    patch: (list: RepoList) => RepoList,
+    write: () => Promise<void>,
+  ) => {
+    repoPatches.current = [...repoPatches.current, patch];
+    setRepoList((cur) => cur && patch(cur));
+    try {
+      await write();
+    } finally {
+      repoPatches.current = repoPatches.current.filter((p) => p !== patch);
+      repoFloor.current = ++repoTicket.current;
+    }
+    await refresh();
+  };
+
+  /** A patch for [`optimisticRepos`] that rewrites one project and no other. */
+  const patchRepo =
+    (root: string, fn: (repo: Repo) => Repo) =>
+    (list: RepoList): RepoList => ({
+      ...list,
+      repos: list.repos.map((r) => (r.root === root ? fn(r) : r)),
+    });
 
   // ---- selection ----------------------------------------------------------
   const {
@@ -2595,9 +2648,9 @@ function AppInner(props: {
    *
    * Optimistic on purpose: the column re-renders from `repos`, which is the poll's
    * list, so without this the square springs back to where it was and stays there
-   * until the next 5s tick. `refresh()` afterwards is what makes the daemon's answer
-   * the one that survives — including the entries this client did not know about,
-   * which `reorder_repos` places for us.
+   * until the write and a refresh have come back (`optimisticRepos`). The refresh
+   * is what makes the daemon's answer the one that survives — including the
+   * entries this client did not know about, which `reorder_repos` places for us.
    */
   const reorderProjectsTo = (from: number, to: number) => {
     const order = reorderedRoots(
@@ -2605,8 +2658,7 @@ function AppInner(props: {
       from,
       to,
     );
-    setRepoList((cur) => {
-      if (!cur) return cur;
+    const patch = (cur: RepoList): RepoList => {
       const listed = order
         .map((root) => cur.repos.find((r) => r.root === root))
         .filter((r): r is Repo => !!r);
@@ -2618,14 +2670,14 @@ function AppInner(props: {
       const seen = new Set(listed.map((r) => r.root));
       const rest = cur.repos.filter((r) => !seen.has(r.root));
       return { ...cur, repos: [...listed, ...rest] };
-    });
-    void api
-      .reorderProjects(order)
-      .then(() => refresh())
-      .catch((e) => {
+    };
+    void optimisticRepos(patch, async () => {
+      try {
+        await api.reorderProjects(order);
+      } catch (e) {
         notifyError("Could not reorder projects", e);
-        void refresh();
-      });
+      }
+    });
   };
 
   /**
@@ -2977,17 +3029,22 @@ function AppInner(props: {
    */
   const moveLaneTo = async (lane: string, onto: string) => {
     if (!repo) return;
+    const root = repo.root;
     // `railOrder` — not `lanes` — because the ungrouped section is one of the
     // things that can move, and the order sent to the daemon has to name it
     // whether or not this repo has ever stored a position for it.
     const order = moveLane(railOrder(laneRows), lane, onto);
     if (!order) return;
-    try {
-      await api.reorderLanes(repo.root, order);
-    } catch (e) {
-      notifyError("Could not reorder the groups", e);
-    }
-    await refresh();
+    await optimisticRepos(
+      patchRepo(root, (r) => ({ ...r, lanes: withLaneOrder(r.lanes, root, order) })),
+      async () => {
+        try {
+          await api.reorderLanes(root, order);
+        } catch (e) {
+          notifyError("Could not reorder the groups", e);
+        }
+      },
+    );
   };
 
   /**
@@ -5334,18 +5391,26 @@ function AppInner(props: {
     toIndex: number,
   ) => {
     if (!repo) return;
+    const root = repo.root;
     const move = moveWorktree(railGroups(worktrees, laneRows), path, toLane, toIndex);
     if (!move) return;
     const moved = worktrees.find((w) => w.path === path);
-    try {
-      if (moved && moved.lane !== move.lane) {
-        await api.patchWorktree(moved.id, { lane: move.lane });
-      }
-      await api.reorderWorktrees(repo.root, move.order);
-    } catch (e) {
-      notifyError("Could not reorder the rail", e);
-    }
-    await refresh();
+    await optimisticRepos(
+      patchRepo(root, (r) => ({
+        ...r,
+        worktrees: withWorktreeMoved(r.worktrees, path, move.lane, move.order),
+      })),
+      async () => {
+        try {
+          if (moved && moved.lane !== move.lane) {
+            await api.patchWorktree(moved.id, { lane: move.lane });
+          }
+          await api.reorderWorktrees(root, move.order);
+        } catch (e) {
+          notifyError("Could not reorder the rail", e);
+        }
+      },
+    );
   };
 
   /**
@@ -5496,27 +5561,45 @@ function AppInner(props: {
     // The main checkout is the repository itself and is never draggable in the
     // first place (the row gates on `!w.is_main`), so a drop can't reach here;
     // this is defence in depth so binning main can never be invoked silently.
-    if (w.is_main) return;
+    if (w.is_main || !repo) return;
     // A dirty worktree can't be deleted later without either discarding or
     // reverting its changes, so a drag-to-trash must not bin it silently —
     // surface the files and let the user choose, the same as the context-menu
     // "Remove worktree…". A clean worktree still bins immediately, as before.
-    try {
-      const status = await api.worktreeGitStatus(w.id);
-      if (status.dirty) {
-        setDialog({ kind: "trash", worktree: w });
-        return;
-      }
-    } catch {
-      // Status unavailable (git error, checkout gone): bin directly; any
-      // refusal surfaces later on the row.
+    //
+    // The poll's `git.dirty` answers first, so a row already known to be dirty
+    // goes straight to the dialog instead of into the trash and back out. It is
+    // up to a sweep old, so a row it calls clean is binned on screen at once and
+    // the live check still runs before anything is written; if that finds
+    // changes, the refresh puts the row back as the dialog opens.
+    if (w.git?.dirty) {
+      setDialog({ kind: "trash", worktree: w });
+      return;
     }
-    try {
-      await api.deleteWorktree(w.id, false);
-    } catch (e) {
-      notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
-    }
-    await refresh();
+    const trashedAt = new Date().toISOString();
+    await optimisticRepos(
+      patchRepo(repo.root, (r) => ({
+        ...r,
+        worktrees: withWorktreeTrashed(r.worktrees, path, trashedAt),
+      })),
+      async () => {
+        try {
+          const status = await api.worktreeGitStatus(w.id);
+          if (status.dirty) {
+            setDialog({ kind: "trash", worktree: w });
+            return;
+          }
+        } catch {
+          // Status unavailable (git error, checkout gone): bin directly; any
+          // refusal surfaces later on the row.
+        }
+        try {
+          await api.deleteWorktree(w.id, false);
+        } catch (e) {
+          notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
+        }
+      },
+    );
   };
 
 
