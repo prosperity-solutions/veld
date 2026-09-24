@@ -1153,6 +1153,8 @@ function AppInner(props: {
   const repoTicket = useRef(0);
   const repoApplied = useRef(0);
   const repoFence = useRef(0);
+  // The tail of the drops' write queue — see `optimisticRepos`.
+  const repoWrites = useRef<Promise<void>>(Promise.resolve());
   const repoPatches = useRef<Array<(list: RepoList) => RepoList>>([]);
   // `historyDays` is a dependency: a change to the horizon must reach the next poll,
   // and re-creating `refresh` is what restarts the interval effect below with it.
@@ -1239,6 +1241,11 @@ function AppInner(props: {
    * jump back — once, a moment before the refresh below corrects it. A failed
    * write needs nothing special: the refresh is the daemon's truth, and it
    * replaces the patch like any other answer.
+   *
+   * Writes run one at a time, in drop order. A second drop is computed from the
+   * first one's painted list and sends a full order that already includes it —
+   * but the first one's own order does not include the second, so if it reached
+   * the daemon last it would undo a drop the rail had already shown as done.
    */
   const optimisticRepos = async (
     patch: (list: RepoList) => RepoList,
@@ -1246,8 +1253,10 @@ function AppInner(props: {
   ) => {
     repoPatches.current = [...repoPatches.current, patch];
     setRepoList((cur) => cur && patch(cur));
+    const queued = repoWrites.current.then(write);
+    repoWrites.current = queued.catch(() => {});
     try {
-      await write();
+      await queued;
     } finally {
       repoPatches.current = repoPatches.current.filter((p) => p !== patch);
       repoFence.current = repoTicket.current;
