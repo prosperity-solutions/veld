@@ -106,6 +106,7 @@ import {
   UNGROUPED_LANE,
   TRASH_PREVIEW,
   trashPreview,
+  repoFetchVerdict,
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
@@ -1184,13 +1185,16 @@ function AppInner(props: {
           api.refreshRepos(),
           api.environments(),
         ]);
-        if (ticket <= repoApplied.current) {
-          setEnvs(pruneRunHistory(environments, historyDays, new Date()));
-          break;
+        const verdict = repoFetchVerdict(
+          ticket,
+          repoApplied.current,
+          repoFence.current,
+        );
+        if (verdict === "refetch") continue;
+        if (verdict === "apply") {
+          repoApplied.current = ticket;
+          setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
         }
-        if (ticket <= repoFence.current) continue;
-        repoApplied.current = ticket;
-        setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
         setEnvs(pruneRunHistory(environments, historyDays, new Date()));
         break;
       }

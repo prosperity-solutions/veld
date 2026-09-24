@@ -1153,6 +1153,29 @@ export function moveLane(
 }
 
 /**
+ * What a finished repo-list fetch may do, given the ticket it was issued with.
+ *
+ * - `stale` — a fetch issued *after* this one has already been applied, so a
+ *   list at least as new is on screen. Drop this one; the caller is answered.
+ * - `refetch` — a rail drop's write settled after this was issued
+ *   (`fence`), so it may carry the pre-drop list. Ask again rather than
+ *   returning: a caller awaiting it must not act on a list older than its call.
+ * - `apply` — the newest answer there is.
+ *
+ * `stale` is checked first on purpose. A fenced fetch that has since been
+ * overtaken by a newer applied one has nothing left to wait for.
+ */
+export function repoFetchVerdict(
+  ticket: number,
+  applied: number,
+  fence: number,
+): "stale" | "refetch" | "apply" {
+  if (ticket <= applied) return "stale";
+  if (ticket <= fence) return "refetch";
+  return "apply";
+}
+
+/**
  * The worktree list as the daemon will send it back once [`moveWorktree`]'s
  * write lands: `path` in `lane`, and the placed rows in `order`.
  *

@@ -19,6 +19,7 @@ import {
   realLanes as realLanesBranded,
   UNGROUPED_LANE,
   moveWorktree,
+  repoFetchVerdict,
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
@@ -1562,6 +1563,31 @@ describe("insertionTarget", () => {
     // A lane with no rows still takes drops — that is how the first worktree
     // gets into a lane someone just made.
     expect(insertionTarget([], 42)).toBe(0);
+  });
+});
+
+describe("repoFetchVerdict", () => {
+  it("applies the newest fetch when no drop has settled", () => {
+    expect(repoFetchVerdict(3, 2, 0)).toBe("apply");
+  });
+
+  it("drops a fetch overtaken by a newer applied one", () => {
+    // The caller is answered: what is on screen started after it did.
+    expect(repoFetchVerdict(2, 3, 0)).toBe("stale");
+  });
+
+  it("refetches a fetch issued before a drop's write settled", () => {
+    // It may hold the pre-drop list, and applying it would be the row jumping
+    // back; resolving without it would hand an awaiting caller an older list.
+    expect(repoFetchVerdict(3, 2, 3)).toBe("refetch");
+  });
+
+  it("prefers stale over refetch once a newer list has landed", () => {
+    expect(repoFetchVerdict(2, 4, 3)).toBe("stale");
+  });
+
+  it("applies the drop's own refresh, issued just past the fence", () => {
+    expect(repoFetchVerdict(4, 2, 3)).toBe("apply");
   });
 });
 
