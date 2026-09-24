@@ -1607,7 +1607,7 @@ describe("optimistic rail drops", () => {
   });
 
   it("bins a row without re-stamping one already in the trash", () => {
-    const at = "2026-03-01T00:00:00.000Z";
+    const at = "2026-03-01T00:00:00.000000Z";
     const next = withWorktreeTrashed(rows(), "/wts/a", at);
     expect(paths(next, TRASH_LANE)).toEqual(["/wts/a", "/wts/t"]);
     expect(paths(next, "")).toEqual(["/wts/b"]);

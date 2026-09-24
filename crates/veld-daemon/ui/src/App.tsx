@@ -1139,10 +1139,11 @@ function AppInner(props: {
   //
   // The rail's drops are the exception, because they paint their result before
   // the write is answered (`optimisticRepos`) and a revert there reads as the
-  // row jumping back to where it was picked up. Three refs close that for them:
-  // every refresh takes a ticket and only the newest one to *start* may write
-  // the repo list (`repoApplied`); while a drop's write is in flight its patch
-  // is replayed over whatever a poll brings back; and once the write is
+  // row jumping back to where it was picked up. Three rules close that for them:
+  // every refresh takes a ticket (`repoTicket`) and only the newest one to
+  // *start* may write the repo list (`repoApplied`); while a drop's write is in
+  // flight its patch is replayed over whatever a poll brings back
+  // (`repoPatches`); and once the write is
   // answered, every refresh issued before that moment is fenced out
   // (`repoFence`), because it may carry the pre-drop list.
   //
@@ -5592,14 +5593,17 @@ function AppInner(props: {
     //
     // The poll's `git.dirty` answers first, so a row already known to be dirty
     // goes straight to the dialog instead of into the trash and back out. It is
-    // up to a sweep old, so a row it calls clean is binned on screen at once and
+    // up to a sweep old, and `null` until the first sweep reaches the row, so a
+    // row it calls clean *or has no answer for* is binned on screen at once and
     // the live check still runs before anything is written; if that finds
     // changes, the refresh puts the row back as the dialog opens.
     if (w.git?.dirty) {
       setDialog({ kind: "trash", worktree: w });
       return;
     }
-    const trashedAt = new Date().toISOString();
+    // Padded to the daemon's fixed-width microseconds (`db::ts_to_str`): the
+    // trash sorts by string compare, and `…500Z` outsorts `…500000Z`.
+    const trashedAt = new Date().toISOString().replace("Z", "000Z");
     await optimisticRepos(
       patchRepo(repo.root, (r) => ({
         ...r,
