@@ -275,6 +275,15 @@ async fn list_viewable(
     // 1.5-second cost has no business being reachable from a drive-by page.
     super::management::check_csrf(&headers)
         .map_err(|_| super::desktop::err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    // All of it on the blocking pool — the database reads, the grant write and the
+    // walk — so neither a `Db::open()` waiting out a GC pass's write lock nor the disk
+    // parks a worker (see `crate::offload`).
+    crate::offload::blocking(move || list_viewable_blocking(id)).await
+}
+
+fn list_viewable_blocking(
+    id: i64,
+) -> Result<axum::Json<serde_json::Value>, super::desktop::ApiError> {
     let db = super::management::open_db().map_err(|_| {
         super::desktop::err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
     })?;
@@ -289,11 +298,12 @@ async fn list_viewable(
     }
     let policy = db.view_policy();
     let root = worktree.path.clone();
-    let scan_root = root.clone();
-    // Blocking filesystem walk, off the runtime's worker threads.
-    let found = tokio::task::spawn_blocking(move || scan(Path::new(&scan_root), &policy))
-        .await
-        .unwrap_or_default();
+    // A panicking walk degrades to an empty list, as it did when the walk was its
+    // own `spawn_blocking` whose `JoinError` fell back to the default.
+    let found = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        scan(Path::new(&root), &policy)
+    }))
+    .unwrap_or_default();
 
     // Origin and grant once for the whole list, not once per row.
     let origin = origin();
@@ -440,17 +450,23 @@ async fn file_stat(
     // mtime-and-size probe for any path a caller cares to name, one request at a time.
     super::management::check_csrf(&headers)
         .map_err(|_| super::desktop::err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
-    let db = super::management::open_db().map_err(|_| {
-        super::desktop::err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
-    })?;
-    let worktree = db
-        .get_worktree(id)
-        .map_err(super::desktop::db_err)?
-        .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such worktree"))?;
-    // The same resolution the read path uses, so a symlink cannot turn this into an
-    // mtime-and-size oracle for a file the read path would refuse.
-    let (full, _) = resolve_servable(Path::new(&worktree.path), &q.path)
-        .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such file"))?;
+    // Polled once a second by every open browser pane, so the database half runs on
+    // the blocking pool (see `crate::offload`).
+    let full = crate::offload::blocking(move || {
+        let db = super::management::open_db().map_err(|_| {
+            super::desktop::err(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+        })?;
+        let worktree = db
+            .get_worktree(id)
+            .map_err(super::desktop::db_err)?
+            .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such worktree"))?;
+        // The same resolution the read path uses, so a symlink cannot turn this into an
+        // mtime-and-size oracle for a file the read path would refuse.
+        let (full, _) = resolve_servable(Path::new(&worktree.path), &q.path)
+            .ok_or_else(|| super::desktop::err(StatusCode::NOT_FOUND, "no such file"))?;
+        Ok::<_, super::desktop::ApiError>(full)
+    })
+    .await?;
     let meta = tokio::fs::metadata(&full)
         .await
         .map_err(|_| super::desktop::err(StatusCode::NOT_FOUND, "no such file"))?;
@@ -495,8 +511,15 @@ async fn serve(UrlPath((grant, path)): UrlPath<(String, String)>) -> Response {
 
 /// Resolve, confine, and read. Every failure is a status, never a message.
 async fn read_file(grant: &str, path: &str) -> Result<(Vec<u8>, &'static str), StatusCode> {
-    let root = root_for_grant(grant).ok_or(StatusCode::NOT_FOUND)?;
-    let (full, content_type) = resolve_servable(&root, path).ok_or(StatusCode::NOT_FOUND)?;
+    // Every asset a viewed page loads comes through here, so the database lookup
+    // runs on the blocking pool (see `crate::offload`).
+    let (grant, path) = (grant.to_owned(), path.to_owned());
+    let (full, content_type) = crate::offload::blocking(move || {
+        let root = root_for_grant(&grant)?;
+        resolve_servable(&root, &path)
+    })
+    .await
+    .ok_or(StatusCode::NOT_FOUND)?;
 
     let meta = tokio::fs::metadata(&full)
         .await

@@ -44,7 +44,16 @@ pub async fn run_stats_sampler() {
 
     loop {
         interval.tick().await;
-        if let Err(e) = sample_once(&mut collector).await {
+        // On the blocking pool (see `offload`): the pass is a machine-wide
+        // process-table scan plus a database read and a write per run, all
+        // synchronous, every five seconds. The collector goes over and comes back.
+        let (back, sampled) = crate::offload::blocking(move || {
+            let sampled = sample_once(&mut collector);
+            (collector, sampled)
+        })
+        .await;
+        collector = back;
+        if let Err(e) = sampled {
             warn!("stats sampling error: {e}");
             crate::dbhealth::note_reported(&e);
         }
@@ -54,7 +63,7 @@ pub async fn run_stats_sampler() {
 /// One sampling pass: refresh the process table once, then record a sample per
 /// live node of every live run. Observational only — per-run write failures
 /// are logged and skipped, never propagated.
-async fn sample_once(collector: &mut StatsCollector) -> anyhow::Result<()> {
+fn sample_once(collector: &mut StatsCollector) -> anyhow::Result<()> {
     // Open per pass so the sampler self-heals across CLI upgrades that migrate
     // the schema (mirrors the health monitor and GC loops).
     let db = Db::open()?;
