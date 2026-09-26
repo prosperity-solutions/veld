@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   runRef,
@@ -118,6 +118,23 @@ import {
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
 import { usePointerDrag } from "./shared/pointerDrag";
+import { type Reach, type ReachBox, reachContains, reachPath } from "./ide/trashReach";
+import {
+  aimReach,
+  arrive,
+  goneZone,
+  leave,
+  type Presence,
+  presenceGone,
+  presenceLook,
+  presenceMoving,
+  type ReachMotion,
+  reachSettled,
+  restingMotion,
+  shownReach,
+  stepPresence,
+  stepReach,
+} from "./ide/reachMotion";
 import { eventLocation } from "./shared/eventLocation";
 import { worktreeLabel } from "./shared/worktreeName";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
@@ -9087,6 +9104,195 @@ function Rail(props: {
   const dockScrollRef = useRef<HTMLDivElement>(null);
 
   /**
+   * The trash reaching for a carried worktree — see `ide/trashReach.ts` for the
+   * shape and how it holds on to a pointer it has reached.
+   *
+   * The shape is the trash's drop target, not only its picture: `aimTrash`
+   * measures it, `rowDrag` lets it win over `rowTargetAt`'s answer, and the
+   * same numbers paint it, so a release anywhere on the red lands in the trash
+   * — including the bump, which rises over rows of the list that are otherwise
+   * their own section's targets. The one exception is the zone's arrival and going: those
+   * scale and fade the picture only, so for the half-second after pickup the
+   * target is the zone at full size while the drawing swells into it.
+   *
+   * Painted imperatively, straight to the path's `d`, for the reason the rest
+   * of the drag feedback compares before it sets state: the pointer moves far
+   * more often than the rail is worth re-rendering, and the reach, unlike the
+   * caret, changes on every one of those moves — and between them, because it
+   * moves on springs (`ide/reachMotion.ts`), stepped by a frame loop that runs
+   * only while the zone is still getting somewhere.
+   *
+   * The shape is an SVG on `.rail-dock` rather than a restyled `.trash-drop`
+   * because it has to rise out of the dock: the overlay lives inside
+   * `.rail-dock-scroll`, which is a scrollport and clips everything outside it.
+   * `.trash-drop` stays as the label and the measure — its box is the zone's
+   * body, so the `top: 9px` it takes when Deleting sits above it is honoured here
+   * without being restated.
+   */
+  const trashDropRef = useRef<HTMLDivElement>(null);
+  const reachPathRef = useRef<SVGPathElement>(null);
+  const dragPointRef = useRef<{ x: number; y: number } | null>(null);
+  // Read once per drag, at pickup: the preference does not change mid-gesture,
+  // and `onMove` is the hottest path in the rail.
+  const reduceMotionRef = useRef(false);
+  // Where the zone is and where it is heading, carried across moves and
+  // frames: the reach grows from what it had, and lets go of a pointer it had.
+  const reachMotionRef = useRef<ReachMotion>(restingMotion());
+  // The zone arriving with a drag and going after it. The overlay outlives its
+  // drag for as long as the going takes — `trashLeaving` keeps it mounted.
+  const presenceRef = useRef<Presence>(goneZone());
+  const [trashLeaving, setTrashLeaving] = useState(false);
+  const reachFrameRef = useRef<number | null>(null);
+  const reachClockRef = useRef<number | null>(null);
+  /** The zone's box in the svg's coordinates, and the svg's client offset to
+   *  bring a pointer into them — or `null` while the overlay is not mounted. */
+  const measureTrash = () => {
+    const svg = reachPathRef.current?.ownerSVGElement;
+    const drop = trashDropRef.current;
+    const scroller = dockScrollRef.current;
+    if (!svg || !drop || !scroller) return null;
+    const origin = svg.getBoundingClientRect();
+    const zone = drop.getBoundingClientRect();
+    const clip = scroller.getBoundingClientRect();
+    // Clipped to the scrollport the way the overlay itself is, and inset by half
+    // the stroke so the 1px outline lands on whole pixels.
+    const box = {
+      left: zone.left - origin.left + 0.5,
+      right: zone.right - origin.left - 0.5,
+      top: Math.max(zone.top, clip.top) - origin.top + 0.5,
+      bottom: Math.min(zone.bottom, clip.bottom) - origin.top - 0.5,
+    };
+    return { box, left: origin.left, top: origin.top };
+  };
+  /** Draws the zone: its shape, scaled about the box's centre and faded by
+   *  how far it has arrived. The label fades with it. */
+  const paintTrash = (box: ReachBox, shape: Reach) => {
+    const path = reachPathRef.current;
+    if (!path) return;
+    const look = reduceMotionRef.current
+      ? { sx: 1, sy: 1, opacity: 1 }
+      : presenceLook(presenceRef.current);
+    const cx = (box.left + box.right) / 2;
+    const cy = (box.top + box.bottom) / 2;
+    path.setAttribute("d", reachPath(box, shape));
+    path.setAttribute(
+      "transform",
+      `translate(${cx} ${cy}) scale(${look.sx.toFixed(4)} ${look.sy.toFixed(4)}) translate(${-cx} ${-cy})`,
+    );
+    path.style.opacity = look.opacity.toFixed(3);
+    if (trashDropRef.current) trashDropRef.current.style.opacity = look.opacity.toFixed(3);
+  };
+  const runTrash = () => {
+    if (reachFrameRef.current === null) {
+      reachFrameRef.current = requestAnimationFrame(stepTrash);
+    }
+  };
+  /** Where a row released at (`x`, `y`) lands: the trash for anywhere on its
+   *  zone, otherwise whatever `rowTargetAt` measures. */
+  const rowDropAt = (overTrash: boolean, x: number, y: number) =>
+    overTrash ? { key: TRASH_LANE, index: 0 } : rowTargetAt(x, y);
+  /** The same, for a pointer that moved there: aims the zone at it first. The
+   *  rows are measured before the zone is, and both before it is painted, so a
+   *  move reads layout once instead of forcing it again after the paint. */
+  const aimDropAt = (x: number, y: number) => {
+    const row = rowTargetAt(x, y);
+    return aimTrash(x, y) ? { key: TRASH_LANE, index: 0 } : row;
+  };
+  const showDropAt = (at: ReturnType<typeof rowDropAt>) =>
+    setDropAt((prev) =>
+      prev?.key === at?.key && prev?.index === at?.index ? prev : at,
+    );
+  /** Moves the zone's aim to a pointer at client (`x`, `y`), repaints it, and
+   *  says whether the pointer is on it. Measuring the same point again changes
+   *  nothing. Reduced motion keeps the zone the box it always was — as a target
+   *  too — and never starts the frame loop. */
+  const aimTrash = (x: number, y: number) => {
+    const at = measureTrash();
+    if (!at) return false;
+    const { box } = at;
+    const px = x - at.left;
+    const py = y - at.top;
+    if (reduceMotionRef.current) {
+      const flat = { lift: 0, cx: 0, tx: 0, h: 0 };
+      paintTrash(box, flat);
+      return reachContains(box, flat, px, py);
+    }
+    const motion = aimReach(reachMotionRef.current, box, px, py);
+    reachMotionRef.current = motion;
+    paintTrash(box, shownReach(motion, box));
+    if (!reachSettled(motion) || presenceMoving(presenceRef.current)) runTrash();
+    return motion.over;
+  };
+  /** One frame of the zone's springs. Mid-drag, for the pointer where it last
+   *  was: the zone can reach a pointer that has stopped, and let go of one, so
+   *  the drop target is re-resolved whenever the frame changes which side it is
+   *  on. After the drag, only the going — the shape it had stays put. */
+  const stepTrash = (now: number) => {
+    reachFrameRef.current = null;
+    const at = measureTrash();
+    if (!at) {
+      reachClockRef.current = null;
+      // Nothing left to draw it on — the dock went with a collapsing rail — and
+      // no drag to come back for: the going is over.
+      if (dragPointRef.current === null) {
+        stopTrash();
+        setTrashLeaving(false);
+      }
+      return;
+    }
+    const last = reachClockRef.current;
+    reachClockRef.current = now;
+    const dt = last === null ? 1 / 60 : (now - last) / 1000;
+    const point = dragPointRef.current;
+    let motion = reachMotionRef.current;
+    if (point) {
+      const before = motion;
+      motion = stepReach(before, at.box, point.x - at.left, point.y - at.top, dt);
+      reachMotionRef.current = motion;
+      if (motion.over !== before.over) showDropAt(rowDropAt(motion.over, point.x, point.y));
+    }
+    const presence = stepPresence(presenceRef.current, dt);
+    presenceRef.current = presence;
+    paintTrash(at.box, shownReach(motion, at.box));
+    if (presenceGone(presence)) {
+      stopTrash();
+      setTrashLeaving(false);
+    } else if ((point && !reachSettled(motion)) || presenceMoving(presence)) {
+      runTrash();
+    } else {
+      reachClockRef.current = null;
+    }
+  };
+  /** Stops the frame loop and puts the zone back at rest, gone. */
+  const stopTrash = () => {
+    if (reachFrameRef.current !== null) cancelAnimationFrame(reachFrameRef.current);
+    reachFrameRef.current = null;
+    reachClockRef.current = null;
+    reachMotionRef.current = restingMotion();
+    presenceRef.current = goneZone();
+  };
+  /** The drag is over, however it ended: the zone goes — unless reduced motion
+   *  asked for it simply to be gone, or it was never drawn. */
+  const leaveTrash = () => {
+    if (reduceMotionRef.current || !reachPathRef.current) {
+      stopTrash();
+      return;
+    }
+    presenceRef.current = leave(presenceRef.current);
+    setTrashLeaving(true);
+    runTrash();
+  };
+  useEffect(() => stopTrash, []);
+  // A render mid-drag is the first moment the overlay and the path exist (pickup
+  // sets `dragPath`, and the move that crossed the threshold ran before the
+  // commit), and any later render may have moved the trash — rows arriving,
+  // Deleting appearing above it. Re-aiming after each is a handful of rects.
+  useLayoutEffect(() => {
+    const at = dragPointRef.current;
+    if (dragPath !== null && at) showDropAt(aimDropAt(at.x, at.y));
+  });
+
+  /**
    * The section a pointer at `clientY` is aiming at, or `null` when the pointer is
    * outside both the list and the dock.
    *
@@ -9133,6 +9339,8 @@ function Rail(props: {
   // visibly lags behind the cursor instead of tracking it.
   const [resizing, setResizing] = useState(false);
   const endDrag = () => {
+    dragPointRef.current = null;
+    leaveTrash();
     setDragPath(null);
     setDropAt(null);
     setDragLane(null);
@@ -9265,19 +9473,27 @@ function Rail(props: {
    * and the feedback for a gesture that is over should not survive into it.
    */
   const rowDrag = usePointerDrag<string>({
-    onBegin: setDragPath,
+    onBegin: (path) => {
+      reduceMotionRef.current =
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      // From wherever the last drag's zone had got to in going, if it is still
+      // on screen: a quick second pickup picks the same zone back up.
+      const presence = presenceRef.current;
+      stopTrash();
+      presenceRef.current = arrive(presence);
+      setTrashLeaving(false);
+      setDragPath(path);
+    },
     // Only when the answer changed. `pointermove` fires far more often than the
     // caret can move, and the rail is a big subtree to re-render for a target
     // that is still the same row's top half; returning the previous object makes
     // React bail out of the render entirely.
     onMove: (_path, x, y) => {
-      const at = rowTargetAt(x, y);
-      setDropAt((prev) =>
-        prev?.key === at?.key && prev?.index === at?.index ? prev : at,
-      );
+      dragPointRef.current = { x, y };
+      showDropAt(aimDropAt(x, y));
     },
     onDrop: (path, x, y) => {
-      const at = rowTargetAt(x, y);
+      const at = aimDropAt(x, y);
       endDrag();
       if (at === null) return;
       // The trash is a destination, not a position — the index is thrown away.
@@ -10215,12 +10431,9 @@ function Rail(props: {
                 Nothing now depends on events passing *through* it — the drop is
                 resolved from the pointer's position against the section's box —
                 but an overlay that is only a picture should not be hit-testable
-                either, and it outlives its drag by a frame. */}
-            {group.key === TRASH_LANE && dragPath !== null && (
-              <div
-                className={`trash-drop${dropInto ? " over" : ""}`}
-                aria-hidden="true"
-              >
+                either — and it outlives its drag while it fades out. */}
+            {group.key === TRASH_LANE && (dragPath !== null || trashLeaving) && (
+              <div className="trash-drop" ref={trashDropRef} aria-hidden="true">
                 Drop here to trash
               </div>
             )}
@@ -10323,6 +10536,19 @@ function Rail(props: {
           <div className="rail-dock-scroll" ref={dockScrollRef}>
             {docked.map((group) => renderGroup(group))}
           </div>
+          {/* The trash's drop zone, reaching for the carried row. A sibling of
+              the scroller so it can rise past the dock's edge; `d` is written
+              by `aimTrash` and `stepTrash`, never by React. `.over` is the confirmation
+              once the pointer is inside — the job `.trash-drop.over` did when
+              the overlay painted its own box. */}
+          {(dragPath !== null || trashLeaving) && (
+            <svg
+              className={`trash-reach${dropAt?.key === TRASH_LANE ? " over" : ""}`}
+              aria-hidden="true"
+            >
+              <path ref={reachPathRef} />
+            </svg>
+          )}
         </div>
       )}
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is
