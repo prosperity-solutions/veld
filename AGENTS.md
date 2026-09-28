@@ -605,6 +605,14 @@ run, while a plain terminal in the same app works perfectly.
 
   The corollary when adding a setting the daemon itself reads: putting a
   `Db::open()` on a hot request path is a design decision, not a detail.
+- **In `veld-daemon`, database work does not run on a tokio worker.** Every `Db`
+  call is synchronous and can wait out the full 10 s `busy_timeout` while a GC
+  pass or a CLI holds the write lock; the workers are one per core, and the PTY
+  relay runs on the same ones. Park them all and every terminal freezes, then
+  delivers its keystrokes in one burst — a reported bug, reproduced at 13.5 s per
+  keystroke. Route new database access through `crate::offload` (`blocking` for a
+  synchronous body, `pass` for a background loop whose DB calls are interleaved
+  with awaits); the module doc says which to pick.
 - **Anything that must outlive the daemon leaves its process group.** A child
   spawned with `process_group(0)` survives launchd's `bootout` and systemd's
   `KillMode=process`; a plain child does not. Both halves are required and neither

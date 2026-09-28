@@ -126,19 +126,28 @@ fn retention_cutoffs(
 
 /// Perform a single garbage-collection pass.
 pub async fn run_gc() -> anyhow::Result<GcSummary> {
-    // Open per pass so the daemon self-heals across CLI upgrades that migrate
-    // the schema.
-    let db = Db::open()?;
-    // Note which way round this is asked: housekeeping needs a **positive**
-    // "checked, and not corrupt" answer, not merely the absence of a complaint.
-    // `dbhealth::verified_not_corrupt` documents the 17 ms race, measured on a
-    // real damaged database, that made the obvious spelling useless on every
-    // single daemon start.
-    //
-    // Gated on `Corrupt` specifically and never on a generic error: an I/O blip
-    // or a full disk is transient and usually sits on good data, and stopping
-    // housekeeping on that would let a healthy file grow forever.
-    run_gc_pass(&db, &|| crate::dbhealth::verified_not_corrupt()).await
+    // Off the workers as a whole (see `offload`): the pass is the daemon's
+    // longest writer — pruning, the bounded page reclaim and a TRUNCATE
+    // checkpoint, every one of them synchronous SQLite — and its database calls
+    // are interleaved with process kills and helper requests too finely to split.
+    // Run on a worker, it parked that worker for the whole pass while everything
+    // it made wait parked the rest, terminals included.
+    crate::offload::pass(|| async {
+        // Open per pass so the daemon self-heals across CLI upgrades that migrate
+        // the schema.
+        let db = Db::open()?;
+        // Note which way round this is asked: housekeeping needs a **positive**
+        // "checked, and not corrupt" answer, not merely the absence of a complaint.
+        // `dbhealth::verified_not_corrupt` documents the 17 ms race, measured on a
+        // real damaged database, that made the obvious spelling useless on every
+        // single daemon start.
+        //
+        // Gated on `Corrupt` specifically and never on a generic error: an I/O blip
+        // or a full disk is transient and usually sits on good data, and stopping
+        // housekeeping on that would let a healthy file grow forever.
+        run_gc_pass(&db, &|| crate::dbhealth::verified_not_corrupt()).await
+    })
+    .await
 }
 
 /// One GC pass against an explicit database, asking `housekeeping` whether the

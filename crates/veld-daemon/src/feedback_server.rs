@@ -325,6 +325,33 @@ fn project_header(headers: &axum::http::HeaderMap) -> Option<String> {
     Some(value.to_owned())
 }
 
+/// Resolve the store and run `f` against it, all off the runtime's workers.
+///
+/// Every step is a synchronous SQLite call — the open, the registry read, the
+/// store's own queries — and each can wait out another writer's lock, so they go
+/// through [`crate::offload::blocking`] together. The overlay polls several of
+/// these endpoints, which is how a held lock used to stall the terminals.
+async fn with_store<T, F>(
+    run: Option<&str>,
+    project: Option<&str>,
+    headers: &axum::http::HeaderMap,
+    f: F,
+) -> Result<T, StatusCode>
+where
+    F: FnOnce(FeedbackStore) -> Result<T, StatusCode> + Send + 'static,
+    T: Send + 'static,
+{
+    let (run, project, headers) = (
+        run.map(str::to_owned),
+        project.map(str::to_owned),
+        headers.clone(),
+    );
+    crate::offload::blocking(move || {
+        f(resolve_store(run.as_deref(), project.as_deref(), &headers)?)
+    })
+    .await
+}
+
 fn resolve_store(
     run: Option<&str>,
     project: Option<&str>,
@@ -691,17 +718,23 @@ async fn list_threads(
     headers: axum::http::HeaderMap,
     Query(q): Query<ThreadListQuery>,
 ) -> Result<Json<Vec<Thread>>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-
     let status_filter = match q.status.as_deref() {
         Some("open") => Some(ThreadStatus::Open),
         Some("resolved") => Some(ThreadStatus::Resolved),
         _ => None,
     };
 
-    let mut threads = store
-        .list_threads(status_filter)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let mut threads = with_store(
+        q.run.as_deref(),
+        q.project.as_deref(),
+        &headers,
+        move |store| {
+            store
+                .list_threads(status_filter)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+    )
+    .await?;
 
     // Filter by page URL if requested.
     if let Some(ref page_url) = q.page_url {
@@ -741,8 +774,6 @@ async fn create_thread(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
     let msg = new_message(Author::Human, &body.message, body.screenshot, None);
     let thread = new_thread(
         body.scope,
@@ -753,15 +784,18 @@ async fn create_thread(
         msg,
     );
 
-    store
-        .save_thread(&thread)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .append_event(EventType::ThreadCreated {
-            thread: thread.clone(),
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let thread = with_store(Some(run_name), None, &headers, move |store| {
+        store
+            .save_thread(&thread)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .append_event(EventType::ThreadCreated {
+                thread: thread.clone(),
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(thread)
+    })
+    .await?;
 
     state.event_notify.notify_waiters();
     Ok((StatusCode::CREATED, Json(thread)))
@@ -772,13 +806,19 @@ async fn get_thread(
     Path(id): Path<String>,
     Query(q): Query<RunQuery>,
 ) -> Result<Json<Thread>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-
-    store
-        .get_thread(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map(Json)
-        .ok_or(StatusCode::NOT_FOUND)
+    with_store(
+        q.run.as_deref(),
+        q.project.as_deref(),
+        &headers,
+        move |store| {
+            store
+                .get_thread(&id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .map(Json)
+                .ok_or(StatusCode::NOT_FOUND)
+        },
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -798,20 +838,21 @@ async fn add_thread_message(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
     let msg = new_message(Author::Human, &body.body, body.screenshot, None);
 
-    store
-        .add_message(&id, &msg)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .append_event(EventType::HumanMessage {
-            thread_id: id,
-            message: msg.clone(),
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let msg = with_store(Some(run_name), None, &headers, move |store| {
+        store
+            .add_message(&id, &msg)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .append_event(EventType::HumanMessage {
+                thread_id: id,
+                message: msg.clone(),
+            })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(msg)
+    })
+    .await?;
 
     state.event_notify.notify_waiters();
     Ok((StatusCode::CREATED, Json(msg)))
@@ -826,15 +867,16 @@ async fn resolve_thread(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    let thread = store
-        .set_thread_status(&id, ThreadStatus::Resolved)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .append_event(EventType::Resolved { thread_id: id })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let thread = with_store(Some(run_name), None, &headers, move |store| {
+        let thread = store
+            .set_thread_status(&id, ThreadStatus::Resolved)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .append_event(EventType::Resolved { thread_id: id })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(thread)
+    })
+    .await?;
 
     state.event_notify.notify_waiters();
     Ok(Json(thread))
@@ -849,15 +891,16 @@ async fn reopen_thread(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    let thread = store
-        .set_thread_status(&id, ThreadStatus::Open)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .append_event(EventType::Reopened { thread_id: id })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let thread = with_store(Some(run_name), None, &headers, move |store| {
+        let thread = store
+            .set_thread_status(&id, ThreadStatus::Open)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .append_event(EventType::Reopened { thread_id: id })
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        Ok(thread)
+    })
+    .await?;
 
     state.event_notify.notify_waiters();
     Ok(Json(thread))
@@ -872,11 +915,12 @@ async fn mark_thread_seen(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    store
-        .mark_thread_seen(&id, body.seq)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    with_store(Some(run_name), None, &headers, move |store| {
+        store
+            .mark_thread_seen(&id, body.seq)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -889,11 +933,18 @@ async fn get_events(
     headers: axum::http::HeaderMap,
     Query(q): Query<EventQuery>,
 ) -> Result<Json<Vec<veld_core::feedback::Event>>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-
-    let events = store
-        .get_events_after(q.after)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let after = q.after;
+    let events = with_store(
+        q.run.as_deref(),
+        q.project.as_deref(),
+        &headers,
+        move |store| {
+            store
+                .get_events_after(after)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+        },
+    )
+    .await?;
 
     Ok(Json(events))
 }
@@ -906,16 +957,17 @@ async fn get_session(
     headers: axum::http::HeaderMap,
     Query(q): Query<RunQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-
     // Don't report "listening" once the reviewer clicked Done — even while the
     // agent drains the last items — so the FAB doesn't re-pulse after Done.
-    let listening = store
-        .is_listening(60)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        && !store
-            .is_ended()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let listening = with_store(q.run.as_deref(), q.project.as_deref(), &headers, |store| {
+        Ok(store
+            .is_listening(60)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            && !store
+                .is_ended()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?)
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({ "listening": listening })))
 }
@@ -928,15 +980,15 @@ async fn end_session(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    store
-        .append_event(EventType::SessionEnded)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .end_session()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    with_store(Some(run_name), None, &headers, |store| {
+        store
+            .append_event(EventType::SessionEnded)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        store
+            .end_session()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await?;
 
     state.event_notify.notify_waiters();
     Ok(StatusCode::NO_CONTENT)
@@ -960,16 +1012,16 @@ async fn upload_screenshot(
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    // Validate: max 10 MB.
-    if body.len() > 10 * 1024 * 1024 {
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
-    }
-
-    store
-        .save_screenshot(&id, &body)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    with_store(Some(run_name), None, &headers, move |store| {
+        // Validate: max 10 MB.
+        if body.len() > 10 * 1024 * 1024 {
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        }
+        store
+            .save_screenshot(&id, &body)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+    })
+    .await?;
 
     Ok(StatusCode::CREATED)
 }
@@ -984,13 +1036,19 @@ async fn get_screenshot(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
     let filename = format!("{id}.png");
-
-    let data = store
-        .get_screenshot(&filename)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let data = with_store(
+        q.run.as_deref(),
+        q.project.as_deref(),
+        &headers,
+        move |store| {
+            store
+                .get_screenshot(&filename)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::NOT_FOUND)
+        },
+    )
+    .await?;
 
     Ok((
         [

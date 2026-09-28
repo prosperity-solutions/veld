@@ -118,7 +118,20 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
         interval.tick().await;
         debug!("running health-check scan");
 
-        match scan_and_update(&broadcaster, &mut last_checks).await {
+        // Off the workers as a whole (see `offload`): every scan reads the
+        // registry and each live run, and its database calls sit between probe
+        // requests and signals too closely to split out. The bookkeeping goes
+        // over and comes back.
+        let b = broadcaster.clone();
+        let mut checks = std::mem::take(&mut last_checks);
+        let (checks, scanned) = crate::offload::pass(move || async move {
+            let scanned = scan_and_update(&b, &mut checks).await;
+            (checks, scanned)
+        })
+        .await;
+        last_checks = checks;
+
+        match scanned {
             Ok(changes) => {
                 if changes > 0 {
                     info!("health scan detected {changes} status change(s)");

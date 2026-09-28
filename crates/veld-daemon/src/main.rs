@@ -4,6 +4,7 @@ mod dbhealth;
 mod feedback_server;
 mod gc;
 mod monitor;
+mod offload;
 mod share;
 mod stats;
 
