@@ -2155,4 +2155,8 @@ export function pruneTerminals(keep: Iterable<string>): void {
   for (const id of [...sessions.keys()]) {
     if (!live.has(id)) disposeTerminal(id);
   }
+  // A parked terminal has no session left here to dispose.
+  for (const id of [...CLOSED_IN_TRASH]) {
+    if (!live.has(id)) CLOSED_IN_TRASH.delete(id);
+  }
 }

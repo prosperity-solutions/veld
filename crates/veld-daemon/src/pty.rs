@@ -965,8 +965,8 @@ async fn reap_detached(grace: Duration) {
     // what breaks it.
     //
     // Asking about the candidates rather than reading `ide`'s whole set also
-    // bounds the work under *its* lock by [`MAX_SESSIONS`]; see
-    // `ide::kept_among`.
+    // bounds the work under *its* lock by the live-session count, at most
+    // [`ADOPT_CEILING`]; see `ide::kept_among`.
     let kept = super::ide::kept_among(&candidates).await;
     if !kept.is_empty() {
         // **Restart their clock.** Being kept is not a pause on the grace, it is
@@ -4707,8 +4707,14 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                     // output can find this arm and the `Trashed` frame ready at
                     // once. The hangup that exit answers is the one `Trashed`
                     // announced, and the client must hear that instead.
-                    let trashed = std::iter::from_fn(|| control.try_recv().ok())
-                        .any(|frame| matches!(frame, ServerControl::Trashed));
+                    let mut trashed = false;
+                    loop {
+                        match control.try_recv() {
+                            Ok(ServerControl::Trashed) => trashed = true,
+                            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
                     let last = if trashed {
                         ServerControl::Trashed
                     } else {
