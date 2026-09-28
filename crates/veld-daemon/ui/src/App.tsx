@@ -6246,16 +6246,19 @@ function AppInner(props: {
   // `held` is empty from a detached window, matching `channel.holds`: it keeps
   // tabs its origin window still holds the worktree for, and files no relayed
   // agent hooks (`relayInboxEvents`), so letting it claim the worktree would hide
-  // every hook-sourced event there.
+  // every hook-sourced event there. It says `own` instead: what its inbox does
+  // hold — its panes' own terminal events — only it can see, so they always count.
   //
-  // Not sent until this window's layouts have arrived (or a few seconds have
-  // passed, for a window that has none to fetch): after a reload `layouts` starts
-  // empty, and a first report saying "I hold nothing" would count other windows'
-  // stale copies of what was read here. The shell keeps the previous page's
-  // report until then.
+  // Not sent until this window's layouts have arrived, or three seconds have
+  // passed — whichever is first, so a window with nothing to fetch still reports,
+  // and so does one whose fetch is slow (briefly holding nothing, the cost of not
+  // waiting forever). After a reload `layouts` starts empty, and a first report
+  // saying "I hold nothing" would count other windows' stale copies of what was
+  // read here. The shell keeps the previous page's report until then.
   const badgeKey = JSON.stringify({
     unread: inbox.unreadSessions(unreadScope),
     held: chromeless ? [] : Object.keys(layouts).map(Number).sort((a, b) => a - b),
+    own: chromeless,
   });
   const [badgeGraceOver, setBadgeGraceOver] = useState(false);
   useEffect(() => {

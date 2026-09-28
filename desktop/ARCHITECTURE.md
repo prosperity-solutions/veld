@@ -974,7 +974,8 @@ Minimal by design. Main process only does:
    relayed agent hook, but only the holder can read one, so a plain union kept a
    read event lit forever. A worktree nobody holds counts from anyone, and a
    detached window never claims to hold one (it files no relayed hooks, like
-   `channel.holds` leaves it out). A report is dropped when its renderer crashes
+   `channel.holds` leaves it out) — it reports `own` instead, and its entries,
+   its panes' own terminal events that no other window sees, always count. A report is dropped when its renderer crashes
    or its `webContents` is destroyed, and ten seconds after a page change unless
    the new page has reported — a reloading page holds nothing until its layouts
    arrive, so dropping at once would count other windows' stale copies. Nothing

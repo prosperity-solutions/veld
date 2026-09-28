@@ -54,7 +54,7 @@ const isWorktreeId = (v) => Number.isSafeInteger(v) && v >= 0;
  * the main process.
  *
  * @param {unknown} payload
- * @returns {{ unread: Map<string, number>, held: Set<number> }}
+ * @returns {{ unread: Map<string, number>, held: Set<number>, own: boolean }}
  */
 function parseReport(payload) {
   const raw = /** @type {any} */ (payload);
@@ -71,7 +71,7 @@ function parseReport(payload) {
   const held = new Set(
     Array.isArray(raw?.held) ? raw.held.slice(0, MAX_ENTRIES).filter(isWorktreeId) : [],
   );
-  return { unread, held };
+  return { unread, held, own: raw?.own === true };
 }
 
 /**
@@ -119,7 +119,7 @@ function badgeText(count, style) {
  * @param {(text: string) => void} apply
  */
 function createDockBadge(apply) {
-  /** @type {Map<number, { unread: Map<string, number>, held: Set<number> }>} */
+  /** @type {Map<number, { unread: Map<string, number>, held: Set<number>, own: boolean }>} */
   const reports = new Map();
   let style = DEFAULT_STYLE;
   /** Nothing is shown until the style has been read once: a user who chose `off`
@@ -133,7 +133,10 @@ function createDockBadge(apply) {
     const counted = new Set();
     for (const r of reports.values()) {
       for (const [id, worktreeId] of r.unread) {
-        if (r.held.has(worktreeId) || !heldAnywhere.has(worktreeId)) counted.add(id);
+        // `own`: a detached window. It holds no worktree, but everything in its
+        // inbox is its own panes' terminal events (it files no relayed hooks), which
+        // no other window can see — so nobody else's word can stand in for it.
+        if (r.own || r.held.has(worktreeId) || !heldAnywhere.has(worktreeId)) counted.add(id);
       }
     }
     return counted.size;

@@ -74,6 +74,18 @@ test("for a held worktree only the holder's answer counts", () => {
   assert.equal(badge.text(), "");
 });
 
+/** A detached window's own terminal events: only it can see them, so they count
+ *  even while the origin window holds that worktree. */
+test("a detached window's entries always count", () => {
+  const badge = createDockBadge(() => {});
+  badge.setStyle("count");
+  badge.report(1, { unread: [], held: [7] });
+  badge.report(2, { unread: [u("d", 7)], held: [], own: true });
+  assert.equal(badge.text(), "1");
+  badge.report(2, { unread: [], held: [], own: true });
+  assert.equal(badge.text(), "");
+});
+
 /** An agent in a project nobody has open this run is news nobody could have read. */
 test("for a worktree nobody holds, any window's answer counts", () => {
   const badge = createDockBadge(() => {});
