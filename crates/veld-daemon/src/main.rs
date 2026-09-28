@@ -90,6 +90,9 @@ fn parse_args() -> Args {
 /// and the shells they start inherit the raised limit.
 fn raise_fd_limit() {
     const WANT: libc::rlim_t = 4096;
+    // Two descriptors per session, with most of the budget left for the rest of
+    // the daemon: raising the session ceiling past this needs a larger `WANT`.
+    const _: () = assert!((veld_core::db::MAX_MAX_SESSIONS as libc::rlim_t) * 8 <= WANT);
     // SAFETY: getrlimit/setrlimit only read and write the struct passed in.
     unsafe {
         let mut lim = std::mem::zeroed::<libc::rlimit>();
@@ -98,6 +101,10 @@ fn raise_fd_limit() {
         }
         let target = WANT.min(lim.rlim_max);
         let before = lim.rlim_cur;
+        if target <= before {
+            warn!("open-file limit is {before} and its hard limit allows no more");
+            return;
+        }
         lim.rlim_cur = target;
         if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
             info!("open-file limit raised from {before} to {target}");

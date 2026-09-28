@@ -2054,6 +2054,7 @@ export function disposeTerminal(id: string): void {
   // mark-all-read — a badge the user cannot clear by looking is the poisoning the
   // design set out to avoid.
   inbox.forget(id);
+  CLOSED_IN_TRASH.delete(id);
   // A prompt queued for a pane that is being closed has nowhere to go. The
   // poll's own guards already stop it reaching a disposed session; this is what
   // keeps a pane closed *before* it ever connected from leaving the text behind.
@@ -2108,21 +2109,23 @@ const CLOSED_IN_TRASH = new Set<string>();
 
 /**
  * Let go of a terminal whose shell the daemon is closing because its worktree
- * has been in the trash past `terminal.trashedGraceMinutes`.
+ * has been in the trash past `terminal.trashedGraceMinutes` (or is being
+ * deleted).
  *
  * The tab stays in the layout — that is what a restore brings back — so the
  * session is dropped the way a reload drops it, not the way closing the tab
- * does: no `DELETE` (the daemon is already ending it), no exit reported to the
- * inbox, and any listener still subscribed goes back to `pending` so it follows
- * the session the next mount creates. (Today the pane's own subscription ends
- * with its unmount, so there is usually none; a subscriber that works from the
- * layout rather than a mounted pane is what this keeps working.) That mount then runs
- * the ordinary path for a tab whose shell is gone: a new shell in the same
- * directory, or, for an agent pane, its Resume/Start choice.
+ * does: no `DELETE` (the daemon is already ending it; `disposeTerminal` would
+ * also be wrong for the listeners below), no exit reported to the inbox. Any
+ * listener still subscribed goes back to `pending` so it follows the session
+ * the next mount creates — usually there is none, since a pane's own
+ * subscription ends with its unmount. That mount then takes the ordinary path
+ * for a tab whose shell is gone: a new shell in the same directory, or, for an
+ * agent pane, its resume.
  *
- * A pane that is on screen right now keeps its terminal — the main window never
- * shows a trashed worktree, but a detached terminal window can — and reads as ended instead: taking the element away under
- * somebody would leave a blank pane with no explanation.
+ * A pane that is on screen keeps its terminal and reads as ended instead,
+ * because taking the element away would leave a blank pane with no
+ * explanation. The main window never shows a trashed worktree; a detached
+ * terminal window can.
  */
 function parkTerminal(s: Session): void {
   if (s.container.isConnected) {

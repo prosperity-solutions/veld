@@ -481,6 +481,11 @@ pub fn spawn_session_reaper() {
 /// pass overrides the keep on purpose; the layout is what brings the tabs back on
 /// restore, not the shells.
 ///
+/// A worktree restored in the instant between reading the expired set and
+/// ending its sessions still loses them — the same width of race, and the same
+/// acceptance, as the re-judge in [`reap_detached`]; its tabs come back with new
+/// shells either way.
+///
 /// A database this pass cannot open leaves every shell running: closing
 /// terminals is the one outcome that cannot be undone here, so an unreadable
 /// setting is not a reason to do it.
@@ -506,7 +511,18 @@ async fn close_trashed_sessions() {
             }
         };
     drop(db);
-    close_sessions_in(&expired).await;
+    close_sessions_in(&expired, "worktree in the trash past its grace").await;
+}
+
+/// End every session of a worktree whose checkout has just been deleted.
+pub(crate) async fn close_worktree_sessions(worktree_id: i64) {
+    let ended = close_sessions_in(&[worktree_id].into_iter().collect(), "worktree deleted").await;
+    if ended > 0 {
+        info!(
+            worktree_id,
+            ended, "closed the terminals of a deleted worktree"
+        );
+    }
 }
 
 /// End every session — registered or released — that belongs to one of
@@ -518,7 +534,7 @@ async fn close_trashed_sessions() {
 /// trash. A released session has no socket to send it on — its client already
 /// read the release as a lost connection — so its pane stays in that state, and
 /// after a restore its Reconnect button opens a new shell.
-async fn close_sessions_in(worktrees: &std::collections::HashSet<i64>) -> usize {
+async fn close_sessions_in(worktrees: &std::collections::HashSet<i64>, reason: &str) -> usize {
     if worktrees.is_empty() {
         return 0;
     }
@@ -538,13 +554,14 @@ async fn close_sessions_in(worktrees: &std::collections::HashSet<i64>) -> usize 
         .collect();
     let mut ended = 0;
     for session in registered {
+        // Before the hangup, never after: the hangup's exit races a later frame.
         let _ = session.control.send(ServerControl::Trashed);
-        if end_session(&session.id, "worktree in the trash past its grace").await {
+        if end_session(&session.id, reason).await {
             ended += 1;
         }
     }
     for id in released {
-        if hang_up_released_holder(&id, "worktree in the trash past its grace").await {
+        if hang_up_released_holder(&id, reason).await {
             ended += 1;
         }
     }
@@ -2250,9 +2267,8 @@ async fn mint_ticket(
 
     // No NEW shells in a checkout that is in the trash. It is still a real directory
     // for the whole retention period, so nothing stops a URL or a direct API call
-    // from opening a terminal in one — and nothing reaps sessions when a worktree is
-    // deleted, so the eventual `git worktree remove` would pull the directory out
-    // from under that shell with no warning.
+    // from opening a terminal in one — and a shell opened there would have its
+    // directory pulled out from under it by the eventual `git worktree remove`.
     //
     // **Reattaching is deliberately still allowed.** A worktree can be binned from
     // another window while a terminal is open in it, and that shell keeps running
@@ -3632,10 +3648,14 @@ async fn attach(
     let (session, resumed) = match obtain_session(&ticket, size).await {
         Ok(s) => s,
         Err(SessionError::AtCapacity) => {
-            warn!("refusing terminal: {} sessions already live", session_cap());
+            let cap = session_cap();
+            warn!("refusing terminal: {cap} sessions already live");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "too many terminal sessions",
+                format!(
+                    "too many terminal sessions ({cap}) — close a terminal pane, or raise \
+                     \"Maximum open terminals\" in Settings › Terminal"
+                ),
             )
                 .into_response();
         }
@@ -4683,7 +4703,18 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                             break;
                         }
                     }
-                    let _ = ws_tx.send(ServerControl::Exit { code }.frame()).await;
+                    // `select!` is unbiased, so a socket that was busy sending
+                    // output can find this arm and the `Trashed` frame ready at
+                    // once. The hangup that exit answers is the one `Trashed`
+                    // announced, and the client must hear that instead.
+                    let trashed = std::iter::from_fn(|| control.try_recv().ok())
+                        .any(|frame| matches!(frame, ServerControl::Trashed));
+                    let last = if trashed {
+                        ServerControl::Trashed
+                    } else {
+                        ServerControl::Exit { code }
+                    };
+                    let _ = ws_tx.send(last.frame()).await;
                     break;
                 }
             },
@@ -7729,7 +7760,7 @@ mod tests {
             read_control(&mut kept, "ready").await;
             crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
 
-            let ended = close_sessions_in(&[trashed].into_iter().collect()).await;
+            let ended = close_sessions_in(&[trashed].into_iter().collect(), "test").await;
             assert_eq!(ended, 1, "only the trashed worktree's session ends");
             read_control(&mut ws, "trashed").await;
             // The last frame: the socket closes without an `exit`, which would
