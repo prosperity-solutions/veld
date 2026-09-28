@@ -1343,7 +1343,7 @@ mod tests {
         }
         let root = dir.path();
         for expected in [
-            root.join("veld.json"),
+            dir.path().join("veld.json"),
             // Unparseable, so not among `files` — and still an input: fixing it
             // changes the result.
             root.join("veld.d/broken.jsonc"),
