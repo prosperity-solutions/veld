@@ -187,6 +187,33 @@ pub const MIN_DETACH_GRACE_MINUTES: i64 = 1;
 /// already generous; unbounded means a leak with a preference in front of it.
 pub const MAX_DETACH_GRACE_MINUTES: i64 = 10_080;
 
+/// Minutes a trashed worktree's terminals keep running before the daemon closes
+/// them, or `0` to keep them until the worktree is deleted.
+///
+/// A trashed worktree cannot open a new terminal, but its running shells used to
+/// stay up for the whole time it sat in the trash — and a window that still has
+/// the worktree's layout keeps naming their panes, so the detach grace never
+/// collected them either. Enough binned worktrees and every new terminal anywhere
+/// is refused at [`DEFAULT_MAX_SESSIONS`]. Five minutes is long enough to undo a
+/// mistaken trash with every shell still live; after that a restore brings the
+/// tabs back with fresh shells, which is what the layout already guarantees.
+pub const DEFAULT_TRASHED_GRACE_MINUTES: i64 = 5;
+/// Upper bound: a week, the same ceiling as the detach grace.
+pub const MAX_TRASHED_GRACE_MINUTES: i64 = 10_080;
+
+/// Live terminal sessions the daemon allows across every worktree.
+///
+/// Each one is a holder process and a socket in the daemon, so the ceiling is a
+/// guard against a runaway client forking shells, not a quota anyone should
+/// have to think about.
+pub const DEFAULT_MAX_SESSIONS: i64 = 48;
+/// Floor: a handful of worktrees with an agent and a shell each.
+pub const MIN_MAX_SESSIONS: i64 = 8;
+/// Ceiling. Every session holds file descriptors in the daemon, and a
+/// launchd-started process begins with a soft limit of 256 of them; well past
+/// this the daemon runs out of descriptors before it runs out of shells.
+pub const MAX_MAX_SESSIONS: i64 = 128;
+
 /// How many times a terminal whose socket dropped reconnects to the same shell
 /// by itself before giving up and waiting for a click.
 ///
@@ -652,6 +679,8 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalBellVolume,
     TerminalDetachGrace,
+    TerminalTrashedGrace,
+    TerminalMaxSessions,
     TerminalReconnectTries,
     TerminalReconnectBackoffSeconds,
     TerminalReconnectFirstDelaySeconds,
@@ -778,6 +807,8 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalBellVolume,
         Self::TerminalDetachGrace,
+        Self::TerminalTrashedGrace,
+        Self::TerminalMaxSessions,
         // ── Terminal › Auto-reconnect ────────────────────────────────────────
         Self::TerminalReconnectTries,
         Self::TerminalReconnectFirstDelaySeconds,
@@ -847,6 +878,8 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalBellVolume => "terminal.bellVolume",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
+            Self::TerminalTrashedGrace => "terminal.trashedGraceMinutes",
+            Self::TerminalMaxSessions => "terminal.maxSessions",
             Self::TerminalReconnectTries => "terminal.reconnectTries",
             Self::TerminalReconnectBackoffSeconds => "terminal.reconnectBackoffSeconds",
             Self::TerminalReconnectFirstDelaySeconds => "terminal.reconnectFirstDelaySeconds",
@@ -922,6 +955,8 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.bellVolume" => Self::TerminalBellVolume,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
+            "terminal.trashedGraceMinutes" => Self::TerminalTrashedGrace,
+            "terminal.maxSessions" => Self::TerminalMaxSessions,
             "terminal.reconnectTries" => Self::TerminalReconnectTries,
             "terminal.reconnectBackoffSeconds" => Self::TerminalReconnectBackoffSeconds,
             "terminal.reconnectFirstDelaySeconds" => Self::TerminalReconnectFirstDelaySeconds,
@@ -1022,6 +1057,14 @@ impl SettingKey {
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
             ),
+            // Zero is "keep them until the worktree is deleted", the minimum of the
+            // range rather than a value clamped up from.
+            Self::TerminalTrashedGrace => {
+                Value::from(clamp_i64(value, 0, MAX_TRASHED_GRACE_MINUTES).ok_or_else(bad)?)
+            }
+            Self::TerminalMaxSessions => {
+                Value::from(clamp_i64(value, MIN_MAX_SESSIONS, MAX_MAX_SESSIONS).ok_or_else(bad)?)
+            }
             // Zero is the off switch and is deliberately inside the range (it is
             // the minimum) — see DEFAULT_RECONNECT_TRIES. The one numeric setting
             // whose lowest value is the answer to "I want none", not a lower
@@ -1672,6 +1715,14 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::TerminalDetachGrace,
             Value::from(DEFAULT_DETACH_GRACE_MINUTES),
         ),
+        (
+            SettingKey::TerminalTrashedGrace,
+            Value::from(DEFAULT_TRASHED_GRACE_MINUTES),
+        ),
+        (
+            SettingKey::TerminalMaxSessions,
+            Value::from(DEFAULT_MAX_SESSIONS),
+        ),
         // Auto-reconnect ships on at three tries: a dropped socket is the common
         // transient (a sleep, a proxy timeout, a daemon restart the holder
         // outlives) and a shell still running is exactly what the holder process
@@ -2179,6 +2230,36 @@ impl Db {
             .unwrap_or(DEFAULT_DETACH_GRACE_MINUTES)
             .clamp(MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES);
         std::time::Duration::from_secs(minutes as u64 * 60)
+    }
+
+    /// How long a trashed worktree's terminals keep running, or `None` for "until
+    /// the worktree is deleted".
+    ///
+    /// Clamped like [`Self::detach_grace`], for the same reason: the daemon acts on
+    /// it, so a stored value from a newer build with a wider range must not reach
+    /// the reaper unchecked.
+    pub fn trashed_grace(&self) -> Option<std::time::Duration> {
+        let minutes = self
+            .setting(&SettingKey::TerminalTrashedGrace)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(DEFAULT_TRASHED_GRACE_MINUTES);
+        if minutes <= 0 {
+            return None;
+        }
+        let minutes = minutes.min(MAX_TRASHED_GRACE_MINUTES);
+        Some(std::time::Duration::from_secs(minutes as u64 * 60))
+    }
+
+    /// The live-session ceiling the daemon should enforce.
+    pub fn max_sessions(&self) -> usize {
+        self.setting(&SettingKey::TerminalMaxSessions)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(DEFAULT_MAX_SESSIONS)
+            .clamp(MIN_MAX_SESSIONS, MAX_MAX_SESSIONS) as usize
     }
 
     /// The shell a terminal session should spawn — already resolved, so every
@@ -3271,6 +3352,51 @@ mod tests {
             db.settings().unwrap()["terminal.reconnectBackoffSeconds"],
             Value::from(DEFAULT_RECONNECT_BACKOFF_SECONDS)
         );
+    }
+
+    #[test]
+    fn trashed_grace_defaults_to_five_minutes_and_zero_keeps_shells() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.trashed_grace(),
+            Some(std::time::Duration::from_secs(
+                DEFAULT_TRASHED_GRACE_MINUTES as u64 * 60
+            ))
+        );
+        db.patch_settings(&patch(&[("terminal.trashedGraceMinutes", Value::from(0))]))
+            .unwrap();
+        assert_eq!(db.trashed_grace(), None, "0 keeps them until deletion");
+        db.patch_settings(&patch(&[(
+            "terminal.trashedGraceMinutes",
+            Value::from(MAX_TRASHED_GRACE_MINUTES + 1),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.trashed_grace(),
+            Some(std::time::Duration::from_secs(
+                MAX_TRASHED_GRACE_MINUTES as u64 * 60
+            ))
+        );
+    }
+
+    #[test]
+    fn max_sessions_is_clamped_to_its_range() {
+        let (_dir, db) = test_db();
+        assert_eq!(db.max_sessions(), DEFAULT_MAX_SESSIONS as usize);
+        db.patch_settings(&patch(&[("terminal.maxSessions", Value::from(2))]))
+            .unwrap();
+        assert_eq!(db.max_sessions(), MIN_MAX_SESSIONS as usize);
+        db.patch_settings(&patch(&[("terminal.maxSessions", Value::from(10_000))]))
+            .unwrap();
+        assert_eq!(db.max_sessions(), MAX_MAX_SESSIONS as usize);
+        // A row a newer build wrote past this build's range is clamped on read.
+        db.lock()
+            .execute(
+                "UPDATE settings SET value = '100000' WHERE key = 'terminal.maxSessions'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(db.max_sessions(), MAX_MAX_SESSIONS as usize);
     }
 
     #[test]

@@ -410,7 +410,15 @@ export function subscribeTerminal(id: string, fn: () => void): () => void {
   const s = sessions.get(id);
   if (s) {
     s.listeners.add(fn);
-    return () => s.listeners.delete(fn);
+    return () => {
+      s.listeners.delete(fn);
+      // `parkTerminal` hands a session's listeners back to `pending`, so a
+      // listener subscribed to the old session may be waiting there now.
+      const waiting = pending.get(id);
+      waiting?.delete(fn);
+      if (waiting?.size === 0) pending.delete(id);
+      sessions.get(id)?.listeners.delete(fn);
+    };
   }
   const waiting = pending.get(id) ?? new Set();
   waiting.add(fn);
@@ -1236,7 +1244,18 @@ async function connect(
     // otherwise a running build is silently replaced by an empty prompt, which
     // is exactly what the docs promise won't happen.
     if (!minted.resumed && EXPECTED_RESUMES.delete(s.id)) {
-      writeNotice(s, "the previous shell is gone — this is a new one");
+      // A `resume` does start a new process, but it is the same session coming
+      // back, and "this is a new one" above the agent's own resumed screen reads
+      // as a contradiction.
+      const closedInTrash = CLOSED_IN_TRASH.delete(s.id);
+      writeNotice(
+        s,
+        closedInTrash && mode === "resume"
+          ? "closed while the worktree was in the trash — resuming it"
+          : closedInTrash
+            ? "closed while the worktree was in the trash — this is a new shell"
+            : "the previous shell is gone — this is a new one",
+      );
     }
   } catch (e) {
     if (s.generation !== generation) return;
@@ -1614,6 +1633,9 @@ function handleControl(s: Session, raw: string): void {
       ) {
         paneCloseHandler?.(s.id, s.worktreeId);
       }
+      break;
+    case "trashed":
+      parkTerminal(s);
       break;
     case "taken_over":
       // Another view of `/ide` (a second window, or a duplicated tab that
@@ -2073,6 +2095,43 @@ export function releaseTerminal(id: string): void {
   s.term.dispose();
   s.listeners.clear();
   sessions.delete(id);
+}
+
+/**
+ * Tab ids whose shell the daemon closed because the worktree sat in the trash,
+ * so the pane that reopens after a restore can say why its shell is new.
+ */
+const CLOSED_IN_TRASH = new Set<string>();
+
+/**
+ * Let go of a terminal whose shell the daemon is closing because its worktree
+ * has been in the trash past `terminal.trashedGraceMinutes`.
+ *
+ * The tab stays in the layout — that is what a restore brings back — so the
+ * session is dropped the way a reload drops it, not the way closing the tab
+ * does: no `DELETE` (the daemon is already ending it), no exit reported to the
+ * inbox, and the listeners go back to `pending` so the pane's chip and the
+ * rail pick up the session that the next mount creates. That mount then runs
+ * the ordinary path for a tab whose shell is gone: a new shell in the same
+ * directory, or, for an agent pane, its Resume/Start choice.
+ *
+ * A pane that is on screen right now keeps its terminal — the main window never
+ * shows a trashed worktree, but a detached terminal window can — and reads as ended instead: taking the element away under
+ * somebody would leave a blank pane with no explanation.
+ */
+function parkTerminal(s: Session): void {
+  CLOSED_IN_TRASH.add(s.id);
+  if (s.container.isConnected) {
+    writeNotice(s, "this worktree is in the trash, so its shell was closed");
+    setState(s, "ended", "closed in the trash");
+    return;
+  }
+  const listeners = [...s.listeners];
+  releaseTerminal(s.id);
+  const waiting = pending.get(s.id) ?? new Set();
+  for (const fn of listeners) waiting.add(fn);
+  pending.set(s.id, waiting);
+  for (const fn of listeners) fn();
 }
 
 /**
