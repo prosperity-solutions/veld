@@ -202,7 +202,21 @@ import {
   DEFAULT_RATIO,
   type PaneLayout,
   type PaneLayoutUpdate,
+  LEGACY_SESSIONS_STORAGE_KEY,
   SESSIONS_STORAGE_KEY,
+  type SessionRegistry,
+  addSession,
+  allSessionJars,
+  canAddSession,
+  forgetRetiredSessions,
+  parseSessionRegistry,
+  removeSession,
+  renameSession,
+  serializeSessionRegistry,
+  sessionsInUse,
+  suggestSessionName,
+  retiredSessions,
+  pruneSessionSets,
   activeTab,
   activateTab,
   addTab,
@@ -223,16 +237,13 @@ import {
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
-  nextFreeProfile,
   paneTakesPrompt,
   paneTabLabel,
   tabForTransport,
-  parseSessionSets,
   parseTransferTabs,
   revealDiagPane,
   saveLayouts,
   seedPane,
-  serializeSessionSets,
   sessionSetFor,
   normalizeBrowserUrl,
   terminalIds,
@@ -301,6 +312,7 @@ import {
   onBrowserAccelerator,
   onBrowserFocused,
   onBrowserOpenRequest,
+  clearBrowserSession,
   popBrowserSuspend,
   pruneBrowsers,
   pushBrowserSuspend,
@@ -555,7 +567,10 @@ function WorktreeMark(props: {
   );
 }
 
-function usePersisted(key: string, initial: string): [string, (v: string) => void] {
+function usePersisted(
+  key: string,
+  initial: string,
+): [string, (v: string) => void, (v: string) => void] {
   const [value, setValue] = useState(
     () => window.localStorage.getItem(key) ?? initial,
   );
@@ -573,7 +588,9 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
     },
     [key],
   );
-  return [value, set];
+  // The third element adopts a value without writing it back — for a value that
+  // another window just wrote, which is already on disk.
+  return [value, set, setValue];
 }
 
 /**
@@ -5319,70 +5336,134 @@ function AppInner(props: {
 
   // ---- browser sessions ---------------------------------------------------
   //
-  // An explicit set per worktree, persisted. Deriving it from which slots panes
-  // occupy was the first attempt and it inverted the feature: moving a pane onto
-  // a new session vacated its old slot, so adding one appeared to delete the
-  // previous. See `SESSIONS_STORAGE_KEY` in panes/model.ts for why localStorage
-  // is the right home for this and not the daemon.
-  const [sessionsRaw, setSessionsRaw] = usePersisted(SESSIONS_STORAGE_KEY, "{}");
-  const sessionSets = useMemo(() => parseSessionSets(sessionsRaw), [sessionsRaw]);
+  // One registry for the whole install: every session's name and colour, and the
+  // explicit set each worktree has. See `SessionRegistry` in panes/model.ts for
+  // why it is explicit and why localStorage is its home.
+  const [sessionsRaw, setSessionsRaw, adoptSessionsRaw] = usePersisted(
+    SESSIONS_STORAGE_KEY,
+    "",
+  );
+  const readSessionRegistry = (raw: string | null) =>
+    parseSessionRegistry(raw, window.localStorage.getItem(LEGACY_SESSIONS_STORAGE_KEY));
+  const sessionRegistry = useMemo(
+    () => readSessionRegistry(sessionsRaw),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the v1 key only matters until v2 exists, and nothing writes it any more
+    [sessionsRaw],
+  );
   const sessions = useMemo(
-    () => (worktree ? sessionSetFor(sessionSets, worktree.id, layout) : []),
-    [sessionSets, worktree?.id, layout],
+    () => (worktree ? sessionSetFor(sessionRegistry, worktree.id, layout) : []),
+    [sessionRegistry, worktree?.id, layout],
+  );
+  // Another window's add or rename. `usePersisted` reads once, and a detached
+  // window is where a session often gets made — without this the main window
+  // showed the tab handed back to it as "Unnamed session" until its next reload.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== SESSIONS_STORAGE_KEY) return;
+      adoptSessionsRaw(window.localStorage.getItem(SESSIONS_STORAGE_KEY) ?? "");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [adoptSessionsRaw]);
+  // A deleted worktree's sessions retire (see `pruneSessionSets` for why this is
+  // not optional). Only once the daemon has answered: `repoList` is `null` until
+  // then, and pruning against that would empty every worktree's set.
+  useEffect(() => {
+    if (!repoList) return;
+    const onDisk = readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
+    const next = pruneSessionSets(onDisk, allWorktrees.map((w) => w.id));
+    if (next !== onDisk) setSessionsRaw(serializeSessionRegistry(next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs per poll result
+  }, [repoList]);
+  const inUseEverywhere = () => sessionsInUse(Object.values(layouts));
+  const retired = useMemo(
+    () => retiredSessions(sessionRegistry, sessionsInUse(Object.values(layouts))),
+    [sessionRegistry, layouts],
   );
   /**
-   * Mutate one worktree's session set against what is *currently* on disk.
+   * Change the registry against what is *currently* on disk.
    *
-   * The whole operation reads through, not just the merge of the other keys:
-   * `usePersisted` reads localStorage in a `useState` initialiser and re-reads only
-   * when the key changes, and this key is a constant — so a second `/ide` tab holds
-   * a snapshot from its own boot. Merging a stale *slot list* is the same bug one
-   * level down: tab B adds `otter`, then stale tab A removes `wombat` and writes
-   * its own list back, and `otter` is gone. Sharing across tabs is the reason
-   * localStorage was chosen (see `SESSIONS_STORAGE_KEY`), so both the set being
-   * edited and the sets beside it have to be as fresh as the write.
-   *
-   * `mutate` runs synchronously against that fresh list, which is what lets
-   * `addSession` below capture the slot it picked.
+   * The whole operation reads through: `usePersisted` reads localStorage in a
+   * `useState` initialiser and re-reads only when the key changes, and this key is
+   * a constant — so a second `/ide` tab holds a snapshot from its own boot. Editing
+   * that snapshot is how tab B's new session gets erased by stale tab A's rename.
+   * Sharing across tabs is the reason localStorage was chosen, so every write has
+   * to start from what the other tabs wrote.
    */
-  const editSessions = (
-    worktreeId: number,
-    mutate: (current: BrowserProfile[]) => BrowserProfile[],
-  ): void => {
-    const onDisk = parseSessionSets(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
-    const next = mutate(sessionSetFor(onDisk, worktreeId, layout));
-    setSessionsRaw(serializeSessionSets({ ...onDisk, [worktreeId]: next }));
+  const editSessions = (edit: (current: SessionRegistry) => SessionRegistry): void => {
+    const onDisk = readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
+    setSessionsRaw(serializeSessionRegistry(edit(onDisk)));
   };
 
-  // Whether *anything* can be added, for the menu's disabled state. The slot that
-  // actually gets used is chosen inside `editSessions` from the on-disk set, since
-  // another tab may have taken this one in the meantime.
-  const nextSession = worktree ? nextFreeProfile(new Set(sessions)) : null;
-  const addSession = (tabId: string) => {
-    if (!worktree || !layout) return;
-    let chosen: BrowserProfile | null = null;
-    editSessions(worktree.id, (current) => {
-      // Taken from the slots this worktree does not already list — not from
-      // page-wide occupancy, so two worktrees can each hold the same slot.
-      chosen = nextFreeProfile(new Set(current));
-      return chosen ? [...current, chosen] : current;
+  // Whether *anything* can be added, for the menu's disabled state, and the name
+  // its prompt starts with. The session itself is made inside `editSessions`, from
+  // the on-disk registry, since another tab may have added one in the meantime.
+  const canAdd = worktree ? canAddSession(sessionRegistry, worktree.id, layout) : false;
+  const newSessionName = worktree ? suggestSessionName(sessionRegistry, worktree.id, layout) : "";
+  // `false` when nothing was added — another window reached the cap since this
+  // one rendered — so the prompt can stay up and say so instead of vanishing
+  // with the typed name.
+  const addSessionFor = (tabId: string, name: string): boolean => {
+    if (!worktree || !layout) return false;
+    let made: BrowserProfile | null = null;
+    editSessions((current) => {
+      const added = addSession(current, worktree.id, layout, name);
+      made = added?.id ?? null;
+      return added?.registry ?? current;
     });
+    if (!made) return false;
     // Adding is only ever worth doing to put this pane on it.
-    if (chosen) setLayout((prev) => updateTab(prev, tabId, { profile: chosen! }));
+    setLayout((prev) => updateTab(prev, tabId, { profile: made! }));
+    return true;
   };
+  const renameSessionTo = (profile: BrowserProfile, name: string) =>
+    editSessions((current) => renameSession(current, profile, name));
   // Removing a session returns its panes to the default one rather than being
   // refused: the session you are looking at was otherwise the single one you
   // could never remove. Only this worktree's panes are touched, because the sets
-  // are per worktree — another worktree still lists (and holds) its own.
-  const removeSession = (profile: BrowserProfile) => {
+  // are per worktree.
+  const removeSessionFrom = (profile: BrowserProfile) => {
     if (!worktree || profile === "default") return;
-    editSessions(worktree.id, (current) => current.filter((p) => p !== profile));
+    editSessions((current) => removeSession(current, worktree.id, layout, profile));
     setLayout((prev) =>
       allTabs(prev)
-        .filter((t) => t.kind === "browser" && (t.profile ?? "default") === profile)
-        .reduce((acc, t) => updateTab(acc, t.id, { profile: "default" }), prev),
+        .filter((t) => t.kind === "browser")
+        .reduce((acc, t) => {
+          // Its remembered URL goes with it: the id is random, so nothing will
+          // ever be on it again, and `urls` is persisted with the layout.
+          const patch: Partial<PaneTab> = {};
+          if (t.urls && Object.hasOwn(t.urls, profile)) {
+            const urls = { ...t.urls };
+            delete urls[profile];
+            patch.urls = urls;
+          }
+          if ((t.profile ?? "default") === profile) patch.profile = "default";
+          return Object.keys(patch).length > 0 ? updateTab(acc, t.id, patch) : acc;
+        }, prev),
     );
   };
+  /**
+   * Clear jars, then forget the retired ones among them that really were
+   * emptied — a failed clear keeps its jar remembered, or its cookies would stay
+   * on disk with nothing left that could reach them.
+   */
+  const clearSessions = async (ids: BrowserProfile[]) => {
+    const results = await Promise.all(ids.map(clearBrowserSession));
+    const cleared = ids.filter((_, i) => results[i]);
+    if (cleared.length > 0) {
+      editSessions((current) => forgetRetiredSessions(current, cleared, inUseEverywhere()));
+    }
+  };
+  const clearOneSession = (id: BrowserProfile) => void clearSessions([id]);
+  // Every jar that may hold data: retired and legacy ones, and any a pane is on
+  // that this registry has lost.
+  const clearAllSessions = () =>
+    void clearSessions(
+      allSessionJars(
+        readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY)),
+        inUseEverywhere(),
+      ),
+    );
 
   // The top bar's globe: a browser pane with nothing in it, which is where the
   // run's URLs live now (`panes/PlaceList.tsx`). An existing blank pane is already
@@ -6944,8 +7025,14 @@ function AppInner(props: {
                 : "This worktree has no veld.json, so there is nothing to run."
             }
             sessions={sessions}
-            onAddSession={nextSession ? addSession : undefined}
-            onRemoveSession={removeSession}
+            sessionRegistry={sessionRegistry}
+            newSessionName={newSessionName}
+            onAddSession={canAdd ? addSessionFor : undefined}
+            onRenameSession={renameSessionTo}
+            onRemoveSession={removeSessionFrom}
+            retiredSessions={retired}
+            onClearSession={clearOneSession}
+            onClearAllSessions={clearAllSessions}
             quickSwitches={quickSwitches}
             showWorking={activity.showWorking}
             runCtx={runCtx}
@@ -7232,8 +7319,14 @@ function AppInner(props: {
                   : "This worktree has no veld.json, so there is nothing to run."
               }
               sessions={sessions}
-              onAddSession={nextSession ? addSession : undefined}
-              onRemoveSession={removeSession}
+              sessionRegistry={sessionRegistry}
+              newSessionName={newSessionName}
+              onAddSession={canAdd ? addSessionFor : undefined}
+              onRenameSession={renameSessionTo}
+              onRemoveSession={removeSessionFrom}
+              retiredSessions={retired}
+              onClearSession={clearOneSession}
+              onClearAllSessions={clearAllSessions}
               quickSwitches={quickSwitches}
               showWorking={activity.showWorking}
               runCtx={runCtx}

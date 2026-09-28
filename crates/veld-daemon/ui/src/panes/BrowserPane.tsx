@@ -32,6 +32,7 @@ import {
   IconLockOff,
   IconMinus,
   IconMoon,
+  IconPencil,
   IconPlugConnectedX,
   IconPlus,
   IconLivePhoto,
@@ -49,12 +50,14 @@ import {
 } from "@tabler/icons-react";
 import { useEffect, useReducer, useRef, useState } from "react";
 import {
-  BROWSER_PROFILES,
-  BROWSER_PROFILE_COLORS,
   type BrowserProfile,
   MAX_EXTRA_SESSIONS,
+  MAX_SESSION_NAME,
+  type SessionRegistry,
+  cleanSessionName,
+  sessionColor,
+  sessionName,
   type PaneTab,
-  browserProfileLabel,
   fileLabel,
   filePathIn,
   resolveAddress,
@@ -129,7 +132,6 @@ import {
   browserCommand,
   browserDevTools,
   browserStatus,
-  clearBrowserSession,
   findNext,
   findPrevious,
   findSupported,
@@ -200,10 +202,10 @@ const TIP = {
   fz: "xs",
 } as const;
 
-/** A session's identity marker, or `null` for the default slot (which stays
+/** A session's identity marker, or `null` for the default session (which stays
  *  unmarked, so the common case has nothing to read). */
-export function browserTabDot(tab: PaneTab): string | null {
-  return BROWSER_PROFILE_COLORS[tab.profile ?? "default"];
+export function browserTabDot(tab: PaneTab, sessions: SessionRegistry): string | null {
+  return sessionColor(sessions, tab.profile ?? "default");
 }
 
 /** The icon for each error kind. The wording lives in `browserError.ts`, which
@@ -309,11 +311,23 @@ export function BrowserPane(props: {
   quickSwitches: QuickSwitchPrefs;
   /** `browser.searchUrl` — where words that are not an address go, or `""`. */
   searchUrl: string;
-  /** The sessions that exist for this worktree, in slot order. */
+  /** The sessions that exist for this worktree, in menu order (default first). */
   sessions: BrowserProfile[];
-  /** Create a session and move this pane onto it. Absent at the slot cap. */
-  onAddSession: (() => void) | undefined;
+  /** Every session's name and colour. */
+  sessionRegistry: SessionRegistry;
+  /** The name the prompt for a new session starts with. */
+  newSessionName: string;
+  /** Create a session with this name and move this pane onto it; `false` if
+   *  none was made (the cap was reached elsewhere). Absent at the cap. */
+  onAddSession: ((name: string) => boolean) | undefined;
+  onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** Removed sessions whose jars may still hold data, for the Clear menu. */
+  retiredSessions: BrowserProfile[];
+  /** Clear one session's data (and forget it, if it was a removed one). */
+  onClearSession: (profile: BrowserProfile) => void;
+  /** Clear every jar that may hold data, including retired and legacy ones. */
+  onClearAllSessions: () => void;
 }) {
   const { tab, onTab } = props;
   const id = tab.id;
@@ -545,7 +559,7 @@ export function BrowserPane(props: {
   const canStop = state.loading && !iframeBackend;
 
   const opening = covered && !failure && !nested && !chooser;
-  const color = BROWSER_PROFILE_COLORS[profile];
+  const color = sessionColor(props.sessionRegistry, profile);
 
   /**
    * Whether the suggestion **panel** is on screen, which is not the same as the
@@ -603,6 +617,8 @@ export function BrowserPane(props: {
   // removing it moves every pane using it back to Default. Refusing instead meant
   // the session you were looking at was the one you could never get rid of.
   const removable = props.sessions.filter((p) => p !== "default");
+  const nameOf = (p: BrowserProfile) => sessionName(props.sessionRegistry, p);
+  const colorOf = (p: BrowserProfile) => sessionColor(props.sessionRegistry, p);
 
   // A blank pane deliberately does **not** focus its own address bar. It did, on the
   // theory that a caret is what says "type here"; driving it, the pane taking the
@@ -654,6 +670,42 @@ export function BrowserPane(props: {
   const [confirmClear, setConfirmClear] = useState<BrowserProfile | "all" | null>(
     null,
   );
+  /**
+   * The session-name prompt: for a session about to be added, or for renaming the
+   * one this pane is on. An in-pane bar like `confirmClear`, for the same reason.
+   *
+   * Adding asks straight away rather than creating "Session 3" and leaving the
+   * rename for later: people who keep several sessions open name every one of
+   * them, so the prompt is the step they would take next anyway. Enter accepts the
+   * prefilled name, so it costs one keypress for anyone who does not care.
+   */
+  const [naming, setNaming] = useState<
+    { mode: "add" } | { mode: "rename"; profile: BrowserProfile } | null
+  >(null);
+  const [nameDraft, setNameDraft] = useState("");
+  // Set when an add was refused, so the bar says why instead of closing on it.
+  const [nameRefused, setNameRefused] = useState(false);
+  const startNaming = (next: NonNullable<typeof naming>) => {
+    setNameDraft(next.mode === "add" ? props.newSessionName : nameOf(next.profile));
+    setNameRefused(false);
+    setNaming(next);
+  };
+  const commitName = () => {
+    if (!naming) return;
+    const name = cleanSessionName(nameDraft);
+    if (naming.mode === "add") {
+      // An emptied field on *add* still adds — the user asked for a session, and
+      // the prefill they deleted is the name it gets.
+      const added = props.onAddSession?.(name ?? props.newSessionName) ?? false;
+      if (!added) {
+        setNameRefused(true);
+        return;
+      }
+    } else if (name) {
+      props.onRenameSession(naming.profile, name);
+    }
+    setNaming(null);
+  };
 
   // ---- Find in page --------------------------------------------------------
   //
@@ -1623,18 +1675,23 @@ export function BrowserPane(props: {
           }}
         />
 
-        <Tooltip {...TIP} label={`Session: ${browserProfileLabel(profile)}`}>
+        <Tooltip {...TIP} label={`Session: ${nameOf(profile)}`}>
           {/* On a span, not on the Menu.Target: `Popover.Target` overwrites the ref
               a Tooltip puts on its child, so a tooltip cloned around a menu target
               has nothing to anchor to. The hover area is the same. */}
           <span className="bar-tip">
-            <Menu position="bottom-end" withinPortal>
+            {/* `returnFocus` off while the name prompt is up: Mantine hands focus
+                back to this button 10ms after the menu closes, which would take it
+                from the prompt's field that "Add…" and "Rename…" just focused. It
+                turns back on when the prompt closes, and that update is what
+                returns focus here afterwards. */}
+            <Menu position="bottom-end" withinPortal returnFocus={naming === null}>
               <Menu.Target>
                 <ActionIcon
                   size="sm"
                   variant="subtle"
                   color="gray"
-                  aria-label={`Browser session: ${browserProfileLabel(profile)}`}
+                  aria-label={`Browser session: ${nameOf(profile)}`}
                 >
                   {color ? (
                     <SessionDot color={color} size={10} />
@@ -1659,25 +1716,32 @@ export function BrowserPane(props: {
                     disabled={iframeBackend}
                     fw={p === profile ? 700 : undefined}
                     leftSection={
-                      <SessionDot color={BROWSER_PROFILE_COLORS[p]} />
+                      <SessionDot color={colorOf(p)} />
                     }
                     onClick={() => onTab({ profile: p })}
                   >
-                    {browserProfileLabel(p)}
-                    {p === "default" ? " · default" : ""}
+                    {nameOf(p)}
+                    {p === "default" && nameOf(p) !== "Default" ? " · default" : ""}
                   </Menu.Item>
                 ))}
                 <Menu.Divider />
+                <Menu.Item
+                  leftSection={<IconPencil size={14} />}
+                  disabled={iframeBackend}
+                  onClick={() => startNaming({ mode: "rename", profile })}
+                >
+                  Rename this session…
+                </Menu.Item>
                 {/* Adding moves this pane onto the new session, because that is the
                 only reason to create one — but the old session stays in the list,
                 which is the whole point of the set being explicit. */}
                 <Menu.Item
                   leftSection={<IconPlus size={14} />}
                   disabled={iframeBackend || !props.onAddSession}
-                  onClick={props.onAddSession}
+                  onClick={() => startNaming({ mode: "add" })}
                 >
                   {props.onAddSession
-                    ? "Add a session for this pane"
+                    ? "Add a session for this pane…"
                     : `All ${MAX_EXTRA_SESSIONS} sessions exist`}
                 </Menu.Item>
                 <Menu.Sub>
@@ -1693,18 +1757,18 @@ export function BrowserPane(props: {
                   </Menu.Sub.Target>
                   <Menu.Sub.Dropdown>
                     <Menu.Label>
-                      Frees the slot and returns its panes to Default; data is
-                      kept
+                      Returns its panes to Default; its data is kept until
+                      cleared
                     </Menu.Label>
                     {removable.map((p) => (
                       <Menu.Item
                         key={p}
                         leftSection={
-                          <SessionDot color={BROWSER_PROFILE_COLORS[p]} />
+                          <SessionDot color={colorOf(p)} />
                         }
                         onClick={() => props.onRemoveSession(p)}
                       >
-                        {browserProfileLabel(p)}
+                        {nameOf(p)}
                       </Menu.Item>
                     ))}
                   </Menu.Sub.Dropdown>
@@ -1724,22 +1788,36 @@ export function BrowserPane(props: {
                       <Menu.Item
                         key={p}
                         leftSection={
-                          <SessionDot color={BROWSER_PROFILE_COLORS[p]} />
+                          <SessionDot color={colorOf(p)} />
                         }
                         onClick={() => setConfirmClear(p)}
                       >
-                        {browserProfileLabel(p)}
+                        {nameOf(p)}
                         {p === profile ? " · this pane" : ""}
                       </Menu.Item>
                     ))}
+                    {/* Removed sessions: not listed above, but their cookies are
+                    still on disk until cleared, and a random id means nothing
+                    will ever bring them back to be cleared from the list. */}
+                    {props.retiredSessions.length > 0 && (
+                      <>
+                        <Menu.Label>Removed sessions</Menu.Label>
+                        {props.retiredSessions.map((p) => (
+                          <Menu.Item
+                            key={p}
+                            leftSection={<SessionDot color={colorOf(p)} />}
+                            onClick={() => setConfirmClear(p)}
+                          >
+                            {nameOf(p)}
+                          </Menu.Item>
+                        ))}
+                      </>
+                    )}
                     <Menu.Divider />
-                    {/* The reachable way to clear a session nothing is using any
-                    more: its slot is not listed above, but its cookies are still
-                    on disk. */}
                     <Menu.Item
                       onClick={() => setConfirmClear("all")}
                     >
-                      All sessions, including retired ones
+                      All sessions, including removed ones
                     </Menu.Item>
                   </Menu.Sub.Dropdown>
                 </Menu.Sub>
@@ -2430,7 +2508,7 @@ export function BrowserPane(props: {
                 cannot give, and the reason panes refused every permission before. */}
             <span className="faint">
               {" · "}
-              {browserProfileLabel(prompt.profile)} session
+              {nameOf(prompt.profile)} session
               {!prompt.isMainFrame && " · asked by a frame inside the page"}
             </span>
           </span>
@@ -2459,7 +2537,7 @@ export function BrowserPane(props: {
             <strong>
               {confirmClear === "all"
                 ? "every browser session"
-                : `the ${browserProfileLabel(confirmClear)} session`}
+                : `the ${nameOf(confirmClear)} session`}
             </strong>
             ? This signs out every pane using it and cannot be undone.
           </span>
@@ -2475,9 +2553,9 @@ export function BrowserPane(props: {
             color="red"
             onClick={() => {
               if (confirmClear === "all") {
-                BROWSER_PROFILES.forEach(clearBrowserSession);
+                props.onClearAllSessions();
               } else {
-                clearBrowserSession(confirmClear);
+                props.onClearSession(confirmClear);
               }
               setConfirmClear(null);
             }}
@@ -2485,6 +2563,56 @@ export function BrowserPane(props: {
             Clear
           </Button>
         </div>
+      )}
+
+      {naming && (
+        /* In-pane, like the two bars above: a Mantine Modal would render behind
+           the native view. */
+        <form
+          className="permission-prompt"
+          role="dialog"
+          aria-label={naming.mode === "add" ? "Name the new session" : "Rename session"}
+          onSubmit={(e) => {
+            e.preventDefault();
+            commitName();
+          }}
+        >
+          {naming.mode === "add" ? (
+            <IconPlus size={16} />
+          ) : (
+            <SessionDot color={colorOf(naming.profile)} size={10} />
+          )}
+          <span className="faint">
+            {nameRefused
+              ? `All ${MAX_EXTRA_SESSIONS} sessions exist`
+              : naming.mode === "add"
+                ? "New session"
+                : "Rename session"}
+          </span>
+          <input
+            className="session-name-input"
+            value={nameDraft}
+            maxLength={MAX_SESSION_NAME}
+            autoFocus
+            spellCheck={false}
+            placeholder="Admin, Logged out, Customer B…"
+            aria-label="Session name"
+            onFocus={(e) => e.currentTarget.select()}
+            onChange={(e) => setNameDraft(e.currentTarget.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                e.preventDefault();
+                setNaming(null);
+              }
+            }}
+          />
+          <Button size="compact-xs" variant="default" onClick={() => setNaming(null)}>
+            Cancel
+          </Button>
+          <Button size="compact-xs" type="submit">
+            {naming.mode === "add" ? "Add" : "Rename"}
+          </Button>
+        </form>
       )}
 
       {/* Same row-in-flow trick as the two prompts above: it shrinks the slot

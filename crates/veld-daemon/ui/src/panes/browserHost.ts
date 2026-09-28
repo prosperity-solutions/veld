@@ -215,7 +215,7 @@ interface DesktopBrowserApi {
   setBackground(background: string): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
-  clearSession(profile: BrowserProfile): Promise<void>;
+  clearSession(profile: BrowserProfile): Promise<boolean | undefined>;
   capture(viewId: string): Promise<string | null>;
   onState(fn: (payload: Record<string, unknown>) => void): () => void;
   onOpenRequest(
@@ -1183,22 +1183,31 @@ export function onFindResult(
 }
 
 /**
- * Clear one session slot's cookies and storage, then reload any pane using it.
+ * Clear one session's cookies and storage, then reload any pane using it.
+ * Resolves `true` once the jar is empty, `false` if it could not be cleared.
  *
- * Addressed by slot rather than by pane, so a session with no pane open can still
- * be emptied — that is what "remove this session" means when the slots
- * themselves are fixed. Electron only: an iframe's cookie jar is the browser's
- * own, and clearing it is not ours to do.
+ * Addressed by session id rather than by pane, so a session with no pane open —
+ * a removed one, whose jar is still on disk — can still be emptied. Electron
+ * only: an iframe's cookie jar is the browser's own, and clearing it is not ours
+ * to do, so there it resolves `false`.
  */
-export function clearBrowserSession(profile: BrowserProfile): void {
-  if (!desktop) return;
-  // Reported on every pane using the slot: the menu item claims to sign them out,
-  // so a refused or failed clear must not look like it worked.
-  void desktop.clearSession(profile).catch((e: unknown) => {
-    for (const v of views.values()) {
-      if (v.profile === profile) reportFailure(v)(e);
-    }
-  });
+export function clearBrowserSession(profile: BrowserProfile): Promise<boolean> {
+  if (!desktop) return Promise.resolve(false);
+  // Reported on every pane using the session: the menu item claims to sign them
+  // out, so a refused or failed clear must not look like it worked. The result
+  // is what lets the caller forget a jar only once it is really empty.
+  // Only an explicit `true` counts: the handler returns nothing when it refuses a
+  // sender, and a shell older than this check returns nothing at all — both of
+  // which must read as "not cleared", or the jar is forgotten with data in it.
+  return desktop.clearSession(profile).then(
+    (done) => done === true,
+    (e: unknown) => {
+      for (const v of views.values()) {
+        if (v.profile === profile) reportFailure(v)(e);
+      }
+      return false;
+    },
+  );
 }
 
 /**

@@ -67,33 +67,37 @@ function isPaneKind(v: unknown): v is PaneKind {
 }
 
 /**
- * Cookie jars a browser pane can run in.
+ * A browser session's id: which cookie jar a pane runs in.
  *
- * The *allowed* set, not the menu: the name becomes an Electron session
- * partition, so it is an identifier the main process has to validate anyway
- * (`PROFILE_RE` in `desktop/src/browserViews.js`), and a restored layout has to
- * be checked against the same list. Which slots actually **exist** is a set the
- * user builds up — see [`SESSIONS_STORAGE_KEY`].
+ * The id is the tail of an Electron partition (`persist:veld-browser-<id>`), so
+ * it is an **identifier and nothing else** — it never changes once a jar has
+ * cookies in it, and it is never what the user reads. What the user reads is the
+ * session's name, which they choose, and its colour; both live in the
+ * [`SessionRegistry`]. New sessions get a random id ([`newSessionId`]); `default`
+ * is the jar a pane gets when nobody chose, and it stays uncoloured so the common
+ * case has no marker to read.
  *
- * `default` is what a pane gets when nobody chose; it stays uncoloured so the
- * common case has no marker to read. Eight slots above it, because that is how
- * many colours stay tellable apart at the size of a tab dot — and the colour is
- * the whole point: it answers "which session is this pane?" without a menu.
- *
- * The slots are **named after animals, not numbered**. A number implies a
- * sequence, so removing "Session 2" and being left with "Default, Session 3"
- * reads as something broken rather than as a set with one item taken out.
- * A name has no successor to be missing. (The worktree rail's emoji set is the
- * same idea, for the same reason.) The name is also the Electron partition
- * (`persist:veld-browser-otter`), so the identifier says what it is.
- *
- * *Naming* a slot is what would need persistence both Veld Desktop and a browser
- * tab agree on, which is the settings store in #167 batch 5 — deliberately not
- * invented here. Clearing a session's data is offered per slot in the pane's
- * session menu.
+ * Any string matching [`SESSION_ID_RE`] is accepted, because that is the whole of
+ * what the main process checks (`PROFILE_RE` in `desktop/src/validate.js`) and a
+ * restored layout must not lose a pane's jar over a stricter rule here.
  */
-export const BROWSER_PROFILES = [
-  "default",
+export type BrowserProfile = string;
+
+/** The same rule as `PROFILE_RE` in `desktop/src/validate.js`. */
+export const SESSION_ID_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+export function isSessionId(v: unknown): v is BrowserProfile {
+  return typeof v === "string" && SESSION_ID_RE.test(v);
+}
+
+/**
+ * The ids sessions had before they were named: a fixed list of animals, one per
+ * colour. Kept for exactly two reasons — a user's existing jars are still called
+ * this on disk (so they are adopted as ids, never renamed: moving a partition
+ * would sign everybody out), and "clear every session" has to reach a legacy jar
+ * nothing lists any more. Never assign one to a new session.
+ */
+export const LEGACY_SESSION_IDS = [
   "otter",
   "wombat",
   "gecko",
@@ -104,38 +108,53 @@ export const BROWSER_PROFILES = [
   "narwhal",
 ] as const;
 
-export type BrowserProfile = (typeof BROWSER_PROFILES)[number];
-
-/** How many sessions can exist alongside the default one. */
-export const MAX_EXTRA_SESSIONS = BROWSER_PROFILES.length - 1;
-
 /**
- * A slot's colour, or `null` for the default one.
+ * Session colours, by index.
  *
  * Literal hexes, not theme tokens: these are identity markers that must mean the
  * same thing in both themes — a session that changes colour when you switch
  * theme identifies nothing. The hues are eight that stay distinct at dot size,
- * mostly borrowed from the terminal's ANSI palette so the app has one set.
+ * mostly borrowed from the terminal's ANSI palette so the app has one set. Index
+ * *i* is the colour the legacy id at *i* always had, so a migrated session keeps
+ * the colour its user learned.
+ *
+ * **Append only — never reorder or replace.** A session stores its colour as an
+ * index into this list, so reordering it repaints every existing session for
+ * every user. `model.test.ts` pins the current entries for that reason.
  */
-export const BROWSER_PROFILE_COLORS: Record<BrowserProfile, string | null> = {
-  default: null,
-  otter: "#5aa2e0",
-  wombat: "#e6b43c",
-  gecko: "#3fbf7f",
-  badger: "#b98ce0",
-  puffin: "#4fbfc0",
-  lemur: "#f2792b",
-  quokka: "#ec6fa9",
-  narwhal: "#e05a50",
-};
+export const SESSION_COLORS = [
+  "#5aa2e0",
+  "#e6b43c",
+  "#3fbf7f",
+  "#b98ce0",
+  "#4fbfc0",
+  "#f2792b",
+  "#ec6fa9",
+  "#e05a50",
+] as const;
 
-/** Display name for a slot: "Default", "Otter", "Wombat"… */
-export function browserProfileLabel(profile: BrowserProfile): string {
-  return profile.charAt(0).toUpperCase() + profile.slice(1);
+/**
+ * How many sessions a worktree can have alongside the default one: as many as
+ * there are colours, because more dots stop being tellable apart and the colour
+ * is what answers "which session is this pane?" without a menu.
+ */
+export const MAX_EXTRA_SESSIONS = SESSION_COLORS.length;
+
+/**
+ * A fresh session id: `s-` and ten random base-36 characters.
+ *
+ * Random rather than the next free slot, so a new session is always a **new jar**.
+ * Slot reuse made two worktrees that each added "a session" share one without
+ * either asking to, and made re-adding a removed session bring its old cookies
+ * back.
+ */
+export function newSessionId(random: (n: number) => Uint8Array = randomBytes): BrowserProfile {
+  const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+  return `s-${Array.from(random(10), (b) => alphabet[b % 36]).join("")}`;
 }
 
-function isBrowserProfile(v: unknown): v is BrowserProfile {
-  return typeof v === "string" && (BROWSER_PROFILES as readonly string[]).includes(v);
+function randomBytes(n: number): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(n));
 }
 
 export interface PaneTab {
@@ -643,14 +662,7 @@ export function browserIds(layout: PaneLayout): string[] {
     .map((t) => t.id);
 }
 
-/**
- * Which session slots are occupied — the set of sessions that *exist*.
- *
- * Computed across **every** worktree's layout, not just the visible one: a
- * session is a cookie jar shared by the whole page, so a pane in a worktree you
- * have since switched away from still holds its slot. Scoping this to one layout
- * would offer a "new session" that quietly adopted another pane's jar.
- */
+/** Which sessions this layout's browser panes are actually on. */
 export function sessionsInUse(layouts: Iterable<PaneLayout>): Set<BrowserProfile> {
   const used = new Set<BrowserProfile>();
   for (const layout of layouts) {
@@ -661,111 +673,390 @@ export function sessionsInUse(layouts: Iterable<PaneLayout>): Set<BrowserProfile
   return used;
 }
 
-/**
- * The lowest slot not in `taken`, or `null` when all of them are.
- *
- * *Lowest*, not next-after-the-highest, so removing session 3 frees that slot
- * and its colour for reuse instead of marching towards the cap.
- */
-export function nextFreeProfile(taken: Set<BrowserProfile>): BrowserProfile | null {
-  for (const p of BROWSER_PROFILES) {
-    if (p !== "default" && !taken.has(p)) return p;
-  }
-  return null;
-}
-
 // ---------------------------------------------------------------------------
-// Session sets
+// Session registry
 // ---------------------------------------------------------------------------
 
 /**
- * Which sessions exist, per worktree.
+ * What a session is to the person using it: the name they gave it and its
+ * colour. `color` indexes [`SESSION_COLORS`]; `null` only for `default`.
  *
- * This is an **explicit set**, not something derived from which slots panes
- * currently occupy. Deriving it was the first attempt and it was wrong in the
- * most confusing way possible: moving a pane onto a new session vacated its old
- * slot, so adding a session appeared to delete the previous one. A session is a
- * cookie jar that outlives the pane that made it — you build a set of them up.
- *
- * `localStorage`, not the daemon: a session only means anything under Electron
- * (the browser build's iframe backend has no cookie jars of its own), so there
- * is no second client for the list to disagree with. That is what makes this
- * *not* the settings store #167 batch 5 needs — it is one client's preference
- * about its own capability. It is also `localStorage` rather than
- * `sessionStorage` on purpose: unlike a layout, this names no live resource, so
- * two windows sharing it is correct rather than a conflict.
- *
- * Partitions themselves stay global (`persist:veld-browser-<slot>`), so two
- * worktrees whose sets both hold the same slot share that jar. That keeps the slot
- * name a plain identifier rather than a composite, at a cost worth stating
- * honestly: cookies scoped to the *project* rather than the run are shared (the
- * default template is `{service}.{run}.{project}.localhost`, so only the run
- * differs between worktrees), and a third-party origin — a login provider on its
- * own domain — is shared unconditionally. Keying the partition by worktree as well
- * is the fix if that ever bites.
+ * Stored per jar, not derived from the id, because the id is random and the
+ * colour has to stay put — a session whose colour shifted when another was
+ * removed would identify nothing.
  */
-export const SESSIONS_STORAGE_KEY = "veld.browserSessions.v1";
-
-/**
- * Put a session set in canonical shape: the default slot always present,
- * duplicates dropped, slot order rather than insertion order.
- *
- * Slot order matters for more than tidiness — the menu is read top to bottom and
- * a session's colour is tied to its slot, so a list that reordered itself as
- * sessions came and went would make the colours look arbitrary.
- */
-export function normalizeSessionSet(
-  slots: Iterable<BrowserProfile>,
-  ...extra: Array<Iterable<BrowserProfile>>
-): BrowserProfile[] {
-  const present = new Set<BrowserProfile>(["default", ...slots]);
-  for (const more of extra) for (const p of more) present.add(p);
-  return BROWSER_PROFILES.filter((p) => present.has(p));
+export interface SessionJar {
+  name: string;
+  color: number | null;
 }
 
-/** Read the stored sets, tolerating anything that isn't the shape we wrote. */
-export function parseSessionSets(raw: string | null): Record<number, BrowserProfile[]> {
-  if (!raw) return {};
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return {};
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+/**
+ * Every session this install knows about, and which of them each worktree has.
+ *
+ * - `jars` holds every jar that has been made and not yet cleared away,
+ *   **including retired ones** no worktree lists: their cookies are still on
+ *   disk, and "clear every session" has to be able to reach them.
+ * - `sets` is the explicit per-worktree list, in the order the sessions were
+ *   added (which is the menu's order), `default` implied. It is explicit rather
+ *   than derived from which sessions panes occupy because deriving it was the
+ *   first attempt and it inverted the feature: moving a pane onto a new session
+ *   vacated its old one, so adding a session appeared to delete the previous.
+ *
+ * A session belongs to the worktree it was added in, since every new one is a new
+ * jar. The one exception is migration: a legacy animal jar two worktrees both
+ * listed stays shared, which is what it always was — and since its name and
+ * colour live on the jar, renaming it renames it in both, which is the truth.
+ *
+ * `localStorage`, not the daemon: a session only means anything under Veld
+ * Desktop (the browser build's iframe backend has no cookie jars of its own), so
+ * this is one client's record of its own capability, not the settings store
+ * #167 batch 5 needs. And `localStorage` rather than `sessionStorage`: unlike a
+ * layout this names no live resource, so two windows sharing it is correct
+ * rather than a conflict — App.tsx re-reads it on `storage` events so they agree.
+ *
+ * **The limit, stated:** layouts (`PaneTab.profile`) are the daemon's, so a
+ * client whose localStorage never saw this registry — a plain-browser `/ide` tab,
+ * or a Desktop whose profile was reset — restores the ids without their names,
+ * and shows them as "Unnamed session" in a colour derived from the id. Cookies
+ * are unaffected; only the label is. Moving the registry to the daemon is the
+ * fix if that ever matters more than keeping this client-local.
+ */
+export interface SessionRegistry {
+  jars: Record<BrowserProfile, SessionJar>;
+  sets: Record<number, BrowserProfile[]>;
+}
 
+export const SESSIONS_STORAGE_KEY = "veld.browserSessions.v2";
+
+/**
+ * Where the per-worktree sets lived when ids were animals: `{ [worktreeId]:
+ * slot[] }`. Read while there is no v2 registry yet, and left in place so a
+ * downgraded build still finds what it wrote.
+ *
+ * A downgrade is not a clean round trip, though: once v2 exists it wins, so
+ * whatever the old build changed in v1 is ignored after upgrading again, and the
+ * old build's layout parser moves any pane on an `s-…` session back to Default
+ * (the jars and their cookies are untouched).
+ */
+export const LEGACY_SESSIONS_STORAGE_KEY = "veld.browserSessions.v1";
+
+export const EMPTY_SESSION_REGISTRY: SessionRegistry = { jars: {}, sets: {} };
+
+/** Long enough for "Customer B (read-only admin)", short enough for a menu row. */
+export const MAX_SESSION_NAME = 40;
+
+/**
+ * A typed name, cleaned: whitespace collapsed, trimmed, capped. `null` when
+ * nothing is left, so an emptied field never produces a nameless session.
+ */
+export function cleanSessionName(raw: string): string | null {
+  const name = raw.replace(/\s+/g, " ").trim().slice(0, MAX_SESSION_NAME).trim();
+  return name === "" ? null : name;
+}
+
+/**
+ * A session's name and colour, with a fallback for a jar the registry does not
+ * know — a layout can name one the registry lost (storage cleared, a hand-edit).
+ * A legacy animal gets the colour it always had; anything else a stable colour
+ * from its id, so it at least does not flicker.
+ */
+export function sessionJar(registry: SessionRegistry, id: BrowserProfile): SessionJar {
+  // `hasOwn`, not a plain lookup: `constructor` is a legal id, and `jars` is an
+  // ordinary object.
+  if (Object.hasOwn(registry.jars, id)) return registry.jars[id];
+  if (id === "default") return { name: "Default", color: null };
+  const legacy = (LEGACY_SESSION_IDS as readonly string[]).indexOf(id);
+  if (legacy >= 0) {
+    // The name its user has been reading since sessions shipped ("Otter"), not a
+    // new one: an upgrade that renamed every session would leave them matching
+    // colours to guess which is which. Renaming it is one menu item away.
+    return { name: id.charAt(0).toUpperCase() + id.slice(1), color: legacy };
+  }
+  // Not checked against the worktree's other colours — the one exception to the
+  // distinct-colour rule in `addSession`, and only for a jar the registry lost.
+  let hash = 0;
+  for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return { name: "Unnamed session", color: hash % SESSION_COLORS.length };
+}
+
+export function sessionName(registry: SessionRegistry, id: BrowserProfile): string {
+  return sessionJar(registry, id).name;
+}
+
+/** A session's colour, or `null` for the default one. */
+export function sessionColor(registry: SessionRegistry, id: BrowserProfile): string | null {
+  const { color } = sessionJar(registry, id);
+  return color === null ? null : SESSION_COLORS[color];
+}
+
+function parseJar(id: string, value: unknown): SessionJar | null {
+  if (typeof value !== "object" || value === null) return null;
+  const v = value as Record<string, unknown>;
+  const name = typeof v.name === "string" ? cleanSessionName(v.name) : null;
+  if (!name) return null;
+  if (id === "default") return { name, color: null };
+  const color =
+    typeof v.color === "number" &&
+    Number.isInteger(v.color) &&
+    v.color >= 0 &&
+    v.color < SESSION_COLORS.length
+      ? v.color
+      : null;
+  return color === null ? null : { name, color };
+}
+
+function parseSets(value: unknown): Record<number, BrowserProfile[]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const out: Record<number, BrowserProfile[]> = {};
-  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+  for (const [key, list] of Object.entries(value as Record<string, unknown>)) {
     const id = Number(key);
-    if (!Number.isInteger(id) || !Array.isArray(value)) continue;
-    // Unknown slot names are dropped rather than carried: the name becomes an
-    // Electron partition, and the shell would refuse it anyway.
-    out[id] = normalizeSessionSet(value.filter(isBrowserProfile));
+    if (!Number.isInteger(id) || !Array.isArray(list)) continue;
+    // `default` is implied, and an id the shell would refuse is dropped rather
+    // than carried to it.
+    out[id] = [...new Set(list.filter(isSessionId))].filter((p) => p !== "default");
   }
   return out;
 }
 
-export function serializeSessionSets(sets: Record<number, BrowserProfile[]>): string {
-  return JSON.stringify(sets);
+function parseJson(raw: string | null): unknown {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 /**
- * A worktree's sessions: what was stored, plus any slot its panes are actually
- * on.
+ * Read the registry, tolerating anything that isn't the shape we wrote — and,
+ * when there is no v2 registry yet, adopting the v1 sets.
+ *
+ * **Migration adopts the animal ids as they are.** Renaming a partition would
+ * mean moving Chromium's directory for it or losing its cookies, and the id is
+ * invisible now anyway, so there is nothing to gain. Each adopted jar keeps the
+ * name it was shown under ("Otter") and its colour; the user can rename it.
+ */
+export function parseSessionRegistry(
+  raw: string | null,
+  legacyRaw: string | null = null,
+): SessionRegistry {
+  const parsed = parseJson(raw);
+  if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+    const p = parsed as Record<string, unknown>;
+    const jars: Record<BrowserProfile, SessionJar> = {};
+    if (typeof p.jars === "object" && p.jars !== null && !Array.isArray(p.jars)) {
+      for (const [id, value] of Object.entries(p.jars as Record<string, unknown>)) {
+        if (!isSessionId(id)) continue;
+        const jar = parseJar(id, value);
+        if (jar) jars[id] = jar;
+      }
+    }
+    return { jars, sets: parseSets(p.sets) };
+  }
+
+  // v1 menus were shown in slot order whatever order the list was stored in, so
+  // the migrated list is put in that order once — after which it is added order.
+  const slot = (id: string) => {
+    const i = (LEGACY_SESSION_IDS as readonly string[]).indexOf(id);
+    return i < 0 ? LEGACY_SESSION_IDS.length : i;
+  };
+  const sets = parseSets(parseJson(legacyRaw));
+  for (const id of Object.keys(sets)) sets[Number(id)].sort((a, b) => slot(a) - slot(b));
+  const jars: Record<BrowserProfile, SessionJar> = {};
+  for (const list of Object.values(sets)) {
+    for (const id of list) jars[id] = sessionJar(EMPTY_SESSION_REGISTRY, id);
+  }
+  return { jars, sets };
+}
+
+export function serializeSessionRegistry(registry: SessionRegistry): string {
+  return JSON.stringify(registry);
+}
+
+/**
+ * A worktree's sessions, in menu order: `default`, what was stored, then any
+ * session its panes are on that the stored set has lost.
  *
  * The union matters on restore — a layout can name a session the stored set has
  * lost (storage cleared, an older build, a hand-edit), and a pane whose own
  * session is missing from its own menu is worse than an extra entry.
  */
 export function sessionSetFor(
-  sets: Record<number, BrowserProfile[]>,
+  registry: SessionRegistry,
   worktreeId: number,
   layout?: PaneLayout,
 ): BrowserProfile[] {
-  return normalizeSessionSet(
-    sets[worktreeId] ?? [],
-    layout ? sessionsInUse([layout]) : [],
+  const out = new Set<BrowserProfile>(["default", ...(registry.sets[worktreeId] ?? [])]);
+  if (layout) for (const p of sessionsInUse([layout])) out.add(p);
+  return [...out];
+}
+
+/**
+ * Drop the sets of worktrees that no longer exist, so their sessions retire.
+ *
+ * Load-bearing, not tidiness: worktree ids are SQLite rowids with no
+ * AUTOINCREMENT, so deleting the newest worktree frees its id for the next one —
+ * which would otherwise inherit its named sessions and their logged-in jars.
+ * The jars stay (retired), so their data can still be cleared.
+ */
+export function pruneSessionSets(
+  registry: SessionRegistry,
+  liveWorktreeIds: Iterable<number>,
+): SessionRegistry {
+  const live = new Set(liveWorktreeIds);
+  const sets: Record<number, BrowserProfile[]> = {};
+  for (const [id, set] of Object.entries(registry.sets)) {
+    if (live.has(Number(id))) sets[Number(id)] = set;
+  }
+  return Object.keys(sets).length === Object.keys(registry.sets).length
+    ? registry
+    : { ...registry, sets };
+}
+
+/** Whether this worktree can take another session. */
+export function canAddSession(
+  registry: SessionRegistry,
+  worktreeId: number,
+  layout?: PaneLayout,
+): boolean {
+  return sessionSetFor(registry, worktreeId, layout).length - 1 < MAX_EXTRA_SESSIONS;
+}
+
+/**
+ * The name a new session's prompt starts with: "Session 2", "Session 3"… — the
+ * lowest one no session in this worktree is already called, so accepting the
+ * prompt with Enter never produces two sessions with one name.
+ */
+export function suggestSessionName(
+  registry: SessionRegistry,
+  worktreeId: number,
+  layout?: PaneLayout,
+): string {
+  const taken = new Set(
+    sessionSetFor(registry, worktreeId, layout).map((p) => sessionName(registry, p)),
   );
+  let n = 2;
+  while (taken.has(`Session ${n}`)) n++;
+  return `Session ${n}`;
+}
+
+/**
+ * Add a session to a worktree: a new jar, the given name, and the lowest colour
+ * none of the worktree's sessions has. `null` at the cap.
+ *
+ * *Lowest free* colour so removing a session frees its colour for the next one,
+ * and so two sessions in one worktree never share a colour — which is the one
+ * job the colour has.
+ */
+export function addSession(
+  registry: SessionRegistry,
+  worktreeId: number,
+  layout: PaneLayout | undefined,
+  name: string,
+  id: BrowserProfile = newSessionId(),
+): { registry: SessionRegistry; id: BrowserProfile } | null {
+  if (!canAddSession(registry, worktreeId, layout)) return null;
+  // Never over an existing jar: that would rename (and recolour) a session some
+  // other worktree may still be using.
+  if (id === "default" || Object.hasOwn(registry.jars, id)) return null;
+  const set = sessionSetFor(registry, worktreeId, layout);
+  const used = new Set(set.map((p) => sessionJar(registry, p).color));
+  let color = 0;
+  while (used.has(color)) color++;
+  const clean = cleanSessionName(name) ?? suggestSessionName(registry, worktreeId, layout);
+  return {
+    id,
+    registry: {
+      jars: { ...registry.jars, [id]: { name: clean, color } },
+      sets: { ...registry.sets, [worktreeId]: [...set.filter((p) => p !== "default"), id] },
+    },
+  };
+}
+
+/** Rename a session. An empty name leaves it as it was. */
+export function renameSession(
+  registry: SessionRegistry,
+  id: BrowserProfile,
+  name: string,
+): SessionRegistry {
+  const clean = cleanSessionName(name);
+  if (!clean) return registry;
+  const jar = sessionJar(registry, id);
+  return { ...registry, jars: { ...registry.jars, [id]: { ...jar, name: clean } } };
+}
+
+/**
+ * Take a session out of a worktree's set. The jar stays in `jars`, retired:
+ * its cookies are still on disk until someone clears them.
+ */
+export function removeSession(
+  registry: SessionRegistry,
+  worktreeId: number,
+  layout: PaneLayout | undefined,
+  id: BrowserProfile,
+): SessionRegistry {
+  if (id === "default") return registry;
+  const set = sessionSetFor(registry, worktreeId, layout).filter(
+    (p) => p !== "default" && p !== id,
+  );
+  return { ...registry, sets: { ...registry.sets, [worktreeId]: set } };
+}
+
+/**
+ * Every jar that may have data on disk, for "clear every session": the default,
+ * every legacy animal, everything the registry knows — and every jar a pane is
+ * on, because layouts are the daemon's and outlive this client's registry (a
+ * reset Veld Desktop profile keeps its layouts and loses its localStorage).
+ */
+export function allSessionJars(
+  registry: SessionRegistry,
+  inUse: Iterable<BrowserProfile> = [],
+): BrowserProfile[] {
+  return [
+    ...new Set<BrowserProfile>([
+      "default",
+      ...LEGACY_SESSION_IDS,
+      ...Object.keys(registry.jars),
+      ...inUse,
+    ]),
+  ];
+}
+
+/**
+ * Removed sessions whose jars may still hold data: known to the registry, listed
+ * by no worktree and used by no pane. These are what the Clear menu offers below
+ * the live ones — otherwise a removed session's cookies could only be cleared by
+ * clearing everything.
+ */
+export function retiredSessions(
+  registry: SessionRegistry,
+  inUse: Iterable<BrowserProfile> = [],
+): BrowserProfile[] {
+  const live = new Set([...Object.values(registry.sets).flat(), ...inUse]);
+  return Object.keys(registry.jars).filter((id) => id !== "default" && !live.has(id));
+}
+
+/**
+ * Forget retired jars whose data has just been cleared: nothing of theirs is
+ * left on disk, so keeping their names would only make the registry grow.
+ *
+ * Only the ones in `cleared` — a clear that failed leaves its jar remembered, or
+ * its cookies would stay on disk with nothing left that could reach them. A pane
+ * still on a jar no set lists keeps its name too: it is the one place that jar
+ * is still visible.
+ */
+export function forgetRetiredSessions(
+  registry: SessionRegistry,
+  cleared: Iterable<BrowserProfile>,
+  inUse: Iterable<BrowserProfile> = [],
+): SessionRegistry {
+  const gone = new Set(retiredSessions(registry, inUse));
+  const forget = new Set([...cleared].filter((id) => gone.has(id)));
+  const jars: Record<BrowserProfile, SessionJar> = {};
+  for (const [id, jar] of Object.entries(registry.jars)) {
+    if (!forget.has(id)) jars[id] = jar;
+  }
+  return { ...registry, jars };
 }
 
 /**
@@ -2072,16 +2363,16 @@ function parseTab(value: unknown): PaneTab | null {
     // be handed to a view on restore.
     const url = typeof t.url === "string" ? normalizeBrowserUrl(t.url) : null;
     if (url) tab.url = url;
-    tab.profile = isBrowserProfile(t.profile) ? t.profile : "default";
+    tab.profile = isSessionId(t.profile) ? t.profile : "default";
     // Per-session remembered URLs, each re-validated like `url` — a hand-edited
     // `javascript:` value would otherwise be handed to a view on a session
     // switch. A slot with an invalid or missing URL is simply not remembered.
     const urls: Partial<Record<BrowserProfile, string>> = {};
     if (typeof t.urls === "object" && t.urls !== null && !Array.isArray(t.urls)) {
       for (const [slot, raw] of Object.entries(t.urls as Record<string, unknown>)) {
-        if (!isBrowserProfile(slot)) continue;
+        if (!isSessionId(slot)) continue;
         const u = typeof raw === "string" ? normalizeBrowserUrl(raw) : null;
-        if (u) urls[slot as BrowserProfile] = u;
+        if (u) urls[slot] = u;
       }
     }
     if (Object.keys(urls).length > 0) tab.urls = urls;

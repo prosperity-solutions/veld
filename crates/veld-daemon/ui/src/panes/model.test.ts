@@ -4,10 +4,8 @@ import {
   type DockIndex,
   MAX_RATIO,
   MIN_RATIO,
-  BROWSER_PROFILES,
-  BROWSER_PROFILE_COLORS,
-  type BrowserProfile,
   MAX_EXTRA_SESSIONS,
+  MAX_SESSION_NAME,
   PANE_KINDS,
   type PaneLayout,
   type PaneTab,
@@ -18,7 +16,26 @@ import {
   adoptTabs,
   allTabs,
   browserIds,
-  browserProfileLabel,
+  LEGACY_SESSION_IDS,
+  SESSION_COLORS,
+  SESSION_ID_RE,
+  type SessionRegistry,
+  addSession,
+  allSessionJars,
+  canAddSession,
+  cleanSessionName,
+  forgetRetiredSessions,
+  isSessionId,
+  newSessionId,
+  parseSessionRegistry,
+  removeSession,
+  renameSession,
+  retiredSessions,
+  pruneSessionSets,
+  serializeSessionRegistry,
+  sessionColor,
+  suggestSessionName,
+  sessionName,
   browserTab,
   configPaneTab,
   takePendingAdopt,
@@ -54,14 +71,11 @@ import {
   mayAdoptTerminalTitle,
   newPaneTab,
   newTabId,
-  nextFreeProfile,
   normalizeBrowserUrl,
-  normalizeSessionSet,
   layoutSlotKey,
   parseLayouts,
   paneTabBaseLabel,
   paneTabLabel,
-  parseSessionSets,
   parseTransferTabs,
   replaceTab,
   resolveAddress,
@@ -70,7 +84,6 @@ import {
   searchTarget,
   serializeLayouts,
   splitWithTab,
-  serializeSessionSets,
   sessionSetFor,
   sessionsInUse,
   setRatio,
@@ -971,7 +984,8 @@ describe("browser tabs", () => {
       urls: {
         default: "http://default.test/dashboard",
         otter: "http://otter.test/",
-        bogus: "http://bogus.test/",
+        // Any id the desktop shell accepts is a session; this one it would not.
+        "../bogus": "http://bogus.test/",
       },
     })!;
     expect(tab.urls).toEqual({
@@ -1130,108 +1144,233 @@ describe("single-dock normalisation", () => {
 });
 
 describe("browser sessions", () => {
-  it("gives every slot but the default a distinct colour", () => {
-    expect(BROWSER_PROFILE_COLORS.default).toBeNull();
-    const colors = BROWSER_PROFILES.filter((p) => p !== "default").map(
-      (p) => BROWSER_PROFILE_COLORS[p],
-    );
-    expect(colors).toHaveLength(MAX_EXTRA_SESSIONS);
-    expect(colors.every((c) => typeof c === "string")).toBe(true);
+  const EMPTY: SessionRegistry = { jars: {}, sets: {} };
+  /** Deterministic ids, so a test can name the session it just made. */
+  const ids = (...list: string[]) => {
+    let i = 0;
+    return () => list[i++];
+  };
+
+  it("has one distinct colour per extra session", () => {
+    expect(SESSION_COLORS).toHaveLength(MAX_EXTRA_SESSIONS);
     // A repeated colour would make two sessions indistinguishable, which is the
     // one job the colour has.
-    expect(new Set(colors).size).toBe(colors.length);
-    // Every slot is a legal Electron partition name (`PROFILE_RE` in
-    // desktop/src/browserViews.js), or the shell rejects it at create time.
-    for (const p of BROWSER_PROFILES) expect(p).toMatch(/^[a-z0-9][a-z0-9-]{0,31}$/);
+    expect(new Set(SESSION_COLORS).size).toBe(SESSION_COLORS.length);
+    // Every legacy id needs its colour; more colours than legacy ids is fine.
+    expect(SESSION_COLORS.length).toBeGreaterThanOrEqual(LEGACY_SESSION_IDS.length);
   });
 
-  it("labels slots by name, since a number implies a missing predecessor", () => {
-    expect(browserProfileLabel("default")).toBe("Default");
-    expect(browserProfileLabel("narwhal")).toBe("Narwhal");
-  });
-
-  it("reports which slots are occupied, across every layout", () => {
-    let a = twoDock();
-    // The default layout's own browser pane sits on the default session.
-    expect(sessionsInUse([a])).toEqual(new Set(["default"]));
-    a = addTab(a, 0, browserTab({ url: "http://a.test/", profile: "wombat" }));
-    expect(sessionsInUse([a])).toEqual(new Set(["wombat", "default"]));
-
-    // A pane in a worktree the user has switched away from still holds its jar,
-    // so the union is what "exists" means.
-    const b = addTab(twoDock(), 0, browserTab({ profile: "badger" }));
-    expect(sessionsInUse([a, b])).toEqual(new Set(["wombat", "default", "badger"]));
-  });
-
-  it("hands out the lowest free slot, and nothing once they are all taken", () => {
-    expect(nextFreeProfile(new Set())).toBe("otter");
-    // Lowest, not next-after-highest: closing the pane on session 2 frees its
-    // colour for reuse rather than marching towards the cap.
-    expect(nextFreeProfile(new Set(["wombat", "gecko"]))).toBe("otter");
-    expect(nextFreeProfile(new Set(["default", "otter"]))).toBe("wombat");
-    // The default slot never gets handed out as a "new" session.
-    const all = new Set(BROWSER_PROFILES.filter((p) => p !== "default"));
-    expect(nextFreeProfile(all)).toBeNull();
-  });
-});
-
-describe("session sets", () => {
-  it("always contains the default slot, deduped and in slot order", () => {
-    // Slot order, not insertion order: a session's colour is tied to its slot, so
-    // a list that reshuffled itself would make the colours look arbitrary.
-    expect(normalizeSessionSet([])).toEqual(["default"]);
-    expect(normalizeSessionSet(["badger", "otter", "badger"])).toEqual([
-      "default",
-      "otter",
-      "badger",
+  it("never reorders the colours sessions already store by index", () => {
+    // A stored session keeps `color: <index>`, so this prefix is a persisted
+    // contract: append new colours, never reorder or replace these.
+    expect(SESSION_COLORS.slice(0, 8)).toEqual([
+      "#5aa2e0",
+      "#e6b43c",
+      "#3fbf7f",
+      "#b98ce0",
+      "#4fbfc0",
+      "#f2792b",
+      "#ec6fa9",
+      "#e05a50",
     ]);
-    expect(normalizeSessionSet(["default"])).toEqual(["default"]);
+  });
+
+  it("never adds over an existing jar", () => {
+    const a = addSession(EMPTY, 1, undefined, "Admin", "s-a")!.registry;
+    expect(addSession(a, 2, undefined, "Other", "s-a")).toBeNull();
+    expect(addSession(EMPTY, 1, undefined, "x", "default")).toBeNull();
+  });
+
+  it("retires the sessions of a worktree that no longer exists", () => {
+    // Worktree ids are reused rowids, so a new worktree must not inherit these.
+    const a = addSession(EMPTY, 7, undefined, "Admin", "s-a")!.registry;
+    const pruned = pruneSessionSets(a, [1, 2]);
+    expect(sessionSetFor(pruned, 7)).toEqual(["default"]);
+    expect(retiredSessions(pruned)).toEqual(["s-a"]);
+    // Nothing to prune: the same object, so the caller can skip the write.
+    expect(pruneSessionSets(a, [7])).toBe(a);
+  });
+
+  it("makes random ids the desktop shell accepts", () => {
+    const a = newSessionId();
+    const b = newSessionId();
+    expect(a).not.toBe(b);
+    // `PROFILE_RE` in desktop/src/validate.js, or the shell rejects it at create.
+    expect(a).toMatch(SESSION_ID_RE);
+    expect(newSessionId(() => new Uint8Array(10).fill(35))).toBe("s-zzzzzzzzzz");
+    expect(isSessionId("../etc")).toBe(false);
+    expect(isSessionId("otter")).toBe(true);
+  });
+
+  it("cleans a typed session name", () => {
+    expect(cleanSessionName("  Customer   B \n")).toBe("Customer B");
+    expect(cleanSessionName("   ")).toBeNull();
+    expect(cleanSessionName("x".repeat(100))).toHaveLength(MAX_SESSION_NAME);
+  });
+
+  it("adds a named session as a new jar, with the lowest free colour", () => {
+    const one = addSession(EMPTY, 1, undefined, " Admin ", "s-aaaa")!;
+    expect(one.id).toBe("s-aaaa");
+    expect(sessionName(one.registry, "s-aaaa")).toBe("Admin");
+    expect(sessionColor(one.registry, "s-aaaa")).toBe(SESSION_COLORS[0]);
+    const two = addSession(one.registry, 1, undefined, "Customer", "s-bbbb")!;
+    expect(sessionSetFor(two.registry, 1)).toEqual(["default", "s-aaaa", "s-bbbb"]);
+    expect(sessionColor(two.registry, "s-bbbb")).toBe(SESSION_COLORS[1]);
+
+    // Removing frees the colour for the next one, and never reuses the jar.
+    const removed = removeSession(two.registry, 1, undefined, "s-aaaa");
+    const three = addSession(removed, 1, undefined, "Guest", "s-cccc")!;
+    expect(sessionColor(three.registry, "s-cccc")).toBe(SESSION_COLORS[0]);
+    expect(sessionSetFor(three.registry, 1)).toEqual(["default", "s-bbbb", "s-cccc"]);
+  });
+
+  it("uses the suggested name when the prompt was emptied", () => {
+    const added = addSession(EMPTY, 1, undefined, "   ", "s-aaaa")!;
+    expect(sessionName(added.registry, "s-aaaa")).toBe("Session 2");
+  });
+
+  it("gives each worktree its own sessions", () => {
+    const next = ids("s-one", "s-two");
+    const a = addSession(EMPTY, 1, undefined, "Admin", next())!;
+    const b = addSession(a.registry, 2, undefined, "Admin", next())!;
+    // Same name, two jars: adding "a session" in two worktrees no longer shares one.
+    expect(a.id).not.toBe(b.id);
+    expect(sessionSetFor(b.registry, 1)).toEqual(["default", "s-one"]);
+    expect(sessionSetFor(b.registry, 2)).toEqual(["default", "s-two"]);
+  });
+
+  it("stops at the colour cap", () => {
+    let reg = EMPTY;
+    for (let i = 0; i < MAX_EXTRA_SESSIONS; i++) {
+      reg = addSession(reg, 1, undefined, `S${i}`, `s-${i}`)!.registry;
+    }
+    expect(canAddSession(reg, 1)).toBe(false);
+    expect(addSession(reg, 1, undefined, "one too many")).toBeNull();
+    // Every session in the worktree has its own colour.
+    const colors = sessionSetFor(reg, 1)
+      .filter((p) => p !== "default")
+      .map((p) => sessionColor(reg, p));
+    expect(new Set(colors).size).toBe(MAX_EXTRA_SESSIONS);
+  });
+
+  it("suggests the lowest Session N nobody in the worktree is called", () => {
+    expect(suggestSessionName(EMPTY, 1)).toBe("Session 2");
+    const a = addSession(EMPTY, 1, undefined, "Session 2", "s-a")!.registry;
+    expect(suggestSessionName(a, 1)).toBe("Session 3");
+    expect(suggestSessionName(renameSession(a, "s-a", "Admin"), 1)).toBe("Session 2");
+  });
+
+  it("renames, including the default session, and ignores an empty name", () => {
+    const a = addSession(EMPTY, 1, undefined, "Admin", "s-a")!.registry;
+    expect(sessionName(renameSession(a, "s-a", "Root"), "s-a")).toBe("Root");
+    expect(sessionName(renameSession(a, "s-a", "  "), "s-a")).toBe("Admin");
+    // Colour survives a rename.
+    expect(sessionColor(renameSession(a, "s-a", "Root"), "s-a")).toBe(SESSION_COLORS[0]);
+    const d = renameSession(a, "default", "Logged out");
+    expect(sessionName(d, "default")).toBe("Logged out");
+    expect(sessionColor(d, "default")).toBeNull();
+  });
+
+  it("does not mistake an Object.prototype key for a known jar", () => {
+    expect(isSessionId("constructor")).toBe(true);
+    expect(sessionName(EMPTY, "constructor")).toBe("Unnamed session");
+    expect(sessionColor(EMPTY, "constructor")).toMatch(/^#/);
+  });
+
+  it("names a jar it does not know without showing its id", () => {
+    expect(sessionName(EMPTY, "default")).toBe("Default");
+    expect(sessionColor(EMPTY, "default")).toBeNull();
+    expect(sessionName(EMPTY, "s-lost")).toBe("Unnamed session");
+    expect(sessionColor(EMPTY, "s-lost")).toBe(sessionColor(EMPTY, "s-lost"));
+    // A legacy animal keeps the name and colour it was always shown with.
+    expect(sessionName(EMPTY, "otter")).toBe("Otter");
+    expect(sessionColor(EMPTY, "otter")).toBe(SESSION_COLORS[0]);
+    expect(sessionColor(EMPTY, "narwhal")).toBe(SESSION_COLORS[7]);
+  });
+
+  it("migrates the animal-keyed v1 sets, keeping every jar where it is", () => {
+    const v1 = JSON.stringify({ 3: ["default", "otter", "gecko"], 4: ["wombat"] });
+    const reg = parseSessionRegistry(null, v1);
+    // The ids are adopted, not rewritten: renaming a partition would lose its cookies.
+    expect(sessionSetFor(reg, 3)).toEqual(["default", "otter", "gecko"]);
+    expect(sessionSetFor(reg, 4)).toEqual(["default", "wombat"]);
+    expect(reg.jars.otter).toEqual({ name: "Otter", color: 0 });
+    expect(reg.jars.gecko).toEqual({ name: "Gecko", color: 2 });
+    // Shown in the order v1 showed it (slot order), not the order it was stored.
+    const shuffled = parseSessionRegistry(null, JSON.stringify({ 1: ["gecko", "otter"] }));
+    expect(sessionSetFor(shuffled, 1)).toEqual(["default", "otter", "gecko"]);
+    // A v2 registry wins over v1, even an empty one.
+    expect(parseSessionRegistry(serializeSessionRegistry(EMPTY), v1)).toEqual(EMPTY);
   });
 
   it("round-trips, and survives storage that is not what we wrote", () => {
-    const sets = { 3: ["default", "otter"] as BrowserProfile[] };
-    expect(parseSessionSets(serializeSessionSets(sets))).toEqual(sets);
+    const reg = addSession(EMPTY, 3, undefined, "Admin", "s-a")!.registry;
+    expect(parseSessionRegistry(serializeSessionRegistry(reg))).toEqual(reg);
 
-    expect(parseSessionSets(null)).toEqual({});
-    expect(parseSessionSets("")).toEqual({});
-    expect(parseSessionSets("not json")).toEqual({});
-    expect(parseSessionSets("[]")).toEqual({});
-    expect(parseSessionSets('{"1":"nope"}')).toEqual({});
-    // A slot name outside the allowed set becomes an Electron partition if it
-    // gets through, so it is dropped rather than carried.
-    expect(parseSessionSets('{"1":["otter","../etc","session-2"]}')).toEqual({
-      1: ["default", "otter"],
-    });
-    // Non-numeric keys can't index a worktree.
-    expect(Object.keys(parseSessionSets('{"abc":["otter"],"4":["otter"]}'))).toEqual([
-      "4",
-    ]);
+    for (const raw of [null, "", "not json", "[]"]) {
+      expect(parseSessionRegistry(raw)).toEqual(EMPTY);
+    }
+    const messy = parseSessionRegistry(
+      JSON.stringify({
+        jars: {
+          "s-ok": { name: " Admin ", color: 2 },
+          "../etc": { name: "x", color: 1 },
+          "s-nocolor": { name: "x" },
+          "s-noname": { name: "  ", color: 1 },
+          "s-badcolor": { name: "x", color: 99 },
+        },
+        // An id the shell would refuse is dropped, and non-numeric keys cannot
+        // index a worktree.
+        sets: { 1: ["s-ok", "../etc", "s-ok", "default"], abc: ["s-ok"], 2: "nope" },
+      }),
+    );
+    expect(messy.jars).toEqual({ "s-ok": { name: "Admin", color: 2 } });
+    expect(messy.sets).toEqual({ 1: ["s-ok"] });
+  });
+
+  it("reports which sessions a layout's panes are on", () => {
+    let a = twoDock();
+    // The default layout's own browser pane sits on the default session.
+    expect(sessionsInUse([a])).toEqual(new Set(["default"]));
+    a = addTab(a, 0, browserTab({ url: "http://a.test/", profile: "s-a" }));
+    expect(sessionsInUse([a])).toEqual(new Set(["s-a", "default"]));
   });
 
   it("unions the stored set with what the layout actually uses", () => {
     // A layout can name a session the stored set has lost (storage cleared, an
     // older build). A pane missing from its own menu is worse than an extra row.
     const layout = addTab(twoDock(), 0, browserTab({ profile: "puffin" }));
-    expect(sessionSetFor({}, 1, layout)).toEqual(["default", "puffin"]);
-    expect(sessionSetFor({ 1: ["default", "otter"] }, 1, layout)).toEqual([
-      "default",
-      "otter",
-      "puffin",
-    ]);
+    expect(sessionSetFor(EMPTY, 1, layout)).toEqual(["default", "puffin"]);
+    const reg: SessionRegistry = { jars: {}, sets: { 1: ["otter"] } };
+    expect(sessionSetFor(reg, 1, layout)).toEqual(["default", "otter", "puffin"]);
     // Per worktree: another worktree's set is not this one's.
-    expect(sessionSetFor({ 2: ["default", "otter"] }, 1)).toEqual(["default"]);
+    expect(sessionSetFor({ jars: {}, sets: { 2: ["otter"] } }, 1)).toEqual(["default"]);
   });
 
-  it("adding a session keeps the ones already there", () => {
-    // The bug this replaced: the set was derived from occupancy, so moving a pane
-    // onto a new slot vacated its old one and adding looked like deleting.
-    let set = normalizeSessionSet([]);
-    const first = nextFreeProfile(new Set(set));
-    set = normalizeSessionSet([...set, first!]);
-    const second = nextFreeProfile(new Set(set));
-    set = normalizeSessionSet([...set, second!]);
-    expect(set).toEqual(["default", "otter", "wombat"]);
-    expect(first).not.toBe(second);
+  it("keeps a removed session's jar until everything is cleared", () => {
+    const a = addSession(EMPTY, 1, undefined, "Admin", "s-a")!.registry;
+    const removed = removeSession(a, 1, undefined, "s-a");
+    expect(sessionSetFor(removed, 1)).toEqual(["default"]);
+    // Retired, not forgotten: its cookies are still on disk, so both "clear
+    // every session" and the Clear menu's removed list reach it.
+    expect(allSessionJars(removed)).toContain("s-a");
+    expect(retiredSessions(removed)).toEqual(["s-a"]);
+    expect(retiredSessions(a)).toEqual([]);
+    expect(retiredSessions(removed, ["s-a"])).toEqual([]);
+    // Legacy jars are always reachable by "clear every session".
+    expect(allSessionJars(EMPTY)).toEqual(["default", ...LEGACY_SESSION_IDS]);
+    // Forgotten only once its clear succeeded.
+    expect(forgetRetiredSessions(removed, []).jars["s-a"]?.name).toBe("Admin");
+    expect(forgetRetiredSessions(removed, ["s-a"]).jars).toEqual({});
+    // A pane still on it keeps its name.
+    expect(forgetRetiredSessions(removed, ["s-a"], ["s-a"]).jars["s-a"]?.name).toBe("Admin");
+    // Listed sessions are never forgotten.
+    expect(forgetRetiredSessions(a, ["s-a"]).jars["s-a"]?.name).toBe("Admin");
+  });
+
+  it("clears every jar a pane is on, even one the registry lost", () => {
+    // Layouts are the daemon's and outlive this client's localStorage.
+    expect(allSessionJars(EMPTY, ["s-lost"])).toContain("s-lost");
   });
 });
 
