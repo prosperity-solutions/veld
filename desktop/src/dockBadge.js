@@ -7,36 +7,75 @@
 // builds.
 //
 // **The page decides what is unread; this only combines.** Every window runs
-// its own inbox and reports the session ids it holds an unread event for (see
-// `setBadge` in `crates/veld-daemon/ui/src/shell.ts`). A pane lives in one
-// window's layout, but a main window and a detached one can both know a
-// session, so the badge counts the *union* of ids rather than adding counts —
-// adding would show one waiting agent as two.
+// its own inbox and reports its unread sessions, each with its worktree, plus
+// the worktrees it *holds* (see `setBadge` in
+// `crates/veld-daemon/ui/src/shell.ts`). Two rules make the combination honest:
+//
+// - **Ids, not counts.** A main window and a detached one can both know a
+//   session, and adding their counts would show one waiting agent as two. The
+//   badge counts distinct session ids.
+// - **The holder's word wins for a held worktree.** The daemon relays an agent
+//   hook to *every* main window, so each one files it — but reading is
+//   per-window, and only the window holding that worktree can read it (the
+//   others are refused the claim). Taking a plain union therefore kept a session
+//   counted forever in a window that could never clear it. So for a worktree
+//   some window holds, only that window's answer counts; for a worktree nobody
+//   holds — the agent in a project you have not opened this run — anyone's does,
+//   since it is news nobody has had the chance to read.
+//
+// **The style is not the page's to say.** A window re-reads settings only on
+// focus, so an unfocused one holds a stale copy; taking its word would bring a
+// number back after the user chose `off`. The main process reads
+// `desktop.dockBadge` from the daemon on the tray's tick and on every settings
+// nudge, as it already does for `desktop.menuBarIcon` — see `main.js`.
 
-/** The most session ids one report may carry. A bound, not a design limit. */
-const MAX_SESSIONS = 1000;
+/** The most sessions (or held worktrees) one report may carry. A bound, not a design limit. */
+const MAX_ENTRIES = 1000;
 /** A pane id is a short token; anything longer did not come from `/ide`. */
 const MAX_ID_LENGTH = 200;
 /** The values `desktop.dockBadge` can take. Mirrors `DOCK_BADGE_STYLES` in Rust. */
 const STYLES = new Set(["count", "dot", "off"]);
+const DEFAULT_STYLE = "count";
+
+const isWorktreeId = (v) => Number.isSafeInteger(v) && v >= 0;
 
 /**
  * A report from a renderer, cleaned up. Anything malformed becomes "nothing
- * unread, counted" — the badge's resting state — rather than an exception in the
- * main process.
+ * unread, nothing held" — the badge's resting state — rather than an exception in
+ * the main process.
  *
  * @param {unknown} payload
- * @returns {{ sessions: string[], style: "count" | "dot" | "off" }}
+ * @returns {{ unread: Map<string, number>, held: Set<number> }}
  */
 function parseReport(payload) {
   const raw = /** @type {any} */ (payload);
-  const style = STYLES.has(raw?.style) ? raw.style : "count";
-  const sessions = Array.isArray(raw?.sessions)
-    ? raw.sessions
-        .filter((id) => typeof id === "string" && id !== "" && id.length <= MAX_ID_LENGTH)
-        .slice(0, MAX_SESSIONS)
-    : [];
-  return { sessions, style };
+  const unread = new Map();
+  if (Array.isArray(raw?.unread)) {
+    for (const entry of raw.unread.slice(0, MAX_ENTRIES)) {
+      const id = entry?.sessionId;
+      const worktreeId = entry?.worktreeId;
+      if (typeof id !== "string" || id === "" || id.length > MAX_ID_LENGTH) continue;
+      if (!isWorktreeId(worktreeId)) continue;
+      unread.set(id, worktreeId);
+    }
+  }
+  const held = new Set(
+    Array.isArray(raw?.held) ? raw.held.slice(0, MAX_ENTRIES).filter(isWorktreeId) : [],
+  );
+  return { unread, held };
+}
+
+/**
+ * `desktop.dockBadge` out of a `GET /api/settings` body. `fallback` for every
+ * shape that is not a known style — a daemon that is down or older than the key
+ * must not change what the user already sees.
+ *
+ * @param {unknown} body
+ * @param {string} fallback
+ */
+function dockBadgeStyleFrom(body, fallback) {
+  const value = /** @type {any} */ (body)?.settings?.["desktop.dockBadge"];
+  return STYLES.has(value) ? value : fallback;
 }
 
 /**
@@ -48,7 +87,7 @@ function parseReport(payload) {
  * a two-digit one does not.
  *
  * @param {number} count
- * @param {"count" | "dot" | "off"} style
+ * @param {string} style
  * @returns {string}
  */
 function badgeText(count, style) {
@@ -60,23 +99,28 @@ function badgeText(count, style) {
 /**
  * Combine the windows' reports and push the result to `apply` when it changes.
  *
- * `style` is taken from the **newest** report. Every window reads the same
- * settings document and re-reports when it changes, so the windows disagree for
- * at most a frame, and "the one that spoke last" is the one that has seen the
- * change.
- *
  * @param {(text: string) => void} apply
  */
 function createDockBadge(apply) {
-  /** @type {Map<number, string[]>} */
+  /** @type {Map<number, { unread: Map<string, number>, held: Set<number> }>} */
   const reports = new Map();
-  let style = /** @type {"count" | "dot" | "off"} */ ("count");
+  let style = DEFAULT_STYLE;
   let shown = "";
 
+  const count = () => {
+    const heldAnywhere = new Set();
+    for (const r of reports.values()) for (const w of r.held) heldAnywhere.add(w);
+    const counted = new Set();
+    for (const r of reports.values()) {
+      for (const [id, worktreeId] of r.unread) {
+        if (r.held.has(worktreeId) || !heldAnywhere.has(worktreeId)) counted.add(id);
+      }
+    }
+    return counted.size;
+  };
+
   const refresh = () => {
-    const union = new Set();
-    for (const sessions of reports.values()) for (const id of sessions) union.add(id);
-    const text = badgeText(union.size, style);
+    const text = badgeText(count(), style);
     if (text === shown) return;
     shown = text;
     apply(text);
@@ -85,34 +129,39 @@ function createDockBadge(apply) {
   return {
     /** A window's current answer, replacing whatever it said before. */
     report(senderId, payload) {
-      const parsed = parseReport(payload);
-      reports.set(senderId, parsed.sessions);
-      style = parsed.style;
+      reports.set(senderId, parseReport(payload));
       refresh();
     },
-    /** A window went away — its unread events are no longer anybody's to see here. */
+    /** A window went away, or its page did — its report no longer describes anything. */
     forget(senderId) {
       if (reports.delete(senderId)) refresh();
     },
+    /** `desktop.dockBadge`, as the main process last read it from the daemon. */
+    setStyle(next) {
+      style = STYLES.has(next) ? next : DEFAULT_STYLE;
+      refresh();
+    },
+    style: () => style,
     /** What the badge currently says. Tests. */
     text: () => shown,
   };
 }
 
 /**
- * Wire `veld:app:set-badge` to the Dock.
+ * Wire `veld:app:set-badge` to the Dock, and return the badge so `main.js` can
+ * feed it the style it reads.
  *
  * macOS only: `app.dock` is undefined elsewhere, and Linux's `setBadgeCount`
  * works on so few desktops that a setting promising it would mostly be a lie.
  * The handler is registered everywhere anyway, so a page asking on Linux gets a
  * `false` rather than an unhandled-channel error.
  *
- * @param {import("electron").IpcMain} ipcMain
- * @param {import("electron").App} app
+ * @param {Pick<import("electron").IpcMain, "handle">} ipcMain
+ * @param {{ dock?: { setBadge(text: string): void } }} app
  */
 function registerDockBadgeIpc(ipcMain, app) {
   const badge = createDockBadge((text) => app.dock?.setBadge(text));
-  /** Senders already being watched for `destroyed`, so a reload does not stack listeners. */
+  /** Senders already being watched, so a reload does not stack listeners. */
   const watched = new Set();
   ipcMain.handle("veld:app:set-badge", (event, payload) => {
     if (!app.dock) return false;
@@ -123,14 +172,30 @@ function registerDockBadgeIpc(ipcMain, app) {
     const id = sender.id;
     if (!watched.has(id)) {
       watched.add(id);
+      const drop = () => badge.forget(id);
+      // A crashed renderer keeps its `webContents` (see `browserViews.js`), and a
+      // page that navigates away stops reporting without saying so — both leave
+      // a report describing a page that no longer exists. The next page's first
+      // report puts back whatever is still true.
+      sender.on("render-process-gone", drop);
+      sender.on("did-start-navigation", (details) => {
+        if (details?.isMainFrame && !details?.isSameDocument) drop();
+      });
       sender.once("destroyed", () => {
         watched.delete(id);
-        badge.forget(id);
+        drop();
       });
     }
     badge.report(id, payload);
     return true;
   });
+  return badge;
 }
 
-module.exports = { badgeText, createDockBadge, parseReport, registerDockBadgeIpc };
+module.exports = {
+  badgeText,
+  createDockBadge,
+  dockBadgeStyleFrom,
+  parseReport,
+  registerDockBadgeIpc,
+};

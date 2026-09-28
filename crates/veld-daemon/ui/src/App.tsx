@@ -41,7 +41,6 @@ import {
   FOCUS_SUPPRESS_BELL,
   FOCUS_SUPPRESS_TOASTS,
   FOCUS_SUPPRESS_OS_NOTIFICATIONS,
-  dockBadgeStyle,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
@@ -1063,12 +1062,12 @@ function AppInner(props: {
   // symmetric: the tray has an independent ten-second tick to fall back on, so a
   // missed key there is latency, while the update schedule's own interval is up
   // to twelve hours — which is the exact bug this nudge was extended to fix.
-  const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}`;
+  const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}\u0000${settings?.["desktop.dockBadge"]}`;
   useEffect(() => {
     // Nothing read yet — a daemon older than both keys, or the first paint.
     // Nothing to tell the shell either way, and it converges on its own schedule
     // regardless. `String(undefined)` is what a missing key renders as above.
-    if (desktopShellPrefs === "undefined\u0000undefined") return;
+    if (desktopShellPrefs === "undefined\u0000undefined\u0000undefined") return;
     void desktopApp?.settingsChanged?.();
   }, [desktopShellPrefs]);
 
@@ -6234,22 +6233,21 @@ function AppInner(props: {
   const nextTarget = inbox.nextUnread(unreadScope);
 
   // The Dock icon's badge: the same unread events Next unread walks, reported to
-  // Veld Desktop, which unions every window's answer (see `setBadge` in
-  // `shell.ts`). Only the worktree inbox is counted — Veld's own news has its own
-  // dot on the ⋯ menu, and a badge that lit up for a release note would stop
-  // meaning "something of yours needs you".
+  // Veld Desktop with the worktrees this window holds, so the shell can combine
+  // every window's answer (see `setBadge` in `shell.ts`). Only the worktree inbox
+  // is counted — Veld's own news has its own dot on the ⋯ menu, and a badge that
+  // lit up for a release note would stop meaning "something of yours needs you".
+  // The style is not sent: the shell reads `desktop.dockBadge` itself.
   //
-  // Keyed on a joined string for the reason `desktopShellPrefs` is: this body
+  // Keyed on a JSON string for the reason `desktopShellPrefs` is: this body
   // re-renders on every inbox change and every settings re-read, and only a change
   // in the answer is worth an IPC round trip.
-  const badgeStyle = dockBadgeStyle(settings ?? {});
-  const badgeKey = `${badgeStyle}\u0000${inbox.unreadSessions(unreadScope).join("\u0000")}`;
+  const badgeKey = JSON.stringify({
+    unread: inbox.unreadSessions(unreadScope),
+    held: Object.keys(layouts).map(Number).sort((a, b) => a - b),
+  });
   useEffect(() => {
-    const [style, ...sessions] = badgeKey.split("\u0000");
-    void desktopApp?.setBadge?.({
-      sessions: sessions.filter((id) => id !== ""),
-      style: style as ReturnType<typeof dockBadgeStyle>,
-    });
+    void desktopApp?.setBadge?.(JSON.parse(badgeKey));
   }, [badgeKey]);
   // **Only in the desktop app**, where the chord is unambiguously ours.
   //

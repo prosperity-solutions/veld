@@ -434,13 +434,14 @@ export const PROMOTIONS: Promotion[] = [
     // unexplained red number.
     //
     // Flat on purpose: the capability, then the control. The body names the app
-    // because a browser-tab reader gets this card too and has no Dock to look at.
+    // and the platform because cards have no audience filter: a browser-tab
+    // reader and a Linux desktop user get this card too, and have no Dock.
     id: "dock-badge",
     since: "2026-09-28",
     eyebrow: "New",
     headline: "See from the Dock when something needs you",
     body:
-      "Veld Desktop's Dock icon counts what is waiting for you: agents with a question, things that finished or failed. Prefer a dot? Settings, Badge on the Dock icon.",
+      "On a Mac, Veld Desktop's Dock icon counts what waits for you: an agent with a question, a job that finished or failed. Prefer a dot? Settings, Dock icon badge.",
     glyph: "inbox",
   },
 ];

@@ -20,7 +20,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 const { menuBarIconFrom, serialize } = require("./trayVisibility");
-const { registerDockBadgeIpc } = require("./dockBadge");
+const { dockBadgeStyleFrom, registerDockBadgeIpc } = require("./dockBadge");
 const {
   focusPrimary,
   initWindows,
@@ -507,6 +507,9 @@ const TRAY_TICK_MS = 10_000;
  */
 let menuBarIcon = true;
 
+/** The Dock badge, once its IPC is registered. Its style rides on the same read. */
+let dockBadge = null;
+
 /**
  * Re-read `desktop.menuBarIcon` from the daemon.
  *
@@ -521,7 +524,12 @@ async function readMenuBarIconSetting() {
   try {
     const res = await fetch(SETTINGS_URL, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return;
-    menuBarIcon = menuBarIconFrom(await res.json(), menuBarIcon);
+    const body = await res.json();
+    menuBarIcon = menuBarIconFrom(body, menuBarIcon);
+    // `desktop.dockBadge` from the same document, for the same reason this reads
+    // the tray's key rather than taking a page's word: a window re-reads settings
+    // only on focus, so an unfocused one would report a stale style.
+    dockBadge?.setStyle(dockBadgeStyleFrom(body, dockBadge.style()));
   } catch {
     // Unreachable or older daemon — keep the last answer. See `menuBarIcon`.
   }
@@ -777,7 +785,7 @@ app.whenReady().then(async () => {
     permissionsFile: path.join(app.getPath("userData"), "permissions.json"),
   });
   registerWindowIpc(ipcMain);
-  registerDockBadgeIpc(ipcMain, app);
+  dockBadge = registerDockBadgeIpc(ipcMain, app);
   // A renderer saw the settings document change. The tick below would converge on
   // its own within ten seconds; this is what makes a toggle in the settings dialog
   // land while the user is still looking at it.

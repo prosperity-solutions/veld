@@ -792,7 +792,7 @@ impl SettingKey {
             ),
 
             Self::DesktopDockBadge => Spec {
-                title: "Badge on the Dock icon",
+                title: "Dock icon badge",
                 help: "While something is unread — a coding agent waiting for you, or something \
                        that finished or failed, in any project — Veld Desktop marks its Dock \
                        icon. These are the same events the Next unread button takes you to, so \

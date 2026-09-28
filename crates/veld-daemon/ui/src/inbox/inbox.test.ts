@@ -1221,8 +1221,11 @@ describe("the unread sessions the Dock badge counts", () => {
     box.report("b", WT, agent("blocked"), NOW);
     box.report("a", OTHER_WT, agent("idle"), NOW + 1000);
     box.report("busy", WT, agent("working"), NOW);
-    expect(box.unreadSessions(new Set([WT, OTHER_WT]))).toEqual(["a", "b"]);
-    expect(box.unreadSessions(new Set([WT]))).toEqual(["b"]);
+    expect(box.unreadSessions(new Set([WT, OTHER_WT]))).toEqual([
+      { sessionId: "a", worktreeId: OTHER_WT },
+      { sessionId: "b", worktreeId: WT },
+    ]);
+    expect(box.unreadSessions(new Set([WT]))).toEqual([{ sessionId: "b", worktreeId: WT }]);
   });
 
   it("drops a session once it is read, as arriving from Next unread does", () => {

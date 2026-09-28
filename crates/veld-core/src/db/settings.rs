@@ -1366,10 +1366,9 @@ impl SettingKey {
             // the settings dialog showed something else.
             Self::DesktopUpdateFrequency => one_of(value, UPDATE_FREQUENCIES).ok_or_else(bad)?,
             // Rejected rather than coerced, like every other enum here. The reader
-            // is the page rather than the shell — it decides what to hand the Dock —
-            // and it maps an unknown value onto `count` (`dockBadgeStyle` in
-            // `ui/src/shared/settings.ts`), so refusing the write is what keeps the
-            // dialog and the Dock from disagreeing.
+            // is the Electron shell, which keeps its last answer for a value it does
+            // not know (`dockBadgeStyleFrom` in `desktop/src/dockBadge.js`), so
+            // refusing the write is what keeps the dialog and the Dock agreeing.
             Self::DesktopDockBadge => one_of(value, DOCK_BADGE_STYLES).ok_or_else(bad)?,
             Self::WorktreeNewMode => one_of(value, WORKTREE_NEW_MODES).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
@@ -2095,8 +2094,8 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (SettingKey::DesktopUpdateFrequency, Value::from("balanced")),
         // `count` — the Dock icon says how many things are waiting for you, the
         // same events the Next unread button walks. `dot` keeps the signal and
-        // drops the number; `off` leaves the icon alone. Read by the page, and
-        // acted on only inside Veld Desktop on macOS — a browser tab has no Dock.
+        // drops the number; `off` leaves the icon alone. Read by the Electron shell
+        // on macOS only — a browser tab has no Dock.
         (SettingKey::DesktopDockBadge, Value::from("count")),
     ]
     .into_iter()

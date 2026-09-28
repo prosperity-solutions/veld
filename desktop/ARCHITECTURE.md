@@ -962,14 +962,19 @@ Minimal by design. Main process only does:
    older than the key cannot. Hiding it costs ambient status, not access — `window-all-closed`
    keeps the app alive on macOS regardless of the tray, and the Dock icon is
    still there to bring a window back.
-   The **Dock badge** (`src/dockBadge.js`, macOS only) goes the other way: the
-   *page* decides, because the page holds the inbox. Every window reports the
-   session ids it has an unread event for, plus `desktop.dockBadge` as it reads
-   it, over `veld:app:set-badge`; the main process takes the **union** across
-   windows (a session two windows both know is one thing waiting, not two),
-   forgets a window's report when its `webContents` is destroyed, and applies
-   `app.dock.setBadge` only when the text changes. Ids rather than a count is the
-   whole design — a count cannot be de-duplicated after the fact.
+   The **Dock badge** (`src/dockBadge.js`, macOS only) is split the other way:
+   the *page* says what is unread, because the page holds the inbox, and the
+   *shell* reads the style (`desktop.dockBadge`) from the daemon on the same read
+   as `desktop.menuBarIcon` — a page re-reads settings only on focus, so an
+   unfocused window's style is stale. Every window reports its unread sessions
+   with their worktrees, plus the worktrees it holds a layout for, over
+   `veld:app:set-badge`. The main process counts distinct session ids (a session
+   two windows both know is one thing waiting), and for a worktree some window
+   holds it counts **only that window's** answer: every main window files every
+   relayed agent hook, but only the holder can read one, so a plain union kept a
+   read event lit forever. A worktree nobody holds counts from anyone. A report
+   is dropped when its page navigates, crashes, or its `webContents` is
+   destroyed, and `app.dock.setBadge` is only called when the text changes.
 4. `contextIsolation: true`, `nodeIntegration: false`, preload exposing
    `veldDesktop.shell` metadata, `veldDesktop.window` (open, detach, snapshot,
    title, close, adopt) and `veldDesktop.browser` — the embedded browser panes

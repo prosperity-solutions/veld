@@ -733,15 +733,18 @@ class WorktreeInbox {
    *
    * The same set {@link nextUnread} picks from, so the badge and the button can
    * never disagree about whether there is anything to go to: the button walks this
-   * list one entry at a time, and the badge counts down as it does. Sorted, so a
-   * caller can compare two answers by joining them.
+   * list one entry at a time, and the badge counts down as it does. With the
+   * worktree, because the shell needs it to combine windows. Sorted, so a caller
+   * can compare two answers by serialising them.
    */
-  unreadSessions(worktreeIds: ReadonlySet<number>): string[] {
-    const out: string[] = [];
+  unreadSessions(worktreeIds: ReadonlySet<number>): { sessionId: string; worktreeId: number }[] {
+    const out: { sessionId: string; worktreeId: number }[] = [];
     for (const [sessionId, session] of this.sessions) {
-      if (session.unseen && worktreeIds.has(session.worktreeId)) out.push(sessionId);
+      if (session.unseen && worktreeIds.has(session.worktreeId)) {
+        out.push({ sessionId, worktreeId: session.worktreeId });
+      }
     }
-    return out.sort();
+    return out.sort((a, b) => (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0));
   }
 
   /**
