@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   api,
   runRef,
@@ -106,6 +106,10 @@ import {
   UNGROUPED_LANE,
   TRASH_PREVIEW,
   trashPreview,
+  repoFetchVerdict,
+  withLaneOrder,
+  withWorktreeMoved,
+  withWorktreeTrashed,
   type PendingAction,
   type RailGroup,
   type LaneRows,
@@ -114,6 +118,23 @@ import {
 } from "./model";
 import { startOriginLabel } from "./shared/startOrigin";
 import { usePointerDrag } from "./shared/pointerDrag";
+import { type Reach, type ReachBox, reachContains, reachPath } from "./ide/trashReach";
+import {
+  aimReach,
+  arrive,
+  goneZone,
+  leave,
+  type Presence,
+  presenceGone,
+  presenceLook,
+  presenceMoving,
+  type ReachMotion,
+  reachSettled,
+  restingMotion,
+  shownReach,
+  stepPresence,
+  stepReach,
+} from "./ide/reachMotion";
 import { eventLocation } from "./shared/eventLocation";
 import { worktreeLabel } from "./shared/worktreeName";
 import { nodeRows, type NodeRow } from "./shared/NodeList";
@@ -249,7 +270,7 @@ import {
   projectForShortcut,
   projectHolder,
   projectShortcutDigit,
-  projectInitials,
+  projectLabels,
   projectWorktreeIds,
   reorderedRoots,
   toggleTarget,
@@ -1129,12 +1150,31 @@ function AppInner(props: {
   // below are fetched only while IDE mode is the one on screen.
   const wantRunState = mode === "ide";
 
-  // Known, accepted: refreshes are not sequenced. A poll issued before a
-  // mutation but resolving after it writes the pre-mutation payload back, so
-  // a rename or emoji change can visibly revert for up to one poll before
-  // settling. Fixing it needs a monotonic request counter guarding the
-  // setters; not worth it while every mutation is followed by its own
-  // `refresh()`.
+  // Known, accepted: refreshes are not sequenced against mutations in general.
+  // A poll issued before a rename or emoji change but resolving after it writes
+  // the pre-mutation payload back, so the change can visibly revert for up to
+  // one poll before settling.
+  //
+  // The rail's drops are the exception, because they paint their result before
+  // the write is answered (`optimisticRepos`) and a revert there reads as the
+  // row jumping back to where it was picked up. Three rules close that for them:
+  // every refresh takes a ticket (`repoTicket`) and only the newest one to
+  // *start* may write the repo list (`repoApplied`); while a drop's write is in
+  // flight its patch is replayed over whatever a poll brings back
+  // (`repoPatches`); and once the write is
+  // answered, every refresh issued before that moment is fenced out
+  // (`repoFence`), because it may carry the pre-drop list.
+  //
+  // A fenced refresh asks again rather than returning. Callers `await
+  // refresh()` and then act on the list — the import dialog selects the project
+  // it just added — so it must not resolve until a list at least as new as the
+  // call is on screen. One that lost to a newer applied list has that already.
+  const repoTicket = useRef(0);
+  const repoApplied = useRef(0);
+  const repoFence = useRef(0);
+  // The tail of the drops' write queue — see `optimisticRepos`.
+  const repoWrites = useRef<Promise<void>>(Promise.resolve());
+  const repoPatches = useRef<Array<(list: RepoList) => RepoList>>([]);
   // `historyDays` is a dependency: a change to the horizon must reach the next poll,
   // and re-creating `refresh` is what restarts the interval effect below with it.
   const refresh = useCallback(async () => {
@@ -1156,12 +1196,25 @@ function AppInner(props: {
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
       // so out-of-app `git worktree add/remove` appears on the next poll.
-      const [repos, environments] = await Promise.all([
-        api.refreshRepos(),
-        api.environments(),
-      ]);
-      setRepoList(repos);
-      setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+      for (;;) {
+        const ticket = ++repoTicket.current;
+        const [repos, environments] = await Promise.all([
+          api.refreshRepos(),
+          api.environments(),
+        ]);
+        const verdict = repoFetchVerdict(
+          ticket,
+          repoApplied.current,
+          repoFence.current,
+        );
+        if (verdict === "refetch") continue;
+        if (verdict === "apply") {
+          repoApplied.current = ticket;
+          setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
+        }
+        setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+        break;
+      }
       setOffline(false);
     } catch {
       setOffline(true);
@@ -1195,6 +1248,51 @@ function AppInner(props: {
     }, POLL_MS);
     return () => window.clearInterval(t);
   }, [refresh]);
+
+  /**
+   * Paint `patch` now, run `write`, then refresh — a rail drop's whole life.
+   *
+   * The patch lands in the same commit as the drag ending, so the row is where it
+   * was released rather than back where it started for however long the writes
+   * and the refresh after them take. It must be idempotent: it is replayed over
+   * any poll that lands while `write` is running, which may already include it.
+   *
+   * On the way out every refresh already in flight is fenced out (`repoFence`).
+   * Those were issued before the write was answered, so any of them can carry the
+   * pre-drop list, and with the patch no longer replayed that would be a visible
+   * jump back — once, a moment before the refresh below corrects it. A failed
+   * write needs nothing special: the refresh is the daemon's truth, and it
+   * replaces the patch like any other answer.
+   *
+   * Writes run one at a time, in drop order. A second drop is computed from the
+   * first one's painted list and sends a full order that already includes it —
+   * but the first one's own order does not include the second, so if it reached
+   * the daemon last it would undo a drop the rail had already shown as done.
+   */
+  const optimisticRepos = async (
+    patch: (list: RepoList) => RepoList,
+    write: () => Promise<void>,
+  ) => {
+    repoPatches.current = [...repoPatches.current, patch];
+    setRepoList((cur) => cur && patch(cur));
+    const queued = repoWrites.current.then(write);
+    repoWrites.current = queued.catch(() => {});
+    try {
+      await queued;
+    } finally {
+      repoPatches.current = repoPatches.current.filter((p) => p !== patch);
+      repoFence.current = repoTicket.current;
+      await refresh();
+    }
+  };
+
+  /** A patch for [`optimisticRepos`] that rewrites one project and no other. */
+  const patchRepo =
+    (root: string, fn: (repo: Repo) => Repo) =>
+    (list: RepoList): RepoList => ({
+      ...list,
+      repos: list.repos.map((r) => (r.root === root ? fn(r) : r)),
+    });
 
   // ---- selection ----------------------------------------------------------
   const {
@@ -2595,9 +2693,9 @@ function AppInner(props: {
    *
    * Optimistic on purpose: the column re-renders from `repos`, which is the poll's
    * list, so without this the square springs back to where it was and stays there
-   * until the next 5s tick. `refresh()` afterwards is what makes the daemon's answer
-   * the one that survives — including the entries this client did not know about,
-   * which `reorder_repos` places for us.
+   * until the write and a refresh have come back (`optimisticRepos`). The refresh
+   * is what makes the daemon's answer the one that survives — including the
+   * entries this client did not know about, which `reorder_repos` places for us.
    */
   const reorderProjectsTo = (from: number, to: number) => {
     const order = reorderedRoots(
@@ -2605,8 +2703,7 @@ function AppInner(props: {
       from,
       to,
     );
-    setRepoList((cur) => {
-      if (!cur) return cur;
+    const patch = (cur: RepoList): RepoList => {
       const listed = order
         .map((root) => cur.repos.find((r) => r.root === root))
         .filter((r): r is Repo => !!r);
@@ -2618,14 +2715,14 @@ function AppInner(props: {
       const seen = new Set(listed.map((r) => r.root));
       const rest = cur.repos.filter((r) => !seen.has(r.root));
       return { ...cur, repos: [...listed, ...rest] };
-    });
-    void api
-      .reorderProjects(order)
-      .then(() => refresh())
-      .catch((e) => {
+    };
+    void optimisticRepos(patch, async () => {
+      try {
+        await api.reorderProjects(order);
+      } catch (e) {
         notifyError("Could not reorder projects", e);
-        void refresh();
-      });
+      }
+    });
   };
 
   /**
@@ -2977,17 +3074,22 @@ function AppInner(props: {
    */
   const moveLaneTo = async (lane: string, onto: string) => {
     if (!repo) return;
+    const root = repo.root;
     // `railOrder` — not `lanes` — because the ungrouped section is one of the
     // things that can move, and the order sent to the daemon has to name it
     // whether or not this repo has ever stored a position for it.
     const order = moveLane(railOrder(laneRows), lane, onto);
     if (!order) return;
-    try {
-      await api.reorderLanes(repo.root, order);
-    } catch (e) {
-      notifyError("Could not reorder the groups", e);
-    }
-    await refresh();
+    await optimisticRepos(
+      patchRepo(root, (r) => ({ ...r, lanes: withLaneOrder(r.lanes, root, order) })),
+      async () => {
+        try {
+          await api.reorderLanes(root, order);
+        } catch (e) {
+          notifyError("Could not reorder the groups", e);
+        }
+      },
+    );
   };
 
   /**
@@ -5334,18 +5436,26 @@ function AppInner(props: {
     toIndex: number,
   ) => {
     if (!repo) return;
+    const root = repo.root;
     const move = moveWorktree(railGroups(worktrees, laneRows), path, toLane, toIndex);
     if (!move) return;
     const moved = worktrees.find((w) => w.path === path);
-    try {
-      if (moved && moved.lane !== move.lane) {
-        await api.patchWorktree(moved.id, { lane: move.lane });
-      }
-      await api.reorderWorktrees(repo.root, move.order);
-    } catch (e) {
-      notifyError("Could not reorder the rail", e);
-    }
-    await refresh();
+    await optimisticRepos(
+      patchRepo(root, (r) => ({
+        ...r,
+        worktrees: withWorktreeMoved(r.worktrees, path, move.lane, move.order),
+      })),
+      async () => {
+        try {
+          if (moved && moved.lane !== move.lane) {
+            await api.patchWorktree(moved.id, { lane: move.lane });
+          }
+          await api.reorderWorktrees(root, move.order);
+        } catch (e) {
+          notifyError("Could not reorder the rail", e);
+        }
+      },
+    );
   };
 
   /**
@@ -5496,27 +5606,48 @@ function AppInner(props: {
     // The main checkout is the repository itself and is never draggable in the
     // first place (the row gates on `!w.is_main`), so a drop can't reach here;
     // this is defence in depth so binning main can never be invoked silently.
-    if (w.is_main) return;
+    if (w.is_main || !repo) return;
     // A dirty worktree can't be deleted later without either discarding or
     // reverting its changes, so a drag-to-trash must not bin it silently —
     // surface the files and let the user choose, the same as the context-menu
     // "Remove worktree…". A clean worktree still bins immediately, as before.
-    try {
-      const status = await api.worktreeGitStatus(w.id);
-      if (status.dirty) {
-        setDialog({ kind: "trash", worktree: w });
-        return;
-      }
-    } catch {
-      // Status unavailable (git error, checkout gone): bin directly; any
-      // refusal surfaces later on the row.
+    //
+    // The poll's `git.dirty` answers first, so a row already known to be dirty
+    // goes straight to the dialog instead of into the trash and back out. It is
+    // up to a sweep old, and `null` until the first sweep reaches the row, so a
+    // row it calls clean *or has no answer for* is binned on screen at once and
+    // the live check still runs before anything is written; if that finds
+    // changes, the refresh puts the row back as the dialog opens.
+    if (w.git?.dirty) {
+      setDialog({ kind: "trash", worktree: w });
+      return;
     }
-    try {
-      await api.deleteWorktree(w.id, false);
-    } catch (e) {
-      notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
-    }
-    await refresh();
+    // Padded to the daemon's fixed-width microseconds (`db::ts_to_str`): the
+    // trash sorts by string compare, and `…500Z` outsorts `…500000Z`.
+    const trashedAt = new Date().toISOString().replace("Z", "000Z");
+    await optimisticRepos(
+      patchRepo(repo.root, (r) => ({
+        ...r,
+        worktrees: withWorktreeTrashed(r.worktrees, path, trashedAt),
+      })),
+      async () => {
+        try {
+          const status = await api.worktreeGitStatus(w.id);
+          if (status.dirty) {
+            setDialog({ kind: "trash", worktree: w });
+            return;
+          }
+        } catch {
+          // Status unavailable (git error, checkout gone): bin directly; any
+          // refusal surfaces later on the row.
+        }
+        try {
+          await api.deleteWorktree(w.id, false);
+        } catch (e) {
+          notifyError(`Could not move ${worktreeLabel(w)} to the trash`, e);
+        }
+      },
+    );
   };
 
 
@@ -8590,8 +8721,11 @@ function ProjectCaret() {
  * # Identity without a migration
  *
  * Projects have no marker of their own and are not getting one: the square is
- * `projectInitials(name)` and nothing else, so an import needs no picker and there is
- * no per-project marker column to add, migrate, or keep in step with a rename.
+ * `projectLabels` over every project's name and nothing else, so an import needs no
+ * picker and there is no per-project marker column to add, migrate, or keep in step
+ * with a rename. Labels are decided across the column because a shared prefix
+ * (`SE-azure-cdn`, `SE-azure-identity`) would otherwise give every square in the
+ * family the same two letters.
  *
  * **Greyscale, deliberately.** An earlier version filled each square with a hue
  * derived from the repo root. It was louder than anything else on screen and it
@@ -8630,6 +8764,7 @@ function ProjectColumn(props: {
   const [dragRoot, setDragRoot] = useState<string | null>(null);
   const [dropAt, setDropAt] = useState<number | null>(null);
   const roots = props.repos.map((r) => r.root);
+  const labels = projectLabels(props.repos);
   const colRef = useRef<HTMLDivElement>(null);
   const endDrag = () => {
     setDragRoot(null);
@@ -8744,7 +8879,7 @@ function ProjectColumn(props: {
               onContextMenu={(e) => props.onMenu(e, r)}
             >
               <span className="project-sq-initials" aria-hidden="true">
-                {projectInitials(r.name)}
+                {labels[index]}
               </span>
               {/* The accessible name, since the initials are decorative and the
                   tooltip is not read out. */}
@@ -8969,6 +9104,195 @@ function Rail(props: {
   const dockScrollRef = useRef<HTMLDivElement>(null);
 
   /**
+   * The trash reaching for a carried worktree — see `ide/trashReach.ts` for the
+   * shape and how it holds on to a pointer it has reached.
+   *
+   * The shape is the trash's drop target, not only its picture: `aimTrash`
+   * measures it, `rowDrag` lets it win over `rowTargetAt`'s answer, and the
+   * same numbers paint it, so a release anywhere on the red lands in the trash
+   * — including the bump, which rises over rows of the list that are otherwise
+   * their own section's targets. The one exception is the zone's arrival and going: those
+   * scale and fade the picture only, so for the half-second after pickup the
+   * target is the zone at full size while the drawing swells into it.
+   *
+   * Painted imperatively, straight to the path's `d`, for the reason the rest
+   * of the drag feedback compares before it sets state: the pointer moves far
+   * more often than the rail is worth re-rendering, and the reach, unlike the
+   * caret, changes on every one of those moves — and between them, because it
+   * moves on springs (`ide/reachMotion.ts`), stepped by a frame loop that runs
+   * only while the zone is still getting somewhere.
+   *
+   * The shape is an SVG on `.rail-dock` rather than a restyled `.trash-drop`
+   * because it has to rise out of the dock: the overlay lives inside
+   * `.rail-dock-scroll`, which is a scrollport and clips everything outside it.
+   * `.trash-drop` stays as the label and the measure — its box is the zone's
+   * body, so the `top: 9px` it takes when Deleting sits above it is honoured here
+   * without being restated.
+   */
+  const trashDropRef = useRef<HTMLDivElement>(null);
+  const reachPathRef = useRef<SVGPathElement>(null);
+  const dragPointRef = useRef<{ x: number; y: number } | null>(null);
+  // Read once per drag, at pickup: the preference does not change mid-gesture,
+  // and `onMove` is the hottest path in the rail.
+  const reduceMotionRef = useRef(false);
+  // Where the zone is and where it is heading, carried across moves and
+  // frames: the reach grows from what it had, and lets go of a pointer it had.
+  const reachMotionRef = useRef<ReachMotion>(restingMotion());
+  // The zone arriving with a drag and going after it. The overlay outlives its
+  // drag for as long as the going takes — `trashLeaving` keeps it mounted.
+  const presenceRef = useRef<Presence>(goneZone());
+  const [trashLeaving, setTrashLeaving] = useState(false);
+  const reachFrameRef = useRef<number | null>(null);
+  const reachClockRef = useRef<number | null>(null);
+  /** The zone's box in the svg's coordinates, and the svg's client offset to
+   *  bring a pointer into them — or `null` while the overlay is not mounted. */
+  const measureTrash = () => {
+    const svg = reachPathRef.current?.ownerSVGElement;
+    const drop = trashDropRef.current;
+    const scroller = dockScrollRef.current;
+    if (!svg || !drop || !scroller) return null;
+    const origin = svg.getBoundingClientRect();
+    const zone = drop.getBoundingClientRect();
+    const clip = scroller.getBoundingClientRect();
+    // Clipped to the scrollport the way the overlay itself is, and inset by half
+    // the stroke so the 1px outline lands on whole pixels.
+    const box = {
+      left: zone.left - origin.left + 0.5,
+      right: zone.right - origin.left - 0.5,
+      top: Math.max(zone.top, clip.top) - origin.top + 0.5,
+      bottom: Math.min(zone.bottom, clip.bottom) - origin.top - 0.5,
+    };
+    return { box, left: origin.left, top: origin.top };
+  };
+  /** Draws the zone: its shape, scaled about the box's centre and faded by
+   *  how far it has arrived. The label fades with it. */
+  const paintTrash = (box: ReachBox, shape: Reach) => {
+    const path = reachPathRef.current;
+    if (!path) return;
+    const look = reduceMotionRef.current
+      ? { sx: 1, sy: 1, opacity: 1 }
+      : presenceLook(presenceRef.current);
+    const cx = (box.left + box.right) / 2;
+    const cy = (box.top + box.bottom) / 2;
+    path.setAttribute("d", reachPath(box, shape));
+    path.setAttribute(
+      "transform",
+      `translate(${cx} ${cy}) scale(${look.sx.toFixed(4)} ${look.sy.toFixed(4)}) translate(${-cx} ${-cy})`,
+    );
+    path.style.opacity = look.opacity.toFixed(3);
+    if (trashDropRef.current) trashDropRef.current.style.opacity = look.opacity.toFixed(3);
+  };
+  const runTrash = () => {
+    if (reachFrameRef.current === null) {
+      reachFrameRef.current = requestAnimationFrame(stepTrash);
+    }
+  };
+  /** Where a row released at (`x`, `y`) lands: the trash for anywhere on its
+   *  zone, otherwise whatever `rowTargetAt` measures. */
+  const rowDropAt = (overTrash: boolean, x: number, y: number) =>
+    overTrash ? { key: TRASH_LANE, index: 0 } : rowTargetAt(x, y);
+  /** The same, for a pointer that moved there: aims the zone at it first. The
+   *  rows are measured before the zone is, and both before it is painted, so a
+   *  move reads layout once instead of forcing it again after the paint. */
+  const aimDropAt = (x: number, y: number) => {
+    const row = rowTargetAt(x, y);
+    return aimTrash(x, y) ? { key: TRASH_LANE, index: 0 } : row;
+  };
+  const showDropAt = (at: ReturnType<typeof rowDropAt>) =>
+    setDropAt((prev) =>
+      prev?.key === at?.key && prev?.index === at?.index ? prev : at,
+    );
+  /** Moves the zone's aim to a pointer at client (`x`, `y`), repaints it, and
+   *  says whether the pointer is on it. Measuring the same point again changes
+   *  nothing. Reduced motion keeps the zone the box it always was — as a target
+   *  too — and never starts the frame loop. */
+  const aimTrash = (x: number, y: number) => {
+    const at = measureTrash();
+    if (!at) return false;
+    const { box } = at;
+    const px = x - at.left;
+    const py = y - at.top;
+    if (reduceMotionRef.current) {
+      const flat = { lift: 0, cx: 0, tx: 0, h: 0 };
+      paintTrash(box, flat);
+      return reachContains(box, flat, px, py);
+    }
+    const motion = aimReach(reachMotionRef.current, box, px, py);
+    reachMotionRef.current = motion;
+    paintTrash(box, shownReach(motion, box));
+    if (!reachSettled(motion) || presenceMoving(presenceRef.current)) runTrash();
+    return motion.over;
+  };
+  /** One frame of the zone's springs. Mid-drag, for the pointer where it last
+   *  was: the zone can reach a pointer that has stopped, and let go of one, so
+   *  the drop target is re-resolved whenever the frame changes which side it is
+   *  on. After the drag, only the going — the shape it had stays put. */
+  const stepTrash = (now: number) => {
+    reachFrameRef.current = null;
+    const at = measureTrash();
+    if (!at) {
+      reachClockRef.current = null;
+      // Nothing left to draw it on — the dock went with a collapsing rail — and
+      // no drag to come back for: the going is over.
+      if (dragPointRef.current === null) {
+        stopTrash();
+        setTrashLeaving(false);
+      }
+      return;
+    }
+    const last = reachClockRef.current;
+    reachClockRef.current = now;
+    const dt = last === null ? 1 / 60 : (now - last) / 1000;
+    const point = dragPointRef.current;
+    let motion = reachMotionRef.current;
+    if (point) {
+      const before = motion;
+      motion = stepReach(before, at.box, point.x - at.left, point.y - at.top, dt);
+      reachMotionRef.current = motion;
+      if (motion.over !== before.over) showDropAt(rowDropAt(motion.over, point.x, point.y));
+    }
+    const presence = stepPresence(presenceRef.current, dt);
+    presenceRef.current = presence;
+    paintTrash(at.box, shownReach(motion, at.box));
+    if (presenceGone(presence)) {
+      stopTrash();
+      setTrashLeaving(false);
+    } else if ((point && !reachSettled(motion)) || presenceMoving(presence)) {
+      runTrash();
+    } else {
+      reachClockRef.current = null;
+    }
+  };
+  /** Stops the frame loop and puts the zone back at rest, gone. */
+  const stopTrash = () => {
+    if (reachFrameRef.current !== null) cancelAnimationFrame(reachFrameRef.current);
+    reachFrameRef.current = null;
+    reachClockRef.current = null;
+    reachMotionRef.current = restingMotion();
+    presenceRef.current = goneZone();
+  };
+  /** The drag is over, however it ended: the zone goes — unless reduced motion
+   *  asked for it simply to be gone, or it was never drawn. */
+  const leaveTrash = () => {
+    if (reduceMotionRef.current || !reachPathRef.current) {
+      stopTrash();
+      return;
+    }
+    presenceRef.current = leave(presenceRef.current);
+    setTrashLeaving(true);
+    runTrash();
+  };
+  useEffect(() => stopTrash, []);
+  // A render mid-drag is the first moment the overlay and the path exist (pickup
+  // sets `dragPath`, and the move that crossed the threshold ran before the
+  // commit), and any later render may have moved the trash — rows arriving,
+  // Deleting appearing above it. Re-aiming after each is a handful of rects.
+  useLayoutEffect(() => {
+    const at = dragPointRef.current;
+    if (dragPath !== null && at) showDropAt(aimDropAt(at.x, at.y));
+  });
+
+  /**
    * The section a pointer at `clientY` is aiming at, or `null` when the pointer is
    * outside both the list and the dock.
    *
@@ -9015,6 +9339,8 @@ function Rail(props: {
   // visibly lags behind the cursor instead of tracking it.
   const [resizing, setResizing] = useState(false);
   const endDrag = () => {
+    dragPointRef.current = null;
+    leaveTrash();
     setDragPath(null);
     setDropAt(null);
     setDragLane(null);
@@ -9147,19 +9473,27 @@ function Rail(props: {
    * and the feedback for a gesture that is over should not survive into it.
    */
   const rowDrag = usePointerDrag<string>({
-    onBegin: setDragPath,
+    onBegin: (path) => {
+      reduceMotionRef.current =
+        window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+      // From wherever the last drag's zone had got to in going, if it is still
+      // on screen: a quick second pickup picks the same zone back up.
+      const presence = presenceRef.current;
+      stopTrash();
+      presenceRef.current = arrive(presence);
+      setTrashLeaving(false);
+      setDragPath(path);
+    },
     // Only when the answer changed. `pointermove` fires far more often than the
     // caret can move, and the rail is a big subtree to re-render for a target
     // that is still the same row's top half; returning the previous object makes
     // React bail out of the render entirely.
     onMove: (_path, x, y) => {
-      const at = rowTargetAt(x, y);
-      setDropAt((prev) =>
-        prev?.key === at?.key && prev?.index === at?.index ? prev : at,
-      );
+      dragPointRef.current = { x, y };
+      showDropAt(aimDropAt(x, y));
     },
     onDrop: (path, x, y) => {
-      const at = rowTargetAt(x, y);
+      const at = aimDropAt(x, y);
       endDrag();
       if (at === null) return;
       // The trash is a destination, not a position — the index is thrown away.
@@ -10097,12 +10431,9 @@ function Rail(props: {
                 Nothing now depends on events passing *through* it — the drop is
                 resolved from the pointer's position against the section's box —
                 but an overlay that is only a picture should not be hit-testable
-                either, and it outlives its drag by a frame. */}
-            {group.key === TRASH_LANE && dragPath !== null && (
-              <div
-                className={`trash-drop${dropInto ? " over" : ""}`}
-                aria-hidden="true"
-              >
+                either — and it outlives its drag while it fades out. */}
+            {group.key === TRASH_LANE && (dragPath !== null || trashLeaving) && (
+              <div className="trash-drop" ref={trashDropRef} aria-hidden="true">
                 Drop here to trash
               </div>
             )}
@@ -10205,6 +10536,19 @@ function Rail(props: {
           <div className="rail-dock-scroll" ref={dockScrollRef}>
             {docked.map((group) => renderGroup(group))}
           </div>
+          {/* The trash's drop zone, reaching for the carried row. A sibling of
+              the scroller so it can rise past the dock's edge; `d` is written
+              by `aimTrash` and `stepTrash`, never by React. `.over` is the confirmation
+              once the pointer is inside — the job `.trash-drop.over` did when
+              the overlay painted its own box. */}
+          {(dragPath !== null || trashLeaving) && (
+            <svg
+              className={`trash-reach${dropAt?.key === TRASH_LANE ? " over" : ""}`}
+              aria-hidden="true"
+            >
+              <path ref={reachPathRef} />
+            </svg>
+          )}
         </div>
       )}
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is

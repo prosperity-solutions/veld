@@ -19,6 +19,10 @@ import {
   realLanes as realLanesBranded,
   UNGROUPED_LANE,
   moveWorktree,
+  repoFetchVerdict,
+  withLaneOrder,
+  withWorktreeMoved,
+  withWorktreeTrashed,
   needsAttention,
   parsePendingKey,
   pendingKey,
@@ -1559,6 +1563,93 @@ describe("insertionTarget", () => {
     // A lane with no rows still takes drops — that is how the first worktree
     // gets into a lane someone just made.
     expect(insertionTarget([], 42)).toBe(0);
+  });
+});
+
+describe("repoFetchVerdict", () => {
+  it("applies the newest fetch when no drop has settled", () => {
+    expect(repoFetchVerdict(3, 2, 0)).toBe("apply");
+  });
+
+  it("drops a fetch overtaken by a newer applied one", () => {
+    // The caller is answered: what is on screen started after it did.
+    expect(repoFetchVerdict(2, 3, 0)).toBe("stale");
+  });
+
+  it("refetches a fetch issued before a drop's write settled", () => {
+    // It may hold the pre-drop list, and applying it would be the row jumping
+    // back; resolving without it would hand an awaiting caller an older list.
+    expect(repoFetchVerdict(3, 2, 3)).toBe("refetch");
+  });
+
+  it("prefers stale over refetch once a newer list has landed", () => {
+    expect(repoFetchVerdict(2, 4, 3)).toBe("stale");
+  });
+
+  it("applies the drop's own refresh, issued just past the fence", () => {
+    expect(repoFetchVerdict(4, 2, 3)).toBe("apply");
+  });
+});
+
+describe("optimistic rail drops", () => {
+  const rows = () => [
+    rw("/repo", { is_main: true }),
+    rw("/wts/a"),
+    rw("/wts/b"),
+    rw("/wts/x", { lane: "review" }),
+    rw("/wts/y", { lane: "review" }),
+    rw("/wts/t", { trashed_at: "2026-01-02T00:00:00.000000Z" }),
+  ];
+  const lanes = [lane("review", 0)];
+  const paths = (ws: Worktree[], key: string) =>
+    railGroups(ws, lanes)
+      .find((g) => g.key === key)
+      ?.worktrees.map((w) => w.path);
+
+  it("paints a cross-lane move the way the write will come back", () => {
+    // The painted rail and the committed write must be one answer: a row that
+    // lands in one place and then settles into another once the poll arrives is
+    // the jump this exists to remove.
+    const move = moveWorktree(railGroups(rows(), lanes), "/wts/a", "review", 1);
+    if (!move) throw new Error("expected a move");
+    const next = withWorktreeMoved(rows(), "/wts/a", move.lane, move.order);
+    expect(paths(next, "")).toEqual(["/wts/b"]);
+    expect(paths(next, "review")).toEqual(["/wts/x", "/wts/a", "/wts/y"]);
+    expect(paths(next, MAIN_LANE)).toEqual(["/repo"]);
+    expect(paths(next, TRASH_LANE)).toEqual(["/wts/t"]);
+  });
+
+  it("is idempotent, because it is replayed over polls mid-write", () => {
+    const order = ["/wts/b", "/wts/a", "/wts/x", "/wts/y"];
+    const once = withWorktreeMoved(rows(), "/wts/b", "", order);
+    expect(withWorktreeMoved(once, "/wts/b", "", order)).toEqual(once);
+  });
+
+  it("keeps rows the order does not name after the placed ones", () => {
+    // Another window's new worktree, picked up by a poll this drag never saw.
+    const ws = [...rows(), rw("/wts/new")];
+    const next = withWorktreeMoved(ws, "/wts/b", "", ["/wts/b", "/wts/a"]);
+    expect(paths(next, "")).toEqual(["/wts/b", "/wts/a", "/wts/new"]);
+  });
+
+  it("bins a row without re-stamping one already in the trash", () => {
+    const at = "2026-03-01T00:00:00.000000Z";
+    const next = withWorktreeTrashed(rows(), "/wts/a", at);
+    expect(paths(next, TRASH_LANE)).toEqual(["/wts/a", "/wts/t"]);
+    expect(paths(next, "")).toEqual(["/wts/b"]);
+    const again = withWorktreeTrashed(next, "/wts/t", at);
+    expect(again.find((w) => w.path === "/wts/t")?.trashed_at).toBe(
+      "2026-01-02T00:00:00.000000Z",
+    );
+  });
+
+  it("reorders lanes, making a row for a bucket never stored", () => {
+    // Without the row, `railOrder` would synthesise the bucket at the front and
+    // undo the very drop being painted.
+    const order = ["review", UNGROUPED_LANE];
+    const next = withLaneOrder([lane("review", 0)], "/repo", order);
+    expect(railOrder(next)).toEqual(order);
+    expect(next.map((l) => l.position)).toEqual([0, 1]);
   });
 });
 

@@ -2920,6 +2920,7 @@ already gone. Concretely:
 | The tool exited while you were looking at it | Buttons, always. `auto_resume` is not consulted; an exit you saw is one you get to answer. |
 | The session was reaped after the detach grace — no window had the pane for the whole of it | Buttons, next time you look at it. |
 | You dragged the pane to another window | Nothing — the shell is alive and moves with the pane. |
+| The worktree sat in the trash past `terminal.trashedGraceMinutes` (its shells were closed) and you restored it | `auto_resume: true` resumes; otherwise the pane waits with a **Resume** button. |
 
 #### Restarting a pane on purpose
 

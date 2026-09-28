@@ -944,8 +944,8 @@ button.lane-empty {
  * the list, so it says so in words rather than by tinting like the others. Every
  * other section answers "which position?" and draws a caret; this one answers
  * "in or out?", and a caret between two binned worktrees would promise an order
- * the drop does not keep (`dropZone` hands a trash drop to `onTrashDrop` and
- * throws the index away).
+ * the drop does not keep (`rowDrag`'s `onDrop` hands a trash drop to
+ * `onTrashDrop` and throws the index away).
  *
  * Laid over the section rather than swapped in for its rows, which is what lets
  * one rule serve all three states the trash can be in — folded (the default),
@@ -956,7 +956,7 @@ button.lane-empty {
  * `.rail-group` is the positioning context (it already is one, for the lane
  * bars). `pointer-events: none` because this is a picture of a drop and the
  * section underneath is the actual target: the drop no longer resolves through
- * hit testing at all, but the overlay outlives its drag by a frame and must not
+ * hit testing at all, but the overlay outlives its drag while it fades out and must not
  * be something the next press can land on. */
 .trash-drop {
   position: absolute;
@@ -965,24 +965,51 @@ button.lane-empty {
   display: flex;
   align-items: center;
   justify-content: center;
-  border: 1px dashed var(--danger);
-  border-radius: 8px;
-  /* Opaque, not a wash: it stands in for the section's contents while the drag
-     is in flight, and rows showing through would read as a list you were about
-     to drop *into* at some position. */
-  background: color-mix(in oklab, var(--danger) 12%, var(--panel2));
+  /* The box and its fill are drawn by `.trash-reach` below, which can rise out
+     of the dock; this element is the label, and the measure the reach is drawn
+     to. It stacks above the reach so the label is never painted over. */
   color: var(--danger);
   font-size: 10px;
   letter-spacing: 0.04em;
   user-select: none;
   pointer-events: none;
 }
+
+/* The zone itself: the overlay's box plus a bump that reaches up for a carried
+ * worktree as it closes in (`ide/trashReach.ts`). An SVG on `.rail-dock`, not on
+ * the section, because the dock's scroller clips and the reach has to leave it —
+ * `.rail-dock` is positioned and does not clip, and `.rail`'s own clip is the
+ * rail's edge, well past the most the bump rises. Stacked under `.trash-drop`'s
+ * label (3) and over the rows of the list it rises into. The shape is the
+ * trash's drop target, but it is resolved from geometry (`aimTrash`), so the
+ * element itself takes no pointer events. */
+.trash-reach {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  z-index: 2;
+  pointer-events: none;
+}
+.trash-reach path {
+  /* Opaque, not a wash: it stands in for the section's contents while the drag
+     is in flight, and rows showing through would read as a list you were about
+     to drop *into* at some position. */
+  fill: color-mix(in oklab, var(--danger) 12%, var(--panel2));
+  stroke: var(--danger);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+  /* Arriving and going scale the path (`presenceLook`); the outline and its
+     dashes stay 1px and 3px at every scale. */
+  vector-effect: non-scaling-stroke;
+}
 /* The pointer is inside: the offer becomes a confirmation. Dashed to solid is the
    same move `.lane-empty` makes under `.rail-group.drop-in`, so the rail's two
    drop targets are one language in two colours. */
-.trash-drop.over {
-  border-style: solid;
-  background: color-mix(in oklab, var(--danger) 22%, var(--panel2));
+.trash-reach.over path {
+  stroke-dasharray: none;
+  fill: color-mix(in oklab, var(--danger) 22%, var(--panel2));
 }
 /* While a removal is in flight the Deleting lane sits above the trash in the
    dock, and a second `.rail-group` carries the divider's 9px of padding. `inset`
@@ -1451,7 +1478,8 @@ body.pointer-dragging * {
      occupy as a border, so the alias sits exactly where it always did. */
   padding: 5px 7px 5px 9px;
   border: none;
-  /* A step tighter than the 8px `.rail-group.drop-in` and `.trash-drop` use.
+  /* A step tighter than the 8px `.rail-group.drop-in` and the trash's zone
+     (`REACH_CORNER`) use.
      Those are the boxes a row sits *inside*, and a nested corner cut to the same
      radius as its container's reads as a mistake rather than as a set. It is
      visible at all because `.rail-list` insets the rows 8px from the rail's

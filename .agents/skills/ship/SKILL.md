@@ -6,8 +6,8 @@ description: >
   PR, mark ready only once the local review is done (CI does not run on drafts),
   wait for green CI, and (when authorized) bypass-merge. For a reported bug it
   first measures whether the reported gap is real, then opens a short kickoff
-  questionnaire that sets review depth, merge policy, and hands-on test
-  checkpoints for the rest of the run. Use when the maintainer says "ship this", "build and merge X",
+  questionnaire that sets review depth, hands-on test checkpoints, and merge
+  policy for the rest of the run. Use when the maintainer says "ship this", "build and merge X",
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
 metadata:
@@ -222,7 +222,24 @@ in their request):
    auth, proxy headers, daemon API, SQLite migrations) is **not** downgradable by
    this answer. If *Light* or *Super light* is chosen and the diff turns out to
    touch one of those paths, run the standard loop and say so in the final report.
-2. **Merge policy** (AGENTS.md's default posture is **ask-first**; bypass is the
+2. **Hands-on test checkpoints** — does the maintainer want to drive the change
+   themselves before it moves on? This is the house style for anything with a UI
+   or a new CLI surface, because a review subagent cannot see that a graph
+   renders wrong.
+   - *One checkpoint, before review (recommended — the house default)* —
+     implement, hand over so the maintainer drives the feature, then run the
+     review loop and everything after it unattended. This is the proposed answer
+     for a user-visible change: the checkpoint that catches what a subagent
+     cannot see is the one on the *feature*, and it is worth most while the
+     design is still cheap to change. Put it first in the question's options.
+   - *Two checkpoints* — the above plus a second hand-over after the review
+     fixes, for a regression pass. See **Checkpointed autonomy** below. Reach for
+     it when the review is likely to touch rendering, wire shapes, or CLI output
+     rather than its own fixes.
+   - *One checkpoint, after review* — implement and review unattended, then hand
+     over once before the PR.
+   - *None* — fully unattended from kickoff to the merge policy's endpoint.
+3. **Merge policy** (AGENTS.md's default posture is **ask-first**; bypass is the
    exception and requires the maintainer's explicit upfront authorization, which
    this questionnaire captures)
    - *Bypass-merge on green* — mark ready, merge with admin bypass the moment CI
@@ -237,23 +254,6 @@ in their request):
    draft" — a draft PR handed over with no checks is a PR the maintainer has to
    flip themselves to learn anything. What differs between the three is who
    merges, not whether CI runs.
-3. **Hands-on test checkpoints** — orthogonal to the merge policy: does the
-   maintainer want to drive the change themselves before it moves on? This is the
-   house style for anything with a UI or a new CLI surface, because a review
-   subagent cannot see that a graph renders wrong.
-   - *One checkpoint, before review (recommended — the house default)* —
-     implement, hand over so the maintainer drives the feature, then run the
-     review loop and everything after it unattended. This is the proposed answer
-     for a user-visible change: the checkpoint that catches what a subagent
-     cannot see is the one on the *feature*, and it is worth most while the
-     design is still cheap to change. Put it first in the question's options.
-   - *Two checkpoints* — the above plus a second hand-over after the review
-     fixes, for a regression pass. See **Checkpointed autonomy** below. Reach for
-     it when the review is likely to touch rendering, wire shapes, or CLI output
-     rather than its own fixes.
-   - *One checkpoint, after review* — implement and review unattended, then hand
-     over once before the PR.
-   - *None* — fully unattended from kickoff to the merge policy's endpoint.
 4. **Docs & tests** (only if ambiguous) — confirm whether the change adds
    user-visible surface (triggers the AGENTS.md docs checklist) or is purely
    internal.
@@ -268,8 +268,8 @@ cat > .veld-ship.json <<'JSON'
 {
   "branch": "<this branch's name>",
   "review_depth": "standard",
-  "merge_policy": "bypass-on-green",
   "checkpoints": "one-before-review",
+  "merge_policy": "bypass-on-green",
   "docs_scope": "internal"
 }
 JSON
@@ -641,8 +641,8 @@ opening the PR.
   | Setting | This run |
   |---|---|
   | Review depth | Standard — 14 spawns, 3 rounds |
+  | Hands-on checkpoints | One, before review |
   | Merge policy | Bypass-merge on green CI |
-  | Hands-on checkpoints | One, before implementation |
   | Docs & tests | Internal — AGENTS.md checklist N/A |
   | Promotion | No |    <!-- your Step 3 call, not a marker key -->
   ```

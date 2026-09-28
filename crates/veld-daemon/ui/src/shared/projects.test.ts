@@ -8,6 +8,7 @@ import {
   projectForShortcut,
   projectHolder,
   projectInitials,
+  projectLabels,
   projectShortcutDigit,
   projectWorktreeIds,
   reorderedRoots,
@@ -257,6 +258,74 @@ describe("a project's initials", () => {
   it("is empty only for an empty name", () => {
     expect(projectInitials("")).toBe("");
     expect(projectInitials("   ")).toBe("");
+  });
+});
+
+describe("labels across the whole column", () => {
+  /** Roots follow the names, so a root-ordered tie-break reads like list order. */
+  const labels = (...names: string[]) =>
+    projectLabels(names.map((name, i) => ({ name, root: `/r${String(i).padStart(2, "0")}` })));
+
+  it("leaves labels that are already unique alone", () => {
+    expect(labels("veld", "my-api", "Prosperity Solutions")).toEqual(["VE", "MA", "PS"]);
+  });
+
+  /** The report: a namespace prefix made every square in the family identical. */
+  it("skips the words a colliding group shares", () => {
+    expect(
+      labels("SE-azure-infrastructure", "SE-azure-cdn", "SE-azure-identity", "veld"),
+    ).toEqual(["IN", "CD", "ID", "VE"]);
+  });
+
+  it("finds word boundaries in camelCase and acronyms", () => {
+    expect(labels("SEAzureInfrastructure", "SEAzureCdn")).toEqual(["IN", "CD"]);
+  });
+
+  it("splits a run of capitals before the word it starts", () => {
+    expect(labels("SEAzureCdn", "SEAzureIdentity", "SE-XMLParser", "SE-XMLWriter")).toEqual([
+      "CD",
+      "ID",
+      "PA",
+      "WR",
+    ]);
+  });
+
+  it("only strips what the whole group shares", () => {
+    expect(labels("SE-azure-cdn", "SE-aws-cdn")).toEqual(["AZ", "AW"]);
+  });
+
+  it("keeps the initials of a name that is the shared prefix itself", () => {
+    expect(labels("SE-azure", "SE-azure-cdn")).toEqual(["SA", "CD"]);
+  });
+
+  /** Numbered families are the common case a one-character word comes from. */
+  it("borrows a neighbouring word when the distinguishing one is a single character", () => {
+    expect(labels("SE-azure-v-1", "SE-azure-v-2")).toEqual(["V1", "V2"]);
+    expect(labels("proj-1", "proj-2", "proj-10")).toEqual(["P1", "P2", "10"]);
+  });
+
+  /** Two digits' worth of square: first character plus a mark, never three glyphs. */
+  it("marks what is still ambiguous", () => {
+    expect(labels("api", "api")).toEqual(["AP", "A2"]);
+    expect(labels("SE-cdn-a", "SE-cdnx")).toEqual(["CD", "C2"]);
+  });
+
+  it("never widens past two characters", () => {
+    const many = labels(...Array.from({ length: 12 }, () => "api"));
+    expect(many.slice(8)).toEqual(["A9", "AA", "AB", "AC"]);
+    expect(many.every((l) => [...l].length <= 2)).toBe(true);
+  });
+
+  /** Dragging is the column's own gesture; it must not reshuffle which square is which. */
+  it("gives a label to the same project whatever the column order", () => {
+    const a = { name: "api", root: "/a" };
+    const b = { name: "api", root: "/b" };
+    expect(projectLabels([a, b])).toEqual(["AP", "A2"]);
+    expect(projectLabels([b, a])).toEqual(["A2", "AP"]);
+  });
+
+  it("does not take a label from a project that never collided", () => {
+    expect(labels("infra-news", "SE-azure-infra", "SE-azure-cdn")).toEqual(["IN", "I2", "CD"]);
   });
 });
 

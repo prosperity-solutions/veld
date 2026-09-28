@@ -1205,8 +1205,9 @@ first row, and picking a row runs **the pane's own `resume`** with
   or when the pick must land in a pane whose flags you already decided.
 
 **`auto_resume` is narrower than it sounds.** It fires only when a pane *comes
-into being* with its shell already gone (app start after a reboot, or after the
-detach grace reaped the session). It is never consulted while you are watching
+into being* with its shell already gone (app start after a reboot, after the
+detach grace reaped the session, or on restoring a worktree whose shells were
+closed because it sat in the trash past `terminal.trashedGraceMinutes`). It is never consulted while you are watching
 the pane: an exit you saw always waits for a click. A daemon restart or
 `veld update` is not a trigger at all, because the shell survives those and the
 pane just reattaches. Dragging a pane to another window spawns nothing. The
