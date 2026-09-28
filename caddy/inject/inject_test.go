@@ -23,6 +23,13 @@ func fakeHandler(status int, contentType string, body string) caddyhttp.Handler 
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		}
 		w.WriteHeader(status)
+		// No Write at all for an empty body. A zero-length Write after a 304 or 204
+		// is still a body write: net/http's server has always refused it with
+		// ErrBodyNotAllowed, and since Go 1.26 httptest.ResponseRecorder does too,
+		// which made this helper — not the plugin — fail the 304/204 tests.
+		if body == "" {
+			return nil
+		}
 		_, err := w.Write([]byte(body))
 		return err
 	})

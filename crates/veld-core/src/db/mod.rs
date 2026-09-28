@@ -1672,6 +1672,11 @@ fn migrate_v8_settings(conn: &Connection) -> rusqlite::Result<()> {
 /// channels symmetric — `emoji` has always stored the glyph, not an offset into
 /// [`WORKTREE_EMOJI`].
 ///
+/// One deliberate exception came later, in the renderer rather than the schema: the
+/// IDE's *pixel* face draws glyph *i* as pattern *i*, so the list's order now
+/// matters for how a marker looks. Nothing stored changes if it moves — but the
+/// picture does, so `the_first_sixty_four_emoji_keep_their_order` pins it.
+///
 /// The empty string means "not assigned yet" and is backfilled lazily on the next
 /// worktree sync, exactly as v6's `emoji` sentinel is. Nothing derives a marker from
 /// `worktrees.id`: rowids are reused, so an id-derived marker would be inherited by

@@ -155,6 +155,26 @@ describe("markerFace", () => {
     });
   });
 
+  it("draws pixels only when both halves exist", () => {
+    const pixels = { "worktree.markerStyle": "pixels" };
+    expect(markerStyle(pixels)).toBe("pixels");
+    expect(markerFace(pixels, both)).toEqual({
+      kind: "pixels",
+      color: "#008cff",
+      emoji: "🦊",
+    });
+    // The colour paints the pattern and the glyph picks it, so either missing
+    // falls back to the face that does exist rather than to a made-up pattern.
+    expect(markerFace(pixels, { emoji: "🦊", marker_color: "" })).toEqual({
+      kind: "emoji",
+      emoji: "🦊",
+    });
+    expect(markerFace(pixels, { emoji: "", marker_color: "#ff3502" })).toEqual({
+      kind: "color",
+      color: "#ff3502",
+    });
+  });
+
   it("uses the glyph while a colour is still unassigned", () => {
     // The upgrade window: a row migrated from before the colour column, whose
     // hue arrives on the next sync. Colour is the default style, so without this

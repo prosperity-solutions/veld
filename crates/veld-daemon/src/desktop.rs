@@ -2175,6 +2175,10 @@ pub(crate) fn validate_display_name(name: &str) -> Result<(), ApiError> {
 /// The colours are the literal values the picker offers. Not the set of *storable*
 /// values — `is_worktree_color` accepts any `#rrggbb`, so a custom colour needs no
 /// migration and no change here.
+///
+/// **The glyph order is part of this contract.** The IDE also fetches the list once
+/// per page load (`MarkerOrderProvider`) and draws glyph *i* as pixel pattern *i*,
+/// so reordering `WORKTREE_EMOJI` repaints every pixel marker — see its own doc.
 async fn worktree_emoji() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "emoji": veld_core::db::WORKTREE_EMOJI,

@@ -20,7 +20,7 @@
 import type { SettingsDoc } from "../api";
 
 export type CursorStyle = "block" | "underline" | "bar";
-export type MarkerStyle = "color" | "emoji";
+export type MarkerStyle = "color" | "emoji" | "pixels";
 /** Where a new worktree's branch is cut from. Mirrors the Rust `one_of` for
  *  `git.createFrom`; a value the daemon acts on. */
 export type GitCreateFrom = "origin" | "local";
@@ -343,7 +343,7 @@ export function markerStyle(doc: SettingsDoc): MarkerStyle {
   return oneOf(
     doc,
     "worktree.markerStyle",
-    ["color", "emoji"] as const,
+    ["color", "emoji", "pixels"] as const,
     FALLBACK.markerStyle,
   );
 }
@@ -368,6 +368,12 @@ export function hasMarkerColor(color: string): boolean {
  * Returns the glyph when the style says emoji, when no colour has been assigned yet,
  * or when the glyph is the only face that exists — so a renderer never has to
  * special-case the upgrade window.
+ *
+ * Pixels need **both** halves — the colour paints it and the glyph picks the
+ * pattern (`shared/markerPixels.ts`) — so a row missing either falls through to
+ * the same fallbacks the other two styles use, rather than inventing a pattern.
+ * The pattern itself is not resolved here: it needs the daemon's glyph list, which
+ * this function has no business fetching.
  */
 export function markerFace(
   doc: SettingsDoc,
@@ -375,8 +381,13 @@ export function markerFace(
 ):
   | { kind: "color"; color: string }
   | { kind: "emoji"; emoji: string }
+  | { kind: "pixels"; color: string; emoji: string }
   | null {
-  if (markerStyle(doc) === "color" && hasMarkerColor(wt.marker_color)) {
+  const style = markerStyle(doc);
+  if (style === "pixels" && hasMarkerColor(wt.marker_color) && wt.emoji) {
+    return { kind: "pixels", color: wt.marker_color, emoji: wt.emoji };
+  }
+  if (style === "color" && hasMarkerColor(wt.marker_color)) {
     return { kind: "color", color: wt.marker_color };
   }
   if (wt.emoji) return { kind: "emoji", emoji: wt.emoji };

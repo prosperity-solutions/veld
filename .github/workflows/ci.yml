@@ -1138,7 +1138,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: '1.24'
+          go-version: '1.26'
       - name: Test caddy/inject module
         working-directory: caddy/inject
         run: go test -v ./...
@@ -1403,7 +1403,7 @@ jobs:
           cd ../ui && npm ci
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: '1.24'
+          go-version: '1.26'
 
       - name: Build all binaries
         run: cargo build
@@ -1846,7 +1846,7 @@ jobs:
           cd ../ui && npm ci
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: '1.24'
+          go-version: '1.26'
 
       - name: Install cross-compilation tools
         if: matrix.cross
@@ -1893,7 +1893,7 @@ jobs:
           cd ../ui && npm ci
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
-          go-version: '1.24'
+          go-version: '1.26'
 
       - name: Build veld
         run: cargo build

@@ -1290,6 +1290,12 @@ pub fn default_alias(branch: &str) -> String {
 
 /// Curated animal set for worktree identifiers — memorable, visually
 /// distinct at small sizes, and single-glyph (no multi-codepoint sequences).
+///
+/// **The order is load-bearing too.** The IDE's pixel marker draws glyph *i* as
+/// pattern *i* of `PIXEL_PATTERNS` (`ui/src/shared/markerPixels.ts`), so moving an
+/// entry repaints every checkout holding it. Appending is safe; grow that table in
+/// the same change, or the new glyphs fall back to a hashed pattern that is not
+/// guaranteed unique within a repo.
 pub const WORKTREE_EMOJI: &[&str] = &[
     "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🦆", "🦅", "🦉",
     "🦇", "🐺", "🐗", "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞", "🐜", "🦗", "🦂", "🐢", "🐍", "🦎",
@@ -2056,6 +2062,42 @@ mod tests {
         // assume this; a duplicate would be a silent runtime defect.
         let unique: std::collections::HashSet<_> = WORKTREE_EMOJI.iter().collect();
         assert_eq!(unique.len(), WORKTREE_EMOJI.len());
+    }
+
+    #[test]
+    fn the_first_sixty_four_emoji_keep_their_order() {
+        // Glyph i is drawn as pixel pattern i, so reordering (or replacing) an
+        // entry repaints every pixel marker holding it — the silent repaint v9
+        // stopped storing a palette index to avoid. Appending leaves this alone.
+        // If you are here because you *meant* to reorder: don't; append instead.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in WORKTREE_EMOJI[..64].concat().bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        assert_eq!(
+            h, 0x38b1_b5db_0d70_17bd,
+            "WORKTREE_EMOJI[..64] changed order or content"
+        );
+    }
+
+    #[test]
+    fn every_curated_emoji_has_a_pixel_pattern() {
+        // The IDE's pixel marker draws glyph i as `PIXEL_PATTERNS[i]`, and a glyph
+        // past the table's end falls back to a hashed pattern that another checkout
+        // of the same repo may already wear. So appending an animal here means
+        // appending a pattern there, in the same change — and this is the only
+        // place both lists are in view at once.
+        let table = include_str!("../../../veld-daemon/ui/src/shared/markerPixels.ts");
+        let start = table.find("PIXEL_PATTERNS").expect("table is declared");
+        let body = &table[start..table[start..].find("];").unwrap() + start];
+        let patterns = body.matches("0b").count();
+        assert!(
+            patterns >= WORKTREE_EMOJI.len(),
+            "{} emoji but only {patterns} pixel patterns — append to PIXEL_PATTERNS in \
+             crates/veld-daemon/ui/src/shared/markerPixels.ts",
+            WORKTREE_EMOJI.len(),
+        );
     }
 
     #[test]
