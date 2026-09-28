@@ -121,6 +121,8 @@ import {
   restartNeedsConfirmation,
   type RestartKind,
   type PaneSessionAnswer,
+  type SessionRegistry,
+  sessionName,
   setRatio,
   splitWithTab,
   updateTab,
@@ -386,11 +388,16 @@ export function PaneArea(props: {
   paneSessions: PaneSessionAnswer | null;
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
-  /** Browser sessions: the set that exists for this worktree, and how to add or
-   *  remove one. */
+  /** Browser sessions: the set that exists for this worktree, what each is
+   *  called, and how to add, rename or remove one. */
   sessions: BrowserProfile[];
-  onAddSession: ((tabId: string) => void) | undefined;
+  sessionRegistry: SessionRegistry;
+  /** The name a new session's prompt starts with. */
+  newSessionName: string;
+  onAddSession: ((tabId: string, name: string) => void) | undefined;
+  onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  onClearAllSessions: () => void;
   /** Which one-click toggles a browser pane's chrome shows. */
   quickSwitches: QuickSwitchPrefs;
   /** `activity.showWorking` — whether a tab shows a spinner while its pane is busy. */
@@ -1239,8 +1246,12 @@ export function PaneArea(props: {
               paneSessions={props.paneSessions}
               urlsEmptyHint={props.urlsEmptyHint}
               sessions={props.sessions}
+              sessionRegistry={props.sessionRegistry}
+              newSessionName={props.newSessionName}
               onAddSession={props.onAddSession}
+              onRenameSession={props.onRenameSession}
               onRemoveSession={props.onRemoveSession}
+              onClearAllSessions={props.onClearAllSessions}
               quickSwitches={props.quickSwitches}
               showWorking={props.showWorking}
               runCtx={props.runCtx}
@@ -1422,8 +1433,12 @@ function DockView(props: {
   paneSessions: PaneSessionAnswer | null;
   urlsEmptyHint: string;
   sessions: BrowserProfile[];
-  onAddSession: ((tabId: string) => void) | undefined;
+  sessionRegistry: SessionRegistry;
+  newSessionName: string;
+  onAddSession: ((tabId: string, name: string) => void) | undefined;
+  onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  onClearAllSessions: () => void;
   quickSwitches: QuickSwitchPrefs;
   showWorking: boolean;
   runCtx: RunPaneContext;
@@ -1698,7 +1713,12 @@ function DockView(props: {
             key={tab.id}
             tab={tab}
             label={paneTabLabel(layout, tab)}
-            icon={tabIcon(tab, props.panes)}
+            icon={tabIcon(tab, props.panes, props.sessionRegistry)}
+            session={
+              tab.kind === "browser"
+                ? sessionName(props.sessionRegistry, tab.profile ?? "default")
+                : null
+            }
             selected={tab.id === dock.activeId}
             panelId={dockPanelId(index)}
             // Local drag first, then one forwarded from another window — the
@@ -1926,10 +1946,15 @@ function DockView(props: {
             watchFilesByDefault={props.watchFilesByDefault}
             urlsEmptyHint={props.urlsEmptyHint}
             sessions={props.sessions}
+            sessionRegistry={props.sessionRegistry}
+            newSessionName={props.newSessionName}
             onAddSession={
-              props.onAddSession && (() => props.onAddSession?.(active.id))
+              props.onAddSession &&
+              ((name: string) => props.onAddSession?.(active.id, name))
             }
+            onRenameSession={props.onRenameSession}
             onRemoveSession={props.onRemoveSession}
+              onClearAllSessions={props.onClearAllSessions}
             quickSwitches={props.quickSwitches}
             searchUrl={props.searchUrl}
             // Updater form on purpose: both docks can hold a browser pane, and
@@ -2542,7 +2567,11 @@ function PaneButton(props: {
  * beside a separate coloured dot: two markers for one fact is noise at tab size,
  * and a tinted globe says both things at once.
  */
-function tabIcon(tab: PaneTab, panes: PaneSpec[]): React.ReactNode {
+function tabIcon(
+  tab: PaneTab,
+  panes: PaneSpec[],
+  sessions: SessionRegistry,
+): React.ReactNode {
   switch (tab.kind) {
     case "terminal": {
       // A config-declared pane keeps its own glyph, so two Claude tabs and a
@@ -2552,7 +2581,7 @@ function tabIcon(tab: PaneTab, panes: PaneSpec[]): React.ReactNode {
       return tab.spec ? paneIcon(spec?.icon, 12) : <IconTerminal2 size={12} />;
     }
     case "browser": {
-      const color = browserTabDot(tab);
+      const color = browserTabDot(tab, sessions);
       return <IconWorld size={12} style={color ? { color } : undefined} />;
     }
     case "logs":
@@ -2704,6 +2733,9 @@ function TabButton(props: {
   label: string;
   /** The kind's glyph, so a strip of tabs is readable without their titles. */
   icon: React.ReactNode;
+  /** `browser` only: the session's name, which the tinted glyph's tooltip says.
+   *  `null` for every other kind. */
+  session: string | null;
   selected: boolean;
   /** The dock's panel, for `aria-controls` on the selected tab. */
   panelId: string;
@@ -2802,7 +2834,12 @@ function TabButton(props: {
         tabIndex={props.selected ? 0 : -1}
         className="pane-tab-label"
         aria-description={
-          props.activity === null ? undefined : HEADLINE[props.activity]
+          [
+            props.session === null ? null : `${props.session} session`,
+            props.activity === null ? null : HEADLINE[props.activity],
+          ]
+            .filter(Boolean)
+            .join(", ") || undefined
         }
         onClick={props.onSelect}
         onKeyDown={onTabKeyDown(props.onClose)}
@@ -2816,6 +2853,7 @@ function TabButton(props: {
         // readable — the drag hints follow it rather than replacing it.
         title={[
           props.label,
+          ...(props.session === null ? [] : [`Session: ${props.session}`]),
           props.canMove
             ? "Drag to reorder, to a pane edge to split · double-click to send to the other pane"
             : "Drag to a pane edge to split",
@@ -2824,9 +2862,20 @@ function TabButton(props: {
           "Right-click for more",
         ].join("\n")}
       >
-        <span className="pane-tab-icon" aria-hidden>
-          {props.icon}
-        </span>
+        {props.session === null ? (
+          <span className="pane-tab-icon" aria-hidden>
+            {props.icon}
+          </span>
+        ) : (
+          /* The colour answers "which session" only once you know the colours; the
+             tooltip is what teaches them. Quicker than the button's own `title`,
+             which it blocks with `title=""` so the two do not stack on one spot. */
+          <Tooltip label={`Session: ${props.session}`} withArrow openDelay={200} fz="xs">
+            <span className="pane-tab-icon" aria-hidden title="">
+              {props.icon}
+            </span>
+          </Tooltip>
+        )}
         <span className="pane-tab-text">{props.label}</span>
       </button>
       {/* Which pane the worktree's rail glyph was talking about — the SAME glyph, so
