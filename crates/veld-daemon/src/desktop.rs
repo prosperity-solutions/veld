@@ -2330,9 +2330,16 @@ struct WorktreeView {
     /// (This is the reverse of the `ide` block's rule, which is always present with
     /// possibly-empty arrays. There, empty and absent mean the same thing; here they
     /// do not.)
+    ///
+    /// **Also `null` for a trashed worktree**, whose presets are not expanded
+    /// because it cannot be started until it is restored. No client shows presets
+    /// for a trashed row; one that starts to must check `trashed_at` first rather
+    /// than read this as "does not parse".
     presets: Option<Vec<PresetView>>,
     /// Startable nodes with their variants — the UI's custom-selection
-    /// source when no preset fits (hidden nodes excluded).
+    /// source when no preset fits (hidden nodes excluded). Empty for a trashed
+    /// worktree, for the reason `presets` is `null` there; unlike `presets`, that
+    /// is indistinguishable from a config declaring none, so check `trashed_at`.
     nodes: Vec<NodeOptionView>,
     /// How many vars this checkout's config declares machine-overridable, so the
     /// UI can tell "this project asks you for nothing" from "this project asks
@@ -2664,8 +2671,8 @@ fn panes_with_sessions(
 /// *declares* them.
 ///
 /// Takes the already-parsed config rather than a root to parse, because its
-/// caller needs the same config for [`panes_with_sessions`] and `parse_config`
-/// is uncached — see the comment at the call site. `None` covers both
+/// caller needs the same config for [`panes_with_sessions`] — see the comment at
+/// the call site. `None` covers both
 /// "`extensions.source = main` with no resolvable main checkout" and "that
 /// config does not parse", and both fail **closed**, exactly as
 /// `extensions::worktree_target` does for the status/activate endpoints, so the
@@ -2683,25 +2690,51 @@ fn extensions_view_for(declared_cfg: Option<&veld_core::config::VeldConfig>) -> 
 }
 
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
+    worktree_view_with(db, wt, &mut DeclaredConfigs::new())
+}
+
+/// Declaring roots' configs already looked up in this listing, by root path.
+///
+/// Held by the listing rather than left to the config cache, because the cache
+/// declines to keep some loads — one whose inputs are still changing, one that
+/// watches too many paths — and under `extensions.source = main` every non-main
+/// worktree of the repo asks for the same main checkout's config. Unkept, that
+/// was one parse of main per worktree per poll.
+type DeclaredConfigs = std::collections::HashMap<String, Option<veld_core::config::VeldConfig>>;
+
+/// [`worktree_view`], sharing declaring-root configs across one listing.
+fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfigs) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
     let cfg = config_path
         .as_deref()
-        .and_then(|p| veld_core::config::parse_config(p).ok());
+        .and_then(super::config_cache::parse_config);
+    // A trashed worktree cannot be started or opened until it is restored, whose
+    // response is built again from here with the flag cleared — so the work that
+    // only a start needs, expanding every preset and listing the nodes, is
+    // skipped for it. Its `ide` section is **not**: its terminals keep running
+    // through `terminal.trashedGraceMinutes`, a detached window can still show
+    // one, and a file-path click there reads this row's `ide.extensions`.
+    // `presets` comes out `None`, which reads as "does not parse", but no UI path
+    // shows presets for a trashed row.
+    let startable = wt.trashed_at.is_empty();
     let declare_root = super::extensions::resolve_declare_root(db, &wt, db.extensions_source());
     // **Parsed once, used twice.** Both of the calls below need the declaring
     // root's config, and with the shipped `extensions.source = main` default that
-    // root is a different checkout for every non-main worktree — so a parse each
-    // would be two file reads, two JSONC parses and two `include` glob expansions
-    // per worktree, in a loop over every worktree, on every `/api/repos`.
-    // `parse_config` is uncached, and this listing is the hottest read path there
-    // is.
+    // root is a different checkout for every non-main worktree — looked up once
+    // per listing through `declared` (see [`DeclaredConfigs`]), and through
+    // `config_cache` across listings.
     let declared_cfg = match declare_root.as_deref() {
         // Already parsed above as this worktree's own — the common case for the
         // main checkout, and for anyone on `extensions.source = worktree`.
         Some(root) if root == wt.path => cfg.clone(),
-        Some(other_root) => veld_core::config::root_config_in(FsPath::new(other_root))
-            .and_then(|p| veld_core::config::parse_config(&p).ok()),
+        Some(other_root) => declared
+            .entry(other_root.to_owned())
+            .or_insert_with(|| {
+                veld_core::config::root_config_in(FsPath::new(other_root))
+                    .and_then(|p| super::config_cache::parse_config(&p))
+            })
+            .clone(),
         None => None,
     };
     // `declared_cfg` is already `None` for both fail-closed cases — no declaring
@@ -2722,7 +2755,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     // surface means something else in the other.
     // `None` when the config did not parse — never an empty list, which means
     // "declares no presets". See `WorktreeView::presets`.
-    let presets: Option<Vec<PresetView>> = cfg.as_ref().map(|c| {
+    let presets: Option<Vec<PresetView>> = cfg.as_ref().filter(|_| startable).map(|c| {
         veld_core::presets::resolve(c)
             .into_iter()
             .enumerate()
@@ -2763,6 +2796,7 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     });
     let mut nodes: Vec<NodeOptionView> = cfg
         .as_ref()
+        .filter(|_| startable)
         .map(|c| {
             c.nodes
                 .iter()
@@ -2967,17 +3001,37 @@ fn select_news(
     }
 }
 
+/// A repo's rail entry, built on the blocking pool.
+///
+/// [`worktree_view`] parses every worktree's config, and `include` expansion walks
+/// the filesystem — synchronous work that scales with the worktree count and took
+/// seconds for a few hundred checkouts. Run on an async worker it parks that
+/// worker for the whole listing, and every task queued behind it waits too: a
+/// terminal socket's keystrokes stopped echoing, and a worktree switch stalled,
+/// for exactly as long as each `/api/repos` poll. It reads the database as well,
+/// which `crate::offload` exists for either way.
 async fn repo_view(
     db: &Db,
     repo: RepoRecord,
     available: bool,
     git: Option<RepoGitStatus>,
 ) -> Result<RepoView, ApiError> {
+    let db = db.clone();
+    crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git)).await
+}
+
+fn repo_view_blocking(
+    db: &Db,
+    repo: RepoRecord,
+    available: bool,
+    git: Option<RepoGitStatus>,
+) -> Result<RepoView, ApiError> {
+    let mut declared = DeclaredConfigs::new();
     let mut worktrees: Vec<WorktreeView> = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
-        .map(|wt| worktree_view(db, wt))
+        .map(|wt| worktree_view_with(db, wt, &mut declared))
         .collect();
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
@@ -5682,6 +5736,53 @@ mod tests {
             "no resolvable main checkout must fail closed, not fall back to this \
              worktree's own (and clearly-untrusted-by-construction) declarations"
         );
+    }
+
+    #[test]
+    fn a_trashed_worktree_view_skips_start_work_but_keeps_its_extensions() {
+        let (_db_dir, db) = open_test_db();
+        let repo_dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            repo_dir.path().join("veld.json"), // root-config-gate-ok
+            r#"{"schemaVersion": "3", "name": "t", "nodes": {
+                "web": {"default_variant": "local", "variants": {"local": {"type": "command", "argv": ["true"]}}}
+            }, "ide": {"extensions": [
+                {"id": "own", "slot": "topBar", "type": "action", "label": "Own", "argv": ["true"]}
+            ], "panes": [
+                {"id": "agent", "label": "Agent", "type": "terminal", "argv": ["true"]}
+            ]}}"#,
+        )
+        .unwrap();
+        let discovered = vec![DiscoveredWorktree {
+            path: repo_dir.path().to_string_lossy().into_owned(),
+            branch: "main".to_owned(),
+            is_main: true,
+        }];
+        db.upsert_repo(repo_dir.path(), "repo").unwrap();
+        db.sync_worktrees(repo_dir.path(), &discovered).unwrap();
+        let wt = db
+            .list_worktrees(repo_dir.path())
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("the only row");
+
+        let live = worktree_view(&db, wt.clone());
+        assert!(live.presets.is_some());
+        assert_eq!(live.nodes.len(), 1);
+
+        let mut trashed = wt;
+        trashed.trashed_at = "2026-09-28T12:00:00Z".to_owned();
+        let view = worktree_view(&db, trashed);
+        assert!(view.has_veld_config, "the file is still there, and says so");
+        assert!(view.presets.is_none());
+        assert!(view.nodes.is_empty());
+        // A trashed worktree's terminals outlive the trashing, and a file-path
+        // click in one reads these.
+        assert_eq!(view.ide.extensions.len(), live.ide.extensions.len());
+        assert_eq!(view.ide.extensions.len(), 1);
+        assert_eq!(view.ide.panes.len(), live.ide.panes.len());
+        assert_eq!(view.ide.panes.len(), 1);
     }
 
     // -- Process-global guards ----------------------------------------------

@@ -612,7 +612,13 @@ run, while a plain terminal in the same app works perfectly.
   delivers its keystrokes in one burst — a reported bug, reproduced at 13.5 s per
   keystroke. Route new database access through `crate::offload` (`blocking` for a
   synchronous body, `pass` for a background loop whose DB calls are interleaved
-  with awaits); the module doc says which to pick.
+  with awaits); the module doc says which to pick. The same goes for parsing a
+  project config, which reads files and walks the `include` globs: the repo
+  listing did it for every worktree on a worker and froze every terminal for as
+  long as each poll took. A hot read path goes through
+  `config_cache::parse_config` (`crates/veld-daemon/src/config_cache.rs`), on the
+  blocking pool; anything that *acts* on a config (starts a run, runs an
+  extension) parses it fresh.
 - **Anything that must outlive the daemon leaves its process group.** A child
   spawned with `process_group(0)` survives launchd's `bootout` and systemd's
   `KillMode=process`; a plain child does not. Both halves are required and neither
