@@ -444,4 +444,26 @@ export const PROMOTIONS: Promotion[] = [
       "On a Mac, Veld Desktop's Dock icon counts what waits for you: an agent with a question, a job that finished or failed. Prefer a dot? Settings, Dock icon badge.",
     glyph: "inbox",
   },
+  {
+    // Small with outsized daily reach, and a choice nobody would go looking for:
+    // the marker style is a settings row, and the reason to change it — a
+    // collapsed rail where the alias is gone and the marker is the row's only
+    // name — is only obvious once you have tried it.
+    //
+    // The headline is what you can now do with the rail collapsed; "Pixel markers"
+    // was the first draft and names the mechanism. The in-place half of this
+    // announcement is the `pixel-markers` highlight on the picker itself
+    // (`highlights/content.ts`), so the body only has to say where to look.
+    //
+    // `panes`, the layout glyph: the change is to how the rail looks, and the set
+    // has no marker glyph — growing it for one card is what `GLYPH_NAMES` says
+    // not to do.
+    id: "pixel-markers",
+    since: "2026-09-28",
+    eyebrow: "New",
+    headline: "Spot worktrees in a collapsed sidebar",
+    body:
+      "Choose Pixels as the marker and each worktree gets a small pattern in its colour. Switch it when you create one, or with Change marker… in its menu.",
+    glyph: "panes",
+  },
 ];

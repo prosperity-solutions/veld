@@ -435,6 +435,31 @@ two themes and ships weekly, so a screenshot is wrong in one theme the day it
 lands and wrong in both within a fortnight. If a promotion cannot be illustrated
 by an existing glyph, prefer the closest one over growing the set.
 
+## Feature highlights — the in-place sibling
+
+A card tells everyone, once, wherever they are. A **feature highlight** is a
+one-line bubble pinned to the control a change added, shown once, the first time
+somebody reaches that control. Use one for an option people would scroll past
+without noticing it is new; pair it with a card when the change also needs
+announcing. The first is `pixel-markers`, on the marker picker's face switch.
+
+- **Where they live:** `crates/veld-daemon/ui/src/highlights/content.ts`, keyed by
+  slug. A call site wraps its control in `<FeatureHighlight slug="…">`, so a
+  typo is a type error and a control that is not rendered shows nothing.
+- **Same store, same id rules.** Seen-state is the promotions map, under a
+  `hint:<slug>` id — the `:` namespace no Veld card can occupy — so the daemon
+  needs nothing new and the What's-new badge never counts one. A slug is never
+  renamed and never reused.
+- **Same date gate.** Shown only to someone who arrived on or before `since`: a
+  newer user meets every option for the first time, and pointing at one as new
+  is noise.
+- **One per page load.** The first eligible highlight whose control is on screen
+  claims the turn; the rest wait for a later load.
+- **Either answer ends it.** *Got it* stores `read`, the ✕ and Esc store
+  `dismissed`, and both stop it — unlike a card there is nowhere to find a
+  highlight again later. A click elsewhere does not close it, because in a
+  dialog that is usually somebody already doing what it points at.
+
 ## How delivery works
 
 The daemon stores two things in `kv` and has no idea what either means:

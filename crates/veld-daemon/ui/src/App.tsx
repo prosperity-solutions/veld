@@ -335,6 +335,8 @@ import {
   startStorageKey,
 } from "./components/StartConfig";
 import { ConfigVarsDialog } from "./components/ConfigVars";
+import { MarkerOrderProvider, PixelMark } from "./components/PixelMark";
+import { HighlightProvider } from "./highlights/FeatureHighlight";
 import { TopBarExtensions, useExtensionStatus } from "./components/Extensions";
 import {
   ChangeMarkerDialog,
@@ -550,6 +552,9 @@ function WorktreeMark(props: {
   if (!face) return null;
   if (face.kind === "emoji") {
     return <span className="wt-emoji">{face.emoji}</span>;
+  }
+  if (face.kind === "pixels") {
+    return <PixelMark color={face.color} emoji={face.emoji} />;
   }
   return (
     <span
@@ -912,12 +917,16 @@ export function App() {
             controls and the Sharing surface sit in, so a failure appears next to
             what was clicked. */}
         <Notifications position="top-right" limit={4} />
-        <AppInner
-          theme={theme}
-          themePref={themePref}
-          onCycleTheme={cycleTheme}
-          onSetTheme={setThemePref}
-        />
+        <MarkerOrderProvider>
+          <HighlightProvider>
+            <AppInner
+              theme={theme}
+              themePref={themePref}
+              onCycleTheme={cycleTheme}
+              onSetTheme={setThemePref}
+            />
+          </HighlightProvider>
+        </MarkerOrderProvider>
       </ContextMenuProvider>
     </MantineProvider>
   );
@@ -8719,7 +8728,7 @@ function actionColor(label: PendingAction): string {
 /**
  * Rail width bounds, in px.
  *
- * The minimum is well clear of the collapsed rail's 64px on purpose: the
+ * The minimum is well clear of the collapsed rail's 72px on purpose: the
  * collapsed rail is a **mode** (it hides the alias, the branch and the inline run
  * control), not a narrow width, so dragging must never slide into it. Crossing
  * that line by drag would silently drop three columns without saying so, and the
@@ -9467,7 +9476,7 @@ function Rail(props: {
     return laneDropTarget(sections, clientY);
   };
   // Suppresses the rail's width transition for the duration of a resize drag. The
-  // transition exists for the collapse/expand toggle, where 236px→64px should
+  // transition exists for the collapse/expand toggle, where 236px→72px should
   // animate; during a drag it re-animates on every pointer move, so the edge
   // visibly lags behind the cursor instead of tracking it.
   const [resizing, setResizing] = useState(false);
@@ -9480,7 +9489,7 @@ function Rail(props: {
     setLaneDropAt(null);
     setOnDock(false);
   };
-  // Dropping is disabled while the rail is collapsed. A 64px row shows only a
+  // Dropping is disabled while the rail is collapsed. A 72px row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
   // whose result you cannot see is a reorder you did not mean.
   const canDrag = props.wide;
@@ -10176,7 +10185,7 @@ function Rail(props: {
               // Terminal removal — distinct from recoverable trash: rendered in the
               // Deleting lane, not revertible, actively coming off the disk.
               const deletingRow = group.key === DELETING_LANE;
-              // Inline controls are wide-only — a 64px collapsed row has no space
+              // Inline controls are wide-only — a 72px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.

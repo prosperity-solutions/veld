@@ -415,7 +415,16 @@ pub(super) const CURSOR_STYLES: &[Choice] = &[
     choice("bar", "Bar"),
 ];
 
-pub(super) const MARKER_STYLES: &[Choice] = &[choice("color", "Colour"), choice("emoji", "Emoji")];
+/// `pixels` is drawn from the other two rather than stored beside them: the colour
+/// paints a 3×3 pattern and the glyph's position in [`WORKTREE_EMOJI`] picks it, so
+/// adding it needed no column and switching to it loses nothing.
+///
+/// [`WORKTREE_EMOJI`]: crate::db::WORKTREE_EMOJI
+pub(super) const MARKER_STYLES: &[Choice] = &[
+    choice("color", "Colour"),
+    choice("emoji", "Emoji"),
+    choice("pixels", "Pixels"),
+];
 
 /// How the New worktree dialog opens.
 ///
@@ -631,8 +640,9 @@ impl SettingKey {
             Self::WorktreeMarkerStyle => Spec {
                 title: "Worktree marker",
                 help: "Both a colour and a glyph are stored for every worktree, so switching here \
-                       never loses the other one. Pick either from a worktree's context menu → \
-                       Change marker…",
+                       never loses the other one. Pixels draws the two together — a small \
+                       pattern in the worktree's colour, easy to tell apart in the collapsed \
+                       rail. Pick either from a worktree's context menu → Change marker…",
                 group: General,
                 section: None,
                 shape: ValueShape::Text,

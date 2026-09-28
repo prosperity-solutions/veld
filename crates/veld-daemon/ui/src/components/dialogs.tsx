@@ -33,7 +33,15 @@ import {
   type WorktreeGitStatus,
 } from "../api";
 import { describeAge } from "../dbhealth/model";
-import type { GitCreateFrom, MarkerStyle, WorktreeNewMode } from "../shared/settings";
+import {
+  type GitCreateFrom,
+  hasMarkerColor,
+  type MarkerStyle,
+  type WorktreeNewMode,
+} from "../shared/settings";
+import { pixelPattern } from "../shared/markerPixels";
+import { PixelGrid } from "./PixelMark";
+import { FeatureHighlight } from "../highlights/FeatureHighlight";
 import {
   aliasCollides,
   DEFAULT_WORKTREE_NAME,
@@ -1932,6 +1940,58 @@ export function MarkerGrids(props: {
     </>
   ) : null;
 
+  // The pixel face picks its pattern by glyph, so its grid is the glyph grid drawn
+  // as patterns: one cell per allowlisted animal, in the colour chosen above it.
+  // Picking a pattern writes the glyph — there is nothing else to write — and the
+  // tooltip names the animal, so the coupling is visible rather than a surprise
+  // the first time somebody switches to Emoji.
+  const patternColor = hasMarkerColor(props.color) ? props.color : "var(--muted)";
+  const patternGrid = choices ? (
+    <>
+      <Text size="xs" fw={600} c="dimmed">
+        Pattern
+      </Text>
+      <div className="emoji-grid">
+        {choices.map((e) => {
+          const isCurrent = e === props.emoji;
+          const others = (props.usedBy[e] ?? []).filter(
+            (h) => h.id !== props.worktreeId,
+          );
+          const taken = others.map((h) => h.label).join(", ");
+          return (
+            <button
+              key={e}
+              type="button"
+              className={`emoji-cell${isCurrent ? " current" : ""}`}
+              disabled={busy !== null}
+              aria-pressed={isCurrent}
+              aria-label={
+                taken ? `Pattern ${e} — in use by ${taken}` : `Pattern ${e}`
+              }
+              title={
+                [isCurrent ? "Current" : "", `Same as ${e}`, taken ? `In use by ${taken}` : ""]
+                  .filter(Boolean)
+                  .join(" · ")
+              }
+              onClick={() => pick({ emoji: e })}
+            >
+              {busy === e ? (
+                <Loader size={14} />
+              ) : (
+                <PixelGrid
+                  color={patternColor}
+                  mask={pixelPattern(e, choices)}
+                  className="pixel-swatch"
+                />
+              )}
+              {taken && <span className="marker-taken" />}
+            </button>
+          );
+        })}
+      </div>
+    </>
+  ) : null;
+
   return (
     <>
       {loadError && <ErrorText error={loadError} />}
@@ -1947,21 +2007,41 @@ export function MarkerGrids(props: {
         data={[
           { value: "color", label: "Colour" },
           { value: "emoji", label: "Emoji" },
+          {
+            value: "pixels",
+            // Anchored on the segment's own label, not the whole control: pinned
+            // to the control, the arrow landed on its centre — on Emoji.
+            label: (
+              <FeatureHighlight slug="pixel-markers">
+                <span>Pixels</span>
+              </FeatureHighlight>
+            ),
+          },
         ]}
       />
       <Text size="xs" c="dimmed">
         {props.style === "color"
           ? "This is what the rail shows. The glyph is still saved, so it is there if you switch."
-          : "This is what the rail shows. The colour is still saved, so it is there if you switch."}
+          : props.style === "emoji"
+            ? "This is what the rail shows. The colour is still saved, so it is there if you switch."
+            : "A pattern in your colour — the easiest to tell apart in a collapsed rail. Each pattern stands for one of the emoji, so switching keeps both."}
       </Text>
-      {props.style === "color" ? colourGrid : emojiGrid}
-      {props.style === "emoji" && !choices && !loadError && (
+      {props.style === "color" && colourGrid}
+      {props.style === "emoji" && emojiGrid}
+      {props.style === "pixels" && (
+        <>
+          {colourGrid}
+          {patternGrid}
+        </>
+      )}
+      {props.style !== "color" && !choices && !loadError && (
         <Group justify="center" py="lg">
           <Loader size="sm" aria-label="Loading emoji" />
         </Group>
       )}
       <Text size="xs" c="dimmed">
-        A dot marks a colour or glyph another checkout of this repo already uses.
+        A dot marks a colour, glyph or pattern another checkout of this repo
+        already uses.
         Picking it is allowed — the rail just won&apos;t identify them apart.
       </Text>
     </>

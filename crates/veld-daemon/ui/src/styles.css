@@ -711,14 +711,16 @@ body[data-fullscreen="true"] .topbar.electron {
 /* Live resize: no transition.
  *
  * `.rail`'s `transition: width 0.15s` is for the collapse/expand toggle, where
- * 236px → 64px should animate. During a drag it re-animates on every pointer move,
+ * 236px → 72px should animate. During a drag it re-animates on every pointer move,
  * so the edge chases the cursor 150ms behind and the drag feels like it is lagging.
  * The class is only present while the pointer is down. */
 .rail.resizing {
   transition: none;
 }
+/* 72px, up from 64: the collapsed row's marker is its only name, and it needs a
+   gap to its neighbours — see `.wt-row.slim` for how the width is spent. */
 .rail:not(.wide) {
-  width: 64px;
+  width: 72px;
 }
 
 /* The drag edge. Wider than it looks (8px hit area, 1px of visible line on
@@ -904,7 +906,7 @@ button.lane-empty {
  *
  * Shorter than a row on purpose (20px against `.wt-row`'s 28px): a count of
  * things you cannot see should not weigh as much as a thing you can. It carries
- * its own `cursor` because it renders in the collapsed rail too, at 64px, where
+ * its own `cursor` because it renders in the collapsed rail too, at 72px, where
  * "+23" is the entire visible affordance and nothing around it says it is
  * clickable. */
 .trash-more {
@@ -1440,13 +1442,104 @@ body.pointer-dragging * {
   color: var(--danger);
 }
 
-/* Collapsed rows: the worktree marker only, centered — plus the state glyphs that
-   survive the collapse (`.wt-away`, `.wt-alert`), which are the reason those two
-   are sized to their glyph rather than to a control box. Height comes from
-   .wt-row's min-height, so rows don't resize when the rail expands. */
+/* Collapsed rows: the marker in the middle, larger than in the wide rail — with
+   the alias gone it *is* the row's name — and each state glyph in a fixed slot
+   beside it instead of queued in a flex line.
+
+   A grid rather than the wide row's flex line, because the flex version did not
+   fit. A 64px rail left 48px of row, and a row holding all four of `.wt-away`, the
+   marker, `.wt-alert` and the row-state glyph with a 7px gap between each needed
+   up to ~68px — so it overflowed, and the marker slid off centre by however many
+   neighbours it happened to have that moment. Here the marker's column is fixed
+   and centred whatever else is lit:
+
+       [away][marker][alert]
+       [    ][      ][state]
+
+   A lone glyph on the right takes both rows (`:has` below), so a row with only a
+   pencil does not look top-heavy.
+
+   **No padding, and no box for the selection.** A collapsed row fills its slot
+   edge to edge, and a selected one paints no background or outline: at this width
+   a bordered box around one marker reads as a button bezel, and a column of them
+   is what made the rail feel crammed. The selection is the accent bar beside the
+   marker. Hover still tints the whole row, as it does in the wide rail.
+
+   The budget, at the 72px rail: 56px of row after `.rail-list`'s 8px a side, and
+   12 + 4 + 18 + 4 + 12 = 50px of grid, centred. Two 12px rows sit inside the wide
+   row's own 28px `min-height`, so rows do not move when the rail expands. */
 .wt-row.slim {
+  display: grid;
+  grid-template-columns: 12px 18px 12px;
+  grid-template-rows: 12px 12px;
+  column-gap: 4px;
+  row-gap: 0;
   justify-content: center;
-  padding: 5px 4px;
+  align-content: center;
+  place-items: center;
+  padding: 0;
+}
+/* Hover keeps the wide row's background — the row is still what you click — but
+   selection paints nothing: the bar beside the marker says it. */
+.wt-row.slim.active {
+  background: transparent;
+  box-shadow: none;
+}
+.wt-row.slim:hover {
+  background: var(--panel);
+}
+/* The state bar, moved in beside the marker and made thicker. Flush to the rail's
+   edge it sat 20px from the marker it belongs to — further than any other glyph
+   on the row — so it read as the rail's decoration rather than the row's state.
+   As a grid item in the left column, end-aligned, it is exactly one column gap
+   from the marker: the same 4px the state glyphs sit at on the other side.
+
+   It shares that column with `.wt-away`. The two do not meet in practice — the
+   row you have selected is open in this window, which is what "away" says it is
+   not. */
+.wt-row.slim::before {
+  position: static;
+  grid-column: 1;
+  grid-row: 1 / span 2;
+  justify-self: end;
+  width: 3px;
+  height: 16px;
+  border-radius: 2px;
+}
+.wt-row.slim > .wt-away {
+  grid-column: 1;
+  grid-row: 1 / span 2;
+}
+.wt-row.slim > :is(.wt-emoji, .wt-dot, .wt-pixels) {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+}
+.wt-row.slim > .wt-alert {
+  grid-column: 3;
+  grid-row: 1;
+}
+.wt-row.slim > :is(.wt-inbox, .wt-git) {
+  grid-column: 3;
+  grid-row: 2;
+}
+.wt-row.slim:not(:has(> .wt-alert)) > :is(.wt-inbox, .wt-git),
+.wt-row.slim:not(:has(> :is(.wt-inbox, .wt-git))) > .wt-alert {
+  grid-row: 1 / span 2;
+}
+/* The three faces at their collapsed size. Optically matched to each other the
+   same way the wide sizes are, so switching `worktree.markerStyle` does not make
+   the collapsed rail jump either. */
+.wt-row.slim > .wt-emoji {
+  font-size: 17px;
+}
+.wt-row.slim > .wt-dot {
+  width: 14px;
+  height: 14px;
+}
+.wt-row.slim > .wt-pixels {
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
 }
 
 .rail-head {
@@ -1531,7 +1624,7 @@ body.pointer-dragging * {
   left: 0;
   top: 4px;
   bottom: 4px;
-  width: 2px;
+  width: 3px;
   border-radius: 0 2px 2px 0;
   background: transparent;
 }
@@ -1675,8 +1768,74 @@ body.pointer-dragging * {
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
 }
 
-.wt-row.away .wt-dot {
+.wt-row.away .wt-dot,
+.wt-row.away .wt-pixels {
   opacity: 0.45;
+}
+
+/* The pixel face: a 3×3 pattern in the worktree's colour (`PixelMark`). 12px in
+   the wide rail — between the dot and the glyph, and a multiple of 3 so each cell
+   is a whole 4px — and 18px collapsed, where it is at its best. The corner is
+   clipped here rather than drawn, so the SVG stays nine plain squares. */
+.wt-pixels,
+.pixel-swatch {
+  flex: none;
+  position: relative;
+  display: block;
+  overflow: hidden;
+}
+.wt-pixels {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+}
+.pixel-swatch {
+  width: 21px;
+  height: 21px;
+  border-radius: 3px;
+}
+.wt-pixels > svg,
+.pixel-swatch > svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+.wt-pixels rect,
+.pixel-swatch rect {
+  fill: currentColor;
+}
+.wt-pixels rect.off,
+.pixel-swatch rect.off {
+  fill-opacity: 0.22;
+}
+/* The pale hues on a light panel: their own tint is a cream next to a yellow, so
+   the unlit cells take a darker shade of the colour instead of a lighter one.
+   Light theme only — on a dark panel the low-opacity tint already reads as dark,
+   which is exactly the contrast this restores.
+
+   Darkened in OKLCH with the chroma pushed *up*, and solid: mixing toward black in
+   sRGB and then letting the white panel through (the first version) greyed the
+   shade into khaki, which kept the contrast and lost the colour. */
+body[data-theme="light"] :is(.wt-pixels, .pixel-swatch).bright rect.off {
+  fill: oklch(from currentColor calc(l * 0.78) calc(c * 1.15) h);
+  fill-opacity: 1;
+}
+/* A thin inner ring, dark on the light theme and light on the dark one, so the
+   square's edge is drawn the same way whatever its colour and pattern. Drawn over
+   the SVG, since an inset shadow on the box itself would be painted underneath its
+   only child. */
+.wt-pixels::after,
+.pixel-swatch::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: inset 0 0 0 1px rgb(255 255 255 / 0.22);
+  pointer-events: none;
+}
+body[data-theme="light"] .wt-pixels::after,
+body[data-theme="light"] .pixel-swatch::after {
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.45);
 }
 
 /* The palette is identical in both themes by request, so the pale hues (FFF827,
@@ -1835,9 +1994,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-alert:hover {
   background: var(--elev);
 }
-/* Collapsed, it shrinks to its glyph. This is the only control that renders in a
-   64px centred row — the run control and the menu are wide-only — and a 17px box
-   beside the marker there spends 6px of padding pushing both off centre. */
+/* Collapsed, it shrinks to its glyph to fit its 12px slot in the `.wt-row.slim`
+   grid — the only control that renders in a collapsed row, since the run control
+   and the menu are wide-only. */
 .wt-row.slim .wt-alert {
   width: auto;
   height: auto;
@@ -1889,12 +2048,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-inbox.working svg {
   animation: spin 1.4s linear infinite;
 }
-/* Collapsed, the same treatment `.wt-alert` gets: a 64px centred row has no room
-   for margin beside the marker. The glyph still renders — this is the indicator
-   most worth seeing from a narrow rail, which is the whole reason it exists. */
-.wt-row.slim .wt-inbox {
-  margin-left: 2px;
-}
+/* Collapsed, the glyph still renders — this is the indicator most worth seeing
+   from a narrow rail, which is the whole reason it exists. Its slot is set by the
+   `.wt-row.slim` grid, beside the marker. */
 
 /* Whether this checkout is holding work that is not safe yet: uncommitted
    changes, or commits that have not been pushed. Those two and nothing else —
@@ -1947,13 +2103,8 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-git.unpushed {
   color: var(--fg);
 }
-/* Collapsed, the same treatment `.wt-alert` and `.wt-inbox` get: a 64px centred row
-   has no room for a margin beside the marker, and this is one of the indicators most
-   worth seeing from a narrow rail — "which of these can I throw away" is a question
-   people ask with the rail collapsed. */
-.wt-row.slim .wt-git {
-  margin-left: 2px;
-}
+/* Collapsed, this still renders in the same slot `.wt-inbox` takes — "which of
+   these can I throw away" is a question people ask with the rail collapsed. */
 
 /* The row's trailing controls — the run count, the node-health alert, the row-state
    glyph (`.wt-git` or `.wt-inbox`, whichever won the slot), the run control, the
@@ -1976,7 +2127,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    nothing held the slack at all and the ⋮ sat wherever the alias happened to
    end.
 
-   **Expanded rows only.** A collapsed row is a 64px centred column with no
+   **Expanded rows only.** A collapsed row is a 72px centred column with no
    trailing cluster to form: the alert and the row-state glyph are the only two that
    render there, and they belong beside the marker (see `.wt-row.slim .wt-alert`,
    `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`) rather than pushed to an
