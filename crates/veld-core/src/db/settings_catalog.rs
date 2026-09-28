@@ -109,10 +109,11 @@ use serde_json::Value;
 use super::settings::{
     ConfigSource, MAX_BACKUP_INTERVAL_MINUTES, MAX_BACKUP_KEEP, MAX_BACKUP_KEEP_DAILY,
     MAX_BELL_VOLUME, MAX_DETACH_GRACE_MINUTES, MAX_FONT_SIZE, MAX_KEEP_AWAKE_MINUTES,
-    MAX_RECONNECT_BACKOFF_SECONDS, MAX_RECONNECT_FIRST_DELAY_SECONDS, MAX_RECONNECT_TRIES,
-    MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_SHARE_TTL_MINUTES, MAX_TRASH_RETENTION_DAYS,
-    MIN_BACKUP_INTERVAL_MINUTES, MIN_BACKUP_KEEP, MIN_BACKUP_KEEP_DAILY, MIN_BELL_VOLUME,
-    MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES, MIN_RECONNECT_BACKOFF_SECONDS,
+    MAX_MAX_SESSIONS, MAX_RECONNECT_BACKOFF_SECONDS, MAX_RECONNECT_FIRST_DELAY_SECONDS,
+    MAX_RECONNECT_TRIES, MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_SHARE_TTL_MINUTES,
+    MAX_TRASH_RETENTION_DAYS, MAX_TRASHED_GRACE_MINUTES, MIN_BACKUP_INTERVAL_MINUTES,
+    MIN_BACKUP_KEEP, MIN_BACKUP_KEEP_DAILY, MIN_BELL_VOLUME, MIN_DETACH_GRACE_MINUTES,
+    MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES, MIN_MAX_SESSIONS, MIN_RECONNECT_BACKOFF_SECONDS,
     MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES, MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK,
     MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
 };
@@ -1086,6 +1087,37 @@ impl SettingKey {
                     unit: Some("min"),
                     empty_means: None,
                 },
+                requires: None,
+            },
+
+            Self::TerminalTrashedGrace => Spec {
+                title: "Close terminals in trashed worktrees after",
+                help: "Minutes a worktree's terminals keep running once you move it to the \
+                       trash, so a worktree binned by mistake comes back with every shell \
+                       still live. After that they are closed; restoring the worktree brings \
+                       its tabs back with new shells, and an agent pane offers to resume its \
+                       session. 0 keeps them running until the worktree is deleted.",
+                group: Terminal,
+                section: BEHAVIOUR,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: 0,
+                    max: MAX_TRASHED_GRACE_MINUTES,
+                    step: None,
+                    unit: Some("min"),
+                    empty_means: Some("keep"),
+                },
+                requires: None,
+            },
+            Self::TerminalMaxSessions => Spec {
+                title: "Maximum open terminals",
+                help: "How many terminals may run at once across every worktree. Past it, a \
+                       new terminal is refused until one is closed. Shells already running are \
+                       never closed by lowering it, not even across a daemon restart.",
+                group: Terminal,
+                section: BEHAVIOUR,
+                shape: ValueShape::Int,
+                choices: range(MIN_MAX_SESSIONS, MAX_MAX_SESSIONS),
                 requires: None,
             },
 

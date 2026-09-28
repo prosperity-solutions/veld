@@ -410,14 +410,25 @@ export function subscribeTerminal(id: string, fn: () => void): () => void {
   const s = sessions.get(id);
   if (s) {
     s.listeners.add(fn);
-    return () => s.listeners.delete(fn);
+    return () => {
+      s.listeners.delete(fn);
+      // `parkTerminal` hands a session's listeners back to `pending`, so a
+      // listener subscribed to the old session may be waiting there now.
+      const waiting = pending.get(id);
+      waiting?.delete(fn);
+      if (waiting?.size === 0) pending.delete(id);
+      sessions.get(id)?.listeners.delete(fn);
+    };
   }
   const waiting = pending.get(id) ?? new Set();
   waiting.add(fn);
   pending.set(id, waiting);
   return () => {
-    waiting.delete(fn);
-    if (waiting.size === 0) pending.delete(id);
+    // Looked up again rather than closed over: `parkTerminal` can put this
+    // listener into a newer set than the one it was added to.
+    const current = pending.get(id);
+    current?.delete(fn);
+    if (current?.size === 0) pending.delete(id);
     sessions.get(id)?.listeners.delete(fn);
   };
 }
@@ -1236,7 +1247,18 @@ async function connect(
     // otherwise a running build is silently replaced by an empty prompt, which
     // is exactly what the docs promise won't happen.
     if (!minted.resumed && EXPECTED_RESUMES.delete(s.id)) {
-      writeNotice(s, "the previous shell is gone — this is a new one");
+      // A `resume` does start a new process, but it is the same session coming
+      // back, and "this is a new one" above the agent's own resumed screen reads
+      // as a contradiction.
+      const closedInTrash = CLOSED_IN_TRASH.delete(s.id);
+      writeNotice(
+        s,
+        closedInTrash && mode === "resume"
+          ? "closed while the worktree was in the trash — resuming it"
+          : closedInTrash
+            ? "closed while the worktree was in the trash — this is a new shell"
+            : "the previous shell is gone — this is a new one",
+      );
     }
   } catch (e) {
     if (s.generation !== generation) return;
@@ -1614,6 +1636,9 @@ function handleControl(s: Session, raw: string): void {
       ) {
         paneCloseHandler?.(s.id, s.worktreeId);
       }
+      break;
+    case "trashed":
+      parkTerminal(s);
       break;
     case "taken_over":
       // Another view of `/ide` (a second window, or a duplicated tab that
@@ -2029,6 +2054,7 @@ export function disposeTerminal(id: string): void {
   // mark-all-read — a badge the user cannot clear by looking is the poisoning the
   // design set out to avoid.
   inbox.forget(id);
+  CLOSED_IN_TRASH.delete(id);
   // A prompt queued for a pane that is being closed has nowhere to go. The
   // poll's own guards already stop it reaching a disposed session; this is what
   // keeps a pane closed *before* it ever connected from leaving the text behind.
@@ -2076,6 +2102,47 @@ export function releaseTerminal(id: string): void {
 }
 
 /**
+ * Tab ids whose shell the daemon closed because the worktree sat in the trash,
+ * so the pane that reopens after a restore can say why its shell is new.
+ */
+const CLOSED_IN_TRASH = new Set<string>();
+
+/**
+ * Let go of a terminal whose shell the daemon is closing because its worktree
+ * has been in the trash past `terminal.trashedGraceMinutes` (or is being
+ * deleted).
+ *
+ * The tab stays in the layout — that is what a restore brings back — so the
+ * session is dropped the way a reload drops it, not the way closing the tab
+ * does: no `DELETE` (the daemon is already ending it; `disposeTerminal` would
+ * also be wrong for the listeners below), no exit reported to the inbox. Any
+ * listener still subscribed goes back to `pending` so it follows the session
+ * the next mount creates — usually there is none, since a pane's own
+ * subscription ends with its unmount. That mount then takes the ordinary path
+ * for a tab whose shell is gone: a new shell in the same directory, or, for an
+ * agent pane, its resume.
+ *
+ * A pane that is on screen keeps its terminal and reads as ended instead,
+ * because taking the element away would leave a blank pane with no
+ * explanation. The main window never shows a trashed worktree; a detached
+ * terminal window can.
+ */
+function parkTerminal(s: Session): void {
+  if (s.container.isConnected) {
+    writeNotice(s, "this worktree is in the trash, so its shell was closed");
+    setState(s, "ended", "closed in the trash");
+    return;
+  }
+  CLOSED_IN_TRASH.add(s.id);
+  const listeners = [...s.listeners];
+  releaseTerminal(s.id);
+  const waiting = pending.get(s.id) ?? new Set();
+  for (const fn of listeners) waiting.add(fn);
+  pending.set(s.id, waiting);
+  for (const fn of listeners) fn();
+}
+
+/**
  * Dispose every session not in `keep`.
  *
  * The layouts are the source of truth for which terminals should exist; this
@@ -2087,5 +2154,9 @@ export function pruneTerminals(keep: Iterable<string>): void {
   const live = new Set(keep);
   for (const id of [...sessions.keys()]) {
     if (!live.has(id)) disposeTerminal(id);
+  }
+  // A parked terminal has no session left here to dispose.
+  for (const id of [...CLOSED_IN_TRASH]) {
+    if (!live.has(id)) CLOSED_IN_TRASH.delete(id);
   }
 }

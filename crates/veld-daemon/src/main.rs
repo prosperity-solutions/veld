@@ -79,6 +79,44 @@ fn parse_args() -> Args {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Raise the soft open-file limit towards the hard one.
+///
+/// launchd starts a process with a soft limit of 256 descriptors, and every
+/// terminal session holds at least two of them in the daemon (its holder's
+/// socket and, while attached, the browser's WebSocket) — so `terminal.maxSessions`
+/// at its ceiling would exhaust descriptors for the whole daemon rather than
+/// refuse a terminal. Capped at 4096 rather than the hard limit: macOS reports
+/// the hard limit as unlimited and refuses anything above `OPEN_MAX`. Holders
+/// and the shells they start inherit the raised limit.
+fn raise_fd_limit() {
+    const WANT: libc::rlim_t = 4096;
+    // Two descriptors per session, with most of the budget left for the rest of
+    // the daemon: raising the session ceiling past this needs a larger `WANT`.
+    const _: () = assert!((veld_core::db::MAX_MAX_SESSIONS as libc::rlim_t) * 8 <= WANT);
+    // SAFETY: getrlimit/setrlimit only read and write the struct passed in.
+    unsafe {
+        let mut lim = std::mem::zeroed::<libc::rlimit>();
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) != 0 || lim.rlim_cur >= WANT {
+            return;
+        }
+        let target = WANT.min(lim.rlim_max);
+        let before = lim.rlim_cur;
+        if target <= before {
+            warn!("open-file limit is {before} and its hard limit allows no more");
+            return;
+        }
+        lim.rlim_cur = target;
+        if libc::setrlimit(libc::RLIMIT_NOFILE, &lim) == 0 {
+            info!("open-file limit raised from {before} to {target}");
+        } else {
+            warn!(
+                "could not raise the open-file limit from {before}: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parsed before tracing is initialised, because the mode decides where the
@@ -114,6 +152,7 @@ async fn main() -> Result<()> {
     }
 
     info!("veld-daemon {VERSION} starting");
+    raise_fd_limit();
     // The SQLite build is a *statically bundled* dependency, so a downgrade is
     // invisible in every other way: nothing on the machine changes, no package
     // manager records it, and the only trace is which `libsqlite3-sys` the

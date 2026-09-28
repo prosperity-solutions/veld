@@ -354,6 +354,12 @@ async fn delete_checkout(
         }
         Err(e) => return Err(e),
     }
+    // Its terminals go with it: a shell left running in a directory git just
+    // removed is the one thing `terminal.trashedGraceMinutes = 0` promises not to
+    // leave behind, and no window may be open to prune the pane. After the removal,
+    // so a delete git refuses keeps them; before the row goes, while the id is
+    // still this worktree's.
+    crate::feedback_server::pty::close_worktree_sessions(wt.id).await;
     if let Err(e) = db.remove_worktree(wt.id) {
         // The checkout is gone; only the row survived. The next reconcile poll reaps
         // it, since the path has left `git worktree list`.

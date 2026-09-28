@@ -138,7 +138,44 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// terminal, so every worktree merely selected started a shell. It no longer does
 /// (`defaultLayout` in `ui/src/panes/model.ts` seeds a `new` pane), which is what
 /// makes this bound comfortable rather than tight.
-const MAX_SESSIONS: usize = 48;
+///
+/// **A default, not a constant.** The effective value is the `terminal.maxSessions`
+/// setting, read through [`session_cap`]; this is the fallback when there is no
+/// database to ask.
+const MAX_SESSIONS: usize = veld_core::db::DEFAULT_MAX_SESSIONS as usize;
+
+/// The bound on shells re-adopted at boot: the highest cap the setting allows.
+const ADOPT_CEILING: usize = veld_core::db::MAX_MAX_SESSIONS as usize;
+
+/// Last session cap read from the database; `0` = never read.
+///
+/// Published by the two places that already have the database open — the reaper
+/// pass and `mint_ticket` — so the claim in [`SessionSlot::claim`] on the attach
+/// path opens SQLite at most once, before either has run. The same shape as
+/// [`GRACE_HINT`], for the same reason.
+static CAP_HINT: AtomicUsize = AtomicUsize::new(0);
+
+/// The live-session ceiling to enforce right now.
+fn session_cap() -> usize {
+    match CAP_HINT.load(Ordering::Relaxed) {
+        0 => {
+            // Not stored on failure, so the next claim asks again instead of
+            // holding the default until the first reaper pass.
+            match veld_core::db::Db::open() {
+                Ok(db) => {
+                    let cap = db.max_sessions();
+                    CAP_HINT.store(cap, Ordering::Relaxed);
+                    cap
+                }
+                Err(e) => {
+                    warn!("could not read the terminal cap setting, using the default: {e}");
+                    MAX_SESSIONS
+                }
+            }
+        }
+        cap => cap,
+    }
+}
 
 /// How long a session no Veld window has a pane for keeps running.
 ///
@@ -427,8 +464,108 @@ pub fn spawn_session_reaper() {
         loop {
             tokio::time::sleep(REAP_INTERVAL).await;
             reap_detached(configured_detach_grace()).await;
+            close_trashed_sessions().await;
         }
     });
+}
+
+/// Close the terminals of every worktree that has sat in the trash longer than
+/// `terminal.trashedGraceMinutes`, and republish the session cap while the
+/// database is open.
+///
+/// **Not a question for the detach reaper**, because the detach reaper is right
+/// to spare these: a window that still lists the trashed worktree (every window
+/// that had it open does — the row is still there) keeps naming its panes, so
+/// [`reap_detached`] never collects them however long the trash holds them. That
+/// is what let a handful of binned worktrees spend the whole session cap. This
+/// pass overrides the keep on purpose; the layout is what brings the tabs back on
+/// restore, not the shells.
+///
+/// A worktree restored in the instant between reading the expired set and
+/// ending its sessions still loses them — the same width of race, and the same
+/// acceptance, as the re-judge in [`reap_detached`]; its tabs come back with new
+/// shells either way.
+///
+/// A database this pass cannot open leaves every shell running: closing
+/// terminals is the one outcome that cannot be undone here, so an unreadable
+/// setting is not a reason to do it.
+async fn close_trashed_sessions() {
+    let db = match veld_core::db::Db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("could not read the trashed-worktree terminal setting: {e}");
+            return;
+        }
+    };
+    CAP_HINT.store(db.max_sessions(), Ordering::Relaxed);
+    let Some(grace) = db.trashed_grace() else {
+        return; // keep them until the worktree is deleted
+    };
+    let expired: std::collections::HashSet<i64> =
+        match db.expired_trashed_worktrees(grace.as_secs() as i64) {
+            Ok(rows) => rows.into_iter().map(|wt| wt.id).collect(),
+            Err(e) => {
+                warn!("could not list trashed worktrees: {e}");
+                crate::dbhealth::note_error(&e);
+                return;
+            }
+        };
+    drop(db);
+    close_sessions_in(&expired, "worktree in the trash past its grace").await;
+}
+
+/// End every session of a worktree whose checkout has just been deleted.
+pub(crate) async fn close_worktree_sessions(worktree_id: i64) {
+    let ended = close_sessions_in(&[worktree_id].into_iter().collect(), "worktree deleted").await;
+    if ended > 0 {
+        info!(
+            worktree_id,
+            ended, "closed the terminals of a deleted worktree"
+        );
+    }
+}
+
+/// End every session — registered or released — that belongs to one of
+/// `worktrees`, telling any attached socket why first. Returns how many ended.
+///
+/// The [`ServerControl::Trashed`] frame goes out before the hangup so a window
+/// still holding the pane can let go of it quietly, the way a reload would,
+/// instead of showing an `exit 129` with a Restart button on a tab that is in the
+/// trash. A released session has no socket to send it on — its client already
+/// read the release as a lost connection — so its pane stays in that state, and
+/// after a restore its Reconnect button opens a new shell.
+async fn close_sessions_in(worktrees: &std::collections::HashSet<i64>, reason: &str) -> usize {
+    if worktrees.is_empty() {
+        return 0;
+    }
+    let registered: Vec<Arc<Session>> = SESSIONS
+        .lock()
+        .await
+        .values()
+        .filter(|s| worktrees.contains(&s.worktree_id))
+        .cloned()
+        .collect();
+    let released: Vec<String> = RELEASED
+        .lock()
+        .expect("released set poisoned")
+        .iter()
+        .filter(|(_, wt)| worktrees.contains(wt))
+        .map(|(id, _)| id.clone())
+        .collect();
+    let mut ended = 0;
+    for session in registered {
+        // Before the hangup, never after: the hangup's exit races a later frame.
+        let _ = session.control.send(ServerControl::Trashed);
+        if end_session(&session.id, reason).await {
+            ended += 1;
+        }
+    }
+    for id in released {
+        if hang_up_released_holder(&id, reason).await {
+            ended += 1;
+        }
+    }
+    ended
 }
 
 type ApiError = (StatusCode, Json<serde_json::Value>);
@@ -655,7 +792,7 @@ struct SessionSlot {
 
 impl SessionSlot {
     fn claim() -> Option<Self> {
-        Self::claim_from(&LIVE_SESSIONS, MAX_SESSIONS)
+        Self::claim_from(&LIVE_SESSIONS, session_cap())
     }
 
     /// Compare-and-swap rather than load-then-add: two simultaneous attaches
@@ -828,8 +965,8 @@ async fn reap_detached(grace: Duration) {
     // what breaks it.
     //
     // Asking about the candidates rather than reading `ide`'s whole set also
-    // bounds the work under *its* lock by [`MAX_SESSIONS`]; see
-    // `ide::kept_among`.
+    // bounds the work under *its* lock by the live-session count, at most
+    // [`ADOPT_CEILING`]; see `ide::kept_among`.
     let kept = super::ide::kept_among(&candidates).await;
     if !kept.is_empty() {
         // **Restart their clock.** Being kept is not a pause on the grace, it is
@@ -2130,15 +2267,15 @@ async fn mint_ticket(
 
     // No NEW shells in a checkout that is in the trash. It is still a real directory
     // for the whole retention period, so nothing stops a URL or a direct API call
-    // from opening a terminal in one — and nothing reaps sessions when a worktree is
-    // deleted, so the eventual `git worktree remove` would pull the directory out
-    // from under that shell with no warning.
+    // from opening a terminal in one — and a shell opened there would have its
+    // directory pulled out from under it by the eventual `git worktree remove`.
     //
     // **Reattaching is deliberately still allowed.** A worktree can be binned from
-    // another window while a terminal is open in it, and that shell keeps running for
-    // the whole retention period — so refusing the reattach would strand a live
-    // session behind a page reload and make the user restore the worktree just to
-    // reach output that never went anywhere. Hence the check sits after `resumed` is
+    // another window while a terminal is open in it, and that shell keeps running
+    // until `terminal.trashedGraceMinutes` is up ([`close_trashed_sessions`]) — so
+    // refusing the reattach would strand a live session behind a page reload and
+    // make the user restore the worktree just to reach output that never went
+    // anywhere. Hence the check sits after `resumed` is
     // known rather than at the top of the handler.
     if !resumed && !wt.trashed_at.is_empty() {
         return Err(err(
@@ -2153,11 +2290,14 @@ async fn mint_ticket(
     // upgrade reaches the UI as an indistinguishable "connection lost". The
     // claim at attach time remains as the race backstop — this check is
     // advisory by construction, since nothing holds a slot between the two.
-    if !resumed && LIVE_SESSIONS.load(Ordering::Acquire) >= MAX_SESSIONS {
+    let cap = db.max_sessions();
+    CAP_HINT.store(cap, Ordering::Relaxed);
+    if !resumed && LIVE_SESSIONS.load(Ordering::Acquire) >= cap {
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
-                "too many terminal sessions ({MAX_SESSIONS}) — close a terminal pane to free one"
+                "too many terminal sessions ({cap}) — close a terminal pane, or raise \
+                 \"Maximum open terminals\" in Settings › Terminal"
             ),
         ));
     }
@@ -3508,10 +3648,14 @@ async fn attach(
     let (session, resumed) = match obtain_session(&ticket, size).await {
         Ok(s) => s,
         Err(SessionError::AtCapacity) => {
-            warn!("refusing terminal: {MAX_SESSIONS} sessions already live");
+            let cap = session_cap();
+            warn!("refusing terminal: {cap} sessions already live");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
-                "too many terminal sessions",
+                format!(
+                    "too many terminal sessions ({cap}) — close a terminal pane, or raise \
+                     \"Maximum open terminals\" in Settings › Terminal"
+                ),
             )
                 .into_response();
         }
@@ -3969,8 +4113,12 @@ async fn adopt_one(path: &FsPath) -> bool {
     // an over-cap holder got a connection that was immediately dropped, and a
     // dropped connection restarts its orphan clock — so a daemon restarting more
     // often than the grace kept a 49th shell alive forever.
-    let Some(slot) = SessionSlot::claim() else {
-        warn!("not adopting {path:?}: already at {MAX_SESSIONS} sessions");
+    //
+    // Against the hard ceiling rather than `terminal.maxSessions`: these shells
+    // are already running, and the setting's promise is that lowering it never
+    // closes one — a restart after lowering it would otherwise orphan the extras.
+    let Some(slot) = SessionSlot::claim_from(&LIVE_SESSIONS, ADOPT_CEILING) else {
+        warn!("not adopting {path:?}: already at {ADOPT_CEILING} sessions");
         return false;
     };
 
@@ -4332,6 +4480,14 @@ enum ServerControl {
     Exit { code: u32 },
     /// This socket was displaced by a newer attach to the same session.
     TakenOver,
+    /// The session is being closed because its worktree has been in the trash
+    /// past `terminal.trashedGraceMinutes`. Sent just before the hangup, so the
+    /// client can drop the pane's terminal without reporting an exit; restoring
+    /// the worktree then opens it the way a reload opens a pane whose shell is
+    /// gone. A bundle older than this frame ignores it and reads the close as a
+    /// lost connection: its reconnect attempts are refused while the worktree is
+    /// in the trash, and after a restore its Reconnect button opens a new shell.
+    Trashed,
     /// Output was produced faster than this socket could take it, so the
     /// display is missing bytes.
     Lagged,
@@ -4547,7 +4703,24 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                             break;
                         }
                     }
-                    let _ = ws_tx.send(ServerControl::Exit { code }.frame()).await;
+                    // `select!` is unbiased, so a socket that was busy sending
+                    // output can find this arm and the `Trashed` frame ready at
+                    // once. The hangup that exit answers is the one `Trashed`
+                    // announced, and the client must hear that instead.
+                    let mut trashed = false;
+                    loop {
+                        match control.try_recv() {
+                            Ok(ServerControl::Trashed) => trashed = true,
+                            Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) => {}
+                            Err(_) => break,
+                        }
+                    }
+                    let last = if trashed {
+                        ServerControl::Trashed
+                    } else {
+                        ServerControl::Exit { code }
+                    };
+                    let _ = ws_tx.send(last.frame()).await;
                     break;
                 }
             },
@@ -4561,6 +4734,12 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                     if *session.attach_epoch.borrow() == epoch
                         && ws_tx.send(frame.frame()).await.is_err()
                     {
+                        break;
+                    }
+                    // The last frame this socket sends: the hangup is already on its
+                    // way, and an `exit` after it would turn the client's quiet
+                    // let-go back into an ended terminal.
+                    if matches!(frame, ServerControl::Trashed) {
                         break;
                     }
                 }
@@ -6004,12 +6183,19 @@ mod tests {
         }
 
         fn plant_ticket(session: &str, cwd: &std::path::Path) -> String {
+            plant_ticket_in(session, cwd, 1)
+        }
+
+        /// [`plant_ticket`] for a worktree of the test's own, for anything that
+        /// acts on every session of a worktree — the registry is process-global,
+        /// and worktree `1` holds every other test's shells.
+        fn plant_ticket_in(session: &str, cwd: &std::path::Path, worktree_id: i64) -> String {
             let key = uuid::Uuid::new_v4().simple().to_string();
             TICKETS.lock().unwrap().insert(
                 key.clone(),
                 Ticket {
                     session_id: session.to_owned(),
-                    worktree_id: 1,
+                    worktree_id,
                     cwd: cwd.to_path_buf(),
                     label: "test".to_owned(),
                     pane: None,
@@ -7541,6 +7727,68 @@ mod tests {
                 !SESSIONS.lock().await.contains_key(&sid),
                 "a session no client has a pane for is collected once its grace is up"
             );
+        }
+
+        /// A trashed worktree's shells are closed even while a client still has
+        /// their panes — the keep that spares them from the detach reaper is
+        /// exactly what used to hold them open for the whole time in the trash —
+        /// and an attached socket is told why before the exit arrives.
+        ///
+        /// Worktree ids here are the test's own: `close_sessions_in` ends every
+        /// session of a worktree, and the registry is shared with every other
+        /// test in the binary.
+        #[tokio::test]
+        async fn a_trashed_worktree_s_shells_are_closed_even_when_kept() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let trashed = 900_000 + (uuid::Uuid::new_v4().as_u128() % 50_000) as i64;
+            let untouched = trashed + 50_000;
+            let sid = session_id();
+            let other = session_id();
+            let client = format!("test-trash-{sid}");
+
+            let attach = |sid: String, wt: i64| {
+                let t = plant_ticket_in(&sid, dir.path(), wt);
+                async move {
+                    let (ws, _) = tokio_tungstenite::connect_async(attach_request(
+                        addr,
+                        &format!("ticket={t}"),
+                        Some(&good_origin()),
+                    ))
+                    .await
+                    .expect("handshake");
+                    ws
+                }
+            };
+            let mut ws = attach(sid.clone(), trashed).await;
+            read_control(&mut ws, "ready").await;
+            let mut kept = attach(other.clone(), untouched).await;
+            read_control(&mut kept, "ready").await;
+            crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
+
+            let ended = close_sessions_in(&[trashed].into_iter().collect(), "test").await;
+            assert_eq!(ended, 1, "only the trashed worktree's session ends");
+            read_control(&mut ws, "trashed").await;
+            // The last frame: the socket closes without an `exit`, which would
+            // turn the client's quiet let-go back into an ended terminal.
+            loop {
+                match tokio::time::timeout(STEP_TIMEOUT, ws.next()).await {
+                    Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(WsMessage::Close(_)))) => break,
+                    Ok(Some(Ok(WsMessage::Text(t)))) => {
+                        panic!("no control frame may follow `trashed`, got {t}")
+                    }
+                    Ok(Some(Ok(_))) => continue,
+                    Err(_) => panic!("the socket did not close after `trashed`"),
+                }
+            }
+            assert!(!SESSIONS.lock().await.contains_key(&sid));
+            assert!(
+                SESSIONS.lock().await.contains_key(&other),
+                "another worktree's shell is left alone"
+            );
+
+            crate::feedback_server::ide::forget_client_for_test(&client).await;
+            end_session(&other, "test cleanup").await;
         }
 
         /// The reload case, which the reaper's own once-a-minute restart cannot

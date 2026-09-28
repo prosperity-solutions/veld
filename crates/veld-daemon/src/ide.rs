@@ -121,7 +121,7 @@ const MAX_HELD: usize = 256;
 
 /// Cap on the PTY sessions one client may report keeping alive.
 ///
-/// Comfortably above `pty::MAX_SESSIONS` (48), which is the real bound on how
+/// Comfortably above the `terminal.maxSessions` ceiling (128), the real bound on how
 /// many shells can exist: a client naming more than that is naming sessions the
 /// daemon does not have, and the extras cost a `HashSet` entry each until its
 /// socket closes. Present for the same reason [`MAX_HELD`] is — a buggy or
@@ -985,8 +985,8 @@ static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().
 /// strings under this lock once a minute, blocking every claim and hello for the
 /// duration. **What this shape removes is the allocation**, not the factor of
 /// clients: the work here is still a probe per client per candidate, but the
-/// reaper only asks about sessions that exist, which `pty::MAX_SESSIONS` caps at
-/// 48. Hash probes over a bounded list, rather than a growing pile of `String`s.
+/// reaper only asks about sessions that exist, which `terminal.maxSessions` caps
+/// at 128 at most. Hash probes over a bounded list, rather than a growing pile of `String`s.
 ///
 /// The decision lives on [`Registry::kept_among`] so it can be tested over a
 /// local registry, the way every other decision in this module is.
