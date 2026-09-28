@@ -136,13 +136,29 @@ pub struct LoadedConfig {
     /// live in other files, which is exactly the question `veld runs diff` exists
     /// to answer.
     pub config_hash: String,
+    /// Every path whose change could change this load's result: the root file
+    /// and its directory, every glob match (including one that failed to read or
+    /// parse), and every directory the glob walk visited. Files are recorded by
+    /// `read`, which every read in [`load`] goes through; a new input read any
+    /// other way is invisible to the daemon's config cache.
+    ///
+    /// A directory is here because adding, removing or renaming an entry in it
+    /// is what changes a glob's matches, and doing so updates the directory's
+    /// own mtime. Re-checking these paths is therefore enough to know a cached
+    /// load is still current, without walking the globs again — see the
+    /// daemon's config cache.
+    pub watched: Vec<PathBuf>,
 }
 
 /// Load a config, following `include` globs from the root file.
 pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     let project_root = crate::config::project_root(root_path);
 
-    let root_text = read(root_path)?;
+    // The project root is watched for what it may *gain*: a second root spelling
+    // beside this one, and the entries the glob walk below lists. Every file is
+    // added by `read` as it is opened.
+    let mut watched = vec![project_root.clone()];
+    let root_text = read(root_path, &mut watched)?;
     let root_doc = parse_document(&root_text, root_path)?;
 
     // The two keys only the root file must have. Everything else is optional
@@ -198,7 +214,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     for glob in &globs {
         // Sorted, so error messages and load order are deterministic across
         // machines and filesystems.
-        let mut matches = expand_glob(&project_root, glob);
+        let mut matches = expand_glob_watching(&project_root, glob, &mut watched);
         matches.sort();
         for path in matches {
             // The root file may also match its own glob (`*.json`); loading it
@@ -207,7 +223,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
                 continue;
             }
             let relative = relative_to(&project_root, &path);
-            let text = match read(&path) {
+            let text = match read(&path, &mut watched) {
                 Ok(text) => text,
                 Err(e) => {
                     file_findings.push(crate::config::Finding::unreadable_include(
@@ -266,6 +282,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
         config_hash: hash_files(&mut hash_inputs),
         files,
         globs,
+        watched,
     })
 }
 
@@ -284,7 +301,12 @@ fn hash_files(inputs: &mut [(PathBuf, Vec<u8>)]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn read(path: &Path) -> Result<String, ConfigError> {
+/// Read one input of the load, recording it in `watched` first — so it is
+/// watched whether or not the read succeeds, and so a new input cannot be read
+/// without being watched: a file the daemon's config cache does not watch is one
+/// whose edits the IDE never shows. Every file `load` reads goes through here.
+fn read(path: &Path, watched: &mut Vec<PathBuf>) -> Result<String, ConfigError> {
+    watched.push(path.to_path_buf());
     std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError {
         path: path.to_path_buf(),
         source: e,
@@ -579,26 +601,35 @@ fn merge_reserved(into: &mut Option<serde_json::Value>, add: &serde_json::Value)
 /// (never `/`), `?` matches one character, `**` as a whole segment matches any
 /// number of segments. No brace expansion, no character classes — if a config
 /// needs those, list another glob.
+#[cfg(test)]
 fn expand_glob(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    expand_glob_watching(root, pattern, &mut Vec::new())
+}
+
+/// [`expand_glob`], also recording in `dirs` every directory the walk looked
+/// into — whether it listed it or only probed it for a literal name, since a
+/// file appearing under that name changes the directory just the same.
+fn expand_glob_watching(root: &Path, pattern: &str, dirs: &mut Vec<PathBuf>) -> Vec<PathBuf> {
     let segments: Vec<&str> = pattern.split('/').filter(|s| !s.is_empty()).collect();
     let mut out = Vec::new();
-    walk(root, &segments, &mut out);
+    walk(root, &segments, &mut out, dirs);
     out
 }
 
-fn walk(dir: &Path, segments: &[&str], out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, segments: &[&str], out: &mut Vec<PathBuf>, dirs: &mut Vec<PathBuf>) {
     let Some((head, rest)) = segments.split_first() else {
         return;
     };
+    dirs.push(dir.to_path_buf());
 
     if *head == "**" {
         // Match zero segments (try the rest right here) …
-        walk(dir, rest, out);
+        walk(dir, rest, out, dirs);
         // … and one-or-more, by recursing into every subdirectory.
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry.file_type().is_ok_and(|t| t.is_dir()) {
-                    walk(&entry.path(), segments, out);
+                    walk(&entry.path(), segments, out, dirs);
                 }
             }
         }
@@ -614,7 +645,7 @@ fn walk(dir: &Path, segments: &[&str], out: &mut Vec<PathBuf>) {
                 out.push(candidate);
             }
         } else if candidate.is_dir() {
-            walk(&candidate, rest, out);
+            walk(&candidate, rest, out, dirs);
         }
         return;
     }
@@ -636,7 +667,7 @@ fn walk(dir: &Path, segments: &[&str], out: &mut Vec<PathBuf>) {
                 out.push(path);
             }
         } else if path.is_dir() {
-            walk(&path, rest, out);
+            walk(&path, rest, out, dirs);
         }
     }
 }
@@ -1292,6 +1323,39 @@ mod tests {
         )]);
         let loaded = load(&dir.path().join("veld.json")).expect("must not self-duplicate");
         assert_eq!(loaded.files.len(), 1);
+    }
+
+    /// The daemon's config cache re-checks exactly these paths instead of parsing
+    /// again, so anything the load depended on and left out is an edit the IDE
+    /// never shows.
+    #[test]
+    fn watched_covers_every_file_read_and_every_directory_probed() {
+        let dir = project(&[
+            ("veld.json", ROOT_WITH_INCLUDE),
+            ("veld.d/a.jsonc", &node_file("a")),
+            ("veld.d/broken.jsonc", "{ not json"),
+            ("services/api/veld.node.json", &node_file("api")),
+            ("services/empty/README.md", ""),
+        ]);
+        let loaded = load(&dir.path().join("veld.json")).unwrap();
+        for file in &loaded.files {
+            assert!(loaded.watched.contains(&file.path), "{:?}", file.path);
+        }
+        let root = dir.path();
+        for expected in [
+            root.join("veld.json"),
+            // Unparseable, so not among `files` — and still an input: fixing it
+            // changes the result.
+            root.join("veld.d/broken.jsonc"),
+            root.to_path_buf(),
+            root.join("veld.d"),
+            root.join("services"),
+            // Probed for `veld.node.json` and found without one: a file appearing
+            // there changes this directory, not any file already watched.
+            root.join("services/empty"),
+        ] {
+            assert!(loaded.watched.contains(&expected), "{expected:?}");
+        }
     }
 
     #[test]

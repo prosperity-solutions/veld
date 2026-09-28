@@ -879,11 +879,7 @@ function ensure(
     for (let i = 0; i < data.length; i += 1) bytes[i] = data.charCodeAt(i) & 0xff;
     s.ws!.send(bytes);
   });
-  term.onResize(({ cols, rows }) => {
-    if (s.ws?.readyState === WebSocket.OPEN) {
-      s.ws.send(JSON.stringify({ type: "resize", cols, rows }));
-    }
-  });
+  term.onResize(() => sendSize(s));
   // A wheel over a full-screen program (the alternate buffer: a pager like
   // `git log`'s, a TUI) scrolls it, the way a native terminal does — xterm.js
   // leaves the alternate buffer alone, so without this the wheel does nothing
@@ -1193,6 +1189,13 @@ function armInitialPrompt(s: Session, generation: number): void {
     );
   };
   tick();
+}
+
+/** Tell the pty the size xterm has now. A no-op until the socket is open. */
+function sendSize(s: Session): void {
+  if (s.ws?.readyState === WebSocket.OPEN) {
+    s.ws.send(JSON.stringify({ type: "resize", cols: s.term.cols, rows: s.term.rows }));
+  }
 }
 
 function attachUrl(ticket: string, cols: number, rows: number): string {
@@ -1616,6 +1619,11 @@ function handleControl(s: Session, raw: string): void {
       // injecting a line into its screen corrupts it. See writeNotice.
       // The pane may have been resized between minting the ticket and the
       // socket opening; re-assert the size now that the shell can hear it.
+      // Sent explicitly as well as re-fitted: a resize in that window already
+      // reached xterm but was dropped by `onResize`'s OPEN gate, and `fit()`
+      // only reports a size that differs from xterm's — so a fit alone leaves
+      // the shell wrapping one width while xterm draws another.
+      sendSize(s);
       requestFit(s);
       break;
     case "exit":

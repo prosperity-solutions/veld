@@ -2996,21 +2996,47 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 
 /* The slot React owns; the element inside it is the live terminal, reparented
    here by panes/terminalHost.ts.
-   The padding MUST live on the slot, not on .term-host: fit-addon sizes the
-   grid from the computed height of the terminal's parent element (which is
-   .term-host), and with border-box sizing that height still includes the
-   parent's own padding. Padding there therefore bought a row that doesn't fit,
-   and the bottom line — a status bar, a prompt — rendered off the pane. Here
-   it insets the absolutely-positioned .term-host instead, so what fit measures
-   is exactly what is visible. */
-.term-slot,
-.term-host {
+   The gutter is .term-host's `inset`, and MUST NOT be padding on either
+   element. fit-addon sizes the grid from the computed size of the terminal's
+   parent element (which is .term-host), and with border-box sizing that still
+   includes the parent's own padding — padding there bought a row and a column
+   that don't fit, so the bottom line and the last column rendered off the
+   pane. Padding on .term-slot does nothing at all: an absolutely-positioned
+   child is laid out against its container's *padding* box, so `inset: 0`
+   ignored it and the grid ran flush to the pane's edges. Insetting .term-host
+   itself makes what fit measures exactly what is visible.
+   No gutter on the right: xterm keeps a scrollbar lane there, which fit leaves
+   free and which already reads as a margin — a gutter beside it only widened
+   the blank strip, and put the scrollbar a gutter away from the pane's edge. */
+.term-slot {
   position: absolute;
   inset: 0;
 }
 
-.term-slot {
-  padding: 6px 8px;
+.term-host {
+  position: absolute;
+  inset: 6px 0 6px 8px;
+}
+
+/* xterm's DOM renderer lays a row out with a letter-spacing correction that is
+   not exact: each character lands ~0.01px further right than its cell, so on a
+   wide pane the last column ends 2–4px past the row's width. The renderer sets
+   `overflow: hidden` on every row (inline, hence `!important`) to stop a tall
+   glyph spilling onto the next row — and that also cut off the last column,
+   leaving a letter half-drawn and a block cursor a sliver. Clip vertically only;
+   `clip` rather than `hidden` because only `clip` lets the other axis stay
+   `visible`. The overflow lands in the scrollbar lane fit reserves, drawn over
+   the scrollbar's first few pixels — which also take a click there as the
+   terminal's rather than the scrollbar's. With `terminal.scrollback` at 0 fit
+   reserves no lane, so the last column still meets the pane's edge there. */
+@supports (overflow: clip) {
+  /* Only where `clip` exists: without it `overflow-y` falls back to xterm's
+     inline `hidden`, and `visible` beside `hidden` computes to `auto` — a
+     horizontal scrollbar on every row, which is worse than the clipped column. */
+  .term-host .xterm-rows > div {
+    overflow-x: visible !important;
+    overflow-y: clip !important;
+  }
 }
 
 .term-status {
