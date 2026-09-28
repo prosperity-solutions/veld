@@ -132,7 +132,6 @@ import {
   browserCommand,
   browserDevTools,
   browserStatus,
-  clearBrowserSession,
   findNext,
   findPrevious,
   findSupported,
@@ -318,11 +317,15 @@ export function BrowserPane(props: {
   sessionRegistry: SessionRegistry;
   /** The name the prompt for a new session starts with. */
   newSessionName: string;
-  /** Create a session with this name and move this pane onto it. Absent at the
-   *  slot cap. */
-  onAddSession: ((name: string) => void) | undefined;
+  /** Create a session with this name and move this pane onto it; `false` if
+   *  none was made (the cap was reached elsewhere). Absent at the cap. */
+  onAddSession: ((name: string) => boolean) | undefined;
   onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** Removed sessions whose jars may still hold data, for the Clear menu. */
+  retiredSessions: BrowserProfile[];
+  /** Clear one session's data (and forget it, if it was a removed one). */
+  onClearSession: (profile: BrowserProfile) => void;
   /** Clear every jar that may hold data, including retired and legacy ones. */
   onClearAllSessions: () => void;
 }) {
@@ -680,8 +683,11 @@ export function BrowserPane(props: {
     { mode: "add" } | { mode: "rename"; profile: BrowserProfile } | null
   >(null);
   const [nameDraft, setNameDraft] = useState("");
+  // Set when an add was refused, so the bar says why instead of closing on it.
+  const [nameRefused, setNameRefused] = useState(false);
   const startNaming = (next: NonNullable<typeof naming>) => {
     setNameDraft(next.mode === "add" ? props.newSessionName : nameOf(next.profile));
+    setNameRefused(false);
     setNaming(next);
   };
   const commitName = () => {
@@ -690,7 +696,11 @@ export function BrowserPane(props: {
     if (naming.mode === "add") {
       // An emptied field on *add* still adds — the user asked for a session, and
       // the prefill they deleted is the name it gets.
-      props.onAddSession?.(name ?? props.newSessionName);
+      const added = props.onAddSession?.(name ?? props.newSessionName) ?? false;
+      if (!added) {
+        setNameRefused(true);
+        return;
+      }
     } else if (name) {
       props.onRenameSession(naming.profile, name);
     }
@@ -1786,14 +1796,28 @@ export function BrowserPane(props: {
                         {p === profile ? " · this pane" : ""}
                       </Menu.Item>
                     ))}
+                    {/* Removed sessions: not listed above, but their cookies are
+                    still on disk until cleared, and a random id means nothing
+                    will ever bring them back to be cleared from the list. */}
+                    {props.retiredSessions.length > 0 && (
+                      <>
+                        <Menu.Label>Removed sessions</Menu.Label>
+                        {props.retiredSessions.map((p) => (
+                          <Menu.Item
+                            key={p}
+                            leftSection={<SessionDot color={colorOf(p)} />}
+                            onClick={() => setConfirmClear(p)}
+                          >
+                            {nameOf(p)}
+                          </Menu.Item>
+                        ))}
+                      </>
+                    )}
                     <Menu.Divider />
-                    {/* The reachable way to clear a session nothing is using any
-                    more: its slot is not listed above, but its cookies are still
-                    on disk. */}
                     <Menu.Item
                       onClick={() => setConfirmClear("all")}
                     >
-                      All sessions, including retired ones
+                      All sessions, including removed ones
                     </Menu.Item>
                   </Menu.Sub.Dropdown>
                 </Menu.Sub>
@@ -2531,7 +2555,7 @@ export function BrowserPane(props: {
               if (confirmClear === "all") {
                 props.onClearAllSessions();
               } else {
-                clearBrowserSession(confirmClear);
+                props.onClearSession(confirmClear);
               }
               setConfirmClear(null);
             }}
@@ -2559,7 +2583,11 @@ export function BrowserPane(props: {
             <SessionDot color={colorOf(naming.profile)} size={10} />
           )}
           <span className="faint">
-            {naming.mode === "add" ? "New session" : "Rename session"}
+            {nameRefused
+              ? `All ${MAX_EXTRA_SESSIONS} sessions exist`
+              : naming.mode === "add"
+                ? "New session"
+                : "Rename session"}
           </span>
           <input
             className="session-name-input"

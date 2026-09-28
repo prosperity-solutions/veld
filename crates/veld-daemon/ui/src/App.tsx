@@ -215,6 +215,7 @@ import {
   serializeSessionRegistry,
   sessionsInUse,
   suggestSessionName,
+  retiredSessions,
   activeTab,
   activateTab,
   addTab,
@@ -5344,6 +5345,22 @@ function AppInner(props: {
     () => (worktree ? sessionSetFor(sessionRegistry, worktree.id, layout) : []),
     [sessionRegistry, worktree?.id, layout],
   );
+  // Another window's add or rename. `usePersisted` reads once, and a detached
+  // window is where a session often gets made — without this the main window
+  // showed the tab handed back to it as "Unnamed session" until its next reload.
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key !== null && e.key !== SESSIONS_STORAGE_KEY) return;
+      setSessionsRaw(window.localStorage.getItem(SESSIONS_STORAGE_KEY) ?? "");
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, [setSessionsRaw]);
+  const inUseEverywhere = () => sessionsInUse(Object.values(layouts));
+  const retired = useMemo(
+    () => retiredSessions(sessionRegistry, sessionsInUse(Object.values(layouts))),
+    [sessionRegistry, layouts],
+  );
   /**
    * Change the registry against what is *currently* on disk.
    *
@@ -5364,16 +5381,21 @@ function AppInner(props: {
   // the on-disk registry, since another tab may have added one in the meantime.
   const canAdd = worktree ? canAddSession(sessionRegistry, worktree.id, layout) : false;
   const newSessionName = worktree ? suggestSessionName(sessionRegistry, worktree.id, layout) : "";
-  const addSessionFor = (tabId: string, name: string) => {
-    if (!worktree || !layout) return;
+  // `false` when nothing was added — another window reached the cap since this
+  // one rendered — so the prompt can stay up and say so instead of vanishing
+  // with the typed name.
+  const addSessionFor = (tabId: string, name: string): boolean => {
+    if (!worktree || !layout) return false;
     let made: BrowserProfile | null = null;
     editSessions((current) => {
       const added = addSession(current, worktree.id, layout, name);
       made = added?.id ?? null;
       return added?.registry ?? current;
     });
+    if (!made) return false;
     // Adding is only ever worth doing to put this pane on it.
-    if (made) setLayout((prev) => updateTab(prev, tabId, { profile: made! }));
+    setLayout((prev) => updateTab(prev, tabId, { profile: made! }));
+    return true;
   };
   const renameSessionTo = (profile: BrowserProfile, name: string) =>
     editSessions((current) => renameSession(current, profile, name));
@@ -5386,20 +5408,43 @@ function AppInner(props: {
     editSessions((current) => removeSession(current, worktree.id, layout, profile));
     setLayout((prev) =>
       allTabs(prev)
-        .filter((t) => t.kind === "browser" && (t.profile ?? "default") === profile)
-        .reduce((acc, t) => updateTab(acc, t.id, { profile: "default" }), prev),
+        .filter((t) => t.kind === "browser")
+        .reduce((acc, t) => {
+          // Its remembered URL goes with it: the id is random, so nothing will
+          // ever be on it again, and `urls` is persisted with the layout.
+          const patch: Partial<PaneTab> = {};
+          if (t.urls && Object.hasOwn(t.urls, profile)) {
+            const urls = { ...t.urls };
+            delete urls[profile];
+            patch.urls = urls;
+          }
+          if ((t.profile ?? "default") === profile) patch.profile = "default";
+          return Object.keys(patch).length > 0 ? updateTab(acc, t.id, patch) : acc;
+        }, prev),
     );
   };
-  // Every jar that may hold data, retired and legacy ones included — then the
-  // retired ones are forgotten, since nothing of theirs is left to name.
-  const clearAllSessions = () => {
-    allSessionJars(readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY))).forEach(
-      clearBrowserSession,
-    );
-    editSessions((current) =>
-      forgetRetiredSessions(current, sessionsInUse(Object.values(layouts))),
-    );
+  /**
+   * Clear jars, then forget the retired ones among them that really were
+   * emptied — a failed clear keeps its jar remembered, or its cookies would stay
+   * on disk with nothing left that could reach them.
+   */
+  const clearSessions = async (ids: BrowserProfile[]) => {
+    const results = await Promise.all(ids.map(clearBrowserSession));
+    const cleared = ids.filter((_, i) => results[i]);
+    if (cleared.length > 0) {
+      editSessions((current) => forgetRetiredSessions(current, cleared, inUseEverywhere()));
+    }
   };
+  const clearOneSession = (id: BrowserProfile) => void clearSessions([id]);
+  // Every jar that may hold data: retired and legacy ones, and any a pane is on
+  // that this registry has lost.
+  const clearAllSessions = () =>
+    void clearSessions(
+      allSessionJars(
+        readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY)),
+        inUseEverywhere(),
+      ),
+    );
 
   // The top bar's globe: a browser pane with nothing in it, which is where the
   // run's URLs live now (`panes/PlaceList.tsx`). An existing blank pane is already
@@ -6966,6 +7011,8 @@ function AppInner(props: {
             onAddSession={canAdd ? addSessionFor : undefined}
             onRenameSession={renameSessionTo}
             onRemoveSession={removeSessionFrom}
+            retiredSessions={retired}
+            onClearSession={clearOneSession}
             onClearAllSessions={clearAllSessions}
             quickSwitches={quickSwitches}
             showWorking={activity.showWorking}
@@ -7258,6 +7305,8 @@ function AppInner(props: {
               onAddSession={canAdd ? addSessionFor : undefined}
               onRenameSession={renameSessionTo}
               onRemoveSession={removeSessionFrom}
+              retiredSessions={retired}
+              onClearSession={clearOneSession}
               onClearAllSessions={clearAllSessions}
               quickSwitches={quickSwitches}
               showWorking={activity.showWorking}

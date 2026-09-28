@@ -1183,22 +1183,28 @@ export function onFindResult(
 }
 
 /**
- * Clear one session slot's cookies and storage, then reload any pane using it.
+ * Clear one session's cookies and storage, then reload any pane using it.
+ * Resolves `true` once the jar is empty, `false` if it could not be cleared.
  *
- * Addressed by slot rather than by pane, so a session with no pane open can still
- * be emptied — that is what "remove this session" means when the slots
- * themselves are fixed. Electron only: an iframe's cookie jar is the browser's
- * own, and clearing it is not ours to do.
+ * Addressed by session id rather than by pane, so a session with no pane open —
+ * a removed one, whose jar is still on disk — can still be emptied. Electron
+ * only: an iframe's cookie jar is the browser's own, and clearing it is not ours
+ * to do, so there it resolves `false`.
  */
-export function clearBrowserSession(profile: BrowserProfile): void {
-  if (!desktop) return;
-  // Reported on every pane using the slot: the menu item claims to sign them out,
-  // so a refused or failed clear must not look like it worked.
-  void desktop.clearSession(profile).catch((e: unknown) => {
-    for (const v of views.values()) {
-      if (v.profile === profile) reportFailure(v)(e);
-    }
-  });
+export function clearBrowserSession(profile: BrowserProfile): Promise<boolean> {
+  if (!desktop) return Promise.resolve(false);
+  // Reported on every pane using the session: the menu item claims to sign them
+  // out, so a refused or failed clear must not look like it worked. The result
+  // is what lets the caller forget a jar only once it is really empty.
+  return desktop.clearSession(profile).then(
+    () => true,
+    (e: unknown) => {
+      for (const v of views.values()) {
+        if (v.profile === profile) reportFailure(v)(e);
+      }
+      return false;
+    },
+  );
 }
 
 /**

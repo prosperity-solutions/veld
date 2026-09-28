@@ -30,6 +30,7 @@ import {
   parseSessionRegistry,
   removeSession,
   renameSession,
+  retiredSessions,
   serializeSessionRegistry,
   sessionColor,
   suggestSessionName,
@@ -1237,13 +1238,19 @@ describe("browser sessions", () => {
     expect(sessionColor(d, "default")).toBeNull();
   });
 
+  it("does not mistake an Object.prototype key for a known jar", () => {
+    expect(isSessionId("constructor")).toBe(true);
+    expect(sessionName(EMPTY, "constructor")).toBe("Unnamed session");
+    expect(sessionColor(EMPTY, "constructor")).toMatch(/^#/);
+  });
+
   it("names a jar it does not know without showing its id", () => {
     expect(sessionName(EMPTY, "default")).toBe("Default");
     expect(sessionColor(EMPTY, "default")).toBeNull();
     expect(sessionName(EMPTY, "s-lost")).toBe("Unnamed session");
     expect(sessionColor(EMPTY, "s-lost")).toBe(sessionColor(EMPTY, "s-lost"));
-    // A legacy animal keeps the colour it always had.
-    expect(sessionName(EMPTY, "otter")).toBe("Session 2");
+    // A legacy animal keeps the name and colour it was always shown with.
+    expect(sessionName(EMPTY, "otter")).toBe("Otter");
     expect(sessionColor(EMPTY, "otter")).toBe(SESSION_COLORS[0]);
     expect(sessionColor(EMPTY, "narwhal")).toBe(SESSION_COLORS[7]);
   });
@@ -1254,8 +1261,8 @@ describe("browser sessions", () => {
     // The ids are adopted, not rewritten: renaming a partition would lose its cookies.
     expect(sessionSetFor(reg, 3)).toEqual(["default", "otter", "gecko"]);
     expect(sessionSetFor(reg, 4)).toEqual(["default", "wombat"]);
-    expect(reg.jars.otter).toEqual({ name: "Session 2", color: 0 });
-    expect(reg.jars.gecko).toEqual({ name: "Session 4", color: 2 });
+    expect(reg.jars.otter).toEqual({ name: "Otter", color: 0 });
+    expect(reg.jars.gecko).toEqual({ name: "Gecko", color: 2 });
     // A v2 registry wins over v1, even an empty one.
     expect(parseSessionRegistry(serializeSessionRegistry(EMPTY), v1)).toEqual(EMPTY);
   });
@@ -1308,15 +1315,26 @@ describe("browser sessions", () => {
     const a = addSession(EMPTY, 1, undefined, "Admin", "s-a")!.registry;
     const removed = removeSession(a, 1, undefined, "s-a");
     expect(sessionSetFor(removed, 1)).toEqual(["default"]);
-    // Retired, not forgotten: its cookies are still on disk.
+    // Retired, not forgotten: its cookies are still on disk, so both "clear
+    // every session" and the Clear menu's removed list reach it.
     expect(allSessionJars(removed)).toContain("s-a");
+    expect(retiredSessions(removed)).toEqual(["s-a"]);
+    expect(retiredSessions(a)).toEqual([]);
+    expect(retiredSessions(removed, ["s-a"])).toEqual([]);
     // Legacy jars are always reachable by "clear every session".
     expect(allSessionJars(EMPTY)).toEqual(["default", ...LEGACY_SESSION_IDS]);
-    expect(forgetRetiredSessions(removed).jars).toEqual({});
+    // Forgotten only once its clear succeeded.
+    expect(forgetRetiredSessions(removed, []).jars["s-a"]?.name).toBe("Admin");
+    expect(forgetRetiredSessions(removed, ["s-a"]).jars).toEqual({});
     // A pane still on it keeps its name.
-    expect(forgetRetiredSessions(removed, ["s-a"]).jars["s-a"]?.name).toBe("Admin");
+    expect(forgetRetiredSessions(removed, ["s-a"], ["s-a"]).jars["s-a"]?.name).toBe("Admin");
     // Listed sessions are never forgotten.
-    expect(forgetRetiredSessions(a).jars["s-a"]?.name).toBe("Admin");
+    expect(forgetRetiredSessions(a, ["s-a"]).jars["s-a"]?.name).toBe("Admin");
+  });
+
+  it("clears every jar a pane is on, even one the registry lost", () => {
+    // Layouts are the daemon's and outlive this client's localStorage.
+    expect(allSessionJars(EMPTY, ["s-lost"])).toContain("s-lost");
   });
 });
 

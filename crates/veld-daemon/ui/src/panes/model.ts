@@ -705,10 +705,17 @@ export interface SessionJar {
  *
  * `localStorage`, not the daemon: a session only means anything under Veld
  * Desktop (the browser build's iframe backend has no cookie jars of its own), so
- * there is no second client for the list to disagree with — it is one client's
- * record of its own capability, not the settings store #167 batch 5 needs. And
- * `localStorage` rather than `sessionStorage`: unlike a layout this names no live
- * resource, so two windows sharing it is correct rather than a conflict.
+ * this is one client's record of its own capability, not the settings store
+ * #167 batch 5 needs. And `localStorage` rather than `sessionStorage`: unlike a
+ * layout this names no live resource, so two windows sharing it is correct
+ * rather than a conflict — App.tsx re-reads it on `storage` events so they agree.
+ *
+ * **The limit, stated:** layouts (`PaneTab.profile`) are the daemon's, so a
+ * client whose localStorage never saw this registry — a plain-browser `/ide` tab,
+ * or a Desktop whose profile was reset — restores the ids without their names,
+ * and shows them as "Unnamed session" in a colour derived from the id. Cookies
+ * are unaffected; only the label is. Moving the registry to the daemon is the
+ * fix if that ever matters more than keeping this client-local.
  */
 export interface SessionRegistry {
   jars: Record<BrowserProfile, SessionJar>;
@@ -745,11 +752,17 @@ export function cleanSessionName(raw: string): string | null {
  * from its id, so it at least does not flicker.
  */
 export function sessionJar(registry: SessionRegistry, id: BrowserProfile): SessionJar {
-  const known = registry.jars[id];
-  if (known) return known;
+  // `hasOwn`, not a plain lookup: `constructor` is a legal id, and `jars` is an
+  // ordinary object.
+  if (Object.hasOwn(registry.jars, id)) return registry.jars[id];
   if (id === "default") return { name: "Default", color: null };
   const legacy = (LEGACY_SESSION_IDS as readonly string[]).indexOf(id);
-  if (legacy >= 0) return { name: `Session ${legacy + 2}`, color: legacy };
+  if (legacy >= 0) {
+    // The name its user has been reading since sessions shipped ("Otter"), not a
+    // new one: an upgrade that renamed every session would leave them matching
+    // colours to guess which is which. Renaming it is one menu item away.
+    return { name: id.charAt(0).toUpperCase() + id.slice(1), color: legacy };
+  }
   let hash = 0;
   for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   return { name: "Unnamed session", color: hash % SESSION_COLORS.length };
@@ -809,9 +822,8 @@ function parseJson(raw: string | null): unknown {
  *
  * **Migration adopts the animal ids as they are.** Renaming a partition would
  * mean moving Chromium's directory for it or losing its cookies, and the id is
- * invisible now anyway, so there is nothing to gain. Each adopted jar is named
- * by the position its animal had ("Session 2" for otter, as before the animals
- * were shown), and keeps its colour.
+ * invisible now anyway, so there is nothing to gain. Each adopted jar keeps the
+ * name it was shown under ("Otter") and its colour; the user can rename it.
  */
 export function parseSessionRegistry(
   raw: string | null,
@@ -947,27 +959,59 @@ export function removeSession(
   return { ...registry, sets: { ...registry.sets, [worktreeId]: set } };
 }
 
-/** Every jar that may have data on disk, for "clear every session". */
-export function allSessionJars(registry: SessionRegistry): BrowserProfile[] {
+/**
+ * Every jar that may have data on disk, for "clear every session": the default,
+ * every legacy animal, everything the registry knows — and every jar a pane is
+ * on, because layouts are the daemon's and outlive this client's registry (a
+ * reset Veld Desktop profile keeps its layouts and loses its localStorage).
+ */
+export function allSessionJars(
+  registry: SessionRegistry,
+  inUse: Iterable<BrowserProfile> = [],
+): BrowserProfile[] {
   return [
-    ...new Set<BrowserProfile>(["default", ...LEGACY_SESSION_IDS, ...Object.keys(registry.jars)]),
+    ...new Set<BrowserProfile>([
+      "default",
+      ...LEGACY_SESSION_IDS,
+      ...Object.keys(registry.jars),
+      ...inUse,
+    ]),
   ];
 }
 
 /**
- * After every jar has been cleared: forget the retired ones. Nothing of theirs
- * is left on disk, so keeping their names would only make the registry grow.
+ * Removed sessions whose jars may still hold data: known to the registry, listed
+ * by no worktree and used by no pane. These are what the Clear menu offers below
+ * the live ones — otherwise a removed session's cookies could only be cleared by
+ * clearing everything.
+ */
+export function retiredSessions(
+  registry: SessionRegistry,
+  inUse: Iterable<BrowserProfile> = [],
+): BrowserProfile[] {
+  const live = new Set([...Object.values(registry.sets).flat(), ...inUse]);
+  return Object.keys(registry.jars).filter((id) => id !== "default" && !live.has(id));
+}
+
+/**
+ * Forget retired jars whose data has just been cleared: nothing of theirs is
+ * left on disk, so keeping their names would only make the registry grow.
+ *
+ * Only the ones in `cleared` — a clear that failed leaves its jar remembered, or
+ * its cookies would stay on disk with nothing left that could reach them. A pane
+ * still on a jar no set lists keeps its name too: it is the one place that jar
+ * is still visible.
  */
 export function forgetRetiredSessions(
   registry: SessionRegistry,
+  cleared: Iterable<BrowserProfile>,
   inUse: Iterable<BrowserProfile> = [],
 ): SessionRegistry {
-  // A pane still on a jar no set lists keeps its name: it is the one place that
-  // jar is still visible.
-  const listed = new Set([...Object.values(registry.sets).flat(), ...inUse]);
+  const gone = new Set(retiredSessions(registry, inUse));
+  const forget = new Set([...cleared].filter((id) => gone.has(id)));
   const jars: Record<BrowserProfile, SessionJar> = {};
   for (const [id, jar] of Object.entries(registry.jars)) {
-    if (id === "default" || listed.has(id)) jars[id] = jar;
+    if (!forget.has(id)) jars[id] = jar;
   }
   return { ...registry, jars };
 }

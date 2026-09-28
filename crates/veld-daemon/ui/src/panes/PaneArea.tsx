@@ -394,9 +394,12 @@ export function PaneArea(props: {
   sessionRegistry: SessionRegistry;
   /** The name a new session's prompt starts with. */
   newSessionName: string;
-  onAddSession: ((tabId: string, name: string) => void) | undefined;
+  onAddSession: ((tabId: string, name: string) => boolean) | undefined;
   onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** Removed sessions whose jars may still hold data. */
+  retiredSessions: BrowserProfile[];
+  onClearSession: (profile: BrowserProfile) => void;
   onClearAllSessions: () => void;
   /** Which one-click toggles a browser pane's chrome shows. */
   quickSwitches: QuickSwitchPrefs;
@@ -1251,6 +1254,8 @@ export function PaneArea(props: {
               onAddSession={props.onAddSession}
               onRenameSession={props.onRenameSession}
               onRemoveSession={props.onRemoveSession}
+              retiredSessions={props.retiredSessions}
+              onClearSession={props.onClearSession}
               onClearAllSessions={props.onClearAllSessions}
               quickSwitches={props.quickSwitches}
               showWorking={props.showWorking}
@@ -1435,9 +1440,12 @@ function DockView(props: {
   sessions: BrowserProfile[];
   sessionRegistry: SessionRegistry;
   newSessionName: string;
-  onAddSession: ((tabId: string, name: string) => void) | undefined;
+  onAddSession: ((tabId: string, name: string) => boolean) | undefined;
   onRenameSession: (profile: BrowserProfile, name: string) => void;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** Removed sessions whose jars may still hold data. */
+  retiredSessions: BrowserProfile[];
+  onClearSession: (profile: BrowserProfile) => void;
   onClearAllSessions: () => void;
   quickSwitches: QuickSwitchPrefs;
   showWorking: boolean;
@@ -1950,10 +1958,12 @@ function DockView(props: {
             newSessionName={props.newSessionName}
             onAddSession={
               props.onAddSession &&
-              ((name: string) => props.onAddSession?.(active.id, name))
+              ((name: string) => props.onAddSession?.(active.id, name) ?? false)
             }
             onRenameSession={props.onRenameSession}
             onRemoveSession={props.onRemoveSession}
+              retiredSessions={props.retiredSessions}
+              onClearSession={props.onClearSession}
               onClearAllSessions={props.onClearAllSessions}
             quickSwitches={props.quickSwitches}
             searchUrl={props.searchUrl}
