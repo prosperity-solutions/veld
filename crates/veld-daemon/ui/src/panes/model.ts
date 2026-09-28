@@ -117,6 +117,10 @@ export const LEGACY_SESSION_IDS = [
  * mostly borrowed from the terminal's ANSI palette so the app has one set. Index
  * *i* is the colour the legacy id at *i* always had, so a migrated session keeps
  * the colour its user learned.
+ *
+ * **Append only — never reorder or replace.** A session stores its colour as an
+ * index into this list, so reordering it repaints every existing session for
+ * every user. `model.test.ts` pins the current entries for that reason.
  */
 export const SESSION_COLORS = [
   "#5aa2e0",
@@ -726,8 +730,13 @@ export const SESSIONS_STORAGE_KEY = "veld.browserSessions.v2";
 
 /**
  * Where the per-worktree sets lived when ids were animals: `{ [worktreeId]:
- * slot[] }`. Read once, when there is no v2 registry yet, and left in place — a
+ * slot[] }`. Read while there is no v2 registry yet, and left in place so a
  * downgraded build still finds what it wrote.
+ *
+ * A downgrade is not a clean round trip, though: once v2 exists it wins, so
+ * whatever the old build changed in v1 is ignored after upgrading again, and the
+ * old build's layout parser moves any pane on an `s-…` session back to Default
+ * (the jars and their cookies are untouched).
  */
 export const LEGACY_SESSIONS_STORAGE_KEY = "veld.browserSessions.v1";
 
@@ -763,6 +772,8 @@ export function sessionJar(registry: SessionRegistry, id: BrowserProfile): Sessi
     // colours to guess which is which. Renaming it is one menu item away.
     return { name: id.charAt(0).toUpperCase() + id.slice(1), color: legacy };
   }
+  // Not checked against the worktree's other colours — the one exception to the
+  // distinct-colour rule in `addSession`, and only for a jar the registry lost.
   let hash = 0;
   for (const ch of id) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
   return { name: "Unnamed session", color: hash % SESSION_COLORS.length };
@@ -873,6 +884,28 @@ export function sessionSetFor(
   return [...out];
 }
 
+/**
+ * Drop the sets of worktrees that no longer exist, so their sessions retire.
+ *
+ * Load-bearing, not tidiness: worktree ids are SQLite rowids with no
+ * AUTOINCREMENT, so deleting the newest worktree frees its id for the next one —
+ * which would otherwise inherit its named sessions and their logged-in jars.
+ * The jars stay (retired), so their data can still be cleared.
+ */
+export function pruneSessionSets(
+  registry: SessionRegistry,
+  liveWorktreeIds: Iterable<number>,
+): SessionRegistry {
+  const live = new Set(liveWorktreeIds);
+  const sets: Record<number, BrowserProfile[]> = {};
+  for (const [id, set] of Object.entries(registry.sets)) {
+    if (live.has(Number(id))) sets[Number(id)] = set;
+  }
+  return Object.keys(sets).length === Object.keys(registry.sets).length
+    ? registry
+    : { ...registry, sets };
+}
+
 /** Whether this worktree can take another session. */
 export function canAddSession(
   registry: SessionRegistry,
@@ -916,6 +949,9 @@ export function addSession(
   id: BrowserProfile = newSessionId(),
 ): { registry: SessionRegistry; id: BrowserProfile } | null {
   if (!canAddSession(registry, worktreeId, layout)) return null;
+  // Never over an existing jar: that would rename (and recolour) a session some
+  // other worktree may still be using.
+  if (id === "default" || Object.hasOwn(registry.jars, id)) return null;
   const set = sessionSetFor(registry, worktreeId, layout);
   const used = new Set(set.map((p) => sessionJar(registry, p).color));
   let color = 0;

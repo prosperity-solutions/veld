@@ -216,6 +216,7 @@ import {
   sessionsInUse,
   suggestSessionName,
   retiredSessions,
+  pruneSessionSets,
   activeTab,
   activateTab,
   addTab,
@@ -566,7 +567,10 @@ function WorktreeMark(props: {
   );
 }
 
-function usePersisted(key: string, initial: string): [string, (v: string) => void] {
+function usePersisted(
+  key: string,
+  initial: string,
+): [string, (v: string) => void, (v: string) => void] {
   const [value, setValue] = useState(
     () => window.localStorage.getItem(key) ?? initial,
   );
@@ -584,7 +588,9 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
     },
     [key],
   );
-  return [value, set];
+  // The third element adopts a value without writing it back — for a value that
+  // another window just wrote, which is already on disk.
+  return [value, set, setValue];
 }
 
 /**
@@ -5333,12 +5339,15 @@ function AppInner(props: {
   // One registry for the whole install: every session's name and colour, and the
   // explicit set each worktree has. See `SessionRegistry` in panes/model.ts for
   // why it is explicit and why localStorage is its home.
-  const [sessionsRaw, setSessionsRaw] = usePersisted(SESSIONS_STORAGE_KEY, "");
+  const [sessionsRaw, setSessionsRaw, adoptSessionsRaw] = usePersisted(
+    SESSIONS_STORAGE_KEY,
+    "",
+  );
   const readSessionRegistry = (raw: string | null) =>
     parseSessionRegistry(raw, window.localStorage.getItem(LEGACY_SESSIONS_STORAGE_KEY));
   const sessionRegistry = useMemo(
     () => readSessionRegistry(sessionsRaw),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- the legacy key is read once, for migration
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the v1 key only matters until v2 exists, and nothing writes it any more
     [sessionsRaw],
   );
   const sessions = useMemo(
@@ -5351,11 +5360,21 @@ function AppInner(props: {
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key !== null && e.key !== SESSIONS_STORAGE_KEY) return;
-      setSessionsRaw(window.localStorage.getItem(SESSIONS_STORAGE_KEY) ?? "");
+      adoptSessionsRaw(window.localStorage.getItem(SESSIONS_STORAGE_KEY) ?? "");
     };
     window.addEventListener("storage", onStorage);
     return () => window.removeEventListener("storage", onStorage);
-  }, [setSessionsRaw]);
+  }, [adoptSessionsRaw]);
+  // A deleted worktree's sessions retire (see `pruneSessionSets` for why this is
+  // not optional). Only once the daemon has answered: `repoList` is `null` until
+  // then, and pruning against that would empty every worktree's set.
+  useEffect(() => {
+    if (!repoList) return;
+    const onDisk = readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
+    const next = pruneSessionSets(onDisk, allWorktrees.map((w) => w.id));
+    if (next !== onDisk) setSessionsRaw(serializeSessionRegistry(next));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs per poll result
+  }, [repoList]);
   const inUseEverywhere = () => sessionsInUse(Object.values(layouts));
   const retired = useMemo(
     () => retiredSessions(sessionRegistry, sessionsInUse(Object.values(layouts))),

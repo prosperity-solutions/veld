@@ -31,6 +31,7 @@ import {
   removeSession,
   renameSession,
   retiredSessions,
+  pruneSessionSets,
   serializeSessionRegistry,
   sessionColor,
   suggestSessionName,
@@ -1155,7 +1156,39 @@ describe("browser sessions", () => {
     // A repeated colour would make two sessions indistinguishable, which is the
     // one job the colour has.
     expect(new Set(SESSION_COLORS).size).toBe(SESSION_COLORS.length);
-    expect(LEGACY_SESSION_IDS).toHaveLength(SESSION_COLORS.length);
+    // Every legacy id needs its colour; more colours than legacy ids is fine.
+    expect(SESSION_COLORS.length).toBeGreaterThanOrEqual(LEGACY_SESSION_IDS.length);
+  });
+
+  it("never reorders the colours sessions already store by index", () => {
+    // A stored session keeps `color: <index>`, so this prefix is a persisted
+    // contract: append new colours, never reorder or replace these.
+    expect(SESSION_COLORS.slice(0, 8)).toEqual([
+      "#5aa2e0",
+      "#e6b43c",
+      "#3fbf7f",
+      "#b98ce0",
+      "#4fbfc0",
+      "#f2792b",
+      "#ec6fa9",
+      "#e05a50",
+    ]);
+  });
+
+  it("never adds over an existing jar", () => {
+    const a = addSession(EMPTY, 1, undefined, "Admin", "s-a")!.registry;
+    expect(addSession(a, 2, undefined, "Other", "s-a")).toBeNull();
+    expect(addSession(EMPTY, 1, undefined, "x", "default")).toBeNull();
+  });
+
+  it("retires the sessions of a worktree that no longer exists", () => {
+    // Worktree ids are reused rowids, so a new worktree must not inherit these.
+    const a = addSession(EMPTY, 7, undefined, "Admin", "s-a")!.registry;
+    const pruned = pruneSessionSets(a, [1, 2]);
+    expect(sessionSetFor(pruned, 7)).toEqual(["default"]);
+    expect(retiredSessions(pruned)).toEqual(["s-a"]);
+    // Nothing to prune: the same object, so the caller can skip the write.
+    expect(pruneSessionSets(a, [7])).toBe(a);
   });
 
   it("makes random ids the desktop shell accepts", () => {

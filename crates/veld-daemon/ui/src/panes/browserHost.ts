@@ -215,7 +215,7 @@ interface DesktopBrowserApi {
   setBackground(background: string): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
-  clearSession(profile: BrowserProfile): Promise<void>;
+  clearSession(profile: BrowserProfile): Promise<boolean | undefined>;
   capture(viewId: string): Promise<string | null>;
   onState(fn: (payload: Record<string, unknown>) => void): () => void;
   onOpenRequest(
@@ -1196,8 +1196,11 @@ export function clearBrowserSession(profile: BrowserProfile): Promise<boolean> {
   // Reported on every pane using the session: the menu item claims to sign them
   // out, so a refused or failed clear must not look like it worked. The result
   // is what lets the caller forget a jar only once it is really empty.
+  // Only an explicit `true` counts: the handler returns nothing when it refuses a
+  // sender, and a shell older than this check returns nothing at all — both of
+  // which must read as "not cleared", or the jar is forgotten with data in it.
   return desktop.clearSession(profile).then(
-    () => true,
+    (done) => done === true,
     (e: unknown) => {
       for (const v of views.values()) {
         if (v.profile === profile) reportFailure(v)(e);

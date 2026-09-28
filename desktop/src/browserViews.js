@@ -2673,6 +2673,9 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
         if (entry.profile === profile) pushPermissionState(window, viewId, entry);
       }
     }
+    // Explicit, because the refusal above also resolves: the renderer forgets a
+    // removed session only on `true`, so "nothing happened" must not look like it.
+    return true;
   });
 
   // -- Permissions ----------------------------------------------------------
