@@ -691,6 +691,14 @@ body[data-fullscreen="true"] .topbar.electron {
 }
 
 .rail {
+  /* The collapsed rail's geometry, in one place: its width is *computed* from the
+     row grid it has to hold (`.wt-row.slim`) plus `.rail-list`'s side padding, so
+     changing either end cannot leave the grid overflowing or the marker off
+     centre. */
+  --rail-pad-x: 8px;
+  --slim-side: 15px;
+  --slim-mark: 18px;
+  --slim-gap: 4px;
   flex: none;
   background: var(--panel2);
   border-right: 1px solid var(--border);
@@ -717,10 +725,23 @@ body[data-fullscreen="true"] .topbar.electron {
 .rail.resizing {
   transition: none;
 }
-/* 72px, up from 64: the collapsed row's marker is its only name, and it needs a
-   gap to its neighbours — see `.wt-row.slim` for how the width is spent. */
+/* 72px (up from 64), derived: the collapsed row's marker is its only name, and it
+   needs a gap to its neighbours — see `.wt-row.slim` for how the width is spent. */
 .rail:not(.wide) {
-  width: 72px;
+  width: calc(
+    2 * var(--rail-pad-x) + 2 * var(--slim-side) + var(--slim-mark) + 2 * var(--slim-gap)
+  );
+}
+/* No scrollbar in the collapsed rail. Chromium's classic scrollbar (9px, see the
+   global `::-webkit-scrollbar`) takes layout width, and the row grid is sized to
+   the rail exactly — so once a long rail scrolled, every row spilled past its own
+   hover background and the markers left centre. It still scrolls by wheel,
+   trackpad and keyboard. */
+.rail:not(.wide) .rail-list {
+  scrollbar-width: none;
+}
+.rail:not(.wide) .rail-list::-webkit-scrollbar {
+  display: none;
 }
 
 /* The drag edge. Wider than it looks (8px hit area, 1px of visible line on
@@ -1465,17 +1486,18 @@ body.pointer-dragging * {
    is what made the rail feel crammed. The selection is the accent bar beside the
    marker. Hover still tints the whole row, as it does in the wide rail.
 
-   The budget, at the 72px rail: 56px of row after `.rail-list`'s 8px a side, all
-   of it grid — 15 + 4 + 18 + 4 + 15. The side columns are wider than any glyph
+   The budget, from the `--slim-*` variables on `.rail` (which also compute the
+   rail's width): 56px of row after `.rail-list`'s 8px a side, all of it grid —
+   15 + 4 + 18 + 4 + 15. The side columns are wider than any glyph
    so the left one can hold the state bar (end) and `.wt-away` (start) at once
    without overlap, and every side item hugs the marker's edge, so bar → marker
    and marker → glyph are both exactly the 4px gap. Two 12px rows sit inside the
    wide row's own 28px `min-height`, so rows do not move when the rail expands. */
 .wt-row.slim {
   display: grid;
-  grid-template-columns: 15px 18px 15px;
+  grid-template-columns: var(--slim-side) var(--slim-mark) var(--slim-side);
   grid-template-rows: 12px 12px;
-  column-gap: 4px;
+  column-gap: var(--slim-gap);
   row-gap: 0;
   justify-content: center;
   align-content: center;
@@ -1543,8 +1565,8 @@ body.pointer-dragging * {
   height: 14px;
 }
 .wt-row.slim > .wt-pixels {
-  width: 18px;
-  height: 18px;
+  width: var(--slim-mark);
+  height: var(--slim-mark);
   border-radius: 3px;
 }
 
@@ -1563,7 +1585,7 @@ body.pointer-dragging * {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px 8px;
+  padding: 10px var(--rail-pad-x, 8px);
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -1822,9 +1844,14 @@ body.pointer-dragging * {
    Darkened in OKLCH with the chroma pushed *up*, and solid: mixing toward black in
    sRGB and then letting the white panel through (the first version) greyed the
    shade into khaki, which kept the contrast and lost the colour. */
-body[data-theme="light"] :is(.wt-pixels, .pixel-swatch).bright rect.off {
-  fill: oklch(from currentColor calc(l * 0.78) calc(c * 1.15) h);
-  fill-opacity: 1;
+@supports (color: oklch(from currentColor l c h)) {
+  /* Guarded as a whole: an engine that drops the relative-colour `fill` would
+     otherwise still apply `fill-opacity: 1`, painting unlit cells in the full lit
+     colour and erasing the pattern. Without support they keep the plain tint. */
+  body[data-theme="light"] :is(.wt-pixels, .pixel-swatch).bright rect.off {
+    fill: oklch(from currentColor calc(l * 0.78) calc(c * 1.15) h);
+    fill-opacity: 1;
+  }
 }
 /* A thin inner ring, dark on the light theme and light on the dark one, so the
    square's edge is drawn the same way whatever its colour and pattern. Drawn over

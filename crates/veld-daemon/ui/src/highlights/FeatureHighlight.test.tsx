@@ -97,6 +97,24 @@ describe("FeatureHighlight", () => {
     expect(marks).toEqual([{ ids: ["hint:pixel-markers"], state: "read" }]);
   });
 
+  it("portals into the dialog its control sits in, not the first one on the page", async () => {
+    render(
+      <HighlightProvider>
+        {/* An outer dialog first in document order — a document-wide query would
+            pick this one, whose focus trap the bubble's buttons are outside of. */}
+        <div className="mantine-Modal-content" data-testid="outer" />
+        <div className="mantine-Modal-content" data-testid="own">
+          <FeatureHighlight slug="pixel-markers">
+            <button type="button">Face switch</button>
+          </FeatureHighlight>
+        </div>
+      </HighlightProvider>,
+    );
+    const got = await screen.findByText("Got it");
+    expect(screen.getByTestId("own").contains(got)).toBe(true);
+    expect(screen.getByTestId("outer").contains(got)).toBe(false);
+  });
+
   it("renders just the control outside a provider", () => {
     render(
       <FeatureHighlight slug="pixel-markers">

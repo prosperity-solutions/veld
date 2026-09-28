@@ -1,5 +1,13 @@
 import { Button, CloseButton, Group, Popover, Stack, Text } from "@mantine/core";
-import { createContext, useCallback, useContext, useEffect, useRef, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { api } from "../api";
 import { mergeStates, type PromotionState, utcDay } from "../promotions/model";
@@ -73,11 +81,6 @@ export function HighlightProvider(props: { children: React.ReactNode }) {
   );
 }
 
-/** The open Mantine dialog's content box, which is also its focus-trap root. */
-function dialogContent(): HTMLElement | null {
-  return document.querySelector<HTMLElement>(".mantine-Modal-content");
-}
-
 /**
  * Pin a highlight's bubble to one control.
  *
@@ -115,8 +118,27 @@ export function FeatureHighlight(props: {
   // harmless against the monotone merge, but a second request for nothing.
   const answered = useRef(false);
 
+  const claimed = eligible && store?.shown === props.slug;
+  // Where the bubble is portalled: the dialog *this anchor* sits in — its own
+  // nearest `.mantine-Modal-content`, which is also that dialog's focus-trap root —
+  // or `null` for none (then `<body>`). A dialog's trap only cycles through its own
+  // subtree, so a bubble in `<body>` had a Got it and ✕ no Tab could reach
+  // (measured: 90 presses in Change marker… never got there). Not rendered in
+  // place either: the anchor sits inside a segmented control that clips its labels.
+  //
+  // Resolved from the anchor after commit, never from the document during render:
+  // a document-wide query picks whichever dialog comes first — an outer one when
+  // two are stacked, or one still fading out — and during the first render the
+  // anchor's own dialog is not in the DOM yet. `undefined` is "not resolved", and
+  // the bubble waits for it rather than opening in `<body>` for a frame.
+  const anchor = useRef<HTMLElement>(null);
+  const [target, setTarget] = useState<HTMLElement | null | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (claimed) setTarget(anchor.current?.closest<HTMLElement>(".mantine-Modal-content") ?? null);
+  }, [claimed]);
+
   if (store === null) return props.children;
-  const opened = eligible && store.shown === props.slug;
+  const opened = claimed && target !== undefined;
   const close = (state: PromotionState) => {
     if (answered.current) return;
     answered.current = true;
@@ -135,15 +157,9 @@ export function FeatureHighlight(props: {
       onClose={() => close("dismissed")}
       trapFocus={false}
       returnFocus={false}
-      // Portalled into the open dialog, when there is one, rather than to <body>: a
-      // dialog's focus trap only cycles through its own subtree, so a bubble in
-      // <body> had a Got it and ✕ no Tab could reach (measured: 90 presses in
-      // Change marker… never got there). Not rendered in place either — the anchor
-      // sits inside a segmented control that clips its labels, which hid the
-      // bubble entirely.
-      portalProps={{ target: opened ? (dialogContent() ?? undefined) : undefined }}
+      portalProps={{ target: target ?? undefined }}
     >
-      <Popover.Target>{props.children}</Popover.Target>
+      <Popover.Target ref={anchor}>{props.children}</Popover.Target>
       <Popover.Dropdown>
         <Stack gap={6} role="status" aria-live="polite">
           <Group justify="space-between" wrap="nowrap" align="flex-start">

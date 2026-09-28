@@ -3,7 +3,8 @@
  *
  * Keyed by slug so a call site names the one it anchors (`HIGHLIGHTS["…"]`), and a
  * typo is a type error instead of a bubble that silently never appears. Same id
- * rules as `promotions/content.ts`: never rename a slug, never reuse one.
+ * rules as `promotions/content.ts`: never rename a slug, never reuse one — and add
+ * each new slug to `SHIPPED_SLUGS` in `model.test.ts`, which is what enforces it.
  */
 
 import type { Highlight } from "./model";

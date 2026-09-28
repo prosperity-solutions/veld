@@ -23,6 +23,20 @@ describe("HIGHLIGHTS", () => {
   });
 });
 
+/**
+ * Every slug that has ever shipped. **Append only.** A slug is the stored id, so
+ * renaming one shows the bubble again to everyone who already answered it, and
+ * dropping one lets a later highlight reuse the id and be silently suppressed for
+ * them. Retiring a highlight means keeping its slug here, not deleting it.
+ */
+const SHIPPED_SLUGS = ["pixel-markers"];
+
+describe("shipped slugs", () => {
+  it("are never renamed or removed", () => {
+    for (const slug of SHIPPED_SLUGS) expect(Object.keys(HIGHLIGHTS)).toContain(slug);
+  });
+});
+
 describe("highlightId", () => {
   it("sits in a namespace no Veld card id can occupy", () => {
     // The What's-new badge counts only cards it built, and a card id is

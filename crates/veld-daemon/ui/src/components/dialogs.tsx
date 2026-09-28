@@ -2015,6 +2015,9 @@ export function MarkerGrids(props: {
       <SegmentedControl
         size="xs"
         fullWidth
+        // Held while a pick is written: whether Change marker… closes after it is
+        // decided by the face, so the face must not move under an in-flight pick.
+        disabled={busy !== null}
         value={props.style}
         onChange={(v) => props.onStyleChange(v as MarkerStyle)}
         data={[
