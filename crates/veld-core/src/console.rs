@@ -143,7 +143,7 @@ status=$?
 echo
 if [ "$status" -eq 0 ]; then
   echo {done_hint}
-else
+{close_on_success}else
   echo "veld update exited with status $status."
   # Only on failure, and bounded. A window that closes takes the diagnosis with
   # it — but a window that waits forever for a user who has walked away is a
@@ -156,6 +156,11 @@ exit "$status"
         exports = exports,
         argv = argv,
         done_hint = quote(done_hint),
+        close_on_success = if std::env::consts::OS == "macos" {
+            TERMINAL_APP_CLOSE
+        } else {
+            ""
+        },
     );
 
     // Owner-only *and* executable: it names paths from this user's machine and is
@@ -188,6 +193,52 @@ exit "$status"
     std::fs::write(&path, body)?;
     Ok(path)
 }
+
+/// Close a Terminal.app window once the update in it has succeeded.
+///
+/// Terminal.app runs a `.command` file as `<script>; exit` in the user's login
+/// shell, and its stock profile keeps the window open after that shell exits —
+/// so a finished update would otherwise leave a `[Process completed]` window
+/// behind. Other terminals (iTerm2, Ghostty, every Linux emulator here) close on
+/// exit by default and are left alone.
+///
+/// The close has to come from a detached child *after* the shell is gone: while
+/// it is still running, closing the window asks the user whether to terminate
+/// it. So the child polls the tab's `busy` flag and closes only once it clears,
+/// matching the window by this script's tty rather than trusting "the front
+/// window" to still be ours. A window holding other tabs too (the user prefers
+/// tabs, or merged windows mid-update) is left open: Terminal cannot close a
+/// single tab from AppleScript, and closing the window would take theirs with
+/// it. Terminal scripting itself needs no Automation consent, and if the Apple
+/// event is refused anyway the window simply stays.
+const TERMINAL_APP_CLOSE: &str = r#"  if [ "$TERM_PROGRAM" = "Apple_Terminal" ] && tty=$(tty 2>/dev/null); then
+    nohup /bin/bash -c '
+      for _ in 1 2 3 4 5 6 7 8 9 10; do
+        sleep 0.5
+        r=$(/usr/bin/osascript - "$1" <<"APPLESCRIPT"
+on run argv
+  tell application "Terminal"
+    repeat with w in windows
+      try
+        repeat with t in tabs of w
+          if tty of t is item 1 of argv then
+            if busy of t then return "busy"
+            if (count of tabs of w) is 1 then close w
+            return "done"
+          end if
+        end repeat
+      end try
+    end repeat
+  end tell
+  return "gone"
+end run
+APPLESCRIPT
+)
+        [ "$r" = "busy" ] || exit 0
+      done
+    ' _ "$tty" >/dev/null 2>&1 </dev/null &
+  fi
+"#;
 
 /// LaunchServices first, Terminal.app as the floor.
 ///
@@ -396,6 +447,9 @@ mod tests {
     fn run_script(script: &Path) -> (String, i32) {
         let out = Command::new("/bin/bash")
             .arg(script)
+            // `cargo test` run from Terminal.app must not have the script close
+            // the developer's window.
+            .env_remove("TERM_PROGRAM")
             .output()
             .expect("bash must run the generated script");
         (
@@ -445,6 +499,27 @@ mod tests {
             let mode = std::fs::metadata(&script).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o700, "the script names local paths");
         }
+    }
+
+    #[test]
+    fn the_window_close_sits_on_the_success_branch_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = with_home(tmp.path());
+
+        let script = write_script(Path::new("/bin/echo"), &[], &[], "t", "done").unwrap();
+        let body = std::fs::read_to_string(&script).unwrap();
+        if std::env::consts::OS != "macos" {
+            assert!(!body.contains("osascript"), "{body}");
+            return;
+        }
+        let close = body
+            .find("osascript")
+            .expect("macOS script closes its window");
+        let failure = body.find("else\n").unwrap();
+        assert!(
+            body.find("if [ \"$status\" -eq 0 ]").unwrap() < close && close < failure,
+            "the close must sit on the success branch only: {body}"
+        );
     }
 
     #[test]
