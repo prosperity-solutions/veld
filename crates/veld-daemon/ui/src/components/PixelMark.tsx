@@ -18,19 +18,27 @@ const MarkerOrder = createContext<readonly string[] | null>(null);
 export function MarkerOrderProvider(props: { children: React.ReactNode }) {
   const [order, setOrder] = useState<readonly string[] | null>(null);
   useEffect(() => {
+    if (order !== null) return;
     let cancelled = false;
-    void api
-      .worktreeEmoji()
-      .then((r) => {
-        if (!cancelled && Array.isArray(r?.emoji)) setOrder(r.emoji);
-      })
-      // No toast: the rail still renders every marker, just with its cells unlit,
-      // and the picker surfaces the same request's failure where it matters.
-      .catch(() => {});
+    const load = () => {
+      void api
+        .worktreeEmoji()
+        .then((r) => {
+          if (!cancelled && Array.isArray(r?.emoji)) setOrder(r.emoji);
+        })
+        // No toast: the rail still renders every marker, just with its cells
+        // unlit. Retried on the next window focus — the same cue `useSettings`
+        // retries on — so one failed request (a daemon mid-restart) does not leave
+        // every pattern blank until a reload.
+        .catch(() => {});
+    };
+    load();
+    window.addEventListener("focus", load);
     return () => {
       cancelled = true;
+      window.removeEventListener("focus", load);
     };
-  }, []);
+  }, [order]);
   return <MarkerOrder.Provider value={order}>{props.children}</MarkerOrder.Provider>;
 }
 

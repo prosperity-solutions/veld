@@ -455,10 +455,12 @@ announcing. The first is `pixel-markers`, on the marker picker's face switch.
   is noise.
 - **One per page load.** The first eligible highlight whose control is on screen
   claims the turn; the rest wait for a later load.
-- **Either answer ends it.** *Got it* stores `read`, the ✕ and Esc store
-  `dismissed`, and both stop it — unlike a card there is nowhere to find a
-  highlight again later. A click elsewhere does not close it, because in a
-  dialog that is usually somebody already doing what it points at.
+- **Either answer ends it.** *Got it* stores `read`, the ✕ stores `dismissed`,
+  and both stop it — unlike a card there is nowhere to find a highlight again
+  later. A click elsewhere does not close it, because in a dialog that is
+  usually somebody already doing what it points at; nor does Esc, which closes
+  the host dialog instead and records nothing, so the bubble is back the next
+  time its control is.
 
 ## How delivery works
 

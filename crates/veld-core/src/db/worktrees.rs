@@ -2065,6 +2065,23 @@ mod tests {
     }
 
     #[test]
+    fn the_first_sixty_four_emoji_keep_their_order() {
+        // Glyph i is drawn as pixel pattern i, so reordering (or replacing) an
+        // entry repaints every pixel marker holding it — the silent repaint v9
+        // stopped storing a palette index to avoid. Appending leaves this alone.
+        // If you are here because you *meant* to reorder: don't; append instead.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in WORKTREE_EMOJI[..64].concat().bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        assert_eq!(
+            h, 0x38b1_b5db_0d70_17bd,
+            "WORKTREE_EMOJI[..64] changed order or content"
+        );
+    }
+
+    #[test]
     fn every_curated_emoji_has_a_pixel_pattern() {
         // The IDE's pixel marker draws glyph i as `PIXEL_PATTERNS[i]`, and a glyph
         // past the table's end falls back to a hashed pattern that another checkout

@@ -1465,12 +1465,15 @@ body.pointer-dragging * {
    is what made the rail feel crammed. The selection is the accent bar beside the
    marker. Hover still tints the whole row, as it does in the wide rail.
 
-   The budget, at the 72px rail: 56px of row after `.rail-list`'s 8px a side, and
-   12 + 4 + 18 + 4 + 12 = 50px of grid, centred. Two 12px rows sit inside the wide
-   row's own 28px `min-height`, so rows do not move when the rail expands. */
+   The budget, at the 72px rail: 56px of row after `.rail-list`'s 8px a side, all
+   of it grid — 15 + 4 + 18 + 4 + 15. The side columns are wider than any glyph
+   so the left one can hold the state bar (end) and `.wt-away` (start) at once
+   without overlap, and every side item hugs the marker's edge, so bar → marker
+   and marker → glyph are both exactly the 4px gap. Two 12px rows sit inside the
+   wide row's own 28px `min-height`, so rows do not move when the rail expands. */
 .wt-row.slim {
   display: grid;
-  grid-template-columns: 12px 18px 12px;
+  grid-template-columns: 15px 18px 15px;
   grid-template-rows: 12px 12px;
   column-gap: 4px;
   row-gap: 0;
@@ -1494,9 +1497,9 @@ body.pointer-dragging * {
    As a grid item in the left column, end-aligned, it is exactly one column gap
    from the marker: the same 4px the state glyphs sit at on the other side.
 
-   It shares that column with `.wt-away`. The two do not meet in practice — the
-   row you have selected is open in this window, which is what "away" says it is
-   not. */
+   It shares that column with `.wt-away`, which sits at the column's other end:
+   the bar is not only the selection — `.deleting` and `.failed-remove` paint it
+   too, on rows another window can be holding — so the two can be lit together. */
 .wt-row.slim::before {
   position: static;
   grid-column: 1;
@@ -1509,6 +1512,7 @@ body.pointer-dragging * {
 .wt-row.slim > .wt-away {
   grid-column: 1;
   grid-row: 1 / span 2;
+  justify-self: start;
 }
 .wt-row.slim > :is(.wt-emoji, .wt-dot, .wt-pixels) {
   grid-column: 2;
@@ -1517,10 +1521,12 @@ body.pointer-dragging * {
 .wt-row.slim > .wt-alert {
   grid-column: 3;
   grid-row: 1;
+  justify-self: start;
 }
 .wt-row.slim > :is(.wt-inbox, .wt-git) {
   grid-column: 3;
   grid-row: 2;
+  justify-self: start;
 }
 .wt-row.slim:not(:has(> .wt-alert)) > :is(.wt-inbox, .wt-git),
 .wt-row.slim:not(:has(> :is(.wt-inbox, .wt-git))) > .wt-alert {

@@ -73,6 +73,11 @@ export function HighlightProvider(props: { children: React.ReactNode }) {
   );
 }
 
+/** The open Mantine dialog's content box, which is also its focus-trap root. */
+function dialogContent(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".mantine-Modal-content");
+}
+
 /**
  * Pin a highlight's bubble to one control.
  *
@@ -81,10 +86,13 @@ export function HighlightProvider(props: { children: React.ReactNode }) {
  * Outside a `HighlightProvider` (a test, a surface that opted out) it renders the
  * child alone.
  *
- * Closed only by **Got it**, the ✕, or Esc — not by a click elsewhere, which in a
- * dialog is usually somebody already doing the thing the bubble is about, and a
- * hint that vanished at the first click would be recorded as seen without being
- * read. `Got it` stores `read`, the others `dismissed`; either ends it.
+ * Answered only by **Got it** (`read`) or the ✕ (`dismissed`); either ends it.
+ * Not by a click elsewhere, which in a dialog is usually somebody already doing
+ * the thing the bubble is about — a hint that vanished at the first click would be
+ * recorded as seen without being read. And not by Esc: focus stays in the host
+ * dialog, so Esc closes *that*, unmounting the bubble with nothing recorded, and
+ * it shows again the next time its control is on screen. That is the right answer
+ * for somebody leaving the dialog, not the hint.
  */
 export function FeatureHighlight(props: {
   slug: HighlightSlug;
@@ -127,6 +135,13 @@ export function FeatureHighlight(props: {
       onClose={() => close("dismissed")}
       trapFocus={false}
       returnFocus={false}
+      // Portalled into the open dialog, when there is one, rather than to <body>: a
+      // dialog's focus trap only cycles through its own subtree, so a bubble in
+      // <body> had a Got it and ✕ no Tab could reach (measured: 90 presses in
+      // Change marker… never got there). Not rendered in place either — the anchor
+      // sits inside a segmented control that clips its labels, which hid the
+      // bubble entirely.
+      portalProps={{ target: opened ? (dialogContent() ?? undefined) : undefined }}
     >
       <Popover.Target>{props.children}</Popover.Target>
       <Popover.Dropdown>

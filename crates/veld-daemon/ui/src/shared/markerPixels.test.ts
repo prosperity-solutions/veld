@@ -16,6 +16,14 @@ describe("PIXEL_PATTERNS", () => {
     for (const m of PIXEL_PATTERNS) expect(m).toBeLessThan(512);
   });
 
+  it("keeps its first 64 slots exactly as shipped", () => {
+    // Slot i is what glyph i looks like, so moving or replacing one repaints every
+    // checkout wearing it. Append new slots after these; never edit this string.
+    expect(PIXEL_PATTERNS.slice(0, 64).join(",")).toBe(
+      "273,5,40,45,320,325,360,365,84,7,42,47,322,327,362,367,79,21,56,61,336,341,376,381,18,23,58,63,338,343,378,383,295,133,168,173,448,453,488,493,130,135,170,175,450,455,490,495,144,149,184,189,464,469,504,509,146,151,186,191,466,471,506,511",
+    );
+  });
+
   it("covers the 64 animals", () => {
     // The Rust side checks the same thing against `WORKTREE_EMOJI` itself
     // (`every_curated_emoji_has_a_pixel_pattern`); this pins the table's own size.

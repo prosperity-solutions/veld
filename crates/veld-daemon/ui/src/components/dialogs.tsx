@@ -1835,6 +1835,15 @@ export function MarkerGrids(props: {
   const busy = props.busy;
   const { choices, colors, loadError } = props.loaded;
 
+  // In the Pixels face a marker is the *pair*, so a sibling only collides with a
+  // candidate when it also holds the other half as currently chosen: the same
+  // pattern in another colour is still told apart at a glance. The other two faces
+  // render one half each, so there each half collides on its own.
+  const pairedWith = (half: EmojiHolder[] | undefined) =>
+    props.style === "pixels" ? new Set((half ?? []).map((h) => h.id)) : null;
+  const colourPartners = pairedWith(props.usedBy[props.emoji]);
+  const patternPartners = pairedWith(props.colorUsedBy[props.color]);
+
   const pick = (patch: { emoji?: string; marker_color?: string }) =>
     props.onPick(patch);
 
@@ -1851,7 +1860,9 @@ export function MarkerGrids(props: {
           // means a within-repo duplicate is likely, and within-repo is the
           // only scope where distinctness is claimed.
           const others = (props.colorUsedBy[color] ?? []).filter(
-            (h) => h.id !== props.worktreeId,
+            (h) =>
+              h.id !== props.worktreeId &&
+              (colourPartners === null || colourPartners.has(h.id)),
           );
           const taken = others.map((h) => h.label).join(", ");
           return (
@@ -1955,7 +1966,9 @@ export function MarkerGrids(props: {
         {choices.map((e) => {
           const isCurrent = e === props.emoji;
           const others = (props.usedBy[e] ?? []).filter(
-            (h) => h.id !== props.worktreeId,
+            (h) =>
+              h.id !== props.worktreeId &&
+              (patternPartners === null || patternPartners.has(h.id)),
           );
           const taken = others.map((h) => h.label).join(", ");
           return (
@@ -2012,7 +2025,7 @@ export function MarkerGrids(props: {
             // Anchored on the segment's own label, not the whole control: pinned
             // to the control, the arrow landed on its centre — on Emoji.
             label: (
-              <FeatureHighlight slug="pixel-markers">
+              <FeatureHighlight slug="pixel-markers" position="bottom">
                 <span>Pixels</span>
               </FeatureHighlight>
             ),
@@ -2040,8 +2053,9 @@ export function MarkerGrids(props: {
         </Group>
       )}
       <Text size="xs" c="dimmed">
-        A dot marks a colour, glyph or pattern another checkout of this repo
-        already uses.
+        {props.style === "pixels"
+          ? "A dot marks a colour or pattern that would give this checkout the same marker as another one in this repo."
+          : "A dot marks a colour or glyph another checkout of this repo already uses."}{" "}
         Picking it is allowed — the rail just won&apos;t identify them apart.
       </Text>
     </>
@@ -2051,9 +2065,10 @@ export function MarkerGrids(props: {
 /**
  * Change an existing worktree's marker.
  *
- * Every pick writes immediately and closes — there is no Save button, because a
- * marker is one value and a dialog that made you confirm a swatch would be a worse
- * version of clicking it.
+ * Every pick writes immediately — there is no Save button, because a marker is one
+ * value and a dialog that made you confirm a swatch would be a worse version of
+ * clicking it. It closes on the pick too, except in the Pixels face, where the
+ * marker is a colour *and* a pattern and both are offered at once.
  */
 export function ChangeMarkerDialog(props: {
   current: string;
@@ -2071,6 +2086,10 @@ export function ChangeMarkerDialog(props: {
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // What has been written so far in this open, over the values it opened with —
+  // the dialog outlives a pick in the Pixels face, and `props` is the snapshot
+  // taken when it opened.
+  const [written, setWritten] = useState<{ emoji?: string; marker_color?: string }>({});
   const loaded = useMarkerChoices();
 
   const pick = async (patch: { emoji?: string; marker_color?: string }) => {
@@ -2082,15 +2101,25 @@ export function ChangeMarkerDialog(props: {
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(null);
+      return;
     }
+    // One grid, one pick, done — except in the Pixels face, which shows two grids
+    // because its marker *is* the pair. Closing there after the colour would
+    // leave the pattern unreachable without reopening the dialog.
+    if (props.style !== "pixels") {
+      props.onClose();
+      return;
+    }
+    setWritten((w) => ({ ...w, ...patch }));
+    setBusy(null);
   };
 
   return (
     <Modal title={`Marker for ${props.label}`} onClose={props.onClose}>
       <Stack gap="sm">
         <MarkerGrids
-          emoji={props.current}
-          color={props.currentColor}
+          emoji={written.emoji ?? props.current}
+          color={written.marker_color ?? props.currentColor}
           usedBy={props.usedBy}
           colorUsedBy={props.colorUsedBy}
           worktreeId={props.worktreeId}

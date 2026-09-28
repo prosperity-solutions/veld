@@ -7765,10 +7765,11 @@ function AppInner(props: {
           style={markerStyle(settings ?? {})}
           onStyleChange={(style) => void saveSettings({ "worktree.markerStyle": style })}
           onClose={closeDialog}
+          // Closing is the dialog's call: it stays open in the Pixels face, whose
+          // marker takes two picks.
           onPick={async (patch) => {
             await api.patchWorktree(dialog.worktree.id, patch);
             await refresh();
-            closeDialog();
           }}
         />
       )}
