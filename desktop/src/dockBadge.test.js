@@ -4,6 +4,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  RELOAD_GRACE_MS,
+  STYLES,
   badgeText,
   createDockBadge,
   dockBadgeStyleFrom,
@@ -21,6 +23,9 @@ test("badgeText: a number, a dot, or nothing", () => {
   assert.equal(badgeText(3, "dot"), "•");
   assert.equal(badgeText(0, "dot"), "");
   assert.equal(badgeText(3, "off"), "");
+  // Every style has a rendering — a new one cannot silently fall through to a number.
+  for (const style of STYLES) badgeText(1, style);
+  assert.throws(() => badgeText(1, "ring"));
 });
 
 test("parseReport: anything malformed is nothing unread, nothing held", () => {
@@ -47,6 +52,7 @@ test("dockBadgeStyleFrom only moves off the fallback for a style it knows", () =
 /** Two windows that both know one session must show 1, not 2. */
 test("the same session in two windows is counted once", () => {
   const badge = createDockBadge(() => {});
+  badge.setStyle("count");
   badge.report(1, { unread: [u("a", 7), u("b", 7)], held: [7] });
   badge.report(2, { unread: [u("b", 7)], held: [7] });
   assert.equal(badge.text(), "2");
@@ -59,6 +65,7 @@ test("the same session in two windows is counted once", () => {
  */
 test("for a held worktree only the holder's answer counts", () => {
   const badge = createDockBadge(() => {});
+  badge.setStyle("count");
   badge.report(1, { unread: [u("a", 7)], held: [7] });
   badge.report(2, { unread: [u("a", 7)], held: [] });
   assert.equal(badge.text(), "1");
@@ -70,6 +77,7 @@ test("for a held worktree only the holder's answer counts", () => {
 /** An agent in a project nobody has open this run is news nobody could have read. */
 test("for a worktree nobody holds, any window's answer counts", () => {
   const badge = createDockBadge(() => {});
+  badge.setStyle("count");
   badge.report(1, { unread: [], held: [7] });
   badge.report(2, { unread: [u("z", 9)], held: [] });
   assert.equal(badge.text(), "1");
@@ -81,6 +89,7 @@ test("for a worktree nobody holds, any window's answer counts", () => {
 test("a window that goes away takes its report with it", () => {
   const applied = [];
   const badge = createDockBadge((t) => applied.push(t));
+  badge.setStyle("count");
   badge.report(1, { unread: [u("a", 1)], held: [1] });
   badge.report(2, { unread: [u("b", 2)], held: [2] });
   badge.forget(1);
@@ -92,6 +101,8 @@ test("the style is the main process's, and an unchanged answer is not re-applied
   const applied = [];
   const badge = createDockBadge((t) => applied.push(t));
   badge.report(1, { unread: [u("a", 1)], held: [1] });
+  assert.equal(badge.text(), "", "nothing is shown before the style has been read");
+  badge.setStyle("count");
   badge.report(1, { unread: [u("a", 1)], held: [1] });
   badge.setStyle("dot");
   badge.setStyle("off");
@@ -125,9 +136,10 @@ function fakeElectron({ dock = true } = {}) {
   return { ipcMain, app, badges, sender, call };
 }
 
-test("the handler: main frame only, one set of listeners, forgets on crash, navigation and destroy", () => {
+test("the handler: main frame only, one set of listeners, forgets on crash, navigation and destroy", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const f = fakeElectron();
-  registerDockBadgeIpc(f.ipcMain, f.app);
+  registerDockBadgeIpc(f.ipcMain, f.app).setStyle("count");
   const s = f.sender(1);
   const report = { unread: [u("a", 1)], held: [1] };
 
@@ -139,9 +151,15 @@ test("the handler: main frame only, one set of listeners, forgets on crash, navi
   assert.equal(s.count("destroyed"), 1, "a second report must not stack listeners");
   assert.deepEqual(f.badges, ["1"]);
 
-  s.emit("did-start-navigation", { isMainFrame: true, isSameDocument: true });
-  assert.deepEqual(f.badges, ["1"], "an in-page navigation keeps the report");
-  s.emit("did-start-navigation", { isMainFrame: true, isSameDocument: false });
+  // A reload: the old report survives until the new page reports…
+  s.emit("did-navigate");
+  t.mock.timers.tick(RELOAD_GRACE_MS - 1);
+  f.call(s, report);
+  t.mock.timers.tick(RELOAD_GRACE_MS);
+  assert.deepEqual(f.badges, ["1"]);
+  // …and goes after the grace when it never does.
+  s.emit("did-navigate");
+  t.mock.timers.tick(RELOAD_GRACE_MS);
   assert.deepEqual(f.badges, ["1", ""]);
 
   f.call(s, report);
@@ -163,7 +181,7 @@ test("the styles match the Rust allow-list and default", () => {
   const block = read("settings_catalog.rs").match(/DOCK_BADGE_STYLES: &\[Choice\] = &\[([\s\S]*?)\];/);
   assert.ok(block, "DOCK_BADGE_STYLES not found in settings_catalog.rs");
   const values = [...block[1].matchAll(/choice\("([^"]+)"/g)].map((m) => m[1]).sort();
-  assert.deepEqual(values, ["count", "dot", "off"]);
+  assert.deepEqual(values, [...STYLES].sort());
   assert.match(read("settings.rs"), /SettingKey::DesktopDockBadge,\s*Value::from\("count"\)/);
   assert.equal(createDockBadge(() => {}).style(), "count");
 });

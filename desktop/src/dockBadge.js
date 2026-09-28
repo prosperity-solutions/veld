@@ -33,9 +33,18 @@
 const MAX_ENTRIES = 1000;
 /** A pane id is a short token; anything longer did not come from `/ide`. */
 const MAX_ID_LENGTH = 200;
-/** The values `desktop.dockBadge` can take. Mirrors `DOCK_BADGE_STYLES` in Rust. */
+/** The values `desktop.dockBadge` can take. Mirrors `DOCK_BADGE_STYLES` in Rust —
+ *  `dockBadge.test.js` compares the two, and `badgeText` has a case for each. */
 const STYLES = new Set(["count", "dot", "off"]);
 const DEFAULT_STYLE = "count";
+/**
+ * How long a reloaded page's previous report is kept while the new page settles.
+ * A page's first report can say "I hold nothing" only because its layouts are
+ * still being fetched, and dropping the old report at once would count other
+ * windows' stale copies for that moment. Long enough for a reload, short enough
+ * that a window which navigated to the waiting screen stops counting soon.
+ */
+const RELOAD_GRACE_MS = 10_000;
 
 const isWorktreeId = (v) => Number.isSafeInteger(v) && v >= 0;
 
@@ -91,9 +100,17 @@ function dockBadgeStyleFrom(body, fallback) {
  * @returns {string}
  */
 function badgeText(count, style) {
-  if (style === "off" || count <= 0) return "";
-  if (style === "dot") return "•";
-  return count > 99 ? "99+" : String(count);
+  if (count <= 0) return "";
+  switch (style) {
+    case "off":
+      return "";
+    case "dot":
+      return "•";
+    case "count":
+      return count > 99 ? "99+" : String(count);
+    default:
+      throw new Error(`badgeText: no rendering for style ${JSON.stringify(style)}`);
+  }
 }
 
 /**
@@ -105,6 +122,9 @@ function createDockBadge(apply) {
   /** @type {Map<number, { unread: Map<string, number>, held: Set<number> }>} */
   const reports = new Map();
   let style = DEFAULT_STYLE;
+  /** Nothing is shown until the style has been read once: a user who chose `off`
+   *  must not see a number flash at launch while the first read is in flight. */
+  let styleKnown = false;
   let shown = "";
 
   const count = () => {
@@ -120,7 +140,7 @@ function createDockBadge(apply) {
   };
 
   const refresh = () => {
-    const text = badgeText(count(), style);
+    const text = styleKnown ? badgeText(count(), style) : "";
     if (text === shown) return;
     shown = text;
     apply(text);
@@ -139,6 +159,7 @@ function createDockBadge(apply) {
     /** `desktop.dockBadge`, as the main process last read it from the daemon. */
     setStyle(next) {
       style = STYLES.has(next) ? next : DEFAULT_STYLE;
+      styleKnown = true;
       refresh();
     },
     style: () => style,
@@ -163,6 +184,12 @@ function registerDockBadgeIpc(ipcMain, app) {
   const badge = createDockBadge((text) => app.dock?.setBadge(text));
   /** Senders already being watched, so a reload does not stack listeners. */
   const watched = new Set();
+  /** Per sender: the pending forget after a navigation, cancelled by a report. */
+  const graces = new Map();
+  const cancelGrace = (id) => {
+    clearTimeout(graces.get(id));
+    graces.delete(id);
+  };
   ipcMain.handle("veld:app:set-badge", (event, payload) => {
     if (!app.dock) return false;
     const sender = event.sender;
@@ -172,20 +199,29 @@ function registerDockBadgeIpc(ipcMain, app) {
     const id = sender.id;
     if (!watched.has(id)) {
       watched.add(id);
-      const drop = () => badge.forget(id);
-      // A crashed renderer keeps its `webContents` (see `browserViews.js`), and a
-      // page that navigates away stops reporting without saying so — both leave
-      // a report describing a page that no longer exists. The next page's first
-      // report puts back whatever is still true.
+      const drop = () => {
+        cancelGrace(id);
+        badge.forget(id);
+      };
+      // A crashed renderer keeps its `webContents` (see `browserViews.js`), so its
+      // report goes at once.
       sender.on("render-process-gone", drop);
-      sender.on("did-start-navigation", (details) => {
-        if (details?.isMainFrame && !details?.isSameDocument) drop();
+      // A committed page change — a reload, or the waiting screen — keeps the
+      // old report for `RELOAD_GRACE_MS` and then drops it unless the new page
+      // has reported. `did-navigate` rather than `did-start-navigation`: the
+      // latter also fires for an external link that `will-navigate` then cancels
+      // (`windows.js`), and the page, still alive, would not re-report.
+      // Same-document navigations have their own event and never reach here.
+      sender.on("did-navigate", () => {
+        cancelGrace(id);
+        graces.set(id, setTimeout(drop, RELOAD_GRACE_MS));
       });
       sender.once("destroyed", () => {
         watched.delete(id);
         drop();
       });
     }
+    cancelGrace(id);
     badge.report(id, payload);
     return true;
   });
@@ -193,6 +229,8 @@ function registerDockBadgeIpc(ipcMain, app) {
 }
 
 module.exports = {
+  RELOAD_GRACE_MS,
+  STYLES,
   badgeText,
   createDockBadge,
   dockBadgeStyleFrom,

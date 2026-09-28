@@ -6242,13 +6242,31 @@ function AppInner(props: {
   // Keyed on a JSON string for the reason `desktopShellPrefs` is: this body
   // re-renders on every inbox change and every settings re-read, and only a change
   // in the answer is worth an IPC round trip.
+  //
+  // `held` is empty from a detached window, matching `channel.holds`: it keeps
+  // tabs its origin window still holds the worktree for, and files no relayed
+  // agent hooks (`relayInboxEvents`), so letting it claim the worktree would hide
+  // every hook-sourced event there.
+  //
+  // Not sent until this window's layouts have arrived (or a few seconds have
+  // passed, for a window that has none to fetch): after a reload `layouts` starts
+  // empty, and a first report saying "I hold nothing" would count other windows'
+  // stale copies of what was read here. The shell keeps the previous page's
+  // report until then.
   const badgeKey = JSON.stringify({
     unread: inbox.unreadSessions(unreadScope),
-    held: Object.keys(layouts).map(Number).sort((a, b) => a - b),
+    held: chromeless ? [] : Object.keys(layouts).map(Number).sort((a, b) => a - b),
   });
+  const [badgeGraceOver, setBadgeGraceOver] = useState(false);
   useEffect(() => {
+    const timer = setTimeout(() => setBadgeGraceOver(true), 3000);
+    return () => clearTimeout(timer);
+  }, []);
+  const badgeReady = badgeGraceOver || Object.keys(layouts).length > 0;
+  useEffect(() => {
+    if (!badgeReady) return;
     void desktopApp?.setBadge?.(JSON.parse(badgeKey));
-  }, [badgeKey]);
+  }, [badgeKey, badgeReady]);
   // **Only in the desktop app**, where the chord is unambiguously ours.
   //
   // `isElectron`, not `clientKind()`. The latter is documented a screen up as "a
