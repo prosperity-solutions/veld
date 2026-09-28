@@ -1211,6 +1211,31 @@ describe("a whole project's glyph", () => {
  * The set it is given is every project's worktrees, so this is the one reader of the
  * store that is not scoped to a project or a row.
  */
+/**
+ * What the Dock badge counts. The same set Next unread picks from, so the badge
+ * counts down as the button walks it.
+ */
+describe("the unread sessions the Dock badge counts", () => {
+  it("lists every unread session in the given worktrees, and nothing running", () => {
+    const box = createInbox();
+    box.report("b", WT, agent("blocked"), NOW);
+    box.report("a", OTHER_WT, agent("idle"), NOW + 1000);
+    box.report("busy", WT, agent("working"), NOW);
+    expect(box.unreadSessions(new Set([WT, OTHER_WT]))).toEqual([
+      { sessionId: "a", worktreeId: OTHER_WT },
+      { sessionId: "b", worktreeId: WT },
+    ]);
+    expect(box.unreadSessions(new Set([WT]))).toEqual([{ sessionId: "b", worktreeId: WT }]);
+  });
+
+  it("drops a session once it is read, as arriving from Next unread does", () => {
+    const box = createInbox();
+    box.report("a", WT, agent("blocked"), NOW);
+    box.read("a");
+    expect(box.unreadSessions(new Set([WT]))).toEqual([]);
+  });
+});
+
 describe("the next thing that needs you", () => {
   const THIRD_WT = 11;
   const ALL = new Set([WT, OTHER_WT, THIRD_WT]);

@@ -1062,12 +1062,12 @@ function AppInner(props: {
   // symmetric: the tray has an independent ten-second tick to fall back on, so a
   // missed key there is latency, while the update schedule's own interval is up
   // to twelve hours — which is the exact bug this nudge was extended to fix.
-  const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}`;
+  const desktopShellPrefs = `${settings?.["desktop.menuBarIcon"]}\u0000${settings?.["desktop.updateFrequency"]}\u0000${settings?.["desktop.dockBadge"]}`;
   useEffect(() => {
     // Nothing read yet — a daemon older than both keys, or the first paint.
     // Nothing to tell the shell either way, and it converges on its own schedule
     // regardless. `String(undefined)` is what a missing key renders as above.
-    if (desktopShellPrefs === "undefined\u0000undefined") return;
+    if (desktopShellPrefs === "undefined\u0000undefined\u0000undefined") return;
     void desktopApp?.settingsChanged?.();
   }, [desktopShellPrefs]);
 
@@ -6229,7 +6229,47 @@ function AppInner(props: {
    * panes this window knows about. A `useMemo` would need the store's mutation as
    * a dependency and it has no version to give one.
    */
-  const nextTarget = inbox.nextUnread(allProjectWorktreeIds(repos));
+  const unreadScope = allProjectWorktreeIds(repos);
+  const nextTarget = inbox.nextUnread(unreadScope);
+
+  // The Dock icon's badge: the same unread events Next unread walks, reported to
+  // Veld Desktop with the worktrees this window holds, so the shell can combine
+  // every window's answer (see `setBadge` in `shell.ts`). Only the worktree inbox
+  // is counted — Veld's own news has its own dot on the ⋯ menu, and a badge that
+  // lit up for a release note would stop meaning "something of yours needs you".
+  // The style is not sent: the shell reads `desktop.dockBadge` itself.
+  //
+  // Keyed on a JSON string for the reason `desktopShellPrefs` is: this body
+  // re-renders on every inbox change and every settings re-read, and only a change
+  // in the answer is worth an IPC round trip.
+  //
+  // `held` is empty from a detached window, matching `channel.holds`: it keeps
+  // tabs its origin window still holds the worktree for, and files no relayed
+  // agent hooks (`relayInboxEvents`), so letting it claim the worktree would hide
+  // every hook-sourced event there. It says `own` instead: what its inbox does
+  // hold — its panes' own terminal events — only it can see, so they always count.
+  //
+  // Not sent until this window's layouts have arrived, or three seconds have
+  // passed — whichever is first, so a window with nothing to fetch still reports,
+  // and so does one whose fetch is slow (briefly holding nothing, the cost of not
+  // waiting forever). After a reload `layouts` starts empty, and a first report
+  // saying "I hold nothing" would count other windows' stale copies of what was
+  // read here. The shell keeps the previous page's report until then.
+  const badgeKey = JSON.stringify({
+    unread: inbox.unreadSessions(unreadScope),
+    held: chromeless ? [] : Object.keys(layouts).map(Number).sort((a, b) => a - b),
+    own: chromeless,
+  });
+  const [badgeGraceOver, setBadgeGraceOver] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setBadgeGraceOver(true), 3000);
+    return () => clearTimeout(timer);
+  }, []);
+  const badgeReady = badgeGraceOver || Object.keys(layouts).length > 0;
+  useEffect(() => {
+    if (!badgeReady) return;
+    void desktopApp?.setBadge?.(JSON.parse(badgeKey));
+  }, [badgeKey, badgeReady]);
   // **Only in the desktop app**, where the chord is unambiguously ours.
   //
   // `isElectron`, not `clientKind()`. The latter is documented a screen up as "a

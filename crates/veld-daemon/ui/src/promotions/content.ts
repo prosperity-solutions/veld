@@ -426,4 +426,22 @@ export const PROMOTIONS: Promotion[] = [
       "Agents running in three projects, and one of them is stuck on a question. Next unread, at the end of the top bar, takes you to it — then to the one after.",
     glyph: "inbox",
   },
+  {
+    // The third of the being-told family, and the one that reaches past the
+    // window: `next-button` answers "where", this answers "is there anything" with
+    // Veld behind another app. Nobody finds it by looking — a Dock badge is only
+    // noticed once it is there, and without this card the first sighting is an
+    // unexplained red number.
+    //
+    // Flat on purpose: the capability, then the control. The body names the app
+    // and the platform because cards have no audience filter: a browser-tab
+    // reader and a Linux desktop user get this card too, and have no Dock.
+    id: "dock-badge",
+    since: "2026-09-28",
+    eyebrow: "New",
+    headline: "See from the Dock when something needs you",
+    body:
+      "On a Mac, Veld Desktop's Dock icon counts what waits for you: an agent with a question, a job that finished or failed. Prefer a dot? Settings, Dock icon badge.",
+    glyph: "inbox",
+  },
 ];

@@ -962,6 +962,25 @@ Minimal by design. Main process only does:
    older than the key cannot. Hiding it costs ambient status, not access — `window-all-closed`
    keeps the app alive on macOS regardless of the tray, and the Dock icon is
    still there to bring a window back.
+   The **Dock badge** (`src/dockBadge.js`, macOS only) is split the other way:
+   the *page* says what is unread, because the page holds the inbox, and the
+   *shell* reads the style (`desktop.dockBadge`) from the daemon on the same read
+   as `desktop.menuBarIcon` — a page re-reads settings only on focus, so an
+   unfocused window's style is stale. Every window reports its unread sessions
+   with their worktrees, plus the worktrees it holds a layout for, over
+   `veld:app:set-badge`. The main process counts distinct session ids (a session
+   two windows both know is one thing waiting), and for a worktree some window
+   holds it counts **only that window's** answer: every main window files every
+   relayed agent hook, but only the holder can read one, so a plain union kept a
+   read event lit forever. A worktree nobody holds counts from anyone, and a
+   detached window never claims to hold one (it files no relayed hooks, like
+   `channel.holds` leaves it out) — it reports `own` instead, and its entries,
+   its panes' own terminal events that no other window sees, always count. A report is dropped when its renderer crashes
+   or its `webContents` is destroyed, and ten seconds after a page change unless
+   the new page has reported — a reloading page holds nothing until its layouts
+   arrive, so dropping at once would count other windows' stale copies. Nothing
+   shows before the style's first read, and `app.dock.setBadge` is only called
+   when the text changes.
 4. `contextIsolation: true`, `nodeIntegration: false`, preload exposing
    `veldDesktop.shell` metadata, `veldDesktop.window` (open, detach, snapshot,
    title, close, adopt) and `veldDesktop.browser` — the embedded browser panes

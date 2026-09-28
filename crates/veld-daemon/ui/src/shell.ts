@@ -371,6 +371,28 @@ export interface DesktopAppApi {
    * poll.
    */
   settingsChanged?(): Promise<void>;
+  /**
+   * What this window has unread, for the Dock icon's badge.
+   *
+   * **Sessions, not a count**, because every window reports and the shell has to
+   * combine them: a main window and a detached one can both know a session, and
+   * adding their counts would report it twice. `held` is the worktrees this window
+   * has a layout for — the ones only it can read — because every main window files
+   * every relayed agent hook, and without it a session read in the holding window
+   * stayed counted in all the others. `own` is a detached window, whose entries are
+   * its panes' own terminal events and always count. The rules are
+   * `desktop/src/dockBadge.js`'s.
+   *
+   * No style: the shell reads `desktop.dockBadge` from the daemon itself, since
+   * this page's copy of the document is only refreshed on focus.
+   *
+   * Optional: an older shell has no Dock badge, and the page simply does not ask.
+   */
+  setBadge?(payload: {
+    unread: { sessionId: string; worktreeId: number }[];
+    held: number[];
+    own: boolean;
+  }): Promise<boolean>;
 }
 
 export const desktopApp: DesktopAppApi | null =
