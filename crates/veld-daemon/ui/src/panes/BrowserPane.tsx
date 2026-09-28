@@ -311,7 +311,7 @@ export function BrowserPane(props: {
   quickSwitches: QuickSwitchPrefs;
   /** `browser.searchUrl` — where words that are not an address go, or `""`. */
   searchUrl: string;
-  /** The sessions that exist for this worktree, in the order they were added. */
+  /** The sessions that exist for this worktree, in menu order (default first). */
   sessions: BrowserProfile[];
   /** Every session's name and colour. */
   sessionRegistry: SessionRegistry;

@@ -854,7 +854,14 @@ export function parseSessionRegistry(
     return { jars, sets: parseSets(p.sets) };
   }
 
+  // v1 menus were shown in slot order whatever order the list was stored in, so
+  // the migrated list is put in that order once — after which it is added order.
+  const slot = (id: string) => {
+    const i = (LEGACY_SESSION_IDS as readonly string[]).indexOf(id);
+    return i < 0 ? LEGACY_SESSION_IDS.length : i;
+  };
   const sets = parseSets(parseJson(legacyRaw));
+  for (const id of Object.keys(sets)) sets[Number(id)].sort((a, b) => slot(a) - slot(b));
   const jars: Record<BrowserProfile, SessionJar> = {};
   for (const list of Object.values(sets)) {
     for (const id of list) jars[id] = sessionJar(EMPTY_SESSION_REGISTRY, id);

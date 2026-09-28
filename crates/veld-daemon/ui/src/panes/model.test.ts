@@ -1296,6 +1296,9 @@ describe("browser sessions", () => {
     expect(sessionSetFor(reg, 4)).toEqual(["default", "wombat"]);
     expect(reg.jars.otter).toEqual({ name: "Otter", color: 0 });
     expect(reg.jars.gecko).toEqual({ name: "Gecko", color: 2 });
+    // Shown in the order v1 showed it (slot order), not the order it was stored.
+    const shuffled = parseSessionRegistry(null, JSON.stringify({ 1: ["gecko", "otter"] }));
+    expect(sessionSetFor(shuffled, 1)).toEqual(["default", "otter", "gecko"]);
     // A v2 registry wins over v1, even an empty one.
     expect(parseSessionRegistry(serializeSessionRegistry(EMPTY), v1)).toEqual(EMPTY);
   });

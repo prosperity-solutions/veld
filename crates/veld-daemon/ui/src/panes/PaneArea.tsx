@@ -1962,9 +1962,9 @@ function DockView(props: {
             }
             onRenameSession={props.onRenameSession}
             onRemoveSession={props.onRemoveSession}
-              retiredSessions={props.retiredSessions}
-              onClearSession={props.onClearSession}
-              onClearAllSessions={props.onClearAllSessions}
+            retiredSessions={props.retiredSessions}
+            onClearSession={props.onClearSession}
+            onClearAllSessions={props.onClearAllSessions}
             quickSwitches={props.quickSwitches}
             searchUrl={props.searchUrl}
             // Updater form on purpose: both docks can hold a browser pane, and
