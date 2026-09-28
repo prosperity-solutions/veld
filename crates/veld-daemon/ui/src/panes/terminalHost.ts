@@ -424,8 +424,11 @@ export function subscribeTerminal(id: string, fn: () => void): () => void {
   waiting.add(fn);
   pending.set(id, waiting);
   return () => {
-    waiting.delete(fn);
-    if (waiting.size === 0) pending.delete(id);
+    // Looked up again rather than closed over: `parkTerminal` can put this
+    // listener into a newer set than the one it was added to.
+    const current = pending.get(id);
+    current?.delete(fn);
+    if (current?.size === 0) pending.delete(id);
     sessions.get(id)?.listeners.delete(fn);
   };
 }
@@ -2110,8 +2113,10 @@ const CLOSED_IN_TRASH = new Set<string>();
  * The tab stays in the layout — that is what a restore brings back — so the
  * session is dropped the way a reload drops it, not the way closing the tab
  * does: no `DELETE` (the daemon is already ending it), no exit reported to the
- * inbox, and the listeners go back to `pending` so the pane's chip and the
- * rail pick up the session that the next mount creates. That mount then runs
+ * inbox, and any listener still subscribed goes back to `pending` so it follows
+ * the session the next mount creates. (Today the pane's own subscription ends
+ * with its unmount, so there is usually none; a subscriber that works from the
+ * layout rather than a mounted pane is what this keeps working.) That mount then runs
  * the ordinary path for a tab whose shell is gone: a new shell in the same
  * directory, or, for an agent pane, its Resume/Start choice.
  *
@@ -2120,12 +2125,12 @@ const CLOSED_IN_TRASH = new Set<string>();
  * somebody would leave a blank pane with no explanation.
  */
 function parkTerminal(s: Session): void {
-  CLOSED_IN_TRASH.add(s.id);
   if (s.container.isConnected) {
     writeNotice(s, "this worktree is in the trash, so its shell was closed");
     setState(s, "ended", "closed in the trash");
     return;
   }
+  CLOSED_IN_TRASH.add(s.id);
   const listeners = [...s.listeners];
   releaseTerminal(s.id);
   const waiting = pending.get(s.id) ?? new Set();

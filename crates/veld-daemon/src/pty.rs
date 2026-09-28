@@ -144,27 +144,34 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// database to ask.
 const MAX_SESSIONS: usize = veld_core::db::DEFAULT_MAX_SESSIONS as usize;
 
+/// The bound on shells re-adopted at boot: the highest cap the setting allows.
+const ADOPT_CEILING: usize = veld_core::db::MAX_MAX_SESSIONS as usize;
+
 /// Last session cap read from the database; `0` = never read.
 ///
 /// Published by the two places that already have the database open — the reaper
-/// pass and `mint_ticket` — so the claim in [`SessionSlot::claim`], which runs on
-/// the attach path and at boot adoption, never opens SQLite itself. The same shape
-/// as [`GRACE_HINT`], for the same reason.
+/// pass and `mint_ticket` — so the claim in [`SessionSlot::claim`] on the attach
+/// path opens SQLite at most once, before either has run. The same shape as
+/// [`GRACE_HINT`], for the same reason.
 static CAP_HINT: AtomicUsize = AtomicUsize::new(0);
 
 /// The live-session ceiling to enforce right now.
 fn session_cap() -> usize {
     match CAP_HINT.load(Ordering::Relaxed) {
         0 => {
-            let cap = match veld_core::db::Db::open() {
-                Ok(db) => db.max_sessions(),
+            // Not stored on failure, so the next claim asks again instead of
+            // holding the default until the first reaper pass.
+            match veld_core::db::Db::open() {
+                Ok(db) => {
+                    let cap = db.max_sessions();
+                    CAP_HINT.store(cap, Ordering::Relaxed);
+                    cap
+                }
                 Err(e) => {
                     warn!("could not read the terminal cap setting, using the default: {e}");
                     MAX_SESSIONS
                 }
-            };
-            CAP_HINT.store(cap, Ordering::Relaxed);
-            cap
+            }
         }
         cap => cap,
     }
@@ -508,7 +515,9 @@ async fn close_trashed_sessions() {
 /// The [`ServerControl::Trashed`] frame goes out before the hangup so a window
 /// still holding the pane can let go of it quietly, the way a reload would,
 /// instead of showing an `exit 129` with a Restart button on a tab that is in the
-/// trash.
+/// trash. A released session has no socket to send it on — its client already
+/// read the release as a lost connection — so its pane stays in that state, and
+/// after a restore its Reconnect button opens a new shell.
 async fn close_sessions_in(worktrees: &std::collections::HashSet<i64>) -> usize {
     if worktrees.is_empty() {
         return 0;
@@ -4084,11 +4093,12 @@ async fn adopt_one(path: &FsPath) -> bool {
     // an over-cap holder got a connection that was immediately dropped, and a
     // dropped connection restarts its orphan clock — so a daemon restarting more
     // often than the grace kept a 49th shell alive forever.
-    let Some(slot) = SessionSlot::claim() else {
-        warn!(
-            "not adopting {path:?}: already at {} sessions",
-            session_cap()
-        );
+    //
+    // Against the hard ceiling rather than `terminal.maxSessions`: these shells
+    // are already running, and the setting's promise is that lowering it never
+    // closes one — a restart after lowering it would otherwise orphan the extras.
+    let Some(slot) = SessionSlot::claim_from(&LIVE_SESSIONS, ADOPT_CEILING) else {
+        warn!("not adopting {path:?}: already at {ADOPT_CEILING} sessions");
         return false;
     };
 
@@ -4454,7 +4464,9 @@ enum ServerControl {
     /// past `terminal.trashedGraceMinutes`. Sent just before the hangup, so the
     /// client can drop the pane's terminal without reporting an exit; restoring
     /// the worktree then opens it the way a reload opens a pane whose shell is
-    /// gone.
+    /// gone. A bundle older than this frame ignores it and reads the close as a
+    /// lost connection: its reconnect attempts are refused while the worktree is
+    /// in the trash, and after a restore its Reconnect button opens a new shell.
     Trashed,
     /// Output was produced faster than this socket could take it, so the
     /// display is missing bytes.
@@ -7720,6 +7732,18 @@ mod tests {
             let ended = close_sessions_in(&[trashed].into_iter().collect()).await;
             assert_eq!(ended, 1, "only the trashed worktree's session ends");
             read_control(&mut ws, "trashed").await;
+            // The last frame: the socket closes without an `exit`, which would
+            // turn the client's quiet let-go back into an ended terminal.
+            loop {
+                match tokio::time::timeout(STEP_TIMEOUT, ws.next()).await {
+                    Ok(None) | Ok(Some(Err(_))) | Ok(Some(Ok(WsMessage::Close(_)))) => break,
+                    Ok(Some(Ok(WsMessage::Text(t)))) => {
+                        panic!("no control frame may follow `trashed`, got {t}")
+                    }
+                    Ok(Some(Ok(_))) => continue,
+                    Err(_) => panic!("the socket did not close after `trashed`"),
+                }
+            }
             assert!(!SESSIONS.lock().await.contains_key(&sid));
             assert!(
                 SESSIONS.lock().await.contains_key(&other),

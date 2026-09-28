@@ -1113,7 +1113,7 @@ impl SettingKey {
                 title: "Maximum open terminals",
                 help: "How many terminals may run at once across every worktree. Past it, a \
                        new terminal is refused until one is closed. Shells already running are \
-                       never closed by lowering it.",
+                       never closed by lowering it, not even across a daemon restart.",
                 group: Terminal,
                 section: BEHAVIOUR,
                 shape: ValueShape::Int,

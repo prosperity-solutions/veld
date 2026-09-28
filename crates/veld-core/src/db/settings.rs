@@ -209,9 +209,10 @@ pub const MAX_TRASHED_GRACE_MINUTES: i64 = 10_080;
 pub const DEFAULT_MAX_SESSIONS: i64 = 48;
 /// Floor: a handful of worktrees with an agent and a shell each.
 pub const MIN_MAX_SESSIONS: i64 = 8;
-/// Ceiling. Every session holds file descriptors in the daemon, and a
-/// launchd-started process begins with a soft limit of 256 of them; well past
-/// this the daemon runs out of descriptors before it runs out of shells.
+/// Ceiling. Every session holds about two file descriptors in the daemon, which
+/// raises its own soft limit at startup (`raise_fd_limit` in `veld-daemon`)
+/// because launchd starts it at 256 — this bound is what keeps the shells well
+/// inside that budget alongside everything else the daemon has open.
 pub const MAX_MAX_SESSIONS: i64 = 128;
 
 /// How many times a terminal whose socket dropped reconnects to the same shell
