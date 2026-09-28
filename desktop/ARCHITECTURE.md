@@ -962,6 +962,14 @@ Minimal by design. Main process only does:
    older than the key cannot. Hiding it costs ambient status, not access — `window-all-closed`
    keeps the app alive on macOS regardless of the tray, and the Dock icon is
    still there to bring a window back.
+   The **Dock badge** (`src/dockBadge.js`, macOS only) goes the other way: the
+   *page* decides, because the page holds the inbox. Every window reports the
+   session ids it has an unread event for, plus `desktop.dockBadge` as it reads
+   it, over `veld:app:set-badge`; the main process takes the **union** across
+   windows (a session two windows both know is one thing waiting, not two),
+   forgets a window's report when its `webContents` is destroyed, and applies
+   `app.dock.setBadge` only when the text changes. Ids rather than a count is the
+   whole design — a count cannot be de-duplicated after the fact.
 4. `contextIsolation: true`, `nodeIntegration: false`, preload exposing
    `veldDesktop.shell` metadata, `veldDesktop.window` (open, detach, snapshot,
    title, close, adopt) and `veldDesktop.browser` — the embedded browser panes

@@ -37,8 +37,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 use super::settings_catalog::{
-    CURSOR_STYLES, Choice, GIT_CREATE_SOURCES, MARKER_STYLES, UPDATE_FREQUENCIES,
-    WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
+    CURSOR_STYLES, Choice, DOCK_BADGE_STYLES, GIT_CREATE_SOURCES, MARKER_STYLES,
+    UPDATE_FREQUENCIES, WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
 };
 use super::{Db, DbError, now_str};
 
@@ -742,6 +742,8 @@ pub enum SettingKey {
     FeedbackSuppressOverlay,
     DesktopMenuBarIcon,
     DesktopUpdateFrequency,
+    /// What the Dock icon carries while something is unread: `count`, `dot` or `off`.
+    DesktopDockBadge,
     Unknown(String),
 }
 
@@ -780,6 +782,7 @@ impl SettingKey {
         Self::NewsSource,
         Self::FeedbackSuppressOverlay,
         Self::DesktopMenuBarIcon,
+        Self::DesktopDockBadge,
         Self::DesktopUpdateFrequency,
         // ── General › Database backups ───────────────────────────────────────
         Self::BackupEnabled,
@@ -940,6 +943,7 @@ impl SettingKey {
             Self::FeedbackSuppressOverlay => "feedback.suppressOverlay",
             Self::DesktopMenuBarIcon => "desktop.menuBarIcon",
             Self::DesktopUpdateFrequency => "desktop.updateFrequency",
+            Self::DesktopDockBadge => "desktop.dockBadge",
             Self::Unknown(k) => k,
         }
     }
@@ -1017,6 +1021,7 @@ impl SettingKey {
             "feedback.suppressOverlay" => Self::FeedbackSuppressOverlay,
             "desktop.menuBarIcon" => Self::DesktopMenuBarIcon,
             "desktop.updateFrequency" => Self::DesktopUpdateFrequency,
+            "desktop.dockBadge" => Self::DesktopDockBadge,
             other => Self::Unknown(other.to_string()),
         }
     }
@@ -1360,6 +1365,12 @@ impl SettingKey {
             // a stored tier no app understands would silently be the default while
             // the settings dialog showed something else.
             Self::DesktopUpdateFrequency => one_of(value, UPDATE_FREQUENCIES).ok_or_else(bad)?,
+            // Rejected rather than coerced, like every other enum here. The reader
+            // is the page rather than the shell — it decides what to hand the Dock —
+            // and it maps an unknown value onto `count` (`dockBadgeStyle` in
+            // `ui/src/shared/settings.ts`), so refusing the write is what keeps the
+            // dialog and the Dock from disagreeing.
+            Self::DesktopDockBadge => one_of(value, DOCK_BADGE_STYLES).ok_or_else(bad)?,
             Self::WorktreeNewMode => one_of(value, WORKTREE_NEW_MODES).ok_or_else(bad)?,
             // Where a *new* worktree's branch is cut from. Rejected rather than
             // coerced (same as the other enums here): the daemon acts on this
@@ -2082,6 +2093,11 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // days between prompts. Read by the Electron shell only — a browser tab
         // does not check for releases.
         (SettingKey::DesktopUpdateFrequency, Value::from("balanced")),
+        // `count` — the Dock icon says how many things are waiting for you, the
+        // same events the Next unread button walks. `dot` keeps the signal and
+        // drops the number; `off` leaves the icon alone. Read by the page, and
+        // acted on only inside Veld Desktop on macOS — a browser tab has no Dock.
+        (SettingKey::DesktopDockBadge, Value::from("count")),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))

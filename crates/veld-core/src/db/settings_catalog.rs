@@ -466,6 +466,13 @@ pub(super) const UPDATE_FREQUENCIES: &[Choice] = &[
     choice("relaxed", "Rarely — at most one every two days"),
 ];
 
+/// What the Dock icon carries while something is unread (`desktop.dockBadge`).
+pub(super) const DOCK_BADGE_STYLES: &[Choice] = &[
+    choice("count", "How many — a number"),
+    choice("dot", "That there are some — a dot"),
+    choice("off", "Nothing"),
+];
+
 /// `extensions.source` and `news.source` share a value vocabulary and not their
 /// labels — see [`Choice`].
 const EXTENSIONS_SOURCES: &[Choice] = &[
@@ -783,6 +790,23 @@ impl SettingKey {
                  menu bar to put anything in.",
                 General,
             ),
+
+            Self::DesktopDockBadge => Spec {
+                title: "Badge on the Dock icon",
+                help: "While something is unread — a coding agent waiting for you, or something \
+                       that finished or failed, in any project — Veld Desktop marks its Dock \
+                       icon. These are the same events the Next unread button takes you to, so \
+                       the badge clears as you walk them. A number says how many; a dot only \
+                       says there are some; Nothing leaves the icon alone. Veld's own news is \
+                       never counted. Only the desktop app on macOS shows this.",
+                group: General,
+                section: None,
+                shape: ValueShape::Text,
+                choices: Choices::Static {
+                    options: DOCK_BADGE_STYLES,
+                },
+                requires: None,
+            },
 
             // ── General › Database backups ───────────────────────────────────
             Self::BackupEnabled => toggle_in(

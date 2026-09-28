@@ -41,6 +41,7 @@ import {
   FOCUS_SUPPRESS_BELL,
   FOCUS_SUPPRESS_TOASTS,
   FOCUS_SUPPRESS_OS_NOTIFICATIONS,
+  dockBadgeStyle,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
@@ -6229,7 +6230,27 @@ function AppInner(props: {
    * panes this window knows about. A `useMemo` would need the store's mutation as
    * a dependency and it has no version to give one.
    */
-  const nextTarget = inbox.nextUnread(allProjectWorktreeIds(repos));
+  const unreadScope = allProjectWorktreeIds(repos);
+  const nextTarget = inbox.nextUnread(unreadScope);
+
+  // The Dock icon's badge: the same unread events Next unread walks, reported to
+  // Veld Desktop, which unions every window's answer (see `setBadge` in
+  // `shell.ts`). Only the worktree inbox is counted — Veld's own news has its own
+  // dot on the ⋯ menu, and a badge that lit up for a release note would stop
+  // meaning "something of yours needs you".
+  //
+  // Keyed on a joined string for the reason `desktopShellPrefs` is: this body
+  // re-renders on every inbox change and every settings re-read, and only a change
+  // in the answer is worth an IPC round trip.
+  const badgeStyle = dockBadgeStyle(settings ?? {});
+  const badgeKey = `${badgeStyle}\u0000${inbox.unreadSessions(unreadScope).join("\u0000")}`;
+  useEffect(() => {
+    const [style, ...sessions] = badgeKey.split("\u0000");
+    void desktopApp?.setBadge?.({
+      sessions: sessions.filter((id) => id !== ""),
+      style: style as ReturnType<typeof dockBadgeStyle>,
+    });
+  }, [badgeKey]);
   // **Only in the desktop app**, where the chord is unambiguously ours.
   //
   // `isElectron`, not `clientKind()`. The latter is documented a screen up as "a

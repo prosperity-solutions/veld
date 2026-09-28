@@ -309,6 +309,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  on (`desktop.menuBarIcon`). A nudge with no value: the daemon owns the
      *  document and the shell polls it anyway, so this only buys immediacy. */
     settingsChanged: () => ipcRenderer.invoke("veld:app:settings-changed"),
+    /** What this window has unread, as `{sessions, style}`, for the Dock badge.
+     *  Ids rather than a count so the shell can union windows — see
+     *  `desktop/src/dockBadge.js`. */
+    setBadge: (payload) => ipcRenderer.invoke("veld:app:set-badge", payload),
   },
   browser: {
     /** Drop views left behind by a previous page. Called once, before any

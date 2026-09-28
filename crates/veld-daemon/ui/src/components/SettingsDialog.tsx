@@ -1262,6 +1262,9 @@ const HARDWARE_GATES: Record<string, (m: Machine) => boolean> = {
   // a control, or a macOS user whose one `/api/caffeinate` request failed loses
   // the setting entirely, and every open flickers the row in as the probe lands.
   "desktop.menuBarIcon": (m) => m.platform === null || m.platform === "macos",
+  // Same machine-not-client rule, same reason: the badge is `app.dock`, which
+  // only exists on macOS (`desktop/src/dockBadge.js`).
+  "desktop.dockBadge": (m) => m.platform === null || m.platform === "macos",
 };
 
 /**

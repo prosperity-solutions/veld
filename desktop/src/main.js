@@ -20,6 +20,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 const { menuBarIconFrom, serialize } = require("./trayVisibility");
+const { registerDockBadgeIpc } = require("./dockBadge");
 const {
   focusPrimary,
   initWindows,
@@ -776,6 +777,7 @@ app.whenReady().then(async () => {
     permissionsFile: path.join(app.getPath("userData"), "permissions.json"),
   });
   registerWindowIpc(ipcMain);
+  registerDockBadgeIpc(ipcMain, app);
   // A renderer saw the settings document change. The tick below would converge on
   // its own within ten seconds; this is what makes a toggle in the settings dialog
   // land while the user is still looking at it.

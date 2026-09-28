@@ -371,6 +371,19 @@ export interface DesktopAppApi {
    * poll.
    */
   settingsChanged?(): Promise<void>;
+  /**
+   * What this window has unread, for the Dock icon's badge.
+   *
+   * **Session ids, not a count**, because every window reports and the shell has to
+   * combine them: a pane lives in exactly one window's layout, but a main window
+   * and a detached one can both know a session, and adding their counts would
+   * report it twice. The shell takes the union across windows. `style` is
+   * `desktop.dockBadge` as this page reads it; the newest report wins, and every
+   * window re-reports when the document changes, so they agree within a frame.
+   *
+   * Optional: an older shell has no Dock badge, and the page simply does not ask.
+   */
+  setBadge?(payload: { sessions: string[]; style: "count" | "dot" | "off" }): Promise<boolean>;
 }
 
 export const desktopApp: DesktopAppApi | null =

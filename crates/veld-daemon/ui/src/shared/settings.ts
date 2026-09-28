@@ -165,6 +165,9 @@ const FALLBACK = {
   // appears takes the *shipped* default, so an older daemon that cannot know the key
   // shows the button rather than looking like a new UI with a piece missing.
   showNextUnread: true,
+  // Matches the Rust default. An older daemon cannot know the key, and `count` is
+  // what the feature ships as — an absent badge would read as a broken new build.
+  dockBadge: "count" as DockBadgeStyle,
   // Matches the Rust default rather than the previous release's behaviour, and
   // the two disagree here: before this key there were no project cards at all,
   // so the rule would say `false`. But an older daemon cannot know the key, and
@@ -757,6 +760,19 @@ export function hideDisabledActions(doc: SettingsDoc): boolean {
  */
 export function showNextUnread(doc: SettingsDoc): boolean {
   return bool(doc, "ui.showNextUnread", FALLBACK.showNextUnread);
+}
+
+/** What Veld Desktop's Dock icon carries while something is unread. */
+export type DockBadgeStyle = "count" | "dot" | "off";
+
+/**
+ * `desktop.dockBadge`. **Defaults to `count`**, and so does any value this build
+ * does not know — the daemon refuses one on write, so an unknown value here means
+ * a newer daemon added a style, and a number is the nearest honest answer.
+ */
+export function dockBadgeStyle(doc: SettingsDoc): DockBadgeStyle {
+  const value = doc["desktop.dockBadge"];
+  return value === "dot" || value === "off" || value === "count" ? value : FALLBACK.dockBadge;
 }
 
 /** The five `keepAwake.*` keys. See [`keepAwakePrefs`]. */

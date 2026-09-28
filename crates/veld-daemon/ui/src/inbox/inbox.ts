@@ -728,6 +728,23 @@ class WorktreeInbox {
   }
 
   /**
+   * Every session with an unread event, in the given worktrees — what the Dock
+   * badge counts.
+   *
+   * The same set {@link nextUnread} picks from, so the badge and the button can
+   * never disagree about whether there is anything to go to: the button walks this
+   * list one entry at a time, and the badge counts down as it does. Sorted, so a
+   * caller can compare two answers by joining them.
+   */
+  unreadSessions(worktreeIds: ReadonlySet<number>): string[] {
+    const out: string[] = [];
+    for (const [sessionId, session] of this.sessions) {
+      if (session.unseen && worktreeIds.has(session.worktreeId)) out.push(sessionId);
+    }
+    return out.sort();
+  }
+
+  /**
    * One pass over the sessions, filtered by whichever worktrees the caller wants.
    *
    * The predicate is a closure per call, which is a cheaper allocation than the
