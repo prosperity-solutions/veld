@@ -67,17 +67,17 @@ import { TopBarControls } from "./components/TopBarControls";
 import {
   activeRun,
   attentionStatus,
-  bestFuzzyMatch,
   bulkMoveTargets,
   bulkTrashable,
   freshRunName,
-  fuzzyMatch,
   insertionTarget,
   laneDropTarget,
   liveRuns,
   moveLane,
   moveWorktree,
   orderKeyOf,
+  rankPaletteMatches,
+  TRASH_GROUP,
   asLaneRows,
   railOrder,
   realLanes,
@@ -5666,10 +5666,13 @@ function AppInner(props: {
     await refresh();
   };
 
-  const restoreWorktree = async (w: Worktree) => {
+  /** Resolves to whether the worktree came back, after the list has refreshed. */
+  const restoreWorktree = async (w: Worktree): Promise<boolean> => {
+    let restored = false;
     try {
       await api.restoreWorktree(w.id);
       notifyDone(`Restored ${worktreeLabel(w)}`);
+      restored = true;
     } catch (e) {
       // 404 is the expected failure — the worker got there first — and saying so is
       // better than a generic error for a race the design admits to. Anything else
@@ -5684,6 +5687,7 @@ function AppInner(props: {
       );
     }
     await refresh();
+    return restored;
   };
 
   /** Drop a rail row onto the trash: bin it (revertible), which is what dragging
@@ -5759,10 +5763,35 @@ function AppInner(props: {
   const buildPaletteItems = (): PaletteItem[] => {
     const items: PaletteItem[] = [];
 
+    /**
+     * A trashed worktree as a ⌘K row: choosing it restores the worktree, then
+     * selects it. `null` once its removal has passed the point of no return —
+     * there is nothing left to restore, the same reason the rail's menu offers
+     * nothing for it.
+     */
+    const trashItem = (w: Worktree, label: string, alt: string[]): PaletteItem | null => {
+      if (isDeleting(w)) return null;
+      return {
+        id: `trash:${w.id}`,
+        group: TRASH_GROUP,
+        label,
+        hint: `${w.branch} · in trash — restore`,
+        alt,
+        mark: { emoji: w.emoji, marker_color: w.marker_color },
+        run: () =>
+          void restoreWorktree(w).then((ok) => {
+            if (ok) void selectWorktree(w);
+          }),
+      };
+    };
+
     for (const w of worktrees) {
-      // Pending removals are omitted: ⌘K exists to *go* somewhere, and there is
-      // nowhere to go in a checkout that is being deleted.
-      if (w.trashed_at) continue;
+      // Trashed worktrees go in the "Trash" group instead — see `trashItem`.
+      if (w.trashed_at) {
+        const t = trashItem(w, worktreeLabel(w), [w.branch, w.alias]);
+        if (t) items.push(t);
+        continue;
+      }
       const wtStatus = worktreeStatus(runsForWorktree(envs, w));
       items.push({
         id: `wt:${w.id}`,
@@ -6000,9 +6029,11 @@ function AppInner(props: {
         run: () => switchToProject(r.root),
       });
       for (const w of r.worktrees) {
-        // Same omission as the "Worktrees" group: there is nowhere to go in a
-        // checkout that is being deleted.
-        if (w.trashed_at) continue;
+        if (w.trashed_at) {
+          const t = trashItem(w, `${r.name} · ${worktreeLabel(w)}`, [w.branch, w.alias, r.name]);
+          if (t) items.push(t);
+          continue;
+        }
         items.push({
           id: `wt:${w.id}`,
           group: "Projects",
@@ -10726,15 +10757,29 @@ const PALETTE_STATUS: Record<WorktreeStatus, string> = {
   stopped: "",
 };
 
-/** Header order for the idle (no-query) list. Also the grouping key. */
-const PALETTE_GROUPS = ["Worktrees", "Run", "Panes", "Worktree", "Projects", "View"] as const;
+/**
+ * Header order for the idle (no-query) list. Also the grouping key.
+ *
+ * "Trash" is never part of the idle list: trashed worktrees appear only for a
+ * query, and then below every other match regardless of score.
+ */
+const PALETTE_GROUPS = [
+  "Worktrees",
+  "Run",
+  "Panes",
+  "Worktree",
+  "Projects",
+  "View",
+  TRASH_GROUP,
+] as const;
 type PaletteGroup = (typeof PALETTE_GROUPS)[number];
 
 /** One ⌘K entry: a worktree to jump to, or an action to run. */
 interface PaletteItem {
   id: string;
   /** Must be one of PALETTE_GROUPS — the idle list is sorted by that order,
-   *  so items need not be declared contiguously by group. */
+   *  so items need not be declared contiguously by group. `TRASH_GROUP`
+   *  items never appear in the idle list, only for a query. */
   group: PaletteGroup;
   label: string;
   /** Dim right-hand detail (branch, URL, path). */
@@ -10797,25 +10842,7 @@ function CommandPalette(props: {
   const scrollToCursor = useRef(false);
 
   const searching = query.trim().length > 0;
-  const matches = searching
-    ? props.items
-        .map((item) => ({
-          item,
-          match: bestFuzzyMatch([item.label, ...(item.alt ?? [])], query),
-          // Highlight only what matched in the label itself; a hit that came
-          // from a branch or URL has no positions to mark here.
-          label: fuzzyMatch(item.label, query),
-        }))
-        .filter((r) => r.match !== null)
-        .sort((a, b) => b.match!.score - a.match!.score)
-    : // Group the idle list explicitly rather than trusting declaration
-      // order: the single `lastGroup` cursor below would emit a duplicate
-      // header for any item appended out of group order.
-      PALETTE_GROUPS.flatMap((g) =>
-        props.items
-          .filter((item) => item.group === g)
-          .map((item) => ({ item, match: null, label: null })),
-      );
+  const matches = rankPaletteMatches(props.items, query, PALETTE_GROUPS);
 
   // Resolve the id back to a position; an id that filtered out falls back to
   // the top match, which is what a user who just typed expects.
@@ -10870,7 +10897,10 @@ function CommandPalette(props: {
         />
         <div className="palette-list">
           {matches.map(({ item, label }, i) => {
-            const header = !searching && item.group !== lastGroup;
+            // While searching the list is one ranking with no headers, except
+            // the one that sets the trailing trashed rows apart.
+            const header =
+              (!searching || item.group === TRASH_GROUP) && item.group !== lastGroup;
             if (header) lastGroup = item.group;
             return (
               <div key={item.id}>

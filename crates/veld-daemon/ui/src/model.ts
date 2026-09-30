@@ -1490,3 +1490,60 @@ export function bestFuzzyMatch(
   }
   return best;
 }
+
+/** The ⌘K palette group trashed worktrees are listed under. */
+export const TRASH_GROUP = "Trash";
+
+/** What `rankPaletteMatches` needs of a ⌘K entry. */
+export interface RankablePaletteItem {
+  group: string;
+  label: string;
+  /** Extra haystacks the query may match, beyond the label. */
+  alt?: string[];
+}
+
+export interface RankedPaletteItem<T> {
+  item: T;
+  /** Best score across the label and `alt`; `null` in the idle list. */
+  match: FuzzyMatch | null;
+  /** Match within the label alone, for highlighting; `null` in the idle list. */
+  label: FuzzyMatch | null;
+}
+
+/**
+ * The rows the ⌘K palette shows, in order.
+ *
+ * With no query: every item except `TRASH_GROUP`, grouped in `groups` order —
+ * explicitly rather than by declaration order, because the palette emits one
+ * header per group change and an item declared out of group order would get a
+ * duplicate header.
+ *
+ * With a query: every match, best score first, except that `TRASH_GROUP`
+ * always sorts below every other match whatever its score. The top row is what
+ * Enter chooses, so a query matching only trashed worktrees restores the best
+ * of them.
+ */
+export function rankPaletteMatches<T extends RankablePaletteItem>(
+  items: T[],
+  query: string,
+  groups: readonly string[],
+): RankedPaletteItem<T>[] {
+  if (query.trim().length === 0) {
+    return groups
+      .filter((g) => g !== TRASH_GROUP)
+      .flatMap((g) =>
+        items.filter((item) => item.group === g).map((item) => ({ item, match: null, label: null })),
+      );
+  }
+  const trash = (r: RankedPaletteItem<T>) => Number(r.item.group === TRASH_GROUP);
+  return items
+    .map((item) => ({
+      item,
+      match: bestFuzzyMatch([item.label, ...(item.alt ?? [])], query),
+      // Highlight only what matched in the label itself; a hit that came
+      // from a branch or URL has no positions to mark here.
+      label: fuzzyMatch(item.label, query),
+    }))
+    .filter((r) => r.match !== null)
+    .sort((a, b) => trash(a) - trash(b) || b.match!.score - a.match!.score);
+}

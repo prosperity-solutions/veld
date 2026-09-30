@@ -51,6 +51,8 @@ import {
   trashPreview,
   asLaneRows,
   type RealLanes,
+  rankPaletteMatches,
+  TRASH_GROUP,
 } from "./model";
 
 /**
@@ -818,6 +820,45 @@ describe("bestFuzzyMatch", () => {
   it("is null only when no haystack matches", () => {
     expect(bestFuzzyMatch(["chk", "feat/x"], "zzz")).toBeNull();
     expect(bestFuzzyMatch([], "a")).toBeNull();
+  });
+});
+
+describe("rankPaletteMatches", () => {
+  const GROUPS = ["Worktrees", "Run", TRASH_GROUP] as const;
+  const item = (group: string, label: string, alt?: string[]) => ({ group, label, alt });
+  const labels = (rows: { item: { label: string } }[]) => rows.map((r) => r.item.label);
+
+  it("leaves trash out of the idle list and groups the rest in header order", () => {
+    const items = [
+      item("Run", "Start run"),
+      item(TRASH_GROUP, "binned"),
+      item("Worktrees", "main"),
+    ];
+    expect(labels(rankPaletteMatches(items, "  ", GROUPS))).toEqual(["main", "Start run"]);
+  });
+
+  it("sorts every trash match below every other match, whatever the score", () => {
+    const items = [
+      item(TRASH_GROUP, "feature"),
+      item("Run", "Free a test runner"),
+    ];
+    // The trash label is the far tighter match, and still comes second.
+    expect(fuzzyMatch("feature", "feat")!.score).toBeGreaterThan(
+      fuzzyMatch("Free a test runner", "feat")!.score,
+    );
+    expect(labels(rankPaletteMatches(items, "feat", GROUPS))).toEqual([
+      "Free a test runner",
+      "feature",
+    ]);
+  });
+
+  it("keeps score order within the trash, and matches on alt haystacks", () => {
+    const items = [
+      item(TRASH_GROUP, "Hello test", ["x/scattered-api"]),
+      item(TRASH_GROUP, "api"),
+      item(TRASH_GROUP, "unrelated"),
+    ];
+    expect(labels(rankPaletteMatches(items, "api", GROUPS))).toEqual(["api", "Hello test"]);
   });
 });
 
