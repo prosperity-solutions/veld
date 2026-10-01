@@ -367,6 +367,40 @@ pub enum State {
     Idle,
     /// The session ended.
     Done,
+    /// A turn ended while the session still has background agents running, which will
+    /// wake it again without the user — so it is still working on the user's behalf, and
+    /// the end of this turn is not news. See [`waits_on_background_agent`].
+    ///
+    /// Not [`Self::Working`]: that also *retracts* an unread "waiting for you", which is
+    /// right when the session moved on and wrong here — one background agent asking for
+    /// permission must stay amber while the session is woken by another one finishing.
+    /// And not [`Self::Unknown`] (nothing at all): the inbox has to *remember* it, because
+    /// Claude's `idle_prompt` reminder ([`Self::Settled`]) arrives a minute into the wait
+    /// whether or not agents are running, and would stop the spinner for the rest of it.
+    Delegated,
+    /// The agent is sitting at its prompt and has nothing new to say — it stopped
+    /// working, but this is not the news that a turn finished.
+    ///
+    /// Clears the pane's *working* flag — unless the last turn was [`Self::Delegated`],
+    /// whose wait it does not end — and files nothing. Exists because the end of a
+    /// turn has two reporters with different reliability: `Stop` is the news ([`Self::Idle`]),
+    /// but Claude does not send it for a turn the user **interrupted** (Esc), so an
+    /// interrupted turn left the spinner running with nothing to ever stop it. Claude's
+    /// later `idle_prompt` reminder is what still arrives, and it maps here: it can stop a
+    /// spinner, but as `Idle` it re-filed a "finished" the user had already read, and
+    /// filed one for a session only waiting on its background agents.
+    ///
+    /// Deliberately not [`Self::Ready`], which does the same to the flag: `Ready` also
+    /// means "an agent just launched here" and lets the inbox attribute an outstanding
+    /// shell command to the agent — a late reminder arriving after the user quit the agent
+    /// and started something else would have claimed *that* command.
+    ///
+    /// Not guaranteed to arrive. Claude skips the reminder for good once the user has
+    /// interacted since the turn ended — pressed Esc, started typing a correction, then
+    /// walked away without sending it — and a user can raise its threshold arbitrarily.
+    /// Then an interrupted turn's spinner runs until the next prompt. Accepted: it is
+    /// what this signal can do, not a bug in reading it.
+    Settled,
     /// Told something we do not understand — **or something we understand and have
     /// chosen not to report**, which is the larger population. Produces no inbox event
     /// and touches no state: silence beats a badge the user cannot act on. See
@@ -384,6 +418,8 @@ impl State {
             Self::Blocked => "blocked",
             Self::Idle => "idle",
             Self::Done => "done",
+            Self::Delegated => "delegated",
+            Self::Settled => "settled",
             Self::Unknown => "unknown",
         }
     }
@@ -396,6 +432,8 @@ impl State {
             Self::Blocked,
             Self::Idle,
             Self::Done,
+            Self::Delegated,
+            Self::Settled,
             Self::Unknown,
         ]
         .into_iter()
@@ -443,18 +481,107 @@ pub struct HookPayload {
     /// live.
     #[serde(default)]
     pub reason: Option<String>,
+    /// `Stop`'s list of the session's background tasks that are still running — see
+    /// [`waits_on_background_agent`]. Kept as raw JSON rather than a typed list: it is
+    /// the one field here with structure, and a shape this code did not expect must cost
+    /// that one field, not turn the whole `Stop` into an unparseable payload.
+    #[serde(default)]
+    pub background_tasks: Option<serde_json::Value>,
+}
+
+/// Whether a `Stop` was sent while the session still has a background agent running —
+/// one it will be woken by, without the user, when that agent ends.
+///
+/// # Why this turns a `Stop` into nothing
+///
+/// A session that launches background agents usually ends its turn straight away and
+/// waits. Claude fires `Stop` for that, and again for every turn that one of the agents'
+/// results wakes it into — no `UserPromptSubmit` in between, because nobody typed
+/// anything. Each of those was filed as "Agent finished", with a banner: one per agent
+/// plus one, for a single request. Reported from real use, and reproduced with two
+/// background agents.
+///
+/// Claude says so itself. Its `Stop` payload carries `background_tasks`, the session's
+/// tasks whose `status` is `running` or `pending` and which are backgrounded, each with
+/// a `type` — already filtered by Claude, so a foreground agent is never on it; the
+/// `status` check here is belt and braces. While one of them is an agent, the turn that just ended is not the session
+/// finishing — it is the session waiting on its own work. The `Stop` after the last
+/// agent has come back has an empty list, and that one is the real "finished". No state
+/// to keep and nothing to pair up: every `Stop` carries the whole current answer.
+///
+/// It reports [`State::Delegated`], which keeps the "finished" out of the inbox and the
+/// spinner on — see that variant for why neither `Working` nor `Unknown` would do.
+///
+/// # What it costs
+///
+/// The answer is Claude's own view of its tasks, so a subagent Claude still lists as
+/// running — wedged, or killed in a way that never updates its status — keeps every
+/// later `Stop` from reading as finished. That is accepted: Claude's own prompt then
+/// says it is still waiting for that agent, so veld agrees with the tool rather than
+/// guessing past it, and the pane keeps spinning until the next prompt — the same
+/// "still waiting" Claude itself shows. A final `Stop` lost on the way (a hook timeout,
+/// a daemon restart) costs that turn's "finished" and leaves the spinner on until the
+/// next prompt or `SessionEnd`, as a lost `Stop` always did.
+///
+/// # Which tasks count
+///
+/// Only `subagent` and `workflow` — work that ends on its own and wakes the session when
+/// it does. **Not `shell`**: a background shell is as often a dev server or a watcher as
+/// a test run, and one that never ends would swallow every "finished" in the pane for as
+/// long as it lives. Not `monitor` or `teammate` either — both are built to stay alive
+/// for the session, so they have the shell's problem by design — and not Claude's own
+/// housekeeping (`dream`, `auto-mode scan`, `memory import`), which never wakes it with
+/// a result. `MCP task` and `cloud session` could join the list; they are left out until
+/// someone measures that they end. The known residual: a turn woken by one of those
+/// still files its own "finished", as every turn did before. A type this list has not heard of does not count, so the failure mode of
+/// a new one is the old behaviour — a `Stop` that badges — rather than a pane that never
+/// finishes.
+///
+/// # What this was not, and why
+///
+/// `SubagentStart`/`SubagentStop` look like the obvious source, and Claude's hook
+/// reference documents a `run_in_background` field on both. **Claude Code 2.1.286 does
+/// not send it**: its `SubagentStart` carries `agent_id` and `agent_type` only, and its
+/// `SubagentStop` adds the same `background_tasks` list. A first version of this fix
+/// built on the documented field, tracked nothing, and was caught only by driving it.
+///
+/// Measured by reading the payload construction in **Claude Code 2.1.286**: the `type`
+/// spellings come from its own table (`local_agent` → `subagent`, `local_workflow` →
+/// `workflow`, `local_bash` → `shell`, …), and the filter is `running`/`pending` and not
+/// explicitly un-backgrounded. Recheck against the current version if this stops working.
+#[must_use]
+pub fn waits_on_background_agent(payload: &HookPayload) -> bool {
+    let Some(serde_json::Value::Array(tasks)) = &payload.background_tasks else {
+        return false;
+    };
+    tasks.iter().any(|task| {
+        let field = |name: &str| task.get(name).and_then(serde_json::Value::as_str);
+        matches!(field("type"), Some("subagent" | "workflow"))
+            && matches!(field("status"), Some("running" | "pending"))
+    })
 }
 
 /// The state a Claude Code hook payload reports.
 ///
-/// # The `idle_prompt` question, which the brief got backwards
+/// # The `idle_prompt` question, which the brief got backwards — twice
 ///
-/// `idle_prompt` is not a false positive to be suppressed — it is Claude's
-/// *end-of-turn* notification, "I have finished and I am waiting for your next
-/// prompt". Treating it as `Blocked` is what produces the notorious
-/// attention-after-every-turn badge; treating it as [`State::Idle`] puts it in the
-/// right bucket and keeps the event. Only a real permission prompt, a question, or
-/// an elicitation dialog means the user is being *waited on*.
+/// `idle_prompt` is not a request for attention: it is "Claude is waiting for your
+/// input", sent once the session has sat at its prompt for a while. Treating it as
+/// `Blocked` is what produced the notorious attention-after-every-turn badge. Only a
+/// real permission prompt, a question, or an elicitation dialog means the user is being
+/// *waited on*.
+///
+/// It was then mapped to [`State::Idle`], on the theory that it is the end of a turn.
+/// It is not one — it is a *reminder* about a turn that already ended, and `Stop`
+/// already reported that turn, on every Claude this integration supports. So it could
+/// only ever repeat news, and it repeated it wrongly in two ways: a "finished" the user
+/// had already read came back a minute later, and a session waiting on its background
+/// agents — which `Stop` correctly reports as still working, see
+/// [`waits_on_background_agent`] — was filed as finished anyway, because this
+/// notification carries no task list to tell the two apart. So it is now
+/// [`State::Settled`]: the news that a turn ended is `Stop`'s to report, and only
+/// `Stop`'s, while this keeps the one job nothing else does — Claude sends no `Stop` for
+/// a turn the user interrupted, and this reminder is what stops that turn's spinner.
 ///
 /// # Everything unrecognised is `Unknown`, and that is load-bearing
 ///
@@ -539,20 +666,27 @@ pub fn claude_state(payload: &HookPayload) -> State {
                 | "elicitation_dialog"
                 | "elicitation_url_dialog",
             ) => State::Blocked,
-            // The turn ended. See the note above.
-            Some("idle_prompt") => State::Idle,
+            // A reminder about a turn `Stop` already reported — or the only word on one
+            // the user interrupted, which gets no `Stop`. See the note above.
+            Some("idle_prompt") => State::Settled,
             // **A subagent, not the session** — see this function's "A subagent's turn is
             // not the session's turn". Deliberately `Unknown`, which sends nothing at all.
             Some("agent_completed") => State::Unknown,
             _ => State::Unknown,
         },
-        // The turn ended without a notification. Redundant with `idle_prompt` on a
-        // Claude that sends one, and the only signal on a Claude that does not —
-        // the two collapse to the same state, so a duplicate costs nothing.
+        // The turn ended — the news of it (see the note above on `idle_prompt`). Unless
+        // the session is only waiting on its own background agents, which will wake it
+        // again without the user: then this is not news, and the pane is still busy.
         //
         // `Stop` is the *session's* turn ending. Its subagent counterparts are matched
         // below and answer `Unknown`, so this arm cannot widen by accident.
-        "Stop" => State::Idle,
+        "Stop" => {
+            if waits_on_background_agent(payload) {
+                State::Delegated
+            } else {
+                State::Idle
+            }
+        }
         // A subagent's lifecycle, which is not this pane's state — see this function's
         // "A subagent's turn is not the session's turn". Neither is installed; matched
         // here for the same reason `SessionStart` is, so the receiving end is never
@@ -970,20 +1104,75 @@ mod tests {
         }
     }
 
-    /// `idle_prompt` is the end of a turn, not a request for attention.
+    /// The end of a turn is `Stop`'s to report, and it is never attention.
     ///
-    /// This is the assertion the whole feature's credibility rests on. Claude sends
-    /// `idle_prompt` after **every** turn; classifying it as `Blocked` is what makes
-    /// a badge that says "needs you" on work that needs nobody, which is how a user
-    /// learns to ignore it. It is a `finished` event and it belongs in the inbox —
-    /// suppressing it would have thrown away the most common real signal there is.
+    /// This is the assertion the whole feature's credibility rests on. Classifying
+    /// `idle_prompt` as `Blocked` is what makes a badge that says "needs you" on work
+    /// that needs nobody, which is how a user learns to ignore it. It is not `Idle`
+    /// either: it is a reminder about a turn `Stop` already reported, so as `Idle` it
+    /// re-filed a "finished" the user had read, and filed one for a session that was
+    /// only waiting on its background agents — it carries no task list to tell. It is
+    /// `Settled`: the spinner stops, nothing is filed.
     #[test]
-    fn an_end_of_turn_notification_is_finished_and_never_attention() {
+    fn a_turn_ends_once_through_stop_and_never_as_attention() {
+        assert_eq!(claude_state(&payload("Stop", None, None)), State::Idle);
+        // Still worth something: it is the only word on a turn the user interrupted,
+        // which gets no `Stop`, so it stops the spinner — without filing anything.
         assert_eq!(
             claude_state(&payload("Notification", Some("idle_prompt"), None)),
-            State::Idle
+            State::Settled
         );
-        assert_eq!(claude_state(&payload("Stop", None, None)), State::Idle);
+        assert_eq!(State::parse("settled"), Some(State::Settled));
+        assert_eq!(State::parse("delegated"), Some(State::Delegated));
+    }
+
+    /// A `Stop` while a background agent is still running is the session waiting on its
+    /// own work, not finishing — the reported bug: two background agents filed three
+    /// "Agent finished" banners for one request. `Delegated`, not `Working`, so it cannot
+    /// retract another agent's unanswered "waiting for you".
+    ///
+    /// The payloads are the shape Claude Code 2.1.286 builds, trimmed to what matters.
+    #[test]
+    fn a_stop_waiting_on_a_background_agent_is_still_working() {
+        let stop = |tasks: &str| -> HookPayload {
+            serde_json::from_str(&format!(
+                r#"{{"hook_event_name":"Stop","stop_hook_active":false,
+                    "last_assistant_message":"waiting","background_tasks":{tasks}}}"#
+            ))
+            .unwrap()
+        };
+        for tasks in [
+            r#"[{"id":"a1","type":"subagent","status":"running","description":"Sleep",
+                "agent_type":"general-purpose"}]"#,
+            r#"[{"id":"w1","type":"workflow","status":"pending","description":"x","name":"y"}]"#,
+            // One agent among other things is enough.
+            r#"[{"id":"b1","type":"shell","status":"running","description":"dev","command":"npm run dev"},
+                {"id":"a1","type":"subagent","status":"running","description":"Sleep"}]"#,
+        ] {
+            assert_eq!(claude_state(&stop(tasks)), State::Delegated, "{tasks}");
+        }
+        for tasks in [
+            // The turn after the last agent came back: the real "finished".
+            "[]",
+            // A background shell can be a server that never ends, so it never holds a
+            // pane at working.
+            r#"[{"id":"b1","type":"shell","status":"running","description":"dev","command":"npm run dev"}]"#,
+            r#"[{"id":"m1","type":"monitor","status":"running","description":"m"}]"#,
+            // An agent that is not running any more.
+            r#"[{"id":"a1","type":"subagent","status":"completed","description":"Sleep"}]"#,
+            // A type this code has never heard of: the old behaviour, not a stuck pane.
+            r#"[{"id":"x","type":"invented_later","status":"running"}]"#,
+            // A shape this code did not expect costs the field, not the `Stop`.
+            r#"{"not":"a list"}"#,
+            r#"[42, null, "subagent"]"#,
+            "null",
+        ] {
+            assert_eq!(claude_state(&stop(tasks)), State::Idle, "{tasks}");
+        }
+        // And only `Stop` reads it: no other event is silenced because of it.
+        let mut end = payload("SessionEnd", None, None);
+        end.background_tasks = stop(r#"[{"type":"subagent","status":"running"}]"#).background_tasks;
+        assert_eq!(claude_state(&end), State::Done);
     }
 
     /// A subagent ending is not the session ending and reports nothing at all — while a
@@ -1396,6 +1585,8 @@ mod tests {
             State::Blocked,
             State::Idle,
             State::Done,
+            State::Delegated,
+            State::Settled,
             State::Unknown,
         ] {
             assert_eq!(State::parse(state.as_str()), Some(state));

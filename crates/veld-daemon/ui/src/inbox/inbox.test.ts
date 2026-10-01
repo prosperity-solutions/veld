@@ -33,7 +33,7 @@ const command = (exit: number): Signal[] => [
 ];
 
 const agent = (
-  state: "ready" | "working" | "blocked" | "idle" | "done",
+  state: "ready" | "working" | "blocked" | "idle" | "done" | "settled" | "delegated",
   source: Source = "hook",
 ) =>
   ({ type: "agent", state, source }) as Signal;
@@ -190,6 +190,72 @@ describe("plain shell commands", () => {
 });
 
 describe("coding agents", () => {
+  /**
+   * The reported bug, as the hooks deliver it: a session launches two background agents
+   * and ends its turn to wait (`delegated`), Claude's idle reminder lands a minute in
+   * (`settled`), the first result wakes it into a turn that also ends waiting, and only
+   * the turn after the last result is finished. One event, and a spinner the whole way.
+   */
+  it("files one finished for a session that waited on its background agents", () => {
+    const box = createInbox();
+    const events: string[] = [];
+    box.onEvent((e) => events.push(e.unseen.detail));
+    box.report("cc", WT, agent("working"), NOW);
+    box.report("cc", WT, agent("delegated"), NOW + 1);
+    expect(box.unseen("cc")).toBeNull();
+    expect(box.isRunning("cc")).toBe(true);
+    box.report("cc", WT, agent("settled"), NOW + 60_000);
+    expect(box.isRunning("cc")).toBe(true);
+    box.report("cc", WT, agent("delegated"), NOW + 70_000);
+    box.report("cc", WT, agent("settled"), NOW + 130_000);
+    expect(box.isRunning("cc")).toBe(true);
+    expect(box.unseen("cc")).toBeNull();
+    box.report("cc", WT, agent("idle"), NOW + 140_000);
+    expect(box.isRunning("cc")).toBe(false);
+    expect(events).toEqual(["Agent finished"]);
+    // And the next turn's reminder stops the spinner again: the memory went with it.
+    box.report("cc", WT, agent("working"), NOW + 200_000);
+    box.report("cc", WT, agent("settled"), NOW + 260_000);
+    expect(box.isRunning("cc")).toBe(false);
+  });
+
+  /** One background agent asking must survive the session being woken by another. */
+  it("never retracts an attention on delegated", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW);
+    box.report("cc", WT, agent("blocked"), NOW + 1);
+    box.report("cc", WT, agent("delegated"), NOW + 2);
+    expect(box.unseen("cc")?.kind).toBe("attention");
+  });
+
+  /**
+   * `settled` is Claude's idle reminder: the only word on a turn the user interrupted,
+   * which gets no `Stop`. It stops the spinner and nothing else — no event, no retraction
+   * of an unread "waiting for you", and no claim on a shell command that started after
+   * the agent quit (that is `ready`'s job, and a late reminder must not do it).
+   */
+  it("stops the spinner on settled without filing or retracting anything", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW);
+    expect(box.isRunning("cc")).toBe(true);
+    box.report("cc", WT, agent("settled"), NOW + 1);
+    expect(box.isRunning("cc")).toBe(false);
+    expect(box.unseen("cc")).toBeNull();
+
+    box.report("bl", WT, agent("blocked"), NOW);
+    box.report("bl", WT, agent("settled"), NOW + 1);
+    expect(box.unseen("bl")?.kind).toBe("attention");
+
+    // The agent quit and released the pane; the user starts a build; a late reminder
+    // arrives. The build's result must still be the shell's to report.
+    box.report("sh", WT, agent("done"), NOW);
+    box.read("sh");
+    box.report("sh", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("sh", WT, agent("settled"), NOW + 2);
+    box.report("sh", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 3);
+    expect(box.unseen("sh")?.kind).toBe("failed");
+  });
+
   it("badges attention when blocked and finished when the turn ends", () => {
     const box = createInbox();
     box.report("cc", WT, agent("blocked"), NOW);

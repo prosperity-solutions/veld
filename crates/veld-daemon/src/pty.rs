@@ -808,6 +808,10 @@ impl SessionSlot {
 
     /// Compare-and-swap rather than load-then-add: two simultaneous attaches
     /// must not both see `max - 1` and both proceed.
+    // `fetch_update` is deprecated on Rust 1.99 in favour of `try_update`, which only
+    // exists since 1.95 — past this workspace's MSRV, so clippy's `incompatible_msrv`
+    // rejects the rename. Same method, new name; switch when the MSRV reaches 1.95.
+    #[allow(deprecated)]
     fn claim_from(counter: &'static AtomicUsize, max: usize) -> Option<Self> {
         counter
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

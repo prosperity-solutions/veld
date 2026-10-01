@@ -92,6 +92,18 @@ export type AgentState =
   | "blocked"
   | "idle"
   | "done"
+  /**
+   * The agent is at its prompt with nothing new to say: stops the spinner, files nothing.
+   * Claude's `idle_prompt` reminder — the only word on a turn the user interrupted, which
+   * gets no `Stop`. Unlike `ready`, it never claims an outstanding shell command.
+   */
+  | "settled"
+  /**
+   * A turn ended while the agent still has background agents running. Not news — the
+   * pane is still working, and stays so through `settled` until the agent says otherwise.
+   * Unlike `working`, it never retracts an unread "waiting for you".
+   */
+  | "delegated"
   | "unknown";
 
 /** One thing that happened in a terminal session. */
@@ -152,7 +164,15 @@ export interface NextTarget {
 }
 
 /** Agent states this build acts on. Anything else claims nothing — see `classify`. */
-const KNOWN_AGENT_STATES: AgentState[] = ["ready", "working", "blocked", "idle", "done"];
+const KNOWN_AGENT_STATES: AgentState[] = [
+  "ready",
+  "working",
+  "blocked",
+  "idle",
+  "done",
+  "settled",
+  "delegated",
+];
 
 /**
  * How much of a program's own message to keep.
@@ -214,6 +234,16 @@ interface SessionState {
    * exactly when it has to be remembered.
    */
   reportedExit: boolean;
+  /**
+   * The agent's last turn ended waiting on its own background agents (`delegated`).
+   *
+   * Remembered because Claude's idle reminder (`settled`) arrives a minute after *every*
+   * turn, background agents or not. Without this it stopped the spinner a minute into a
+   * wait that can last many — and the turns the agents wake have no prompt to restart it.
+   * Cleared by any state other than `delegated` and `settled`, which is the agent saying
+   * something newer.
+   */
+  delegated: boolean;
   unseen: Unseen | null;
 }
 
@@ -307,6 +337,7 @@ class WorktreeInbox {
       agentSource: null,
       agentCommand: false,
       reportedExit: false,
+      delegated: false,
       unseen: null,
     });
   }
@@ -439,6 +470,7 @@ class WorktreeInbox {
         // session is the ordinary case, not an exotic one.
         session.agentSource = null;
         session.agentCommand = false;
+        session.delegated = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -501,8 +533,16 @@ class WorktreeInbox {
         // unrecognised state *permanently muted* the shell's `working` and every OSC 9 in
         // that pane, rather than being the no-op the wire contract promises.
         if (!KNOWN_AGENT_STATES.includes(signal.state)) return undefined;
+        // A reminder with no agent holding the pane is a late one, from an agent that has
+        // already quit — the idle reminder is fire-and-forget. Claiming here would hand
+        // the *next* shell command to an agent that is gone, swallowing its result.
+        if (signal.state === "settled" && session.agentSource === null) return undefined;
         session.agentSource = signal.source;
-        session.agentWorking = signal.state === "working";
+        // `settled` is a reminder sent a minute after every turn; while the agent is
+        // waiting on its background agents it is not news that the pane went quiet.
+        session.delegated =
+          signal.state === "delegated" || (signal.state === "settled" && session.delegated);
+        session.agentWorking = signal.state === "working" || session.delegated;
         // Only `ready` may claim an outstanding `C`, because only `ready` means "an agent
         // just launched here" — it is the wrapper's own report, fired before the exec. Any
         // agent state would have been wrong in the other direction: `Stop` and `SessionEnd`
@@ -518,6 +558,16 @@ class WorktreeInbox {
             // its prompt from showing the activity spinner. Deliberately not an event —
             // `idle` would have put a spurious "agent finished" in the inbox on every
             // launch.
+            return undefined;
+          case "settled":
+            // `agentWorking` is already settled above; that is the whole payload. Not an
+            // event — the turn's news was `Stop`'s, or (after an interrupt) the user was
+            // there to see it.
+            return undefined;
+          case "delegated":
+            // Still working, and deliberately not `working`'s retraction: one background
+            // agent's unanswered "waiting for you" outlives the session being woken by
+            // another one finishing.
             return undefined;
           case "blocked":
             return {
@@ -600,6 +650,7 @@ class WorktreeInbox {
     session.agentWorking = false;
     session.agentSource = null;
     session.agentCommand = false;
+    session.delegated = false;
     // The event goes too. Restart is reachable from an *inactive* tab's strip, so
     // restarting without having read is an ordinary gesture — and a badge left over from
     // the previous run then asserts a failure the current run has not had, with no fresh
