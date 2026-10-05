@@ -31,6 +31,12 @@ describe("which worktrees a client could take", () => {
     expect(openableWorktrees(rows, none).map((w) => w.id)).toEqual([2, 3]);
   });
 
+  /** The main checkout is the repository, never a discovery, whatever the flag. */
+  it("always offers the main checkout", () => {
+    const rows = [{ ...wt(1), adopted: false, is_main: true }];
+    expect(openableWorktrees(rows, none).map((w) => w.id)).toEqual([1]);
+  });
+
   /** The window that confirmed a removal knows before the daemon's flag does. */
   it("never offers one this window is removing", () => {
     const rows = [wt(1), wt(2)];

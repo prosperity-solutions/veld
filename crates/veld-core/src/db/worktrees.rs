@@ -498,9 +498,22 @@ impl Db {
             for p in &keep {
                 params_vec.push(p);
             }
-            // First the adoptions of the rows about to go, except where git still
-            // lists the path as prunable (see above). Same parameters, plus the
-            // prunable paths after them.
+            // The adoptions first, in three steps, while the rows about to go
+            // still say which paths they are. A path whose row vanishes is marked
+            // `missing`; a marked path git lists neither as a checkout nor as
+            // `prunable` is forgotten — at once for a `git worktree remove`, or
+            // whenever a later `git worktree prune` drops a spared entry; and a
+            // marked path that is listed again is unmarked. A path recorded ahead
+            // of `git worktree add` is never marked, because it never had a row,
+            // so the poll that races a create cannot forget it.
+            tx.execute(
+                &format!(
+                    "UPDATE adopted_paths SET missing = 1 WHERE path IN
+                       (SELECT path FROM worktrees WHERE repo_root = ?1
+                         AND path NOT IN ({placeholders}))"
+                ),
+                params_vec.as_slice(),
+            )?;
             let mut forget_params = params_vec.clone();
             let spared = if prunable.is_empty() {
                 String::new()
@@ -517,11 +530,17 @@ impl Db {
             };
             tx.execute(
                 &format!(
-                    "DELETE FROM adopted_paths WHERE path IN
-                       (SELECT path FROM worktrees WHERE repo_root = ?1
-                         AND path NOT IN ({placeholders})){spared}"
+                    "DELETE FROM adopted_paths WHERE repo_root = ?1 AND missing = 1
+                       AND path NOT IN ({placeholders}){spared}"
                 ),
                 forget_params.as_slice(),
+            )?;
+            tx.execute(
+                &format!(
+                    "UPDATE adopted_paths SET missing = 0
+                     WHERE repo_root = ?1 AND missing = 1 AND path IN ({placeholders})"
+                ),
+                params_vec.as_slice(),
             )?;
             tx.execute(
                 &format!(
@@ -1781,6 +1800,63 @@ mod tests {
         let recreated = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
         assert!(!recreated.adopted);
         assert!(db.adopt_worktree(recreated.id).unwrap());
+
+        // One sync with both at once: only the prunable path keeps its adoption.
+        let gone = wt("/tmp/wts/gone", "gone", false);
+        db.remember_adopted_path(root, "/tmp/wts/gone").unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone(), gone.clone()])
+            .unwrap();
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone(), gone])
+            .unwrap();
+        let by = |p: &str| wts.iter().find(|w| w.path == p).unwrap().adopted;
+        assert!(by("/tmp/wts/made"));
+        assert!(!by("/tmp/wts/gone"));
+
+        // Spared while prunable, then pruned (`git worktree prune`: listed no
+        // longer, not even as prunable), then re-created by an agent: a discovery.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let after_prune = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!after_prune.adopted);
+        assert!(db.adopt_worktree(after_prune.id).unwrap());
+
+        // Spared, then back: unmarked again, so a later removal still forgets it
+        // only once git stops listing it.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(
+            wts.iter()
+                .find(|w| w.path == "/tmp/wts/made")
+                .unwrap()
+                .adopted
+        );
 
         // Deleted by Veld: a later checkout at the same path is a discovery.
         let id = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap().id;

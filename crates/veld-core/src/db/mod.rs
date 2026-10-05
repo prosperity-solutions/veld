@@ -1972,7 +1972,9 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
 /// **`adopted_paths` is the durable half, keyed by checkout path.** A row does not
 /// outlive its path leaving `git worktree list` — a checkout on an unmounted volume
 /// is reported `prunable` and skipped — so a flag on the row alone would send the
-/// user's own worktree to Discovered the moment it came back. Sync inserts a row
+/// user's own worktree to Discovered the moment it came back. (It still comes back
+/// as a new row — ungrouped, freshly named — because that is what reaping a
+/// prunable row has always cost; only the adoption is carried over.) Sync inserts a row
 /// adopted when its path is recorded here,
 /// and `create_worktree` records its path *before* running `git worktree add`, so
 /// a poll that races it cannot file it as a discovery either. A path is forgotten
@@ -1995,7 +1997,9 @@ fn migrate_v17_worktree_adopted(conn: &Connection) -> rusqlite::Result<()> {
         ALTER TABLE worktrees ADD COLUMN adopted INTEGER NOT NULL DEFAULT 1;
         CREATE TABLE adopted_paths (
             path      TEXT PRIMARY KEY,
-            repo_root TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE
+            repo_root TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,
+            -- Its row is gone; the path is kept only while git lists it `prunable`.
+            missing   INTEGER NOT NULL DEFAULT 0
         );
         INSERT OR IGNORE INTO adopted_paths (path, repo_root)
             SELECT path, repo_root FROM worktrees;
