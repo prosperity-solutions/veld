@@ -55,6 +55,7 @@ pub fn routes() -> Router {
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
+        .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
         // Extension surfaces are worktree-scoped, so they live here and
         // inherit `csrf_layer` — both of them execute a project-declared
@@ -1525,6 +1526,22 @@ fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     out
 }
 
+/// The paths `git worktree list --porcelain` reports as `prunable` — the prunable
+/// entries [`parse_worktree_list`] skips. Not canonicalized: the directory is missing by
+/// definition, and git already emits the physical path the row was stored under.
+fn parse_prunable_paths(porcelain: &str) -> Vec<String> {
+    porcelain
+        .split("\n\n")
+        .filter(|block| {
+            block
+                .lines()
+                .any(|l| l == "prunable" || l.starts_with("prunable "))
+        })
+        .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("worktree ")))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Canonicalize discovered worktree paths before storing them. Git porcelain
 /// already emits physical (symlink-resolved) paths, and `veld start` derives
 /// the project root from `getcwd` (also physical) — canonicalizing here keeps
@@ -1542,8 +1559,9 @@ fn canonicalize_discovered(mut discovered: Vec<DiscoveredWorktree>) -> Vec<Disco
 
 /// Discover a repo's worktrees on disk and reconcile the database rows.
 async fn sync_repo_worktrees(db: &Db, repo_root: &FsPath) -> Result<Vec<WorktreeRecord>, ApiError> {
-    let discovered = discover_worktrees(repo_root).await?;
-    db.sync_worktrees(repo_root, &discovered).map_err(db_err)
+    let (discovered, prunable) = discover_worktrees(repo_root).await?;
+    db.sync_worktrees_listing(repo_root, &discovered, &prunable)
+        .map_err(db_err)
 }
 
 /// Ask git what checkouts this repo has. **Takes a path and nothing else**, and
@@ -1558,11 +1576,19 @@ async fn sync_repo_worktrees(db: &Db, repo_root: &FsPath) -> Result<Vec<Worktree
 /// there on disk, with the start/stop controls hidden and the real error thrown
 /// away. Two functions with disjoint consumers is what stops that being
 /// re-collapsed by the next person in a hurry.
-async fn discover_worktrees(repo_root: &FsPath) -> Result<Vec<DiscoveredWorktree>, ApiError> {
+///
+/// Returns the checkouts, and separately the paths git still lists as `prunable`
+/// (see [`Db::sync_worktrees_listing`] for why the two are told apart).
+async fn discover_worktrees(
+    repo_root: &FsPath,
+) -> Result<(Vec<DiscoveredWorktree>, Vec<String>), ApiError> {
     let porcelain = git(repo_root, &["worktree", "list", "--porcelain"])
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    Ok(canonicalize_discovered(parse_worktree_list(&porcelain)))
+    Ok((
+        canonicalize_discovered(parse_worktree_list(&porcelain)),
+        parse_prunable_paths(&porcelain),
+    ))
 }
 
 /// One local branch of a repo, as the create dialog's source picker needs it.
@@ -3584,8 +3610,8 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
                 // retyped field would read as `undefined`, hence falsy, hence
                 // the incident made permanent in every stale tab.
                 match discover_worktrees(&root).await {
-                    Ok(discovered) => {
-                        if let Err(e) = db.sync_worktrees(&root, &discovered) {
+                    Ok((discovered, prunable)) => {
+                        if let Err(e) = db.sync_worktrees_listing(&root, &discovered, &prunable) {
                             crate::dbhealth::note_error(&e);
                             warn!("worktree reconcile failed for {}: {e}", repo.root);
                         }
@@ -3842,6 +3868,7 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
     // Same normalization as sync-on-refresh — an import must not store raw
     // paths that the first refresh would then churn into canonical ones.
     let discovered = canonicalize_discovered(parse_worktree_list(&porcelain));
+    let prunable = parse_prunable_paths(&porcelain);
     let Some(main) = discovered.iter().find(|w| w.is_main) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -3856,7 +3883,8 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
 
     let db = open_desktop_db()?;
     db.upsert_repo(&root, &name).map_err(db_err)?;
-    db.sync_worktrees(&root, &discovered).map_err(db_err)?;
+    db.sync_worktrees_listing(&root, &discovered, &prunable)
+        .map_err(db_err)?;
     let repo = db
         .get_repo(&root)
         .map_err(db_err)?
@@ -4389,9 +4417,27 @@ async fn create_worktree(
         }
     };
     let git_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
-    git(&repo_root, &git_refs)
-        .await
-        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    // Recorded as adopted before the checkout exists, because the IDE's poll can
+    // reconcile between `git worktree add` and the sync below and would otherwise
+    // file it as a discovery. Spelled as git will report it: git records the
+    // realpath'd form, and the target directory does not exist yet.
+    let adopted_path = canonicalize_prefix(&checkout_path)
+        .to_string_lossy()
+        .into_owned();
+    let remembered = db
+        .remember_adopted_path(&repo_root, &adopted_path)
+        .map_err(write_err)?;
+    if let Err(e) = git(&repo_root, &git_refs).await {
+        // Only what this call recorded: a path already there belongs to a checkout
+        // git still has registered (an unmounted volume refuses the add as "missing
+        // but already registered"), and forgetting it would undo the user's adoption.
+        if remembered {
+            if let Err(e) = db.forget_adopted_path(&adopted_path) {
+                warn!("create worktree: could not forget {adopted_path}: {e}");
+            }
+        }
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, e));
+    }
 
     // Reproduce the source's uncommitted work, now that there is a clean
     // checkout at its HEAD to reproduce it into.
@@ -4433,6 +4479,12 @@ async fn create_worktree(
             )
         })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
+    // Normally a no-op, since the path was recorded above. It is what still adopts
+    // the row if git reported the path in a spelling `canonicalize_prefix` did
+    // not predict. Before any write below that can fail and return early: a
+    // worktree the user just created must not land in the section for ones they
+    // did not.
+    db.adopt_worktree(created.id).map_err(write_err)?;
     // The sync assigns a marker and no lane or label; apply what the dialog chose.
     // Before the alias rename below rather than after, because that rename is the
     // step that can lose a race and return early — and a checkout that ends up
@@ -4943,6 +4995,20 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
     Ok(Json(worktree_view(&db, wt)))
 }
 
+/// Move a worktree the discovery poll found on its own — one made outside Veld —
+/// out of the rail's "Discovered" section and into the rail proper.
+async fn adopt_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
+    let db = open_desktop_db()?;
+    if !db.adopt_worktree(id).map_err(write_err)? {
+        return Err(err(StatusCode::NOT_FOUND, "no such worktree"));
+    }
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
+    Ok(Json(worktree_view(&db, wt)))
+}
+
 /// Delete a trashed worktree now, without waiting for its retention to expire.
 ///
 /// Queues the same worker the retention sweep uses, so there is exactly one code path
@@ -5276,6 +5342,7 @@ mod tests {
             sort_position: None,
             trashed_at: String::new(),
             trash_error: String::new(),
+            adopted: true,
         }
     }
 
@@ -5905,6 +5972,8 @@ mod tests {
         assert!(wts[0].is_main);
         assert_eq!(wts[1].path, "/wts/live");
         assert!(!wts[1].is_main, "the skip must not promote a worktree");
+        // The skipped entry is still reported, as what keeps its adoption.
+        assert_eq!(parse_prunable_paths(out), vec!["/wts/gone".to_owned()]);
     }
 
     #[test]

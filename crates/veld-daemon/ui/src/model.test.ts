@@ -46,6 +46,7 @@ import {
   worktreeStatus,
   worstStatus,
   DELETING_LANE,
+  DISCOVERED_LANE,
   TRASH_LANE,
   TRASH_PREVIEW,
   trashPreview,
@@ -881,6 +882,38 @@ const lane = (name: string, position: number): Lane => ({
 });
 
 describe("railGroups", () => {
+  it("keeps unadopted worktrees in a Discovered section below the lanes", () => {
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/repo/.claude/worktrees/agent", { adopted: false }),
+        rw("/wts/old", { adopted: false, trashed_at: "2026-01-02T00:00:00.000000Z" }),
+      ],
+      [lane("review", 0)],
+    );
+    expect(groups.map((g) => g.key)).toEqual([
+      MAIN_LANE,
+      "",
+      "review",
+      DISCOVERED_LANE,
+      TRASH_LANE,
+    ]);
+    const found = groups.find((g) => g.key === DISCOVERED_LANE);
+    expect(found?.pinned).toBe(true);
+    expect(found?.worktrees.map((w) => w.path)).toEqual([
+      "/repo/.claude/worktrees/agent",
+    ]);
+    // A trashed discovery is in the trash, not in both.
+    expect(groups.at(-1)?.worktrees.map((w) => w.path)).toEqual(["/wts/old"]);
+  });
+
+  it("draws no Discovered section when nothing is unadopted", () => {
+    // A daemon older than the field sends no `adopted` at all.
+    const groups = railGroups([rw("/wts/a"), rw("/wts/b", { adopted: true })]);
+    expect(groups.some((g) => g.key === DISCOVERED_LANE)).toBe(false);
+  });
+
   it("gives the main checkout its own pinned section", () => {
     // Main is the repository, not one of the branches you are juggling, so it gets
     // a divider under it. Pinned: it always leads, so it takes no part in ordering.

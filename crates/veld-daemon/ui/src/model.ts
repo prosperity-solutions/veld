@@ -551,6 +551,21 @@ export const TRASH_LANE = "\u0000trash";
 export const DELETING_LANE = "\u0000deleting";
 
 /**
+ * Group key for the "Discovered" section — checkouts the daemon found on its own,
+ * made outside Veld (typically by a coding agent), that nobody has adopted.
+ *
+ * NUL-prefixed like the other virtual sections, so a lane called "Discovered"
+ * cannot collide with it; and a stored value like them too, since
+ * `ide/foldedSections.ts` persists a folded section's key.
+ */
+export const DISCOVERED_LANE = "\u0000discovered";
+
+/** Whether the rail lists this worktree in its "Discovered" section. */
+export function isDiscovered(w: Worktree): boolean {
+  return w.adopted === false && !w.is_main && !w.trashed_at;
+}
+
+/**
  * Group key for the main checkout's own pinned section.
  *
  * NUL-prefixed like the other virtual sections, and for a reason that was paid
@@ -636,8 +651,8 @@ export const UNGROUPED_LABEL = "Worktrees";
 
 /**
  * Split a repo's worktrees into rail sections: the ungrouped bucket and the
- * lanes in the order the user arranged them, then the terminal "Deleting" lane,
- * then the trash.
+ * lanes in the order the user arranged them, then the worktrees discovered
+ * outside Veld, then the terminal "Deleting" lane, then the trash.
  *
  * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
  * only *segments* the list — it must not re-sort, or the manual order the user
@@ -653,7 +668,8 @@ export const UNGROUPED_LABEL = "Worktrees";
  * permanent clutter.
  */
 export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] {
-  const live = worktrees.filter((w) => !w.trashed_at);
+  const live = worktrees.filter((w) => !w.trashed_at && !isDiscovered(w));
+  const discovered = worktrees.filter(isDiscovered);
   // A worktree whose removal is actively running leaves the trash for the
   // terminal deleting lane: it is still a trashed row until the worker drops it,
   // but the two states are not the same thing and must not share a lane.
@@ -761,6 +777,23 @@ export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] 
       editable: true,
       bulk: true,
       worktrees: live.filter((w) => w.lane === name),
+    });
+  }
+  // Docked at the bottom of the rail above Deleting and the trash, and only
+  // while it holds something: like Deleting it is a state, not a place, and most
+  // repos never have one.
+  // Pinned, so it takes no part in the lane order and accepts no drop — a row
+  // leaves it by being adopted, which dragging it into a section also does.
+  if (discovered.length > 0) {
+    groups.push({
+      key: DISCOVERED_LANE,
+      lane: DISCOVERED_LANE,
+      label: "Discovered",
+      pinned: true,
+      addable: false,
+      editable: false,
+      bulk: false,
+      worktrees: discovered,
     });
   }
   if (deleting.length > 0) {

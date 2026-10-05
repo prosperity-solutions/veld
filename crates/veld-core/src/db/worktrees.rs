@@ -116,6 +116,15 @@ pub struct WorktreeRecord {
     /// with the reason attached, rather than leaving it in a state that looks like
     /// pending work forever.
     pub trash_error: String,
+    /// Whether the rail lists this worktree among the user's own, rather than in
+    /// its "Discovered" section.
+    ///
+    /// `false` only for a checkout the discovery poll found by itself — made by a
+    /// coding agent or by hand, outside Veld — and nobody has adopted since. A
+    /// worktree Veld creates is adopted by the handler that created it, the main
+    /// checkout always is, and so is every checkout of a repo at the moment it is
+    /// imported: those are the ones the user brought with them. See v17.
+    pub adopted: bool,
 }
 
 /// A user-defined rail lane — a named group of worktrees within one repo.
@@ -227,7 +236,7 @@ pub struct DiscoveredWorktree {
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
-     marker_color, lane, sort_position, trashed_at, trash_error, display_name";
+     marker_color, lane, sort_position, trashed_at, trash_error, display_name, adopted";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -245,6 +254,7 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         trashed_at: row.get(11)?,
         trash_error: row.get(12)?,
         display_name: row.get(13)?,
+        adopted: row.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -433,10 +443,30 @@ impl Db {
     /// de-duplicated with a numeric suffix), update `branch`/`is_main` on
     /// existing rows (a worktree can switch branches), and delete rows whose
     /// path vanished. User-chosen aliases on surviving rows are preserved.
+    ///
+    /// The same as [`Self::sync_worktrees_listing`] with nothing listed as
+    /// `prunable`.
     pub fn sync_worktrees(
         &self,
         repo_root: &Path,
         discovered: &[DiscoveredWorktree],
+    ) -> Result<Vec<WorktreeRecord>, DbError> {
+        self.sync_worktrees_listing(repo_root, discovered, &[])
+    }
+
+    /// [`Self::sync_worktrees`], told which paths git still lists as `prunable`.
+    ///
+    /// Those rows go like any vanished row, but their adoption is kept: git reports
+    /// a checkout `prunable` while its directory is missing yet its entry remains —
+    /// an unmounted volume, typically — so it may come back, and should come back
+    /// where it was. A path git no longer lists at all was removed (`git worktree
+    /// remove`, by an agent or by hand), and a later checkout there is a new one,
+    /// so its adoption is forgotten with the row.
+    pub fn sync_worktrees_listing(
+        &self,
+        repo_root: &Path,
+        discovered: &[DiscoveredWorktree],
+        prunable: &[String],
     ) -> Result<Vec<WorktreeRecord>, DbError> {
         // Guard the degenerate case explicitly: an empty `discovered` would
         // make the prune below `path NOT IN ()` — which SQLite evaluates as
@@ -450,6 +480,15 @@ impl Db {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         {
+            // A repo with no rows yet is being imported, and the checkouts it
+            // already has are the ones the user brought with it — they are not
+            // discoveries. Asked before the DELETE below, which never empties a
+            // repo that has rows (git always lists the main checkout).
+            let importing: bool = tx.query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM worktrees WHERE repo_root = ?1)",
+                params![root],
+                |r| r.get(0),
+            )?;
             // Delete rows for paths that no longer exist on disk.
             let keep: Vec<&str> = discovered.iter().map(|d| d.path.as_str()).collect();
             let placeholders = std::iter::repeat_n("?", keep.len())
@@ -459,6 +498,50 @@ impl Db {
             for p in &keep {
                 params_vec.push(p);
             }
+            // The adoptions first, in three steps, while the rows about to go
+            // still say which paths they are. A path whose row vanishes is marked
+            // `missing`; a marked path git lists neither as a checkout nor as
+            // `prunable` is forgotten — at once for a `git worktree remove`, or
+            // whenever a later `git worktree prune` drops a spared entry; and a
+            // marked path that is listed again is unmarked. A path recorded ahead
+            // of `git worktree add` is never marked, because it never had a row,
+            // so the poll that races a create cannot forget it.
+            tx.execute(
+                &format!(
+                    "UPDATE adopted_paths SET missing = 1 WHERE path IN
+                       (SELECT path FROM worktrees WHERE repo_root = ?1
+                         AND path NOT IN ({placeholders}))"
+                ),
+                params_vec.as_slice(),
+            )?;
+            let mut forget_params = params_vec.clone();
+            let spared = if prunable.is_empty() {
+                String::new()
+            } else {
+                for p in prunable {
+                    forget_params.push(p);
+                }
+                format!(
+                    " AND path NOT IN ({})",
+                    std::iter::repeat_n("?", prunable.len())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            tx.execute(
+                &format!(
+                    "DELETE FROM adopted_paths WHERE repo_root = ?1 AND missing = 1
+                       AND path NOT IN ({placeholders}){spared}"
+                ),
+                forget_params.as_slice(),
+            )?;
+            tx.execute(
+                &format!(
+                    "UPDATE adopted_paths SET missing = 0
+                     WHERE repo_root = ?1 AND missing = 1 AND path IN ({placeholders})"
+                ),
+                params_vec.as_slice(),
+            )?;
             tx.execute(
                 &format!(
                     "DELETE FROM worktrees WHERE repo_root = ?1
@@ -546,14 +629,27 @@ impl Db {
                         )?;
                     }
                 } else {
+                    let remembered: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM adopted_paths WHERE path = ?1)",
+                        params![d.path],
+                        |r| r.get(0),
+                    )?;
+                    let adopted = importing || d.is_main || remembered;
+                    if adopted {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+                             VALUES (?1, ?2)",
+                            params![d.path, root],
+                        )?;
+                    }
                     let alias = unique_alias(&tx, &root, &default_alias(&d.branch))?;
                     let emoji = pick_emoji(&tx, &root, &alias)?;
                     let color = pick_color(&tx, &root, &alias)?;
                     tx.execute(
                         "INSERT INTO worktrees
                             (repo_root, path, branch, alias, emoji, is_main, created_at,
-                             marker_color)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                             marker_color, adopted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             root,
                             d.path,
@@ -562,7 +658,8 @@ impl Db {
                             emoji,
                             d.is_main as i64,
                             now_str(),
-                            color
+                            color,
+                            adopted as i64
                         ],
                     )?;
                 }
@@ -800,9 +897,19 @@ impl Db {
     /// The two legitimate callers are `worktree_trash::process` (after git has
     /// actually removed it) and the forced branch of the `delete_worktree` handler.
     /// Anything else wants [`Self::trash_worktree`].
+    ///
+    /// Forgets the path's adoption too: the checkout is gone, and a later one at the
+    /// same path is a new worktree with no claim to it.
     pub fn remove_worktree(&self, id: i64) -> Result<bool, DbError> {
-        let conn = self.lock();
-        let n = conn.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM adopted_paths
+             WHERE path = (SELECT path FROM worktrees WHERE id = ?1)",
+            params![id],
+        )?;
+        let n = tx.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -1210,6 +1317,53 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Move a worktree out of the rail's "Discovered" section and into the rail
+    /// proper. Returns whether a row existed; adopting one twice is a no-op.
+    ///
+    /// One-way by design: nothing un-adopts. A worktree the user does not want
+    /// listed goes to the trash, like any other.
+    pub fn adopt_worktree(&self, id: i64) -> Result<bool, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
+            "UPDATE worktrees SET adopted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+             SELECT path, repo_root FROM worktrees WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok(n > 0)
+    }
+
+    /// Record a checkout path as adopted before anything exists there, so whichever
+    /// sync first sees the checkout inserts it adopted. What `create_worktree` calls
+    /// ahead of `git worktree add`, since the IDE's poll can reconcile in between.
+    ///
+    /// `path` must be spelled the way `git worktree list` will report it — git
+    /// records the realpath'd form — or the row will not match it. Returns whether
+    /// the path was newly recorded, which is what decides whether a failed create
+    /// may [`Self::forget_adopted_path`] it again.
+    pub fn remember_adopted_path(&self, repo_root: &Path, path: &str) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO adopted_paths (path, repo_root) VALUES (?1, ?2)",
+            params![path, root_key(repo_root)],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Drop a recorded path again — for a `git worktree add` that failed after
+    /// [`Self::remember_adopted_path`], so a later checkout at that path made outside
+    /// Veld is not adopted on Veld's behalf.
+    pub fn forget_adopted_path(&self, path: &str) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM adopted_paths WHERE path = ?1", params![path])?;
+        Ok(())
+    }
+
     /// Clear a worktree's recorded removal failure (the user has read it).
     pub fn clear_trash_error(&self, id: i64) -> Result<bool, DbError> {
         let conn = self.lock();
@@ -1554,6 +1708,173 @@ mod tests {
         assert_eq!(chk.alias, "chk");
         assert_eq!(chk.branch, "feat/checkout-v3");
         assert_eq!(chk.id, id);
+    }
+
+    #[test]
+    fn sync_adopts_what_an_import_brings_and_nothing_found_later() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAdopt");
+        db.upsert_repo(root, "repo-adopt").unwrap();
+
+        // The first sync is the import: every checkout already there is adopted.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                ],
+            )
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // A checkout that appears afterwards was made outside Veld.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                    wt("/tmp/repoAdopt/.claude/worktrees/agent", "agent", false),
+                ],
+            )
+            .unwrap();
+        let found = wts.iter().find(|w| w.path.ends_with("/agent")).unwrap();
+        assert!(!found.adopted);
+
+        // Adopting is durable across the next poll, and idempotent.
+        assert!(db.adopt_worktree(found.id).unwrap());
+        assert!(db.adopt_worktree(found.id).unwrap());
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                    wt("/tmp/repoAdopt/.claude/worktrees/agent", "agent", false),
+                ],
+            )
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+        assert!(!db.adopt_worktree(i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn adoption_follows_the_path_not_the_row() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoPath");
+        db.upsert_repo(root, "repo-path").unwrap();
+        let main = wt("/tmp/repoPath", "main", true);
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+
+        // Recorded before `git worktree add`: the first sync to see it adopts it.
+        assert!(db.remember_adopted_path(root, "/tmp/wts/made").unwrap());
+        assert!(!db.remember_adopted_path(root, "/tmp/wts/made").unwrap());
+        let made = wt("/tmp/wts/made", "made", false);
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // Listed `prunable` for a while (an unmounted volume), then back: a new row,
+        // still adopted.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // Removed outside Veld (`git worktree remove`: no longer listed at all),
+        // then re-created at the same path by an agent: a discovery again.
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let recreated = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!recreated.adopted);
+        assert!(db.adopt_worktree(recreated.id).unwrap());
+
+        // One sync with both at once: only the prunable path keeps its adoption.
+        let gone = wt("/tmp/wts/gone", "gone", false);
+        db.remember_adopted_path(root, "/tmp/wts/gone").unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone(), gone.clone()])
+            .unwrap();
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone(), gone])
+            .unwrap();
+        let by = |p: &str| wts.iter().find(|w| w.path == p).unwrap().adopted;
+        assert!(by("/tmp/wts/made"));
+        assert!(!by("/tmp/wts/gone"));
+
+        // Spared while prunable, then pruned (`git worktree prune`: listed no
+        // longer, not even as prunable), then re-created by an agent: a discovery.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let after_prune = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!after_prune.adopted);
+        assert!(db.adopt_worktree(after_prune.id).unwrap());
+
+        // Spared, then back: unmarked again, so a later removal still forgets it
+        // only once git stops listing it.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        db.sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(
+            wts.iter()
+                .find(|w| w.path == "/tmp/wts/made")
+                .unwrap()
+                .adopted
+        );
+
+        // Deleted by Veld: a later checkout at the same path is a discovery.
+        let id = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap().id;
+        assert!(db.remove_worktree(id).unwrap());
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let again = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!again.adopted);
+
+        // A failed create forgets what it remembered.
+        db.remember_adopted_path(root, "/tmp/wts/failed").unwrap();
+        db.forget_adopted_path("/tmp/wts/failed").unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main, wt("/tmp/wts/failed", "failed", false)])
+            .unwrap();
+        let failed = wts.iter().find(|w| w.path == "/tmp/wts/failed").unwrap();
+        assert!(!failed.adopted);
     }
 
     #[test]

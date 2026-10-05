@@ -1222,6 +1222,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "repo-sort-position",
         apply: migrate_v16_repo_sort_position,
     },
+    Migration {
+        version: 17,
+        name: "worktree-adopted",
+        apply: migrate_v17_worktree_adopted,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -1955,6 +1960,53 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE repos ADD COLUMN sort_position INTEGER;")
 }
 
+/// v17: whether a worktree belongs in the rail proper, or in its "Discovered"
+/// section.
+///
+/// `git worktree list` is the only source of worktrees, so a checkout made outside
+/// Veld — by a coding agent, by hand — used to land in the rail exactly like one
+/// made through it. `worktrees.adopted = 0` marks a row nobody has adopted yet;
+/// [`Db::sync_worktrees_listing`] is the only writer of `0`, and only when it
+/// inserts a row.
+///
+/// **`adopted_paths` is the durable half, keyed by checkout path.** A row does not
+/// outlive its path leaving `git worktree list` — a checkout on an unmounted volume
+/// is reported `prunable` and skipped — so a flag on the row alone would send the
+/// user's own worktree to Discovered the moment it came back. (It still comes back
+/// as a new row — ungrouped, freshly named — because that is what reaping a
+/// prunable row has always cost; only the adoption is carried over.) Sync inserts a row
+/// adopted when its path is recorded here,
+/// and `create_worktree` records its path *before* running `git worktree add`, so
+/// a poll that races it cannot file it as a discovery either. A path is forgotten
+/// when its checkout is removed — by Veld ([`Db::remove_worktree`]), or outside it,
+/// which is when git stops listing it rather than listing it `prunable`
+/// ([`Db::sync_worktrees_listing`]) — when the repo is removed, and when the
+/// `git worktree add` it was recorded for fails ([`Db::forget_adopted_path`]).
+///
+/// **Not covered: `git worktree move`.** The path changes, so the moved checkout is
+/// a new path with nothing recorded and lands in Discovered, one adopt away.
+///
+/// **`DEFAULT 1` and the backfill are what keep the upgrade invisible.** Nothing
+/// recorded who made an existing row, and a path heuristic would move a Veld-made
+/// checkout created before a storage-location change into the section. So every
+/// row that existed before this migration is adopted, and only discoveries made
+/// after it are not.
+fn migrate_v17_worktree_adopted(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE worktrees ADD COLUMN adopted INTEGER NOT NULL DEFAULT 1;
+        CREATE TABLE adopted_paths (
+            path      TEXT PRIMARY KEY,
+            repo_root TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,
+            -- Its row is gone; the path is kept only while git lists it `prunable`.
+            missing   INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+            SELECT path, repo_root FROM worktrees;
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2666,6 +2718,61 @@ mod tests {
             .query_row("PRAGMA integrity_check", [], |r| r.get(0))
             .unwrap();
         assert_eq!(integrity, "ok");
+    }
+
+    /// v17 against a real v16 database: every worktree that existed before the
+    /// column did stays in the rail. Nothing recorded who made those rows, so the
+    /// upgrade must not guess.
+    #[test]
+    fn v16_v17_upgrade_adopts_every_existing_worktree() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            for m in MIGRATIONS.iter().take_while(|m| m.version <= 16) {
+                (m.apply)(&conn).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 16).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO repos (root, name, created_at)
+                  VALUES ('/tmp/r', 'r', '2026-01-01T00:00:00.000000Z');
+                INSERT INTO worktrees (repo_root, path, branch, alias, emoji, is_main, created_at)
+                  VALUES ('/tmp/r', '/tmp/r', 'main', 'main', '🦊', 1,
+                          '2026-01-01T00:00:00.000000Z'),
+                         ('/tmp/r', '/tmp/r/.claude/worktrees/x', 'x', 'x', '🐙', 0,
+                          '2026-01-01T00:00:00.000000Z');
+                "#,
+            )
+            .unwrap();
+        }
+
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(
+            db.schema_version().unwrap(),
+            MIGRATIONS.last().unwrap().version
+        );
+        let wts = db.list_worktrees(std::path::Path::new("/tmp/r")).unwrap();
+        assert_eq!(wts.len(), 2);
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+        // …and durably so: a checkout that drops out of `git worktree list` for a
+        // while (an unmounted volume) comes back adopted, not as a discovery.
+        let root = std::path::Path::new("/tmp/r");
+        let main = crate::db::DiscoveredWorktree {
+            path: "/tmp/r".into(),
+            branch: "main".into(),
+            is_main: true,
+        };
+        let x = crate::db::DiscoveredWorktree {
+            path: "/tmp/r/.claude/worktrees/x".into(),
+            branch: "x".into(),
+            is_main: false,
+        };
+        db.sync_worktrees_listing(root, std::slice::from_ref(&main), &[x.path.clone()])
+            .unwrap();
+        let wts = db.sync_worktrees(root, &[main, x]).unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
     }
 
     /// v14 against a real v13 database holding a node row from before per-port

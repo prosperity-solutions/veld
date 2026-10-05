@@ -102,6 +102,8 @@ import {
   worstStatus,
   DELETING_LANE,
   isDetached,
+  isDiscovered,
+  DISCOVERED_LANE,
   TRASH_LANE,
   UNGROUPED_LANE,
   TRASH_PREVIEW,
@@ -159,6 +161,7 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconChevronUp,
+  IconCirclePlus,
   IconDots,
   IconDotsVertical,
   IconFolderPlus,
@@ -1377,9 +1380,11 @@ function AppInner(props: {
   const lanes = useMemo(() => realLanes(laneRows), [laneRows]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
-  // opening panes on a vanishing directory.
+  // opening panes on a vanishing directory. And unadopted discoveries, which are
+  // not opened until they are adopted — a remembered `?wt=` or a reopened path
+  // can name one, since an agent re-creating a checkout gets a fresh row.
   const selectable = useMemo(
-    () => worktrees.filter((w) => !w.trashed_at),
+    () => worktrees.filter((w) => !w.trashed_at && !isDiscovered(w)),
     [worktrees],
   );
   const worktree: Worktree | null =
@@ -1809,6 +1814,10 @@ function AppInner(props: {
    * worktree's layout would open a pane in a set of panes another window owns.
    */
   const selectWorktree = async (w: Worktree): Promise<boolean> => {
+    // The one gate every route into a worktree passes — the rail, ⌘K, stepping,
+    // a restore that selects what it restored. A discovered checkout is opened
+    // only once it is adopted.
+    if (isDiscovered(w)) return false;
     // A detached window shows one dock of a worktree its origin owns; it is a
     // satellite of that claim and never makes one of its own.
     if (chromeless) {
@@ -2875,6 +2884,18 @@ function AppInner(props: {
           // start) would fail against a directory that is coming off the disk.
           disabled: true,
           onClick: () => {},
+        },
+      ]);
+    }
+    // Not the user's yet: adopting it is the one thing on offer, and everything
+    // else on the menu waits until it has been.
+    if (isDiscovered(w)) {
+      return showContextMenu([
+        {
+          key: "adopt",
+          icon: <IconCirclePlus size={14} />,
+          title: "Adopt into the rail",
+          onClick: () => void adoptWorktree(w),
         },
       ]);
     }
@@ -5527,16 +5548,29 @@ function AppInner(props: {
   ) => {
     if (!repo) return;
     const root = repo.root;
-    const move = moveWorktree(railGroups(worktrees, laneRows), path, toLane, toIndex);
-    if (!move) return;
     const moved = worktrees.find((w) => w.path === path);
+    // Dragging a discovered worktree into a section adopts it, so the move is
+    // computed over the rail as it will be once it has been.
+    const adopting = moved !== undefined && isDiscovered(moved);
+    const adopt = (list: Worktree[]) =>
+      adopting
+        ? list.map((w) => (w.path === path ? { ...w, adopted: true } : w))
+        : list;
+    const move = moveWorktree(
+      railGroups(adopt(worktrees), laneRows),
+      path,
+      toLane,
+      toIndex,
+    );
+    if (!move) return;
     await optimisticRepos(
       patchRepo(root, (r) => ({
         ...r,
-        worktrees: withWorktreeMoved(r.worktrees, path, move.lane, move.order),
+        worktrees: withWorktreeMoved(adopt(r.worktrees), path, move.lane, move.order),
       })),
       async () => {
         try {
+          if (moved && adopting) await api.adoptWorktree(moved.id);
           if (moved && moved.lane !== move.lane) {
             await api.patchWorktree(moved.id, { lane: move.lane });
           }
@@ -5666,6 +5700,25 @@ function AppInner(props: {
     await refresh();
   };
 
+  /** Move a discovered worktree out of its section and into the rail proper. */
+  const adoptWorktree = async (w: Worktree) => {
+    await optimisticRepos(
+      patchRepo(w.repo_root, (r) => ({
+        ...r,
+        worktrees: r.worktrees.map((x) =>
+          x.id === w.id ? { ...x, adopted: true } : x,
+        ),
+      })),
+      async () => {
+        try {
+          await api.adoptWorktree(w.id);
+        } catch (e) {
+          notifyError(`Could not adopt ${worktreeLabel(w)}`, e);
+        }
+      },
+    );
+  };
+
   /** Resolves to whether the worktree came back, after the list has refreshed. */
   const restoreWorktree = async (w: Worktree): Promise<boolean> => {
     let restored = false;
@@ -5792,6 +5845,8 @@ function AppInner(props: {
         if (t) items.push(t);
         continue;
       }
+      // Not somewhere to go until it is adopted, which the rail is for.
+      if (isDiscovered(w)) continue;
       const wtStatus = worktreeStatus(runsForWorktree(envs, w));
       items.push({
         id: `wt:${w.id}`,
@@ -6034,6 +6089,7 @@ function AppInner(props: {
           if (t) items.push(t);
           continue;
         }
+        if (isDiscovered(w)) continue;
         items.push({
           id: `wt:${w.id}`,
           group: "Projects",
@@ -6868,9 +6924,10 @@ function AppInner(props: {
   function stepWorktree(delta: number) {
     const wt = worktreeRef.current;
     if (!wt) return;
-    const order = railGroups(worktreesRef.current, laneRowsRef.current).flatMap(
-      (g) => g.worktrees,
-    );
+    // Discovered rows are skipped: selecting one is what adopting it unlocks.
+    const order = railGroups(worktreesRef.current, laneRowsRef.current)
+      .filter((g) => g.key !== DISCOVERED_LANE)
+      .flatMap((g) => g.worktrees);
     const idx = order.findIndex((w) => w.id === wt.id);
     const next = order[nextIndex(idx, delta, order.length)];
     if (next) void selectWorktreeRef.current(next);
@@ -7340,6 +7397,7 @@ function AppInner(props: {
             onMove={moveWorktreeTo}
             onMoveLane={(lane, onto) => void moveLaneTo(lane, onto)}
             onRestore={restoreWorktree}
+            onAdopt={(w) => void adoptWorktree(w)}
             onEmptyTrash={emptyTrash}
             onTrashDrop={trashWorktree}
             deleting={deletingIds}
@@ -7452,7 +7510,11 @@ function AppInner(props: {
           // reading its index would race `git worktree remove` — the daemon
           // refuses it too, and offering it here would only make that refusal
           // arrive after the click.
-          sources={worktrees.filter((w) => !w.trashed_at && !isDeleting(w))}
+          // Nor an unadopted discovery: spinning one off acts on it, which waits
+          // until it is adopted like everything else.
+          sources={worktrees.filter(
+            (w) => !w.trashed_at && !isDeleting(w) && !isDiscovered(w),
+          )}
           spinOffFrom={dialog.spinOffFrom}
           takenAliases={worktrees.map((w) => w.alias)}
           lane={dialog.lane}
@@ -9125,6 +9187,8 @@ function Rail(props: {
    *  `onto` holds. Two names, never an index — see `moveLane`. */
   onMoveLane: (lane: string, onto: string) => void;
   onRestore: (w: Worktree) => void;
+  /** Move a worktree out of the Discovered section and into the rail proper. */
+  onAdopt: (w: Worktree) => void;
   onEmptyTrash: () => void;
   /** Dropping a dragged worktree onto the trash — bins it (revertible), which is
    *  not a lane move. Receives the dragged worktree's path. */
@@ -9148,10 +9212,11 @@ function Rail(props: {
     props.deleting.has(w.id) ? { ...w, deleting: true } : w,
   );
   const groups = railGroups(worktrees, props.lanes);
-  // The trash and the terminal deleting lane are pinned to the bottom of the
-  // rail and never scroll with the rows; everything above them does. Splitting
+  // The trash, the terminal deleting lane and the worktrees discovered outside
+  // Veld are pinned to the bottom of the rail and never scroll with the rows;
+  // everything above them does. Splitting
   // here keeps one render for both halves — `renderGroup` below.
-  const dockedKeys = new Set([DELETING_LANE, TRASH_LANE]);
+  const dockedKeys = new Set([DISCOVERED_LANE, DELETING_LANE, TRASH_LANE]);
   const scroll = groups.filter((g) => !dockedKeys.has(g.key));
   const docked = groups.filter((g) => dockedKeys.has(g.key));
   // The dock always renders in wide mode — the trash header is the point of an
@@ -9361,6 +9426,11 @@ function Rail(props: {
       reachFrameRef.current = requestAnimationFrame(stepTrash);
     }
   };
+  /** Whether a dragged row may be dropped on the trash. Not a discovered one:
+   *  until it is adopted, adopting is the only thing it offers — and dragging it
+   *  into a section is that. */
+  const binnable = (path: string) =>
+    !worktrees.some((w) => w.path === path && isDiscovered(w));
   /** Where a row released at (`x`, `y`) lands: the trash for anywhere on its
    *  zone, otherwise whatever `rowTargetAt` measures. */
   const rowDropAt = (overTrash: boolean, x: number, y: number) =>
@@ -9368,9 +9438,9 @@ function Rail(props: {
   /** The same, for a pointer that moved there: aims the zone at it first. The
    *  rows are measured before the zone is, and both before it is painted, so a
    *  move reads layout once instead of forcing it again after the paint. */
-  const aimDropAt = (x: number, y: number) => {
+  const aimDropAt = (x: number, y: number, path: string) => {
     const row = rowTargetAt(x, y);
-    return aimTrash(x, y) ? { key: TRASH_LANE, index: 0 } : row;
+    return binnable(path) && aimTrash(x, y) ? { key: TRASH_LANE, index: 0 } : row;
   };
   const showDropAt = (at: ReturnType<typeof rowDropAt>) =>
     setDropAt((prev) =>
@@ -9463,7 +9533,7 @@ function Rail(props: {
   // Deleting appearing above it. Re-aiming after each is a handful of rects.
   useLayoutEffect(() => {
     const at = dragPointRef.current;
-    if (dragPath !== null && at) showDropAt(aimDropAt(at.x, at.y));
+    if (dragPath !== null && at) showDropAt(aimDropAt(at.x, at.y, dragPath));
   });
 
   /**
@@ -9662,12 +9732,12 @@ function Rail(props: {
     // caret can move, and the rail is a big subtree to re-render for a target
     // that is still the same row's top half; returning the previous object makes
     // React bail out of the render entirely.
-    onMove: (_path, x, y) => {
+    onMove: (path, x, y) => {
       dragPointRef.current = { x, y };
-      showDropAt(aimDropAt(x, y));
+      showDropAt(aimDropAt(x, y, path));
     },
     onDrop: (path, x, y) => {
-      const at = aimDropAt(x, y);
+      const at = aimDropAt(x, y, path);
       endDrag();
       if (at === null) return;
       // The trash is a destination, not a position — the index is thrown away.
@@ -9864,7 +9934,7 @@ function Rail(props: {
     return (
           <div
             key={group.key}
-            className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${group.key === DELETING_LANE ? " deleting" : ""}${
+            className={`rail-group${group.key === TRASH_LANE ? " trash" : ""}${group.key === DELETING_LANE ? " deleting" : ""}${group.key === DISCOVERED_LANE ? " discovered" : ""}${folded ? " folded" : ""}${
               // Lit while a drag is over this section, so the target reads as a
               // whole area and not only as a caret between two rows. This is the
               // only feedback an EMPTY lane can give.
@@ -10217,11 +10287,16 @@ function Rail(props: {
               // Terminal removal — distinct from recoverable trash: rendered in the
               // Deleting lane, not revertible, actively coming off the disk.
               const deletingRow = group.key === DELETING_LANE;
+              // Not the user's yet, so it offers one thing — adopting it — and
+              // nothing that acts on it as if it were: no run control, no menu
+              // of edits, and no selecting it into the workspace.
+              const discoveredRow = group.key === DISCOVERED_LANE;
               // Inline controls are wide-only — a 72px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.
-              const showRunControl = props.wide && !trashed && props.canRun(w);
+              const showRunControl =
+                props.wide && !trashed && !discoveredRow && props.canRun(w);
               const holder = props.elsewhere.get(w.id);
               const away = holder !== undefined;
               // One pass over this worktree's sessions, here rather than inside the
@@ -10242,8 +10317,13 @@ function Rail(props: {
                  row visibly snaps back to the top of its group, a drag that
                  appears to do nothing. It leads its lane instead, which is the
                  same rule it follows ungrouped. */
+              // The Discovered section is pinned but its rows are not stuck:
+              // dragging one into a section is how it is adopted there.
               const rowDraggable =
-                canDrag && !trashed && !group.pinned && !w.is_main;
+                canDrag &&
+                !trashed &&
+                (!group.pinned || discoveredRow) &&
+                !w.is_main;
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
                    they were clipped by its `overflow: hidden` and rounded by its
@@ -10289,7 +10369,9 @@ function Rail(props: {
                       ? `${worktreeLabel(w)} — being deleted, cannot be restored`
                       : trashed
                         ? `${worktreeLabel(w)} — in the trash, still on disk`
-                        : w.trash_error
+                        : discoveredRow
+                          ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
+                          : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
                             ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
@@ -10313,7 +10395,7 @@ function Rail(props: {
                      about to stop existing. The restore control and the context
                      menu are still live. */
                   onClick={() => {
-                    if (!trashed) props.onSelect(w);
+                    if (!trashed && !discoveredRow) props.onSelect(w);
                   }}
                   onKeyDown={(e) => {
                     // Only the row's OWN key events. Keydown bubbles from the
@@ -10323,7 +10405,7 @@ function Rail(props: {
                     if (e.target !== e.currentTarget) return;
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
-                      if (!trashed) props.onSelect(w);
+                      if (!trashed && !discoveredRow) props.onSelect(w);
                     }
                   }}
                   onContextMenu={(e) => props.onMenu(e, w)}
@@ -10484,7 +10566,22 @@ function Rail(props: {
                       </button>
                     </Tooltip>
                   )}
-                  {props.wide && !trashed && (
+                  {props.wide && discoveredRow && (
+                    <Tooltip label={`Adopt ${worktreeLabel(w)} into the rail`}>
+                      <button
+                        type="button"
+                        className="wt-edit"
+                        aria-label={`Adopt ${worktreeLabel(w)}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          props.onAdopt(w);
+                        }}
+                      >
+                        <IconCirclePlus size={12} />
+                      </button>
+                    </Tooltip>
+                  )}
+                  {props.wide && !trashed && !discoveredRow && (
                     <button
                       type="button"
                       className="wt-edit"
@@ -10606,7 +10703,8 @@ function Rail(props: {
                 resolved from the pointer's position against the section's box —
                 but an overlay that is only a picture should not be hit-testable
                 either — and it outlives its drag while it fades out. */}
-            {group.key === TRASH_LANE && (dragPath !== null || trashLeaving) && (
+            {group.key === TRASH_LANE &&
+              ((dragPath !== null && binnable(dragPath)) || trashLeaving) && (
               <div className="trash-drop" ref={trashDropRef} aria-hidden="true">
                 Drop here to trash
               </div>
@@ -10715,7 +10813,7 @@ function Rail(props: {
               by `aimTrash` and `stepTrash`, never by React. `.over` is the confirmation
               once the pointer is inside — the job `.trash-drop.over` did when
               the overlay painted its own box. */}
-          {(dragPath !== null || trashLeaving) && (
+          {((dragPath !== null && binnable(dragPath)) || trashLeaving) && (
             <svg
               className={`trash-reach${dropAt?.key === TRASH_LANE ? " over" : ""}`}
               aria-hidden="true"
