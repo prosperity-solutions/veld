@@ -1966,7 +1966,8 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
 /// `git worktree list` is the only source of worktrees, so a checkout made outside
 /// Veld — by a coding agent, by hand — used to land in the rail exactly like one
 /// made through it. `worktrees.adopted = 0` marks a row nobody has adopted yet;
-/// [`Db::sync_worktrees`] is the only writer of `0`, and only when it inserts a row.
+/// [`Db::sync_worktrees_listing`] is the only writer of `0`, and only when it
+/// inserts a row.
 ///
 /// **`adopted_paths` is the durable half, keyed by checkout path.** A row does not
 /// outlive its path leaving `git worktree list` — a checkout on an unmounted volume
@@ -1977,7 +1978,8 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
 /// a poll that races it cannot file it as a discovery either. A path is forgotten
 /// when its checkout is removed — by Veld ([`Db::remove_worktree`]), or outside it,
 /// which is when git stops listing it rather than listing it `prunable`
-/// ([`Db::sync_worktrees_listing`]) — and when the repo is removed.
+/// ([`Db::sync_worktrees_listing`]) — when the repo is removed, and when the
+/// `git worktree add` it was recorded for fails ([`Db::forget_adopted_path`]).
 ///
 /// **Not covered: `git worktree move`.** The path changes, so the moved checkout is
 /// a new path with nothing recorded and lands in Discovered, one adopt away.

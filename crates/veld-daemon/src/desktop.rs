@@ -1526,8 +1526,8 @@ fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     out
 }
 
-/// The paths `git worktree list --porcelain` reports as `prunable` — the entries
-/// [`parse_worktree_list`] skips. Not canonicalized: the directory is missing by
+/// The paths `git worktree list --porcelain` reports as `prunable` — the prunable
+/// entries [`parse_worktree_list`] skips. Not canonicalized: the directory is missing by
 /// definition, and git already emits the physical path the row was stored under.
 fn parse_prunable_paths(porcelain: &str) -> Vec<String> {
     porcelain
@@ -3868,6 +3868,7 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
     // Same normalization as sync-on-refresh — an import must not store raw
     // paths that the first refresh would then churn into canonical ones.
     let discovered = canonicalize_discovered(parse_worktree_list(&porcelain));
+    let prunable = parse_prunable_paths(&porcelain);
     let Some(main) = discovered.iter().find(|w| w.is_main) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -3882,7 +3883,8 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
 
     let db = open_desktop_db()?;
     db.upsert_repo(&root, &name).map_err(db_err)?;
-    db.sync_worktrees(&root, &discovered).map_err(db_err)?;
+    db.sync_worktrees_listing(&root, &discovered, &prunable)
+        .map_err(db_err)?;
     let repo = db
         .get_repo(&root)
         .map_err(db_err)?
@@ -5969,7 +5971,8 @@ mod tests {
         assert_eq!(wts[0].path, "/repo");
         assert!(wts[0].is_main);
         assert_eq!(wts[1].path, "/wts/live");
-        assert!(!wts[1].is_main, "the skip must not promote a worktree"); // The skipped entry is still reported, as what keeps its adoption.
+        assert!(!wts[1].is_main, "the skip must not promote a worktree");
+        // The skipped entry is still reported, as what keeps its adoption.
         assert_eq!(parse_prunable_paths(out), vec!["/wts/gone".to_owned()]);
     }
 

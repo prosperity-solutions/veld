@@ -844,8 +844,8 @@ body[data-fullscreen="true"] .topbar.electron {
 
 /* The dock opts out of the symmetric padding and keeps the one-sided separation
    the scroller above just gave up. Nothing pinned here takes the `.drop-in` wash
-   — the trash draws `.trash-drop` over its whole self, and the Deleting lane
-   refuses drops outright — so there is no lopsided wash to balance, and padding
+   — the trash draws `.trash-drop` over its whole self, and Deleting and
+   Discovered refuse drops outright — so there is no lopsided wash to balance, and padding
    on a dock that is usually a single group would only make the pinned bottom of
    the rail taller for nothing. The gutter between Deleting and Trash still has to
    exist while a removal is in flight, which is what the second rule restores —
@@ -1248,8 +1248,9 @@ button.lane-empty {
 /* The dock's scrollport.
  *
  * The dock is `flex: none` under a `flex: 1` scroller, so its height comes out of
- * the list above it, which can shrink to nothing — and both sections pinned here
- * are unbounded. The trash holds rows until the retention clock runs out (its own
+ * the list above it, which can shrink to nothing — and every section pinned here
+ * is unbounded (Discovered as well, since agents can create checkouts faster
+ * than anyone adopts them). The trash holds rows until the retention clock runs out (its own
  * preview, `.trash-more`, keeps the ordinary case small, but the reader can open
  * it), and emptying the trash moves every row into Deleting at once. Past a
  * screenful the dock stopped being a dock: it pushed the lanes being worked in
@@ -1277,8 +1278,9 @@ button.lane-empty {
  * resolves a pointer over the dock to the section it can see — Deleting, which
  * refuses drops — and answers "nowhere". Emptying a full trash is exactly the
  * moment Deleting is tall, so that is the moment drag-to-trash would have stopped
- * working. Deleting scrolls inside itself instead (`min-height: 0` is what lets a
- * flex item shrink below its content at all), and the trash keeps its size. */
+ * working. Deleting and Discovered scroll inside themselves instead (`min-height:
+ * 0` is what lets a flex item shrink below its content at all), and the trash
+ * keeps its size. */
 .rail-dock-scroll .rail-group:is(.deleting, .discovered) {
   /* `min-height: 0` alone let it yield *everything*: the trash does not shrink,
      so an expanded trash taller than the cap took the whole dock and Deleting
@@ -1300,8 +1302,11 @@ button.lane-empty {
    inset. Its 9px of padding is inside the box (`border-box`), so the floor
    grows by it there.
 
-   Folded, a section is its header and nothing else, so the floor is lifted —
-   held at a row's height it left an empty band under a shut section.
+   Folded, a section is its header and nothing else, so the floor drops to the
+   header's 20px — held at a row's height it left an empty band under a shut
+   section, and dropped to nothing an expanded trash squeezed the header, and
+   with it the only way to unfold the section, out of sight. Only the wide rail:
+   a header, and so a fold, exists nowhere else.
 
    Split by width because the collapsed rail draws no headers at all
    (`hasHeader` is `label !== null && props.wide`), so one floor for both left
@@ -1312,6 +1317,12 @@ button.lane-empty {
 }
 .rail.wide .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 58px;
+}
+.rail.wide .rail-dock-scroll .rail-group:is(.deleting, .discovered).folded {
+  min-height: 20px;
+}
+.rail.wide .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered).folded {
+  min-height: 29px;
 }
 .rail:not(.wide) .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 28px;
