@@ -20,6 +20,10 @@ export interface OwnableWorktree {
    *  opened: its panes would root a terminal and a browser at a directory that
    *  is about to stop existing. */
   trashed_at: string;
+  /** `false` for a checkout discovered outside Veld that nobody has adopted —
+   *  not openable until it is. See `isDiscovered` in `model.ts`. */
+  adopted?: boolean;
+  is_main?: boolean;
 }
 
 /**
@@ -41,7 +45,11 @@ export function openableWorktrees<T extends OwnableWorktree>(
   elsewhere?: ReadonlyMap<number, unknown>,
 ): T[] {
   return worktrees.filter(
-    (w) => w.trashed_at === "" && !isRemoving(w) && !elsewhere?.has(w.id),
+    (w) =>
+      w.trashed_at === "" &&
+      (w.adopted !== false || w.is_main === true) &&
+      !isRemoving(w) &&
+      !elsewhere?.has(w.id),
   );
 }
 

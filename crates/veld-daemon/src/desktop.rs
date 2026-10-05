@@ -4390,9 +4390,21 @@ async fn create_worktree(
         }
     };
     let git_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
-    git(&repo_root, &git_refs)
-        .await
-        .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
+    // Recorded as adopted before the checkout exists, because the IDE's poll can
+    // reconcile between `git worktree add` and the sync below and would otherwise
+    // file it as a discovery. Spelled as git will report it: git records the
+    // realpath'd form, and the target directory does not exist yet.
+    let adopted_path = canonicalize_prefix(&checkout_path)
+        .to_string_lossy()
+        .into_owned();
+    db.remember_adopted_path(&repo_root, &adopted_path)
+        .map_err(write_err)?;
+    if let Err(e) = git(&repo_root, &git_refs).await {
+        if let Err(e) = db.forget_adopted_path(&adopted_path) {
+            warn!("create worktree: could not forget {adopted_path}: {e}");
+        }
+        return Err(err(StatusCode::UNPROCESSABLE_ENTITY, e));
+    }
 
     // Reproduce the source's uncommitted work, now that there is a clean
     // checkout at its HEAD to reproduce it into.
@@ -4434,10 +4446,11 @@ async fn create_worktree(
             )
         })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
-    // The sync inserted it as a discovery, since nothing tells a poll which
-    // checkouts this handler made. Adopted first, before any write below that can
-    // fail and return early: whatever else goes wrong, a worktree the user just
-    // created must not land in the section for ones they did not.
+    // Normally a no-op, since the path was recorded above. It is what still adopts
+    // the row if git reported the path in a spelling `canonicalize_prefix` did
+    // not predict. Before any write below that can fail and return early: a
+    // worktree the user just created must not land in the section for ones they
+    // did not.
     db.adopt_worktree(created.id).map_err(write_err)?;
     // The sync assigns a marker and no lane or label; apply what the dialog chose.
     // Before the alias rename below rather than after, because that rename is the

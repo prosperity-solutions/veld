@@ -1380,9 +1380,11 @@ function AppInner(props: {
   const lanes = useMemo(() => realLanes(laneRows), [laneRows]);
   // The fallbacks skip pending removals: when the worktree you were looking at is
   // being deleted, the app has to land somewhere that still exists rather than
-  // opening panes on a vanishing directory.
+  // opening panes on a vanishing directory. And unadopted discoveries, which are
+  // not opened until they are adopted — a remembered `?wt=` or a reopened path
+  // can name one, since an agent re-creating a checkout gets a fresh row.
   const selectable = useMemo(
-    () => worktrees.filter((w) => !w.trashed_at),
+    () => worktrees.filter((w) => !w.trashed_at && !isDiscovered(w)),
     [worktrees],
   );
   const worktree: Worktree | null =
@@ -1812,6 +1814,10 @@ function AppInner(props: {
    * worktree's layout would open a pane in a set of panes another window owns.
    */
   const selectWorktree = async (w: Worktree): Promise<boolean> => {
+    // The one gate every route into a worktree passes — the rail, ⌘K, stepping,
+    // a restore that selects what it restored. A discovered checkout is opened
+    // only once it is adopted.
+    if (isDiscovered(w)) return false;
     // A detached window shows one dock of a worktree its origin owns; it is a
     // satellite of that claim and never makes one of its own.
     if (chromeless) {
@@ -7504,7 +7510,11 @@ function AppInner(props: {
           // reading its index would race `git worktree remove` — the daemon
           // refuses it too, and offering it here would only make that refusal
           // arrive after the click.
-          sources={worktrees.filter((w) => !w.trashed_at && !isDeleting(w))}
+          // Nor an unadopted discovery: spinning one off acts on it, which waits
+          // until it is adopted like everything else.
+          sources={worktrees.filter(
+            (w) => !w.trashed_at && !isDeleting(w) && !isDiscovered(w),
+          )}
           spinOffFrom={dialog.spinOffFrom}
           takenAliases={worktrees.map((w) => w.alias)}
           lane={dialog.lane}

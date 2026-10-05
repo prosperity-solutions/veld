@@ -24,6 +24,13 @@ describe("which worktrees a client could take", () => {
     expect(openableWorktrees(rows, none).map((w) => w.id)).toEqual([2]);
   });
 
+  /** Discovered outside Veld and not adopted: the hunt must not land a second
+   *  window on it, since nothing else is allowed to open it either. */
+  it("never offers one that has not been adopted", () => {
+    const rows = [{ ...wt(1), adopted: false }, { ...wt(2), adopted: true }, wt(3)];
+    expect(openableWorktrees(rows, none).map((w) => w.id)).toEqual([2, 3]);
+  });
+
   /** The window that confirmed a removal knows before the daemon's flag does. */
   it("never offers one this window is removing", () => {
     const rows = [wt(1), wt(2)];

@@ -1965,16 +1965,35 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// `git worktree list` is the only source of worktrees, so a checkout made outside
 /// Veld — by a coding agent, by hand — used to land in the rail exactly like one
-/// made through it. `0` marks a row the discovery poll found on its own and nobody
-/// has adopted yet; [`Db::sync_worktrees`] is the only writer of `0`, and only when
-/// it inserts a row.
+/// made through it. `worktrees.adopted = 0` marks a row nobody has adopted yet;
+/// [`Db::sync_worktrees`] is the only writer of `0`, and only when it inserts a row.
 ///
-/// **`DEFAULT 1` is what keeps the upgrade invisible.** Nothing recorded who made
-/// an existing row, and a path heuristic would move a Veld-made checkout created
-/// before a storage-location change into the section. So every row that existed
-/// before this column did is adopted, and only discoveries made after it are not.
+/// **`adopted_paths` is the durable half, keyed by checkout path.** A row does not
+/// outlive its path leaving `git worktree list` — a checkout on an unmounted volume
+/// is reported `prunable` and skipped, and `git worktree move` changes the path —
+/// so a flag on the row alone would send the user's own worktree to Discovered the
+/// moment it came back. Sync inserts a row adopted when its path is recorded here,
+/// and `create_worktree` records its path *before* running `git worktree add`, so
+/// a poll that races it cannot file it as a discovery either. A path is forgotten
+/// when Veld deletes the checkout ([`Db::remove_worktree`]) or the repo is removed.
+///
+/// **`DEFAULT 1` and the backfill are what keep the upgrade invisible.** Nothing
+/// recorded who made an existing row, and a path heuristic would move a Veld-made
+/// checkout created before a storage-location change into the section. So every
+/// row that existed before this migration is adopted, and only discoveries made
+/// after it are not.
 fn migrate_v17_worktree_adopted(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN adopted INTEGER NOT NULL DEFAULT 1;")
+    conn.execute_batch(
+        r#"
+        ALTER TABLE worktrees ADD COLUMN adopted INTEGER NOT NULL DEFAULT 1;
+        CREATE TABLE adopted_paths (
+            path      TEXT PRIMARY KEY,
+            repo_root TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE
+        );
+        INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+            SELECT path, repo_root FROM worktrees;
+        "#,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2725,6 +2744,23 @@ mod tests {
         );
         let wts = db.list_worktrees(std::path::Path::new("/tmp/r")).unwrap();
         assert_eq!(wts.len(), 2);
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+        // …and durably so: a checkout that drops out of `git worktree list` for a
+        // while (an unmounted volume) comes back adopted, not as a discovery.
+        let root = std::path::Path::new("/tmp/r");
+        let main = crate::db::DiscoveredWorktree {
+            path: "/tmp/r".into(),
+            branch: "main".into(),
+            is_main: true,
+        };
+        let x = crate::db::DiscoveredWorktree {
+            path: "/tmp/r/.claude/worktrees/x".into(),
+            branch: "x".into(),
+            is_main: false,
+        };
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+        let wts = db.sync_worktrees(root, &[main, x]).unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
     }
 

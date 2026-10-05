@@ -565,6 +565,19 @@ impl Db {
                         )?;
                     }
                 } else {
+                    let remembered: bool = tx.query_row(
+                        "SELECT EXISTS (SELECT 1 FROM adopted_paths WHERE path = ?1)",
+                        params![d.path],
+                        |r| r.get(0),
+                    )?;
+                    let adopted = importing || d.is_main || remembered;
+                    if adopted {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+                             VALUES (?1, ?2)",
+                            params![d.path, root],
+                        )?;
+                    }
                     let alias = unique_alias(&tx, &root, &default_alias(&d.branch))?;
                     let emoji = pick_emoji(&tx, &root, &alias)?;
                     let color = pick_color(&tx, &root, &alias)?;
@@ -582,7 +595,7 @@ impl Db {
                             d.is_main as i64,
                             now_str(),
                             color,
-                            (importing || d.is_main) as i64
+                            adopted as i64
                         ],
                     )?;
                 }
@@ -820,9 +833,19 @@ impl Db {
     /// The two legitimate callers are `worktree_trash::process` (after git has
     /// actually removed it) and the forced branch of the `delete_worktree` handler.
     /// Anything else wants [`Self::trash_worktree`].
+    ///
+    /// Forgets the path's adoption too: the checkout is gone, and a later one at the
+    /// same path is a new worktree with no claim to it.
     pub fn remove_worktree(&self, id: i64) -> Result<bool, DbError> {
-        let conn = self.lock();
-        let n = conn.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM adopted_paths
+             WHERE path = (SELECT path FROM worktrees WHERE id = ?1)",
+            params![id],
+        )?;
+        let n = tx.execute("DELETE FROM worktrees WHERE id = ?1", params![id])?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -1236,12 +1259,43 @@ impl Db {
     /// One-way by design: nothing un-adopts. A worktree the user does not want
     /// listed goes to the trash, like any other.
     pub fn adopt_worktree(&self, id: i64) -> Result<bool, DbError> {
-        let conn = self.lock();
-        let n = conn.execute(
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let n = tx.execute(
             "UPDATE worktrees SET adopted = 1 WHERE id = ?1",
             params![id],
         )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO adopted_paths (path, repo_root)
+             SELECT path, repo_root FROM worktrees WHERE id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
         Ok(n > 0)
+    }
+
+    /// Record a checkout path as adopted before anything exists there, so whichever
+    /// sync first sees the checkout inserts it adopted. What `create_worktree` calls
+    /// ahead of `git worktree add`, since the IDE's poll can reconcile in between.
+    ///
+    /// `path` must be spelled the way `git worktree list` will report it — git
+    /// records the realpath'd form — or the row will not match it.
+    pub fn remember_adopted_path(&self, repo_root: &Path, path: &str) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO adopted_paths (path, repo_root) VALUES (?1, ?2)",
+            params![path, root_key(repo_root)],
+        )?;
+        Ok(())
+    }
+
+    /// Drop a recorded path again — for a `git worktree add` that failed after
+    /// [`Self::remember_adopted_path`], so a later checkout at that path made outside
+    /// Veld is not adopted on Veld's behalf.
+    pub fn forget_adopted_path(&self, path: &str) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute("DELETE FROM adopted_paths WHERE path = ?1", params![path])?;
+        Ok(())
     }
 
     /// Clear a worktree's recorded removal failure (the user has read it).
@@ -1637,6 +1691,51 @@ mod tests {
             .unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
         assert!(!db.adopt_worktree(i64::MAX).unwrap());
+    }
+
+    #[test]
+    fn adoption_follows_the_path_not_the_row() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoPath");
+        db.upsert_repo(root, "repo-path").unwrap();
+        let main = wt("/tmp/repoPath", "main", true);
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+
+        // Recorded before `git worktree add`: the first sync to see it adopts it.
+        db.remember_adopted_path(root, "/tmp/wts/made").unwrap();
+        let made = wt("/tmp/wts/made", "made", false);
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // Gone from `git worktree list` for a while (an unmounted volume), then back:
+        // a new row, still adopted.
+        db.sync_worktrees(root, std::slice::from_ref(&main))
+            .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // Deleted by Veld: a later checkout at the same path is a discovery.
+        let id = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap().id;
+        assert!(db.remove_worktree(id).unwrap());
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        let again = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!again.adopted);
+
+        // A failed create forgets what it remembered.
+        db.remember_adopted_path(root, "/tmp/wts/failed").unwrap();
+        db.forget_adopted_path("/tmp/wts/failed").unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main, wt("/tmp/wts/failed", "failed", false)])
+            .unwrap();
+        let failed = wts.iter().find(|w| w.path == "/tmp/wts/failed").unwrap();
+        assert!(!failed.adopted);
     }
 
     #[test]
