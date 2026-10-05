@@ -1970,12 +1970,17 @@ fn migrate_v16_repo_sort_position(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// **`adopted_paths` is the durable half, keyed by checkout path.** A row does not
 /// outlive its path leaving `git worktree list` — a checkout on an unmounted volume
-/// is reported `prunable` and skipped, and `git worktree move` changes the path —
-/// so a flag on the row alone would send the user's own worktree to Discovered the
-/// moment it came back. Sync inserts a row adopted when its path is recorded here,
+/// is reported `prunable` and skipped — so a flag on the row alone would send the
+/// user's own worktree to Discovered the moment it came back. Sync inserts a row
+/// adopted when its path is recorded here,
 /// and `create_worktree` records its path *before* running `git worktree add`, so
 /// a poll that races it cannot file it as a discovery either. A path is forgotten
-/// when Veld deletes the checkout ([`Db::remove_worktree`]) or the repo is removed.
+/// when its checkout is removed — by Veld ([`Db::remove_worktree`]), or outside it,
+/// which is when git stops listing it rather than listing it `prunable`
+/// ([`Db::sync_worktrees_listing`]) — and when the repo is removed.
+///
+/// **Not covered: `git worktree move`.** The path changes, so the moved checkout is
+/// a new path with nothing recorded and lands in Discovered, one adopt away.
 ///
 /// **`DEFAULT 1` and the backfill are what keep the upgrade invisible.** Nothing
 /// recorded who made an existing row, and a path heuristic would move a Veld-made
@@ -2758,7 +2763,7 @@ mod tests {
             branch: "x".into(),
             is_main: false,
         };
-        db.sync_worktrees(root, std::slice::from_ref(&main))
+        db.sync_worktrees_listing(root, std::slice::from_ref(&main), &[x.path.clone()])
             .unwrap();
         let wts = db.sync_worktrees(root, &[main, x]).unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");

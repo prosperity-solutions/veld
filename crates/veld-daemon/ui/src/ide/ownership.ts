@@ -47,6 +47,9 @@ export function openableWorktrees<T extends OwnableWorktree>(
   return worktrees.filter(
     (w) =>
       w.trashed_at === "" &&
+      // `isDiscovered` in `model.ts`, minus its trash test (the line above);
+      // spelled out because that takes a whole `Worktree` and this works on the
+      // narrower `OwnableWorktree`. Keep the two in step.
       (w.adopted !== false || w.is_main === true) &&
       !isRemoving(w) &&
       !elsewhere?.has(w.id),

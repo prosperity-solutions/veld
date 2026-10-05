@@ -443,10 +443,30 @@ impl Db {
     /// de-duplicated with a numeric suffix), update `branch`/`is_main` on
     /// existing rows (a worktree can switch branches), and delete rows whose
     /// path vanished. User-chosen aliases on surviving rows are preserved.
+    ///
+    /// The same as [`Self::sync_worktrees_listing`] with nothing listed as
+    /// `prunable`.
     pub fn sync_worktrees(
         &self,
         repo_root: &Path,
         discovered: &[DiscoveredWorktree],
+    ) -> Result<Vec<WorktreeRecord>, DbError> {
+        self.sync_worktrees_listing(repo_root, discovered, &[])
+    }
+
+    /// [`Self::sync_worktrees`], told which paths git still lists as `prunable`.
+    ///
+    /// Those rows go like any vanished row, but their adoption is kept: git reports
+    /// a checkout `prunable` while its directory is missing yet its entry remains —
+    /// an unmounted volume, typically — so it may come back, and should come back
+    /// where it was. A path git no longer lists at all was removed (`git worktree
+    /// remove`, by an agent or by hand), and a later checkout there is a new one,
+    /// so its adoption is forgotten with the row.
+    pub fn sync_worktrees_listing(
+        &self,
+        repo_root: &Path,
+        discovered: &[DiscoveredWorktree],
+        prunable: &[String],
     ) -> Result<Vec<WorktreeRecord>, DbError> {
         // Guard the degenerate case explicitly: an empty `discovered` would
         // make the prune below `path NOT IN ()` — which SQLite evaluates as
@@ -478,6 +498,31 @@ impl Db {
             for p in &keep {
                 params_vec.push(p);
             }
+            // First the adoptions of the rows about to go, except where git still
+            // lists the path as prunable (see above). Same parameters, plus the
+            // prunable paths after them.
+            let mut forget_params = params_vec.clone();
+            let spared = if prunable.is_empty() {
+                String::new()
+            } else {
+                for p in prunable {
+                    forget_params.push(p);
+                }
+                format!(
+                    " AND path NOT IN ({})",
+                    std::iter::repeat_n("?", prunable.len())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            tx.execute(
+                &format!(
+                    "DELETE FROM adopted_paths WHERE path IN
+                       (SELECT path FROM worktrees WHERE repo_root = ?1
+                         AND path NOT IN ({placeholders})){spared}"
+                ),
+                forget_params.as_slice(),
+            )?;
             tx.execute(
                 &format!(
                     "DELETE FROM worktrees WHERE repo_root = ?1
@@ -1279,14 +1324,16 @@ impl Db {
     /// ahead of `git worktree add`, since the IDE's poll can reconcile in between.
     ///
     /// `path` must be spelled the way `git worktree list` will report it — git
-    /// records the realpath'd form — or the row will not match it.
-    pub fn remember_adopted_path(&self, repo_root: &Path, path: &str) -> Result<(), DbError> {
+    /// records the realpath'd form — or the row will not match it. Returns whether
+    /// the path was newly recorded, which is what decides whether a failed create
+    /// may [`Self::forget_adopted_path`] it again.
+    pub fn remember_adopted_path(&self, repo_root: &Path, path: &str) -> Result<bool, DbError> {
         let conn = self.lock();
-        conn.execute(
+        let n = conn.execute(
             "INSERT OR IGNORE INTO adopted_paths (path, repo_root) VALUES (?1, ?2)",
             params![path, root_key(repo_root)],
         )?;
-        Ok(())
+        Ok(n > 0)
     }
 
     /// Drop a recorded path again — for a `git worktree add` that failed after
@@ -1703,21 +1750,37 @@ mod tests {
             .unwrap();
 
         // Recorded before `git worktree add`: the first sync to see it adopts it.
-        db.remember_adopted_path(root, "/tmp/wts/made").unwrap();
+        assert!(db.remember_adopted_path(root, "/tmp/wts/made").unwrap());
+        assert!(!db.remember_adopted_path(root, "/tmp/wts/made").unwrap());
         let made = wt("/tmp/wts/made", "made", false);
         let wts = db
             .sync_worktrees(root, &[main.clone(), made.clone()])
             .unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
 
-        // Gone from `git worktree list` for a while (an unmounted volume), then back:
-        // a new row, still adopted.
+        // Listed `prunable` for a while (an unmounted volume), then back: a new row,
+        // still adopted.
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            &["/tmp/wts/made".to_owned()],
+        )
+        .unwrap();
+        let wts = db
+            .sync_worktrees(root, &[main.clone(), made.clone()])
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // Removed outside Veld (`git worktree remove`: no longer listed at all),
+        // then re-created at the same path by an agent: a discovery again.
         db.sync_worktrees(root, std::slice::from_ref(&main))
             .unwrap();
         let wts = db
             .sync_worktrees(root, &[main.clone(), made.clone()])
             .unwrap();
-        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+        let recreated = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap();
+        assert!(!recreated.adopted);
+        assert!(db.adopt_worktree(recreated.id).unwrap());
 
         // Deleted by Veld: a later checkout at the same path is a discovery.
         let id = wts.iter().find(|w| w.path == "/tmp/wts/made").unwrap().id;
