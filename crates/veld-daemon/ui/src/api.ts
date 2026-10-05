@@ -405,6 +405,14 @@ export interface Worktree {
    */
   trash_error: string;
   /**
+   * Whether the rail lists this worktree among the user's own. `false` for a
+   * checkout the daemon discovered by itself — made outside Veld, typically by a
+   * coding agent — that nobody has adopted yet; the rail keeps those in its
+   * "Discovered" section. Optional only so a daemon older than the field reads as
+   * "everything adopted", which is what it would have shown.
+   */
+  adopted?: boolean;
+  /**
    * Whether this checkout's removal is past the point of no return — it is not
    * in the trash any more, it is actively being deleted and cannot be restored.
    *
@@ -1738,6 +1746,9 @@ export const api = {
    */
   restoreWorktree: (id: number) =>
     request<Worktree>(`/api/worktrees/${id}/restore`, { method: "POST" }),
+  /** Move a discovered worktree into the rail proper. */
+  adoptWorktree: (id: number) =>
+    request<Worktree>(`/api/worktrees/${id}/adopt`, { method: "POST" }),
   /**
    * Delete a trashed worktree now instead of waiting for its retention (202).
    * `409` if it is not in the trash — this is not a shortcut past the confirmation.

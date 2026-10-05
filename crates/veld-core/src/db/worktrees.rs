@@ -116,6 +116,15 @@ pub struct WorktreeRecord {
     /// with the reason attached, rather than leaving it in a state that looks like
     /// pending work forever.
     pub trash_error: String,
+    /// Whether the rail lists this worktree among the user's own, rather than in
+    /// its "Discovered" section.
+    ///
+    /// `false` only for a checkout the discovery poll found by itself — made by a
+    /// coding agent or by hand, outside Veld — and nobody has adopted since. A
+    /// worktree Veld creates is adopted by the handler that created it, the main
+    /// checkout always is, and so is every checkout of a repo at the moment it is
+    /// imported: those are the ones the user brought with them. See v17.
+    pub adopted: bool,
 }
 
 /// A user-defined rail lane — a named group of worktrees within one repo.
@@ -227,7 +236,7 @@ pub struct DiscoveredWorktree {
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
-     marker_color, lane, sort_position, trashed_at, trash_error, display_name";
+     marker_color, lane, sort_position, trashed_at, trash_error, display_name, adopted";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -245,6 +254,7 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         trashed_at: row.get(11)?,
         trash_error: row.get(12)?,
         display_name: row.get(13)?,
+        adopted: row.get::<_, i64>(14)? != 0,
     })
 }
 
@@ -450,6 +460,15 @@ impl Db {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         {
+            // A repo with no rows yet is being imported, and the checkouts it
+            // already has are the ones the user brought with it — they are not
+            // discoveries. Asked before the DELETE below, which never empties a
+            // repo that has rows (git always lists the main checkout).
+            let importing: bool = tx.query_row(
+                "SELECT NOT EXISTS (SELECT 1 FROM worktrees WHERE repo_root = ?1)",
+                params![root],
+                |r| r.get(0),
+            )?;
             // Delete rows for paths that no longer exist on disk.
             let keep: Vec<&str> = discovered.iter().map(|d| d.path.as_str()).collect();
             let placeholders = std::iter::repeat_n("?", keep.len())
@@ -552,8 +571,8 @@ impl Db {
                     tx.execute(
                         "INSERT INTO worktrees
                             (repo_root, path, branch, alias, emoji, is_main, created_at,
-                             marker_color)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                             marker_color, adopted)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             root,
                             d.path,
@@ -562,7 +581,8 @@ impl Db {
                             emoji,
                             d.is_main as i64,
                             now_str(),
-                            color
+                            color,
+                            (importing || d.is_main) as i64
                         ],
                     )?;
                 }
@@ -1210,6 +1230,20 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Move a worktree out of the rail's "Discovered" section and into the rail
+    /// proper. Returns whether a row existed; adopting one twice is a no-op.
+    ///
+    /// One-way by design: nothing un-adopts. A worktree the user does not want
+    /// listed goes to the trash, like any other.
+    pub fn adopt_worktree(&self, id: i64) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees SET adopted = 1 WHERE id = ?1",
+            params![id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Clear a worktree's recorded removal failure (the user has read it).
     pub fn clear_trash_error(&self, id: i64) -> Result<bool, DbError> {
         let conn = self.lock();
@@ -1554,6 +1588,55 @@ mod tests {
         assert_eq!(chk.alias, "chk");
         assert_eq!(chk.branch, "feat/checkout-v3");
         assert_eq!(chk.id, id);
+    }
+
+    #[test]
+    fn sync_adopts_what_an_import_brings_and_nothing_found_later() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAdopt");
+        db.upsert_repo(root, "repo-adopt").unwrap();
+
+        // The first sync is the import: every checkout already there is adopted.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                ],
+            )
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+
+        // A checkout that appears afterwards was made outside Veld.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                    wt("/tmp/repoAdopt/.claude/worktrees/agent", "agent", false),
+                ],
+            )
+            .unwrap();
+        let found = wts.iter().find(|w| w.path.ends_with("/agent")).unwrap();
+        assert!(!found.adopted);
+
+        // Adopting is durable across the next poll, and idempotent.
+        assert!(db.adopt_worktree(found.id).unwrap());
+        assert!(db.adopt_worktree(found.id).unwrap());
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAdopt", "main", true),
+                    wt("/tmp/wts/brought", "feat/brought", false),
+                    wt("/tmp/repoAdopt/.claude/worktrees/agent", "agent", false),
+                ],
+            )
+            .unwrap();
+        assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+        assert!(!db.adopt_worktree(i64::MAX).unwrap());
     }
 
     #[test]

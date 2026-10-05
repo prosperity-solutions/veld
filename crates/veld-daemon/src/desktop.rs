@@ -55,6 +55,7 @@ pub fn routes() -> Router {
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
+        .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
         // Extension surfaces are worktree-scoped, so they live here and
         // inherit `csrf_layer` — both of them execute a project-declared
@@ -4433,6 +4434,11 @@ async fn create_worktree(
             )
         })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
+    // The sync inserted it as a discovery, since nothing tells a poll which
+    // checkouts this handler made. Adopted first, before any write below that can
+    // fail and return early: whatever else goes wrong, a worktree the user just
+    // created must not land in the section for ones they did not.
+    db.adopt_worktree(created.id).map_err(write_err)?;
     // The sync assigns a marker and no lane or label; apply what the dialog chose.
     // Before the alias rename below rather than after, because that rename is the
     // step that can lose a race and return early — and a checkout that ends up
@@ -4943,6 +4949,20 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
     Ok(Json(worktree_view(&db, wt)))
 }
 
+/// Move a worktree the discovery poll found on its own — one made outside Veld —
+/// out of the rail's "Discovered" section and into the rail proper.
+async fn adopt_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
+    let db = open_desktop_db()?;
+    if !db.adopt_worktree(id).map_err(write_err)? {
+        return Err(err(StatusCode::NOT_FOUND, "no such worktree"));
+    }
+    let wt = db
+        .get_worktree(id)
+        .map_err(db_err)?
+        .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
+    Ok(Json(worktree_view(&db, wt)))
+}
+
 /// Delete a trashed worktree now, without waiting for its retention to expire.
 ///
 /// Queues the same worker the retention sweep uses, so there is exactly one code path
@@ -5276,6 +5296,7 @@ mod tests {
             sort_position: None,
             trashed_at: String::new(),
             trash_error: String::new(),
+            adopted: true,
         }
     }
 

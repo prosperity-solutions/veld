@@ -1216,12 +1216,19 @@ button.lane-empty {
   color: var(--danger);
 }
 
+/* Discovered worktrees were made outside Veld and are not the user's yet:
+   quieter than the rail proper until hovered or selected, so they read as
+   candidates rather than as part of the list. */
+.rail-group.discovered .wt-row:not(.active):not(:hover) {
+  opacity: 0.7;
+}
+
 /* The terminal deletion lane is destructive but *in progress* — the rows carry
    the motion (spinner) and the red left edge, so the header keeps the default
    muted tone. A green header here read as "success", which a deletion is not. */
 
-/* The pinned bottom of the rail: the trash lane (always present) and the
-   terminal Deleting lane sit here and never scroll away with the rows above
+/* The pinned bottom of the rail: the trash lane (always present), the
+   terminal Deleting lane and the Discovered section sit here and never scroll away with the rows above
    them — however many worktrees there are, the exit is always in sight. The top
    border marks where scrolling ends and the dock begins. */
 .rail-dock {
@@ -1262,7 +1269,8 @@ button.lane-empty {
   overflow-y: auto;
 }
 
-/* Which section yields when the dock runs out of room, and it must be Deleting.
+/* Which section yields when the dock runs out of room, and it must not be the
+   trash.
  *
  * The trash is the rail's permanent bottom anchor and a drop target; scrolled out
  * of the dock it is not merely invisible but *unhittable*, because `rowTargetAt`
@@ -1271,7 +1279,7 @@ button.lane-empty {
  * moment Deleting is tall, so that is the moment drag-to-trash would have stopped
  * working. Deleting scrolls inside itself instead (`min-height: 0` is what lets a
  * flex item shrink below its content at all), and the trash keeps its size. */
-.rail-dock-scroll .rail-group.deleting {
+.rail-dock-scroll .rail-group:is(.deleting, .discovered) {
   /* `min-height: 0` alone let it yield *everything*: the trash does not shrink,
      so an expanded trash taller than the cap took the whole dock and Deleting
      went to 0px — no header, no rows, and no height to scroll inside. Deleting a
@@ -1282,20 +1290,34 @@ button.lane-empty {
   overflow-y: auto;
 }
 /* One row, and in the wide rail the header above it. All content, no padding to
-   add back: `.rail-dock .rail-group` above zeroes `.rail-group`'s own 9px, and
-   the `+ .rail-group` inset lands on the trash rather than here — Deleting is
-   always the dock's first section. The header is `.lane-fold`'s 14px plus
-   `.lane-head`'s 2px/3px, then `.rail-group`'s 2px gap, then `.wt-row`'s 28px.
+   add back: `.rail-dock .rail-group` above zeroes `.rail-group`'s own 9px. The
+   header is `.lane-fold`'s 14px plus `.lane-head`'s 2px/3px, then
+   `.rail-group`'s 2px gap, then `.wt-row`'s 28px.
+
+   The Discovered section yields the same way and for the same reason — an agent
+   can create checkouts faster than anyone adopts them — and it sits above
+   Deleting, so whichever of the two comes second carries the `+ .rail-group`
+   inset. Its 9px of padding is inside the box (`border-box`), so the floor
+   grows by it there.
+
+   Folded, a section is its header and nothing else, so the floor is lifted —
+   held at a row's height it left an empty band under a shut section.
 
    Split by width because the collapsed rail draws no headers at all
    (`hasHeader` is `label !== null && props.wide`), so one floor for both left
    19px of dead air above the trash divider in the mode with the least room for
    it. */
-.rail.wide .rail-dock-scroll .rail-group.deleting {
+.rail.wide .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 49px;
 }
-.rail:not(.wide) .rail-dock-scroll .rail-group.deleting {
+.rail.wide .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
+  min-height: 58px;
+}
+.rail:not(.wide) .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 28px;
+}
+.rail:not(.wide) .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
+  min-height: 37px;
 }
 .rail-dock-scroll .rail-group.trash {
   flex: none;
