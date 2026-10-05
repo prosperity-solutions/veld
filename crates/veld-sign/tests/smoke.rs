@@ -982,11 +982,17 @@ fn a_non_utf8_secret_does_not_print_the_key() {
     assert!(!sig_path_for(&binary).exists());
 }
 
-/// The macOS ordering that `release.yml` and `install.sh` depend on, and that
-/// nothing but a real install has ever exercised: ad-hoc `codesign` first, then
-/// ed25519-sign the ad-hoc-signed bytes, then let install.sh re-sign ad-hoc on
-/// the user's machine. The `.sig` must still verify afterwards, which requires
-/// the re-sign to reproduce the signed bytes exactly.
+/// The macOS ordering that `release.yml` depends on: ad-hoc `codesign` first,
+/// then ed25519-sign the ad-hoc-signed bytes. A re-sign on **this** machine
+/// reproduces the signed bytes exactly, and this test holds that much.
+///
+/// **It cannot see the case that broke in the field**, and it used to be read as
+/// if it did. The re-sign is idempotent against the *same* `codesign`; macOS 27's
+/// `codesign` packs the signature tighter than the CI runner's and truncates a
+/// CI-signed helper by 18000 bytes, which made every lib-dir helper fail its
+/// `.sig`. So `install.sh` no longer relies on idempotency at all — it re-signs
+/// only a binary whose signature does not verify, and
+/// `install_sh_leaves_a_verifying_binary_byte_for_byte_alone` is what holds that.
 ///
 /// **The trap.** An ad-hoc signature's identifier is derived from the file's
 /// **basename**, and that identifier is hashed into the CodeDirectory. So both
@@ -1093,6 +1099,231 @@ fn adhoc_resign_is_byte_idempotent_for_a_multi_slot_signature() {
              generation whose only key is this one would refuse the release"
         );
     }
+}
+
+/// `install.sh`'s `install_bin`, run for real: a binary whose code signature
+/// verifies must arrive **byte-for-byte** as it left CI, and one whose signature
+/// does not verify must still come out runnable.
+///
+/// The fixture is signed with a non-default identifier on purpose. A
+/// `codesign --force --sign -` then produces different bytes — the same shape as
+/// a newer macOS's `codesign` re-signing a CI-built helper — so an `install_bin`
+/// that re-signs unconditionally fails this test on any machine, rather than only
+/// on the OS release where the field bug appeared.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_leaves_a_verifying_binary_byte_for_byte_alone() {
+    let dir = scratch("install-bin");
+
+    // Signed, and verifying: must not be touched.
+    let src = dir.join("veld-helper");
+    std::fs::copy(env!("CARGO_BIN_EXE_veld-sign"), &src).expect("copy a real Mach-O");
+    let out = Command::new("/usr/bin/codesign")
+        .args([
+            "--force",
+            "--sign",
+            "-",
+            "--identifier",
+            "dev.veld.not-the-default",
+        ])
+        .arg(&src)
+        .output()
+        .expect("run codesign");
+    assert!(out.status.success(), "codesign: {}", stderr_of(&out));
+    let shipped = std::fs::read(&src).unwrap();
+
+    // Prove the fixture discriminates: a plain re-sign would change these bytes.
+    let resigned = dir.join("resigned").join("veld-helper");
+    std::fs::create_dir_all(resigned.parent().unwrap()).unwrap();
+    std::fs::copy(&src, &resigned).unwrap();
+    adhoc_sign(&resigned);
+    assert!(
+        std::fs::read(&resigned).unwrap() != shipped,
+        "fixture does not discriminate: a re-sign left its bytes unchanged"
+    );
+
+    let dst_dir = dir.join("lib");
+    std::fs::create_dir_all(&dst_dir).unwrap();
+    let dst = dst_dir.join("veld-helper");
+    run_install_bin(&src, &dst);
+    assert!(
+        std::fs::read(&dst).unwrap() == shipped,
+        "install_bin rewrote a binary whose signature verified, which breaks the org \
+         signature shipped beside it"
+    );
+
+    // Not signed at all: must come out with a signature that verifies.
+    let unsigned = dir.join("unsigned").join("veld-helper");
+    std::fs::create_dir_all(unsigned.parent().unwrap()).unwrap();
+    std::fs::copy(&src, &unsigned).unwrap();
+    let out = Command::new("/usr/bin/codesign")
+        .arg("--remove-signature")
+        .arg(&unsigned)
+        .output()
+        .expect("run codesign");
+    assert!(out.status.success(), "codesign: {}", stderr_of(&out));
+    let dst2 = dst_dir.join("veld-unsigned");
+    run_install_bin(&unsigned, &dst2);
+    let out = Command::new("/usr/bin/codesign")
+        .arg("--verify")
+        .arg(&dst2)
+        .output()
+        .expect("run codesign");
+    assert!(
+        out.status.success(),
+        "install_bin left an unsigned binary unsigned: {}",
+        stderr_of(&out)
+    );
+}
+
+/// `install_bin` over a destination that is **running**: the next exec of the
+/// new bytes must succeed.
+///
+/// macOS caches a binary's code signature per vnode, so `cp` onto a file that has
+/// run keeps the inode and gets every later exec of the new bytes SIGKILLed. The
+/// old unconditional re-sign hid that by writing a new file; with it gone, only
+/// the stage-and-rename holds it — and the places it bites are the CLI replacing
+/// itself under `veld update`, the helper's `--version` probe, and a daemon that
+/// launchd then crash-loops. Both fixtures verify, so neither is re-signed and
+/// nothing else gives the destination a fresh inode.
+///
+/// A copy of `/bin/sleep` rather than `veld-sign`, because the old bytes have to
+/// still be running while they are replaced.
+#[cfg(target_os = "macos")]
+#[test]
+fn install_sh_replaces_a_running_binary_without_breaking_its_next_exec() {
+    use std::os::unix::fs::MetadataExt;
+
+    let dir = scratch("install-bin-running");
+    let sleep_signed_as = |name: &str, identifier: &str| {
+        let path = dir.join(name).join("sleeper");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::copy("/bin/sleep", &path).expect("copy /bin/sleep");
+        let out = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-", "--identifier", identifier])
+            .arg(&path)
+            .output()
+            .expect("run codesign");
+        assert!(out.status.success(), "codesign: {}", stderr_of(&out));
+        path
+    };
+    let old = sleep_signed_as("old", "dev.veld.old");
+    let new = sleep_signed_as("new", "dev.veld.new");
+    assert!(
+        std::fs::read(&old).unwrap() != std::fs::read(&new).unwrap(),
+        "fixture does not discriminate: both sleepers have the same bytes"
+    );
+
+    let lib = dir.join("lib");
+    std::fs::create_dir_all(&lib).unwrap();
+    let dst = lib.join("sleeper");
+    std::fs::copy(&old, &dst).unwrap();
+    let inode_before = std::fs::metadata(&dst).unwrap().ino();
+    let mut running = Command::new(&dst)
+        .arg("30")
+        .spawn()
+        .expect("run the old bytes");
+
+    run_install_bin(&new, &dst);
+    let next = Command::new(&dst)
+        .arg("0")
+        .status()
+        .expect("exec the new bytes");
+    let _ = running.kill();
+    let _ = running.wait();
+
+    assert!(
+        std::fs::read(&dst).unwrap() == std::fs::read(&new).unwrap(),
+        "install_bin did not install the new bytes"
+    );
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+        0o755,
+        "install_bin left the umask's mode on the binary, not 0755"
+    );
+    assert!(
+        next.success(),
+        "the binary install_bin just replaced did not run: {next:?}"
+    );
+    assert_ne!(
+        std::fs::metadata(&dst).unwrap().ino(),
+        inode_before,
+        "install_bin overwrote the running binary in place"
+    );
+
+    // A symlinked destination: `cp` wrote through it, so the link must survive
+    // and its target take the bytes.
+    let target = lib.join("linked-target");
+    std::fs::copy(&old, &target).unwrap();
+    let link = lib.join("linked");
+    std::os::unix::fs::symlink("linked-target", &link).unwrap();
+    run_install_bin(&new, &link);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "install_bin replaced a symlinked destination with a file"
+    );
+    assert!(
+        std::fs::read(&target).unwrap() == std::fs::read(&new).unwrap(),
+        "install_bin did not write through a symlinked destination"
+    );
+    // A symlink loop: `cp` failed with ELOOP, so install_bin must fail too —
+    // promptly, not by walking the loop forever under `veld update`.
+    std::os::unix::fs::symlink("loop-b", lib.join("loop-a")).unwrap();
+    std::os::unix::fs::symlink("loop-a", lib.join("loop-b")).unwrap();
+    let started = std::time::Instant::now();
+    let out = install_bin_output(&new, &lib.join("loop-a"));
+    assert!(!out.status.success(), "install_bin followed a symlink loop");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "install_bin took {:?} to give up on a symlink loop",
+        started.elapsed()
+    );
+
+    let leftovers: Vec<_> = std::fs::read_dir(&lib)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .filter(|n| n.to_string_lossy().starts_with(".veld-install."))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "install_bin left staging dirs: {leftovers:?}"
+    );
+}
+
+/// Runs `install.sh`'s own `install_bin` — extracted from the script, not copied
+/// — with `OS=macos`, no sudo, and a 077 umask: the replacement is a new file, so
+/// it takes the umask where the old in-place `cp` kept the old file's mode, and a
+/// restrictive one is what made `veld` root-only under sudo.
+#[cfg(target_os = "macos")]
+fn run_install_bin(src: &Path, dst: &Path) {
+    let out = install_bin_output(src, dst);
+    assert!(out.status.success(), "install_bin: {}", stderr_of(&out));
+}
+
+#[cfg(target_os = "macos")]
+fn install_bin_output(src: &Path, dst: &Path) -> Output {
+    let script =
+        std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../install.sh"))
+            .expect("read install.sh");
+    let start = script
+        .find("\ninstall_bin() {\n")
+        .expect("install.sh defines install_bin");
+    let end = start + script[start..].find("\n}\n").expect("install_bin ends") + 3;
+    let install_bin = &script[start..end];
+
+    Command::new("/bin/bash")
+        .arg("-c")
+        .arg(format!(
+            "set -euo pipefail\numask 077\nOS=macos\nNEED_SUDO=\nINSTALL_BIN_STAGE=\n{install_bin}\ninstall_bin \"$1\" \"$2\" sign"
+        ))
+        .arg("install_bin")
+        .arg(src)
+        .arg(dst)
+        .output()
+        .expect("run install_bin")
 }
 
 #[cfg(target_os = "macos")]

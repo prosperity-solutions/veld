@@ -52,10 +52,11 @@
 //!
 //! It never re-signs the binary on macOS. CI ad-hoc signs the helper *before*
 //! `veld-sign` covers it, so the shipped bytes already carry the code signature
-//! and the detached `.sig` matches them exactly. `install.sh`'s own
-//! `codesign --force --sign -` is a byte-idempotent no-op for that reason; a
-//! re-sign here would not be, and would invalidate the signature this store
-//! exists to enforce.
+//! and the detached `.sig` matches them exactly. A re-sign here would invalidate
+//! the signature this store exists to enforce — and it is not byte-idempotent
+//! even when it looks like it should be: macOS 27's `codesign` packs the
+//! signature tighter than CI's and truncates the file. `install.sh` re-signs only
+//! a binary whose signature does not verify, for the same reason.
 
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -255,6 +256,26 @@ impl Candidate {
         self.verified_version_with(signing::ORG_SIGNING_KEYRING)
     }
 
+    /// Why these bytes match no org signature slot — size, digest prefix and
+    /// the `.sig` path — or `None` when they verify.
+    ///
+    /// **User-side only.** [`Self::verified_version`]'s error says none of this
+    /// on purpose, because the root helper builds candidates from a path its
+    /// caller chose and both replies with and logs that error. Only a caller
+    /// already running with the user's own privilege over the file — `veld
+    /// setup`, under the user's sudo — may attach it.
+    pub fn mismatch_detail(&self) -> Option<String> {
+        (!signing::verify_data_slots(signing::ORG_SIGNING_KEYRING, &self.bytes, &self.sig)).then(
+            || {
+                signing::mismatch_detail(
+                    &self.bytes,
+                    &self.sig,
+                    &signing::sig_path_for(&self.source),
+                )
+            },
+        )
+    }
+
     /// [`Self::verified_version`] against an explicit keyring.
     ///
     /// Private, and the whole seam this type has: the public entry points name
@@ -268,7 +289,14 @@ impl Candidate {
     /// this with a one-key keyring.
     fn verified_version_with(&self, keyring: &[signing::PubKey]) -> Result<String> {
         if !signing::verify_data_slots(keyring, &self.bytes, &self.sig) {
-            bail!("the staged helper is not signed with the org's key; refusing to install it");
+            // Fixed text, and nothing about the file in the chain either: the
+            // root helper builds candidates too, replies with `{e}` and logs
+            // `{e:#}` to a world-readable file, and the size and digest describe
+            // a file root read on the caller's behalf — through a symlink, any
+            // root-only file. See [`Self::mismatch_detail`] for who may add it.
+            anyhow::bail!(
+                "the staged helper is not signed with the org's key; refusing to install it"
+            );
         }
         signing::version_in_signed_bytes(&self.bytes).context(
             "the staged helper is signed but carries no version record, so it cannot be checked \
@@ -779,11 +807,32 @@ mod tests {
         std::fs::write(&bin, &bytes).unwrap();
 
         let candidate = Candidate::read(&bin).unwrap();
-        let err = candidate
-            .approve(&pubkey, "16.58.3")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("not signed with the org's key"), "{err}");
+        let err = candidate.approve(&pubkey, "16.58.3").unwrap_err();
+        let reply = err.to_string();
+        assert!(reply.contains("not signed with the org's key"), "{reply}");
+
+        // The root helper replies with `{e}` and logs `{e:#}` to a world-readable
+        // file, and neither may describe the file: the caller can point `path`
+        // at a symlink to a root-only file. The size is for user-side callers,
+        // through `mismatch_detail`, only.
+        let size = format!("{} bytes", bytes.len());
+        let digest = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(&bytes))[..16].to_owned()
+        };
+        let sig_name = signing::sig_path_for(&bin)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let chain = format!("{err:#}");
+        for leak in [&size, &digest, &sig_name] {
+            assert!(!chain.contains(leak.as_str()), "{leak} in {chain}");
+        }
+        let detail = candidate
+            .mismatch_detail()
+            .expect("a tampered helper does not verify");
+        assert!(detail.contains(&size), "{detail}");
     }
 
     /// A genuinely signed helper from before this mechanism existed carries no

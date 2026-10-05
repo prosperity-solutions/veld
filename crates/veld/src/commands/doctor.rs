@@ -664,6 +664,9 @@ impl Diagnostics {
         // verifies via `current_exe()`), not a lib-dir guess: on a machine
         // carrying both ~/.local and /usr/local, the guess would accuse a file
         // the helper never runs.
+        // Kept for the root-owned-directory row below, whose advice depends on
+        // whether the file the service names can verify at all.
+        let mut service_bin_trust = None;
         if mode.as_deref() == Some("privileged") {
             let path = veld_core::setup::privileged_helper_program()
                 .await
@@ -683,6 +686,7 @@ impl Diagnostics {
             // retired-key sentence into the middle of the tampering paragraph or
             // printing "not signed" for a file that now verifies.
             let verdict = veld_core::signing::classify_binary_signature_detail(&path);
+            service_bin_trust = Some(verdict.trust);
             match verdict.trust {
                 // Names the key, not just the verdict. During a rotation a helper's
                 // keyring and a release's slots move at different times, and "OK" is
@@ -725,18 +729,25 @@ impl Diagnostics {
                         veld_core::signing::INSTALLER_COMMAND
                     ),
                 }),
+                // Says what is known, and only that. This used to add "the running
+                // helper is still the genuine one" — an inference nothing here
+                // checks, and false the moment the service has been restarted onto
+                // this file. What *is* certain is the part that matters: the
+                // service manager runs whatever this path holds, as root, the next
+                // time it starts the service.
                 veld_core::signing::SigTrust::Untrusted => self.checks.push(Check {
                     pass: false,
                     label: format!(
-                        "the binary at {} is not signed with the org's key (or its {} is \
-                         missing/invalid); refusing to relaunch onto it — the running helper is \
-                         still the genuine one, but it will refuse to update onto this file. \
-                         Re-deploy a signed helper with `veld update` (or `veld setup \
-                         privileged`). Do NOT force a restart: `launchctl kill`/`systemctl \
-                         restart` would run this unverified binary as root, which is exactly \
-                         what the gate is refusing",
+                        "The privileged helper service runs {} as root, and it is not signed \
+                         with the org's key ({}). The helper refuses to relaunch onto it, so it \
+                         neither updates nor moves itself into {} — but the service manager will \
+                         run this file as root at the next reboot or crash. To fix it, {}. Do \
+                         NOT force a restart: `launchctl kill`/`systemctl restart` would run this \
+                         unverified binary as root, which is exactly what the gate is refusing",
                         tilde_path(&path),
-                        tilde_path(&veld_core::signing::sig_path_for(&path))
+                        veld_core::signing::untrusted_cause(&path),
+                        tilde_path(&veld_core::paths::privileged_helper_dir()),
+                        veld_core::setup::unverified_helper_remedy()
                     ),
                 }),
             }
@@ -795,6 +806,25 @@ impl Diagnostics {
                             tilde_path(&path)
                         ),
                     });
+                }
+                // "It moves itself on its next restart" only holds for a file that
+                // verifies: the helper moves nothing it cannot verify, and refuses to
+                // restart onto it in the first place. Promising the move for an
+                // unverified file described a self-heal that could not happen —
+                // the signature row above already names that state and its fix.
+                Some(path) if service_bin_trust != Some(veld_core::signing::SigTrust::Active) => {
+                    self.checks.push(Check {
+                        pass: false,
+                        label: format!(
+                            "The privileged veld-helper runs as root from {}, which you can \
+                             write \u{2014} anything running as you could replace it and gain \
+                             root at the next reboot. It cannot move itself to {} while that \
+                             file does not verify under the current org key (see the \
+                             signature check above)",
+                            tilde_path(&path),
+                            tilde_path(&veld_core::paths::privileged_helper_dir()),
+                        ),
+                    })
                 }
                 Some(path) => self.checks.push(Check {
                     pass: false,

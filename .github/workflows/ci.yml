@@ -281,7 +281,7 @@ jobs:
       # `injection-test` and `release-build`'s darwin legs are Rust jobs on
       # macOS too, but they build and run the CLI rather than the test suite.
       # So deleting or renaming `signing-smoke` leaves CI fully green with zero
-      # coverage of the ordering install.sh's re-sign depends on — a silent
+      # coverage of the sign-ad-hoc-then-.sig ordering release.yml depends on — a silent
       # reopening of the exact gap this issue closed. Nothing else notices:
       # `validate-workflow-gates.py` reads jobs only to check their draft guard,
       # never that a given job exists.
@@ -306,8 +306,22 @@ jobs:
           smoke = open("crates/veld-sign/tests/smoke.rs").read()
           if "fn adhoc_resign_after_ed25519_signing_is_byte_idempotent" not in smoke:
               sys.exit("crates/veld-sign/tests/smoke.rs: the ad-hoc resign "
-                       "idempotency test is gone; install.sh's re-sign assumption "
+                       "idempotency test is gone; CI's sign-ad-hoc-then-.sig order "
                        "would be unverified again (issue #339)")
+          # The test that actually holds the fix for a helper whose .sig stopped
+          # matching: install.sh must not touch a binary that already verifies,
+          # because a re-sign is NOT byte-idempotent across macOS releases.
+          if "fn install_sh_leaves_a_verifying_binary_byte_for_byte_alone" not in smoke:
+              sys.exit("crates/veld-sign/tests/smoke.rs: the install.sh "
+                       "leave-it-alone test is gone; nothing would stop install.sh "
+                       "re-signing a release helper out from under its .sig again")
+          # Its other half: once install.sh stops re-signing, only the
+          # stage-and-rename gives a replaced binary a fresh inode, and without
+          # one macOS SIGKILLs the next exec of a binary that had been running.
+          if "fn install_sh_replaces_a_running_binary_without_breaking_its_next_exec" not in smoke:
+              sys.exit("crates/veld-sign/tests/smoke.rs: the install.sh "
+                       "running-binary replace test is gone; nothing would stop "
+                       "install_bin overwriting a live binary in place again")
           # A name-only check would still pass with the case marked `#[ignore]`,
           # which is the normal reaction to a flake and leaves the ordering
           # unexercised with every check green.
@@ -779,7 +793,7 @@ jobs:
               ("more_keys_than_slots_is_a_usage_error",
                "without it a release can claim more slots than any reader looks at"),
               ("adhoc_resign_is_byte_idempotent_for_a_multi_slot_signature",
-               "install.sh's macOS re-sign is unverified for the multi-slot shape "
+               "CI's sign-ad-hoc-then-.sig order is unverified for the multi-slot shape "
                "otherwise, and this is the only macOS home for it"),
               ("slots_is_the_same_signature_as_key_env_plus_expected_pubkeys",
                "--slots is the flag the release actually uses, and every other guard in "
@@ -1957,8 +1971,11 @@ jobs:
   #
   # Linux coverage is already free: `check` runs `cargo test --workspace` on
   # ubuntu, which includes `crates/veld-sign/tests/smoke.rs`. This job exists
-  # for the macOS half — `codesign` is what install.sh's re-sign idempotency
-  # rests on, and nothing else in CI can exercise it.
+  # for the macOS half — `codesign` is what the ad-hoc-then-ed25519 ordering
+  # rests on, and nothing else in CI can exercise it. Note what it cannot see:
+  # a re-sign is idempotent on the runner's own codesign and NOT across macOS
+  # releases (macOS 27 truncates a CI-signed helper by 18000 bytes), which is
+  # why install.sh only re-signs a binary whose signature does not verify.
   #
   # The test generates a throwaway ed25519 key per run from /dev/urandom and
   # hands it over as `VELD_SIGN_SMOKE_KEY`. `SIGNING_PRIVATE_KEY` is never

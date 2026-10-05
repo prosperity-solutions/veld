@@ -1598,20 +1598,50 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
         // unexplained silence, which reads as a hang.
         Steps::detail(&output::dim("waiting for veld-helper..."));
 
+        let healthy =
+            wait_for_helper_version(&socket, target_version, HELPER_RESTART_TIMEOUT).await;
+        // Before ANY restart — the free `sudo -n` one included. Every path through
+        // `offer_sudo_helper_restart` bounces the service, and launchd/systemd
+        // relaunch it onto whatever its definition names. If that file does not
+        // verify, a bounce runs it as root: the one thing the helper's own
+        // relaunch guard refuses to do, and the reason it is still on the old
+        // version. So do not offer to go around it, and do not print `launchctl
+        // kill` as a hint either — say why and what fixes it. A machine whose
+        // `sudo -n` works would otherwise do it silently.
+        let unverified = if !healthy && privileged {
+            veld_core::setup::unverified_service_binary().await
+        } else {
+            None
+        };
         // `||` short-circuits, so the sudo offer is only ever reached after the
         // no-sudo paths have had their full budget and failed.
-        let healthy = wait_for_helper_version(&socket, target_version, HELPER_RESTART_TIMEOUT)
-            .await
-            || (privileged && offer_sudo_helper_restart(&socket, target_version).await);
+        let healthy = healthy
+            || (privileged
+                && unverified.is_none()
+                && offer_sudo_helper_restart(&socket, target_version).await);
         if healthy {
             Steps::service_ok("veld-helper", target_version);
         } else {
             all_healthy = false;
-            output::print_error(
-                "veld-helper did not pick up the new binary automatically. \
-                 Run `veld doctor`; if it stays down, re-run `veld setup`.",
-                false,
-            );
+            // One remedy, not two: under this error, "re-run `veld setup`" would
+            // be advice that points the service at the same unverified file.
+            match unverified {
+                Some((bin, cause)) => output::print_error(
+                    &format!(
+                        "veld-helper is still not running {target_version}: the service runs {}, \
+                         which is not signed with the org's key ({cause}). Restarting the service \
+                         would run that file as root, so veld will not. To fix it, {}.",
+                        bin.display(),
+                        veld_core::setup::unverified_helper_remedy()
+                    ),
+                    false,
+                ),
+                None => output::print_error(
+                    "veld-helper did not pick up the new binary automatically. \
+                     Run `veld doctor`; if it stays down, re-run `veld setup`.",
+                    false,
+                ),
+            }
         }
     }
 

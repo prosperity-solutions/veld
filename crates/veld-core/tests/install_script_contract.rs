@@ -593,3 +593,56 @@ fn an_ambient_output_variable_cannot_decide_how_the_script_runs() {
     assert!(ok);
     assert_eq!(env.get("VELD_VERBOSE"), Some("1"));
 }
+
+/// The installer's own root restart never lands on a helper it had to re-sign.
+///
+/// `install_bin` re-signs a binary only when CI's signature does not verify, and
+/// for the helper that breaks the org `.sig` beside it. A standalone `curl |
+/// bash` then reaches `sudo launchctl kill TERM` — on a machine whose service is
+/// still served from the lib dir, launchd relaunches it as root onto exactly that
+/// file. Nothing at runtime would notice the guard going missing: the branch is
+/// only taken on a macOS that rejects CI's signature, which no CI runner is.
+#[test]
+fn the_installer_never_restarts_the_root_helper_onto_a_binary_it_re_signed() {
+    let script = std::fs::read_to_string(repo_root().join("install.sh")).unwrap();
+    let restart = script
+        .find("sudo launchctl kill TERM system/dev.veld.helper")
+        .expect("install.sh no longer restarts the privileged helper itself");
+    let guard = script[..restart]
+        .rfind("elif [ -n \"$INSTALL_BIN_SIG_BROKEN\" ]; then")
+        .expect("the privileged restart is not guarded by INSTALL_BIN_SIG_BROKEN");
+    // An earlier arm of the same if-chain, not a stray test that closed before it.
+    assert!(
+        !script[guard..restart].lines().any(|l| l.trim() == "fi"),
+        "INSTALL_BIN_SIG_BROKEN is tested in a different if-chain than the restart"
+    );
+    // And the guarded arm itself restarts nothing: its body runs to the next arm.
+    let arm = &script[guard..restart];
+    let arm_end = arm[1..]
+        .find("\n      elif ")
+        .or_else(|| arm[1..].find("\n      else"))
+        .expect("the guarded arm is followed by the restart's own arm");
+    assert!(
+        !arm[..arm_end + 1].contains("launchctl"),
+        "the INSTALL_BIN_SIG_BROKEN arm signals the helper itself"
+    );
+
+    // Set only where a binary with a `.sig` was re-signed — not on every install,
+    // which would quietly drop the restart for everyone.
+    let install_bin = shell_function("install_bin");
+    let sig_branch = install_bin
+        .find("if [ -f \"$1.sig\" ]; then")
+        .expect("install_bin no longer checks for a .sig after re-signing");
+    let set = install_bin
+        .find("INSTALL_BIN_SIG_BROKEN=\"1\"")
+        .expect("install_bin no longer records that it re-signed a binary with a .sig");
+    assert_eq!(
+        install_bin.matches("INSTALL_BIN_SIG_BROKEN=").count(),
+        1,
+        "install_bin sets INSTALL_BIN_SIG_BROKEN more than once"
+    );
+    assert!(
+        set > sig_branch && !install_bin[sig_branch..set].contains("\n      fi"),
+        "INSTALL_BIN_SIG_BROKEN is set outside the .sig branch"
+    );
+}

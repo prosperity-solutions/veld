@@ -988,6 +988,10 @@ pub fn relaunch_guard(binary: &Path) -> Option<String> {
         // reading is wrong: these bytes are genuinely ours. See
         // [`SigTrust::RetiredOnly`] for how a healthy machine gets here.
         SigTrust::RetiredOnly => Some(relaunch_guard_message_for_retired(binary)),
+        // A fixed sentence, not [`untrusted_cause`]: this runs inside the root
+        // helper and its text goes back over the socket (`shutdown`), so it must
+        // not describe a file root read on a caller's behalf. The cause is for
+        // processes running as the user — `veld doctor`, `veld update`.
         SigTrust::Untrusted => Some(format!(
             "the binary at {} is not signed with the org's key (or its {} is \
              missing/invalid); refusing to relaunch onto it",
@@ -995,6 +999,87 @@ pub fn relaunch_guard(binary: &Path) -> Option<String> {
             sig_path_for(binary).display()
         )),
     }
+}
+
+/// Why `binary` did not verify, in words that point at a fix.
+///
+/// **Diagnosis only — never a gate.** It re-reads both files after the verdict
+/// was reached, so it can disagree with it; the disagreements it names — "it
+/// verifies now" and "only a retired-key slot" — mean the file was being
+/// replaced while it was checked. Every caller has already refused by the time it asks.
+///
+/// **Not for the root helper.** It names the size and a digest of whatever is at
+/// `binary`, and inside root that is an oracle on files the caller cannot read —
+/// a symlink to a root-only file is enough. It also re-opens both paths, which
+/// the root-side classifier deliberately does not. Call it from processes that
+/// run as the user, where it reveals nothing the caller could not read anyway.
+///
+/// It exists because "not signed with the org's key (or its .sig is
+/// missing/invalid)" was the whole message for four different states, and the
+/// one that actually happened in the field — a helper whose bytes a local
+/// `codesign --force` had rewritten, beside an untouched `.sig` — read exactly
+/// like tampering. Naming the size and digest lets a reader compare the file
+/// against the release artifact instead of guessing.
+pub fn untrusted_cause(binary: &Path) -> String {
+    let sig_path = sig_path_for(binary);
+    let sig = match read_detached_sig_slots_classified(binary) {
+        SigRead::Slots(slots) => slots,
+        SigRead::NoWholeSlot => {
+            return format!(
+                "{} holds no complete {SIG_SLOT_LEN}-byte signature",
+                sig_path.display()
+            );
+        }
+        SigRead::Unreadable => return format!("{} is missing or unreadable", sig_path.display()),
+    };
+    let Some((data, over)) = read_regular_file_bounded(binary, MAX_VERIFIED_BINARY_BYTES) else {
+        return format!(
+            "{} is missing, unreadable, or not a regular file",
+            binary.display()
+        );
+    };
+    if over {
+        return format!(
+            "{} is larger than {MAX_VERIFIED_BINARY_BYTES} bytes, which no release helper is",
+            binary.display()
+        );
+    }
+    if verify_data_slots(ORG_SIGNING_KEYRING, &data, &sig) {
+        return "it verifies on a second read, so it was being replaced while it was checked"
+            .to_owned();
+    }
+    if verify_data_slots(&retired_keys(), &data, &sig) {
+        return format!(
+            "{} carries only a slot for a retired key",
+            sig_path.display()
+        );
+    }
+    mismatch_detail(&data, &sig, &sig_path)
+}
+
+/// The "bytes match no slot" half of [`untrusted_cause`], for a caller that
+/// already holds both in memory (`helper_store::Candidate`).
+///
+/// Names the size and a digest prefix so the file can be compared with the
+/// release artifact, and names the commonest cause on macOS: a `codesign` re-sign
+/// rewrites the embedded signature and so the bytes the org signature covers.
+///
+/// **Never in a root-side reply.** Same rule as [`untrusted_cause`]: in the root
+/// helper this describes a file the caller may not be able to read, and the
+/// helper's log is world-readable. `Candidate` keeps it out of its errors
+/// entirely and offers it through `Candidate::mismatch_detail` for user-side
+/// callers only.
+pub fn mismatch_detail(data: &[u8], sig: &[u8], sig_path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(data));
+    format!(
+        "its {} bytes (sha256 {}…) match none of the {} signature slot(s) in {}: either it is \
+         not an org build, or it changed after signing — a local `codesign` re-sign does that",
+        data.len(),
+        &digest[..16],
+        sig.len() / SIG_SLOT_LEN,
+        sig_path.display()
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2946,5 +3031,62 @@ mod tests {
         std::fs::write(sig_path_for(&binary), vec![0u8; 1 << 20]).unwrap();
         let _ = verify_binary_signed(&binary); // returns false; bounded read means it didn't OOM
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Each way a binary fails to verify gets its own words.
+    ///
+    /// "Not signed with the org's key (or its .sig is missing/invalid)" was the
+    /// whole message for all of these, and the one hit in the field — a release
+    /// helper whose bytes a local `codesign` re-sign had changed — read exactly
+    /// like tampering. The mismatch case must name size and digest so the file
+    /// can be compared against the release artifact.
+    #[test]
+    fn an_untrusted_binary_says_why() {
+        let dir = std::env::temp_dir().join(format!("veld-sig-cause-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let binary = dir.join("veld-helper");
+        let data = b"not the bytes anybody signed".to_vec();
+        std::fs::write(&binary, &data).unwrap();
+
+        let cause = untrusted_cause(&binary);
+        assert!(cause.contains("missing or unreadable"), "{cause}");
+        assert!(cause.contains("veld-helper.sig"), "{cause}");
+
+        std::fs::write(sig_path_for(&binary), [0u8; 10]).unwrap();
+        let cause = untrusted_cause(&binary);
+        assert!(cause.contains("no complete 64-byte signature"), "{cause}");
+
+        // A signature over *other* bytes: the re-signed-helper shape.
+        let (key, _) = gen_key(7);
+        std::fs::write(sig_path_for(&binary), slots(&[&key], b"what CI shipped")).unwrap();
+        let cause = untrusted_cause(&binary);
+        assert!(
+            cause.contains(&format!("its {} bytes", data.len())),
+            "{cause}"
+        );
+        use sha2::{Digest, Sha256};
+        let digest = format!("{:x}", Sha256::digest(&data));
+        assert!(cause.contains(&digest[..16]), "{cause}");
+        assert!(cause.contains("1 signature slot(s)"), "{cause}");
+        assert!(cause.contains("codesign"), "{cause}");
+
+        // The guard's message must NOT carry it: the root helper returns that
+        // text over its socket, and the digest would describe a file root read.
+        let reason = relaunch_guard(&binary).expect("refused");
+        assert!(
+            reason.contains("is not signed with the org's key"),
+            "{reason}"
+        );
+        assert!(!reason.contains(&digest[..16]), "{reason}");
+
+        std::fs::remove_file(&binary).unwrap();
+        let cause = untrusted_cause(&binary);
+        assert!(
+            cause.contains("missing, unreadable, or not a regular file"),
+            "{cause}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

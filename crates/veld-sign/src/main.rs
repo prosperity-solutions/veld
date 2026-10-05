@@ -31,8 +31,9 @@
 //! relaunching onto a changed on-disk binary (see
 //! `crates/veld-helper/src/signing.rs`; the list is
 //! `veld_core::signing::ORG_SIGNING_KEYRING`). CI runs this over the *final*
-//! shipped bytes — on macOS that is the ad-hoc re-signed binary, so install.sh's
-//! later re-sign is a byte-idempotent no-op and the `.sig` still matches.
+//! shipped bytes — on macOS that is the ad-hoc signed binary, and install.sh
+//! leaves a binary whose signature verifies alone (it re-signs only one that
+//! fails `codesign --verify`), so the `.sig` still matches.
 //!
 //! Diagnosis is a feature here, not a nicety. This tool runs in exactly one
 //! place — `release.yml`'s `Package client binaries` — and only on a tagged

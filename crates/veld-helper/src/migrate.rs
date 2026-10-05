@@ -197,7 +197,7 @@ pub async fn migrate_to_root_owned_dir(privileged: bool, caddy_bin: Option<&Path
                 }
                 Err(Skip(reason)) => {
                     info!(
-                        reason,
+                        reason = %reason,
                         "not moving the privileged helper into a root-owned directory"
                     );
                 }
@@ -314,7 +314,7 @@ impl Decision {
 /// something went wrong (`Failed`). Kept apart so the log can distinguish "this
 /// install is not a candidate" from "this install is, and it did not work".
 enum MigrationError {
-    Skip(&'static str),
+    Skip(String),
     Failed(anyhow::Error),
 }
 use MigrationError::{Failed, Skip};
@@ -328,18 +328,24 @@ async fn relocate(
     // Read and verify before anything is created. `Candidate` reads the bytes
     // once and installs *those*, which is what stops a swap between the check
     // and the copy — the swap being the entire reason this directory is moving.
-    let candidate = veld_core::helper_store::Candidate::read(exe).map_err(|_| {
-        Skip(
+    //
+    // Both skips carry the underlying error, which says which check failed. It
+    // never says what the bytes are: this is the root helper, its log is
+    // world-readable, and `Candidate` keeps the size and digest out of its errors
+    // for exactly that reason. `veld doctor`'s signature row, run as the user,
+    // is where a re-signed release is told apart from a local build.
+    let candidate = veld_core::helper_store::Candidate::read(exe).map_err(|e| {
+        Skip(format!(
             "this helper has no readable org signature beside it (a local build, or an \
-              install that predates signing)",
-        )
+             install that predates signing): {e:#}"
+        ))
     })?;
     let running = env!("CARGO_PKG_VERSION");
-    candidate.verified_version().map_err(|_| {
-        Skip(
-            "this helper is not signed with the org's key, so moving it into a root-owned \
-              directory would only make an unverified binary harder to replace",
-        )
+    candidate.verified_version().map_err(|e| {
+        Skip(format!(
+            "this helper does not verify against the org's key, so moving it into a root-owned \
+             directory would only make an unverified binary harder to replace: {e:#}"
+        ))
     })?;
     candidate.install(running).map_err(Failed)?;
 
