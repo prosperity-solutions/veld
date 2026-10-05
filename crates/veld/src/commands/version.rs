@@ -2,11 +2,15 @@ use crate::output;
 use std::path::Path;
 use std::process::Command;
 
+/// How long to wait for the running helper to answer before falling back to the
+/// binaries on disk. Short: this sits in front of `veld start` and `veld status`,
+/// and a helper that is up answers its status request in milliseconds.
+const RUNNING_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// Print version information for all Veld binaries.
-pub fn print_version() {
+pub async fn print_version() {
     let cli_version = env!("CARGO_PKG_VERSION");
 
-    let helper_version = find_and_query_version("veld-helper");
     let daemon_version = find_and_query_version("veld-daemon");
 
     println!("{}", output::bold("Veld"));
@@ -15,10 +19,39 @@ pub fn print_version() {
         "  veld-daemon    {}",
         format_version(&daemon_version, cli_version)
     );
-    println!(
-        "  veld-helper    {}",
-        format_version(&helper_version, cli_version)
-    );
+    let helper = match running_helper_version().await {
+        Some(v) => format!("{v} (running)"),
+        None => format_version(&find_and_query_version("veld-helper"), cli_version),
+    };
+    println!("  veld-helper    {helper}");
+}
+
+/// The version the **running** helper reports over its socket, or `None` when
+/// nothing answers in time (not running, an older helper without the field, a
+/// socket this user cannot reach).
+///
+/// This is the number that matters for a skew check, and asking the files on
+/// disk is a guess at it. The guess was wrong in the field: on a privileged
+/// install whose service had been pointed back at `~/.local/lib/veld`, the
+/// store-first candidate list read a stale v16.74.0 out of the root-owned
+/// directory while v16.80.1 was the helper actually serving requests — and
+/// `veld start` refused to run over a mismatch that did not exist, naming no
+/// source and offering no way around it.
+///
+/// The socket is chosen by setup mode, as `veld update` does, rather than by
+/// `connect()`'s fallthrough, which could latch onto a stale user-level helper
+/// while the privileged one is down.
+async fn running_helper_version() -> Option<String> {
+    let socket = if crate::commands::read_setup_mode().as_deref() == Some("privileged") {
+        veld_core::helper::system_socket_path()
+    } else {
+        veld_core::helper::user_socket_path()
+    };
+    let client = veld_core::helper::HelperClient::new(&socket);
+    tokio::time::timeout(RUNNING_HELPER_TIMEOUT, client.version())
+        .await
+        .ok()?
+        .ok()?
 }
 
 /// Format a version result for display.
@@ -130,16 +163,53 @@ fn query_binary_version(path: &str) -> Option<String> {
     }
 }
 
-/// Check that installed helper and daemon binaries match the CLI version.
+/// Where a helper version came from, so the mismatch message can say it.
+#[derive(Debug, PartialEq)]
+enum HelperVersionSource {
+    /// Reported by the helper serving the socket.
+    Running,
+    /// Read from a binary on disk with `--version` — what a restart would run,
+    /// not necessarily what runs now.
+    OnDisk(String),
+}
+
+/// Check that the helper and daemon match the CLI version.
 /// Returns `Ok(())` if everything is fine, or `Err(message)` with a
 /// user-facing error string if there is a mismatch.
-pub fn check_version_mismatch() -> Result<(), String> {
+///
+/// In privileged and unprivileged mode the helper is asked **first** (see
+/// [`running_helper_version`]) and the binaries on disk are consulted only when
+/// it does not answer; auto mode reads the disk only (see the body for why).
+/// Either way the message
+/// names which one was read, because "veld-helper is v16.74.0" with no source
+/// left a user unable to tell a stale file from a stale process.
+pub async fn check_version_mismatch() -> Result<(), String> {
     let cli_version = env!("CARGO_PKG_VERSION");
     let mut mismatches: Vec<String> = Vec::new();
 
-    if let VersionResult::Ok(v) = find_and_query_version("veld-helper") {
-        if v != cli_version {
-            mismatches.push(format!("veld-helper is v{v} (expected v{cli_version})"));
+    // The running helper is asked only where a service manager restarts it onto
+    // a new file. Auto mode's helper is ephemeral: nothing restarts it after an
+    // install, and only `veld update` stops it — which does nothing on a CLI that
+    // is already current. Gating on it there would block `veld start` (the very
+    // command that re-bootstraps it) behind advice that cannot work, so auto mode
+    // keeps comparing against the file on disk, as before.
+    let mode = crate::commands::read_setup_mode();
+    let privileged = mode.as_deref() == Some("privileged");
+    let running = if privileged || mode.as_deref() == Some("unprivileged") {
+        running_helper_version().await
+    } else {
+        None
+    };
+    let mut running_helper_behind = false;
+    let helper = helper_version_source(running, find_helper_on_disk);
+    if let Some((v, source)) = helper {
+        if let Some(line) = helper_mismatch(&v, &source, cli_version) {
+            // Behind, not merely different: a helper *newer* than this CLI is a
+            // stale `veld` earlier on PATH, and "the helper cannot restart"
+            // would explain the wrong direction.
+            running_helper_behind = matches!(source, HelperVersionSource::Running)
+                && veld_core::setup::is_newer(cli_version, &v);
+            mismatches.push(line);
         }
     }
 
@@ -150,11 +220,160 @@ pub fn check_version_mismatch() -> Result<(), String> {
     }
 
     if mismatches.is_empty() {
-        Ok(())
+        return Ok(());
+    }
+    // A running helper that is behind is usually one that refused to restart
+    // onto its file, and `veld update` cannot fix that: on a CLI that is already
+    // current it does nothing at all, so "run `veld update`" would loop. Name the
+    // real remedy when that is the cause, and `veld doctor` when it might be.
+    let remedy = if !running_helper_behind {
+        "Run `veld update` to fix this.".to_string()
+    } else if let Some((bin, cause)) = match privileged {
+        // The system service is only this machine's helper in privileged mode;
+        // a leftover registration on an unprivileged one is not what is behind.
+        true => veld_core::setup::unverified_service_binary().await,
+        false => None,
+    } {
+        format!(
+            "The helper cannot restart onto {}: it is not signed with the org's key ({cause}). \
+             To fix it, {}.",
+            bin.display(),
+            veld_core::setup::unverified_helper_remedy()
+        )
+    } else if privileged {
+        // Only the privileged helper watches its own file and restarts onto it;
+        // the unprivileged one is restarted by the installer, so there is no
+        // window to wait out.
+        "If you just updated, the helper restarts onto the new version within about 15 seconds \
+         — retry then. Otherwise run `veld update`; if it says you are already on the latest \
+         version, run `veld doctor` to see why the helper has not restarted."
+            .to_string()
     } else {
-        Err(format!(
-            "Version mismatch detected: {}. Run `veld update` to fix this.",
-            mismatches.join(", ")
-        ))
+        "Run `veld update`; if it says you are already on the latest version, run `veld doctor` \
+         to see why the helper has not restarted."
+            .to_string()
+    };
+    Err(format!(
+        "Version mismatch detected: {}. {remedy}",
+        mismatches.join(", ")
+    ))
+}
+
+/// Which helper version the check compares against: the running helper's when
+/// it answered, the file on disk otherwise.
+///
+/// The disk is the fallback and never the first answer, because the two differ
+/// in exactly the case that matters — a helper that refused to restart onto a
+/// new file is old, while the file says it is new. `disk` is a closure so the
+/// files are not read when the helper answered.
+fn helper_version_source(
+    running: Option<String>,
+    disk: impl FnOnce() -> Option<(String, String)>,
+) -> Option<(String, HelperVersionSource)> {
+    match running {
+        Some(v) => Some((v, HelperVersionSource::Running)),
+        None => disk().map(|(v, path)| (v, HelperVersionSource::OnDisk(path))),
+    }
+}
+
+/// The helper's version as read from disk, with the path it came from.
+///
+/// [`find_and_query_version`]'s candidate order, so the fallback answers exactly
+/// as the whole check used to — only now it can say which file it read.
+fn find_helper_on_disk() -> Option<(String, String)> {
+    binary_candidates("veld-helper")
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .and_then(|path| query_binary_version(&path).map(|v| (v, path)))
+}
+
+/// One mismatch line for the helper, or `None` when it matches.
+fn helper_mismatch(
+    version: &str,
+    source: &HelperVersionSource,
+    cli_version: &str,
+) -> Option<String> {
+    if version == cli_version {
+        return None;
+    }
+    Some(match source {
+        HelperVersionSource::Running => {
+            format!("the running veld-helper is v{version} (expected v{cli_version})")
+        }
+        HelperVersionSource::OnDisk(path) => format!(
+            "veld-helper at {path} is v{version} (expected v{cli_version}; the running helper \
+             did not answer, so this is the file on disk)"
+        ),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HelperVersionSource, helper_mismatch, helper_version_source};
+
+    /// The report's machine: the helper is still the old one, the file beside
+    /// it is the new one. The running helper must win, and the disk must not
+    /// even be read.
+    #[test]
+    fn the_running_helper_wins_over_the_file_on_disk() {
+        let source = helper_version_source(Some("16.74.0".into()), || {
+            panic!("the disk is read only when the helper does not answer")
+        });
+        assert_eq!(
+            source,
+            Some(("16.74.0".into(), HelperVersionSource::Running))
+        );
+
+        let source =
+            helper_version_source(None, || Some(("16.81.1".into(), "/x/veld-helper".into())));
+        assert_eq!(
+            source,
+            Some((
+                "16.81.1".into(),
+                HelperVersionSource::OnDisk("/x/veld-helper".into())
+            ))
+        );
+
+        assert_eq!(helper_version_source(None, || None), None);
+    }
+
+    #[test]
+    fn a_matching_helper_is_not_a_mismatch_whatever_the_source() {
+        assert_eq!(
+            helper_mismatch("1.2.3", &HelperVersionSource::Running, "1.2.3"),
+            None
+        );
+        assert_eq!(
+            helper_mismatch(
+                "1.2.3",
+                &HelperVersionSource::OnDisk("/x/veld-helper".into()),
+                "1.2.3"
+            ),
+            None
+        );
+    }
+
+    /// The field report: a mismatch that named neither the process nor the file,
+    /// so a stale binary in the store read like a stale running helper.
+    #[test]
+    fn a_mismatch_names_where_the_version_came_from() {
+        let running =
+            helper_mismatch("16.74.0", &HelperVersionSource::Running, "16.80.1").expect("mismatch");
+        assert!(
+            running.contains("running veld-helper is v16.74.0"),
+            "{running}"
+        );
+
+        let on_disk = helper_mismatch(
+            "16.74.0",
+            &HelperVersionSource::OnDisk("/var/db/veld-helper/veld-helper".into()),
+            "16.80.1",
+        )
+        .expect("mismatch");
+        assert!(
+            on_disk.contains("/var/db/veld-helper/veld-helper"),
+            "{on_disk}"
+        );
+        assert!(on_disk.contains("file on disk"), "{on_disk}");
     }
 }

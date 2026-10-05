@@ -176,12 +176,14 @@ jobs:
           cp LICENSE THIRD-PARTY-LICENSES.md dist/
           # Sign the helper (issue #261) so a running root helper refuses to
           # relaunch onto a swapped, unsigned binary. On macOS the binary MUST
-          # be ad-hoc signed FIRST (mimicking install.sh's own `codesign --force
-          # --sign -`) so that install.sh's later re-sign is a byte-idempotent
-          # no-op and the .sig still matches the on-disk bytes. The ad-hoc
-          # identifier is derived from the file's basename, so both signings must
-          # see it named `veld-helper` — hence signing dist/, not target/. On
-          # Linux there is no re-sign, so we ed25519-sign the raw build.
+          # be ad-hoc signed FIRST, so that it arrives with a code signature that
+          # verifies and install.sh leaves its bytes alone — install.sh re-signs
+          # only a binary whose signature does NOT verify, because a re-sign is
+          # not byte-identical across macOS releases (macOS 27's codesign
+          # truncates this one) and would break the .sig. The ad-hoc identifier
+          # is derived from the file's basename, so sign it named `veld-helper` —
+          # hence signing dist/, not target/. On Linux there is no re-sign, so we
+          # ed25519-sign the raw build.
           if [ "${{ matrix.goos }}" = "darwin" ]; then
             codesign --force --sign - dist/veld-helper
           fi

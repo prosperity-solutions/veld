@@ -927,10 +927,11 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
 /// Copy `bin` into the root-owned helper store and return the path to serve
 /// from, or hand `bin` straight back when this install is not a candidate.
 ///
-/// Falls back to `bin` for every failure rather than propagating one. Setup's
-/// job is to end with a working privileged helper; a store that could not be
-/// written is a machine that keeps the shape it has today, which is the
-/// pre-existing state rather than a new one. The refusal is logged, and
+/// Never propagates a failure. Setup's job is to end with a working privileged
+/// helper; a store that could not be written is a machine that keeps the shape
+/// it has today, which is the pre-existing state rather than a new one. Which
+/// path a failure falls back to is [`unverified_helper_path`]'s call: the store's
+/// verified copy when it holds one, `bin` otherwise. The refusal is logged, and
 /// `veld doctor`'s signature row is where a user sees the consequence.
 ///
 /// **The version floor still applies here**, and that is a change from the first
@@ -944,7 +945,7 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
     let store = crate::paths::privileged_helper_bin();
     let candidate = match crate::helper_store::Candidate::read(bin) {
         Ok(c) => c,
-        Err(_) => return fallback_helper_path(bin),
+        Err(e) => return unverified_helper_path(bin, &e),
     };
     // The version this binary claims, not the one *this* process was compiled
     // as: `veld setup` may be a different release from the helper it installs
@@ -953,7 +954,16 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
     // apply comes from the store, inside `install`.
     let version = match candidate.verified_version() {
         Ok(v) => v,
-        Err(_) => return fallback_helper_path(bin),
+        // The size and digest `verified_version` leaves out, because the root
+        // helper shares it. This is `veld setup` under the user's own sudo, and
+        // the detail is what tells a re-signed release from a local build.
+        Err(e) => {
+            let e = match candidate.mismatch_detail() {
+                Some(detail) => anyhow::anyhow!("{e}: {detail}"),
+                None => e,
+            };
+            return unverified_helper_path(bin, &e);
+        }
     };
     match candidate.install(&version) {
         Ok(_) => store,
@@ -987,6 +997,107 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
             );
             fallback_helper_path(bin)
         }
+    }
+}
+
+/// What to point the service definition at when `bin` does not carry the org's
+/// signature (or could not be read to check).
+///
+/// **The store wins when it holds a helper of ours.** This used to hand `bin`
+/// straight back, and that is how a migrated machine got de-migrated: a lib-dir
+/// helper whose bytes no longer matched its `.sig` (install.sh's `codesign`
+/// re-sign truncated it on macOS 27) failed here silently, and `veld setup
+/// privileged` — the documented repair — rewrote the service definition from the
+/// root-owned store back onto `~/.local/lib/veld`, a path the user can write. The
+/// helper then refused to relaunch onto that same file and refused to migrate off
+/// it, while launchd was ready to run it as root at the next crash or reboot.
+///
+/// Serving `bin` would put an unverified, user-writable binary under the root
+/// service. Serving the store keeps the helper that is already ours. The cost is
+/// that a developer's unsigned local build no longer replaces a migrated helper
+/// through `veld setup privileged` — which is the #262 boundary doing its job.
+///
+/// With no org binary in the store (a fresh install of a local build, a machine
+/// that never migrated) nothing changes: `bin` is served, as before.
+fn unverified_helper_path(bin: &Path, reason: &anyhow::Error) -> PathBuf {
+    let store = crate::paths::privileged_helper_bin();
+    // `is_org_binary` for the same reason as `fallback_helper_path`: a store
+    // binary signed by a retired key is still ours, and root-owned.
+    if crate::signing::is_org_binary(&store) {
+        tracing::warn!(
+            reason = %format!("{reason:#}"),
+            "the helper at {} does not verify; keeping the signed one in {} instead",
+            bin.display(),
+            store.display()
+        );
+        return store;
+    }
+    tracing::warn!(
+        reason = %format!("{reason:#}"),
+        "the helper at {} does not verify; serving it from there (not moving it into {})",
+        bin.display(),
+        store.display()
+    );
+    fallback_helper_path(bin)
+}
+
+/// What to tell a user whose privileged helper service points at a binary that
+/// does not verify — named once, because `veld doctor`, `veld update` and the
+/// version check all reach this state and must not disagree about the way out.
+///
+/// **Never `launchctl kill` / `systemctl restart`.** Those relaunch the service
+/// onto the very file that just failed verification, as root; the helper's own
+/// guard refuses to do that, and advice to go around it is the hole the guard
+/// closes. The installer replaces the file with the release's bytes, which is
+/// what lets the helper relaunch and move itself into its root-owned directory
+/// with no password. `sudo veld setup privileged` is offered alongside only when
+/// the store holds a helper of ours, because then it re-points the service at
+/// that one instead (see `unverified_helper_path`).
+pub fn unverified_helper_remedy() -> String {
+    let store = crate::paths::privileged_helper_bin();
+    let installer = format!(
+        "re-run the installer ({}) to replace it with the release's own bytes",
+        crate::signing::INSTALLER_COMMAND
+    );
+    if crate::signing::is_org_binary(&store) {
+        // Named by version, because the store's copy is whatever was current
+        // when the helper last got there — on the machine that reported this,
+        // several releases behind the one running. Pointing the service at it is
+        // safe, but it is a downgrade until the installer runs, and saying so
+        // spares the reader a version-mismatch error they did not expect.
+        let version = crate::helper_store::installed_version()
+            .map(|v| format!("v{v} "))
+            .unwrap_or_default();
+        format!(
+            "{installer}, or run `sudo veld setup privileged` to point the service back at the \
+             verified {version}helper in {} (then re-run the installer if that is older than \
+             this release)",
+            store.display()
+        )
+    } else {
+        installer
+    }
+}
+
+/// The binary the privileged helper service runs, and why it does not verify —
+/// or `None` when it verifies, cannot be found, or the service cannot be asked.
+///
+/// Only [`crate::signing::SigTrust::Untrusted`] counts. A retired-key binary is
+/// genuinely ours and has its own advice; calling it unverified here would put
+/// "restarting would run that file as root" over a file that is fine to run.
+///
+/// For processes running as the user only: the cause comes from
+/// [`crate::signing::untrusted_cause`] (see there for why).
+pub async fn unverified_service_binary() -> Option<(PathBuf, String)> {
+    let bin = privileged_helper_program()
+        .await
+        .filter(|bin| bin.is_file())?;
+    match crate::signing::classify_binary_signature(&bin) {
+        crate::signing::SigTrust::Untrusted => {
+            let cause = crate::signing::untrusted_cause(&bin);
+            Some((bin, cause))
+        }
+        _ => None,
     }
 }
 

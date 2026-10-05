@@ -659,8 +659,8 @@ async fn watch_own_binary() {
                             warn!(
                                 reason,
                                 "helper binary changed on disk, but restarting onto it is unsafe \
-                                 — staying alive on the old binary. Run `veld setup` if this \
-                                 persists."
+                                 — staying alive on the old binary. Run `veld doctor` for why \
+                                 and what fixes it."
                             );
                         }
                         ticks_since_warn = (ticks_since_warn + 1) % REWARN_TICKS;
@@ -694,20 +694,27 @@ pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
     let Some(exe) = own_exe() else {
         return Some("could not resolve own executable path".into());
     };
+    // The on-disk binary must carry a valid org signature (the fail-closed
+    // signing gate from #261): relaunching onto a swapped, unsigned binary is
+    // the #247 escalation. Shared by the watcher and the `restart` command so
+    // neither can exit onto a binary the other refuses.
+    //
+    // **Before the exec probe, never after.** `binary_executes` runs the file —
+    // as root, here — and a privileged helper still served from the user's lib
+    // dir is exactly the state where a user process can swap a script in; with
+    // the probe first, root ran it within one watcher tick instead of never. A
+    // file caught mid-write now reads as "not signed" for a tick rather than
+    // "does not execute yet"; the watcher retries every tick either way.
+    if privileged {
+        if let Some(reason) = signing::relaunch_guard(exe) {
+            return Some(reason);
+        }
+    }
     if !binary_executes(exe).await {
         return Some(format!(
             "the binary at {} does not execute yet",
             exe.display()
         ));
-    }
-    // The on-disk binary must carry a valid org signature (the fail-closed
-    // signing gate from #261): relaunching onto a swapped, unsigned binary is
-    // the #247 escalation. Shared by the watcher and the `restart` command so
-    // neither can exit onto a binary the other refuses.
-    if privileged {
-        if let Some(reason) = signing::relaunch_guard(exe) {
-            return Some(reason);
-        }
     }
     None
 }

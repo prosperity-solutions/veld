@@ -282,11 +282,23 @@ DESKTOP_LOCK_DIR=""      # held lock, removed on the way out
 DESKTOP_SWAP_DEST=""     # bundle being replaced
 DESKTOP_SWAP_BACKUP=""   # its `.old` copy, while the swap is in flight
 DESKTOP_RELAUNCH_PATH="" # bundle to reopen when VELD_DESKTOP_RELAUNCH is set
+INSTALL_BIN_STAGE=""     # `install_bin`'s staging dir, while a binary is in it
 
 # Runs on success, on failure, and on Ctrl-C — the three ways an app update can
 # end with the app not on screen.
 cleanup() {
   rm -rf "$TMP_DIR"
+
+  # Litter rather than breakage — nothing reads it — but under sudo it is a
+  # root-only copy of a binary in the lib dir. `-n` so Ctrl-C never stops at a
+  # password prompt.
+  if [ -n "$INSTALL_BIN_STAGE" ]; then
+    if [ -n "${NEED_SUDO:-}" ]; then
+      sudo -n rm -rf "$INSTALL_BIN_STAGE" 2>/dev/null || true
+    else
+      rm -rf "$INSTALL_BIN_STAGE" 2>/dev/null || true
+    fi
+  fi
 
   # An interrupted swap leaves the bundle moved aside; auto-mode keys off "a
   # directory exists there", so nothing would ever put it back. Restore it
@@ -698,7 +710,7 @@ remove_desktop_app_via_cli() {
 # verification of them would fail, so it is here in writing. `VELD_BINARY_ICONS=0`
 # opts out.
 #
-# Runs AFTER `install_bin` has signed each binary: `xattr -cr` there would strip
+# Runs AFTER `install_bin` has handled each binary: `xattr -cr` there would strip
 # the icon straight back off. `osascript -l JavaScript` rather than the
 # Rez/SetFile dance every recipe for this uses — those are Xcode command-line
 # tools, absent on a plain macOS, which is precisely the machine a `curl | bash`
@@ -1132,31 +1144,88 @@ say "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
 $NEED_SUDO mkdir -p "$LIB_DIR"
 
-# Install a binary and, on macOS, immediately clear its extended attributes and
-# re-sign it BEFORE moving on to the next file.
+# Install a binary and, on macOS, clear its extended attributes and re-sign it if
+# its signature does not verify — all on a staged copy, which is then renamed
+# into place BEFORE moving on to the next file.
 #
 # Downloaded binaries carry com.apple.quarantine / com.apple.provenance; on
 # macOS Sequoia (15+) an unsigned/adhoc binary can be SIGKILLed by Gatekeeper on
-# launch. Signing inline (rather than in a separate pass after all copies) keeps
-# the unsigned window to milliseconds — critical because veld-helper is now
-# relaunched automatically when its binary changes (launchd WatchPaths + the
-# helper's own binary-change watcher), and either could otherwise relaunch a
+# launch. Finishing each binary before the rename means the destination never
+# holds an unsigned one — critical because veld-helper is relaunched
+# automatically when its binary changes (launchd WatchPaths + the helper's own
+# binary-change watcher), and either could otherwise relaunch a
 # freshly-copied-but-not-yet-signed binary into a Gatekeeper kill/throttle loop.
-# $1 = source, $2 = destination, $3 = "sign" (macOS re-sign) | "nosign".
+#
+# **Only re-signed when the signature it arrived with does not verify.** Release
+# binaries are ad-hoc signed in CI, and the helper's org `.sig` covers exactly
+# those bytes. `codesign --force` is not byte-idempotent across macOS releases:
+# macOS 27's codesign reserves less space for the signature than CI's runner did
+# and truncates the file (by 18000 bytes on v16.74.0), so re-signing a perfectly
+# good release helper made the `.sig` beside it fail on every update. The running
+# root helper then refused to relaunch onto it, refused to migrate itself into its
+# root-owned directory, and `veld setup privileged` fell back to serving it from
+# here. A binary whose signature verifies already runs; leave its bytes alone.
+# $1 = source, $2 = destination, $3 = "sign" (macOS re-sign if needed) | "nosign".
 install_bin() {
-  $NEED_SUDO cp "$1" "$2"
-  $NEED_SUDO chmod +x "$2"
+  # Replaced by rename, never overwritten in place: `cp` onto an existing file
+  # keeps its inode, and macOS caches a binary's code signature per vnode, so
+  # once the old bytes have run (the CLI driving `veld update`, a live helper or
+  # daemon) every later exec of the new bytes is SIGKILLed. The unconditional
+  # re-sign this function used to do hid that by writing a new file itself.
+  local dst="$2" link stage hops=0
+  # `cp` wrote through a symlink, so the rename lands where its bytes did rather
+  # than silently swapping a dev's link for a real file. Bounded, because `cp`
+  # failed on a loop with ELOOP and an unbounded walk would hang `veld update`.
+  while [ -L "$dst" ]; do
+    hops=$((hops + 1))
+    if [ "$hops" -gt 40 ]; then
+      echo "Error: too many levels of symbolic links at $2" >&2
+      return 1
+    fi
+    link=$(readlink "$dst")
+    case "$link" in
+      /*) dst="$link" ;;
+      *) dst="$(dirname "$dst")/$link" ;;
+    esac
+  done
+  # Staged beside the destination under its own basename: same filesystem, so
+  # the `mv` is an atomic rename, and an ad-hoc signature's identifier comes from
+  # the basename, so signing here yields the bytes signing "$dst" would have.
+  stage=$($NEED_SUDO mktemp -d "$(dirname "$dst")/.veld-install.XXXXXX")
+  INSTALL_BIN_STAGE="$stage"
+  $NEED_SUDO cp "$1" "$stage/${dst##*/}"
+  # An explicit mode, not `+x`: a new file takes the umask where the in-place
+  # `cp` kept the old file's mode, and under a 077 umask (sudo keeps it) that
+  # would leave `veld` and the daemon executable by root alone.
+  $NEED_SUDO chmod 755 "$stage/${dst##*/}"
   if [ "$OS" = "macos" ] && [ "$3" = "sign" ]; then
-    $NEED_SUDO xattr -cr "$2" 2>/dev/null || true
-    $NEED_SUDO codesign --force --sign - "$2" 2>/dev/null || true
+    $NEED_SUDO xattr -cr "$stage/${dst##*/}" 2>/dev/null || true
+    # Verified with the same privileges it was copied with: a root-owned copy
+    # under a restrictive umask is unreadable to the user, and a verify that
+    # fails on EACCES would re-sign a perfectly good binary.
+    if ! $NEED_SUDO codesign --verify "$stage/${dst##*/}" >/dev/null 2>&1; then
+      $NEED_SUDO codesign --force --sign - "$stage/${dst##*/}" 2>/dev/null || true
+      # A release binary always verifies, so reaching here with a `.sig` beside
+      # the source means this macOS rejects CI's signature, and the re-sign just
+      # broke the org signature. Every remedy veld prints says "re-run the
+      # installer", which would do this again — so say that it will not help.
+      # Loud, even when embedded.
+      if [ -f "$1.sig" ]; then
+        echo "  warning: $2 failed 'codesign --verify' and had to be re-signed, so its org signature no longer matches it and the helper will not restart onto it. Re-running the installer will not fix this; please report it with the output of: shasum -a 256 \"$2\"; sw_vers" >&2
+      fi
+    fi
   fi
+  $NEED_SUDO mv -f "$stage/${dst##*/}" "$dst"
+  $NEED_SUDO rmdir "$stage"
+  INSTALL_BIN_STAGE=""
 }
 
 # veld CLI goes to INSTALL_DIR (on PATH).
 install_bin "${TMP_DIR}/veld" "${INSTALL_DIR}/veld" sign
 
 # Helper and daemon go to LIB_DIR (bundled in the release tarball) and are
-# re-signed. Caddy is a Go binary shipped signed upstream, so it is not re-signed.
+# re-signed only if their signature does not verify. Caddy is a Go binary
+# shipped signed upstream, so it is not re-signed.
 for bin in veld-helper veld-daemon; do
   if [ -f "${TMP_DIR}/${bin}" ]; then
     install_bin "${TMP_DIR}/${bin}" "${LIB_DIR}/${bin}" sign
@@ -1170,7 +1239,7 @@ fi
 # running root helper verifies the on-disk binary against it before it will
 # relaunch onto a changed file, so without this every future update is refused
 # fail-closed. The binary above is byte-identical to the CI-signed artifact
-# (install.sh's re-sign is a no-op on the already-signed macOS binary), so the
+# (`install_bin` leaves a binary whose signature verifies untouched), so the
 # shipped .sig matches.
 if [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   $NEED_SUDO cp "${TMP_DIR}/veld-helper.sig" "${LIB_DIR}/veld-helper.sig"
@@ -1656,7 +1725,7 @@ fi
 # --- Binary icons (macOS) ---
 #
 # See `apply_binary_icons`. Deliberately last of the install steps: it must run
-# after `install_bin` has signed each binary, or `xattr -cr` there strips the
+# after `install_bin` has run on each binary, or `xattr -cr` there strips the
 # icon straight back off.
 WANT_BINARY_ICONS="1"
 case "${VELD_BINARY_ICONS:-}" in
