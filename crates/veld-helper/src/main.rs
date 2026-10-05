@@ -624,9 +624,10 @@ async fn watch_own_binary() {
         interval.tick().await;
         let current = binary_signature(exe);
         if current.is_some() && current != baseline {
-            // Debounce: `veld update` does cp + chmod + xattr + codesign — several
-            // writes. Wait for the signature to settle before relaunching so we
-            // don't exit mid-swap.
+            // Debounce: an install is several writes — the installer renames the
+            // binary in and then copies its `.sig`; `just`'s dev install writes in
+            // place and then re-signs. Wait for the signature to settle before
+            // relaunching so we don't exit mid-swap.
             tokio::time::sleep(Duration::from_secs(2)).await;
             if binary_signature(exe) == current {
                 // Keep polling when something blocks the exit: the checks can
@@ -637,10 +638,11 @@ async fn watch_own_binary() {
                 // watcher is the privileged helper by construction.
                 match restart_blocker(true).await {
                     // Re-stat *after* the gate, not only before it. The gate
-                    // takes real time (a service query plus an exec), and the
-                    // write sequence this debounce exists for is cp + chmod +
-                    // xattr + codesign — so a 2s lull before `codesign` can let
-                    // a valid-but-unsigned file pass the exec check and be
+                    // takes real time (a service query plus an exec), and an
+                    // in-place write sequence — an older installer's, or
+                    // `just`'s dev install: cp + chmod + xattr + codesign — can
+                    // pause for 2s before `codesign` and let a
+                    // valid-but-unsigned file pass the exec check and be
                     // rewritten underneath us. Requiring the signature to be
                     // unchanged across the whole gate closes that window: if it
                     // moved, this tick's evidence is stale and the next one
@@ -722,9 +724,10 @@ pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
 /// Whether `path` runs — checked by executing it with `--version`, which prints
 /// and exits without binding the socket or touching Caddy.
 ///
-/// This is the guard the size/mtime debounce could not provide. `veld update`
-/// writes the binary with cp + chmod + xattr + codesign, and the signature can
-/// go quiet *between* those steps; a watcher that trusted it exited onto a file
+/// This is the guard the size/mtime debounce could not provide. An in-place
+/// install (an older installer's, or `just`'s dev install) writes the binary with
+/// cp + chmod + xattr + codesign, and the signature can go quiet *between* those
+/// steps; a watcher that trusted it exited onto a file
 /// launchd then failed to exec, leaving it to crash-loop against `KeepAlive`
 /// with no helper running at all (observed in the field: one such episode
 /// produced 2432 consecutive `cannot execute binary file` lines). Asking the

@@ -283,6 +283,7 @@ DESKTOP_SWAP_DEST=""     # bundle being replaced
 DESKTOP_SWAP_BACKUP=""   # its `.old` copy, while the swap is in flight
 DESKTOP_RELAUNCH_PATH="" # bundle to reopen when VELD_DESKTOP_RELAUNCH is set
 INSTALL_BIN_STAGE=""     # `install_bin`'s staging dir, while a binary is in it
+INSTALL_BIN_SIG_BROKEN="" # set when `install_bin` had to re-sign a binary that has a `.sig`
 
 # Runs on success, on failure, and on Ctrl-C — the three ways an app update can
 # end with the app not on screen.
@@ -1211,6 +1212,7 @@ install_bin() {
       # installer", which would do this again — so say that it will not help.
       # Loud, even when embedded.
       if [ -f "$1.sig" ]; then
+        INSTALL_BIN_SIG_BROKEN="1"
         echo "  warning: $2 failed 'codesign --verify' and had to be re-signed, so its org signature no longer matches it and the helper will not restart onto it. Re-running the installer will not fix this; please report it with the output of: shasum -a 256 \"$2\"; sw_vers" >&2
       fi
     fi
@@ -1472,6 +1474,13 @@ if [ "$OS" = "macos" ]; then
         # Never attempted: this release carries no signature for the helper, so
         # there was nothing to hand over and no error to point at.
         echo "The privileged veld-helper was not updated: this release ships no signature for it."
+      elif [ -n "$INSTALL_BIN_SIG_BROKEN" ]; then
+        # Not signalled: on a service still served from the lib dir, launchd
+        # would relaunch it as root onto the re-signed file the warning above is
+        # about — the one thing its org signature exists to prevent. A service
+        # served from the store loses nothing: the store got the download's own
+        # bytes, and the helper restarts itself onto them.
+        echo "Not restarting the privileged veld-helper from here: its binary in ${LIB_DIR} had to be re-signed (see the warning above). A helper served from its root-owned directory still picks up the new version by itself within about 15 seconds."
       elif sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true

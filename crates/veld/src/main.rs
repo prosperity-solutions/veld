@@ -1079,8 +1079,8 @@ async fn main() {
     );
 
     // The version gate compares this CLI against the RUNNING helper in
-    // privileged/unprivileged mode (the installed file when it does not answer,
-    // and always in auto mode) and the installed daemon. A dev instance
+    // privileged mode (the installed file when it does not answer, and always in
+    // unprivileged and auto mode) and the installed daemon. A dev instance
     // (VELD_DAEMON_PORT set) shares those services deliberately, so a version gap with them is expected — enforce
     // alignment only for the installed instance. VELD_LIB_DIR is the older
     // escape hatch (points version discovery at a dev build dir) and still
