@@ -71,6 +71,19 @@ export function Modal(props: {
    * to a full-width modal on a small screen rather than overflowing.
    */
   size?: number | string;
+  /**
+   * For a dialog that owns its scrolling. By default the modal itself scrolls
+   * once it reaches its viewport cap, which is right for a plain form. A dialog
+   * with its own scroll region inside would then scroll twice, so this makes
+   * the content a flex column instead: the header keeps its height and the
+   * body gets whatever is left, as a height its children can shrink into
+   * (`minHeight: 0` all the way down) rather than overflow. The caller has to
+   * supply that chain; without it, nothing here takes effect except the offset.
+   * Such a dialog spends less on that offset when the window is short, since
+   * every pixel of margin there is a pixel taken from the one thing that
+   * scrolls.
+   */
+  ownsScroll?: boolean;
   children: ReactNode;
 }) {
   return (
@@ -78,10 +91,22 @@ export function Modal(props: {
       opened
       onClose={props.onClose}
       title={props.title}
-      yOffset={88}
+      yOffset={props.ownsScroll ? "clamp(16px, 10dvh, 88px)" : 88}
       size={props.size ?? 560}
       radius="lg"
       overlayProps={{ backgroundOpacity: 0.42 }}
+      styles={
+        props.ownsScroll
+          ? {
+              content: { display: "flex", flexDirection: "column" },
+              body: {
+                display: "flex",
+                flexDirection: "column",
+                minHeight: 0,
+              },
+            }
+          : undefined
+      }
     >
       {props.children}
     </MantineModal>
@@ -1507,18 +1532,33 @@ export function NewWorktreeDialog(props: {
       // fields plus two marker grids that were cramped at 560, and neither
       // needs the 940 the two-column version did.
       size={680}
+      ownsScroll
       onClose={props.onClose}
     >
-      <form onSubmit={submit} ref={formRef}>
-        {/* The fields scroll, the footer does not. The glyph grid is 64 animals and
-            pushed the Create button below the fold on a laptop, so the dialog's only
-            action was reachable exactly when you had stopped scrolling to look for it.
-            An inner scroll region rather than `position: sticky` on the footer: the
-            modal body is the scroller otherwise, and a sticky child of a scrolling
-            ancestor sticks to the wrong box. */}
+      <form
+        onSubmit={submit}
+        ref={formRef}
+        style={{ display: "flex", flexDirection: "column", minHeight: 0 }}
+      >
+        {/* **Exactly one thing scrolls, and the footer is never it.** The glyph
+            grid is 64 animals and pushed the Create button below the fold on a
+            laptop, so the dialog's only action was reachable exactly when you had
+            stopped scrolling to look for it. The fix used to be a fixed cap here
+            (`min(70vh, 620px)`) plus a row cap on the prompt, and neither knew
+            about the modal's own viewport cap: a long paste got three scrollbars
+            side by side and Create was cut off anyway. Now nothing below has a
+            height cap of its own. The modal hands down what the viewport leaves
+            (`ownsScroll`), this region shrinks into it, and what scrolls depends
+            on the mode: the prompt in prompt mode, the region in manual mode, and
+            nothing in ask mode, which has no fields to scroll. In
+            prompt mode the textarea gives way first, down to its floor; only a
+            window too short for even that (under about 450px, below the desktop
+            window's 540px minimum) scrolls the region as well. */}
         <div
           style={{
-            maxHeight: "min(70vh, 620px)",
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
             overflowY: "auto",
             // Keeps the focus ring of a field flush against the scrollbar from being
             // clipped, and stops the grids touching the edge.
@@ -1547,9 +1587,19 @@ export function NewWorktreeDialog(props: {
           autoFlow="auto-fit"
           spacing="xl"
           verticalSpacing="sm"
+          // Prompt mode passes the bounded height on to the textarea: the grid
+          // may shrink, and its row with it (`minmax(0, 1fr)` rather than the
+          // implicit `auto`, which cannot go below its content). Manual mode
+          // must not, or the fields would be squeezed instead of scrolled; ask
+          // mode renders an empty grid, so either branch would do.
+          style={
+            shownMode === "prompt"
+              ? { minHeight: 0, gridTemplateRows: "minmax(0, 1fr)" }
+              : { flexShrink: 0 }
+          }
         >
           {shownMode === "prompt" && (
-            <Stack gap="sm">
+            <Stack gap="sm" mih={0}>
               {/* The agent, then the prompt, in that order — it is the order the
                   sentence goes in ("give Claude this") and it puts the smaller
                   control above the bigger one. A `Select` even for a project
@@ -1568,19 +1618,39 @@ export function NewWorktreeDialog(props: {
                   `TextInput`: prompts are sentences and often several, and a
                   one-line box that scrolls sideways makes re-reading what you
                   typed impossible. Autosized so a short prompt does not leave a
-                  hole and a long one does not need scrolling to review, capped
-                  before it can push Create out of the scroll region. */}
+                  hole, and grown with the dialog until the window runs out —
+                  then this, and only this, scrolls. */}
               <Textarea
                 label="Prompt"
                 placeholder="Fix the login redirect loop for expired sessions"
                 autosize
                 // Sized to be the surface the dialog is for, not a field on it:
-                // ten rows is a paragraph of instructions without scrolling, and
-                // it stands the left column up next to the right one's stack of
-                // fields. Autosize still grows it, up to the point where the
-                // dialog's own scroll region would start moving the button.
+                // ten rows is a paragraph of instructions without scrolling.
+                // No `maxRows`: a row count cannot know how tall the window is,
+                // which is how a 20-row cap ended up taller than the space left
+                // for it. The bound is the dialog's instead — autosize asks for
+                // the full height, and the flex chain below shrinks the field
+                // to what the modal has left.
                 minRows={10}
-                maxRows={20}
+                styles={{
+                  root: {
+                    display: "flex",
+                    flexDirection: "column",
+                    minHeight: 0,
+                  },
+                  wrapper: {
+                    display: "flex",
+                    flexDirection: "column",
+                    minHeight: 0,
+                  },
+                  // About three rows: a short window squeezes the field to
+                  // something still usable and only then scrolls the region.
+                  // Three, not five, because five already overflowed a 560px
+                  // window with the field empty. `overflowY` because autosize
+                  // without `maxRows` sets `--input-overflow: hidden`,
+                  // expecting never to clip.
+                  input: { minHeight: "5rem", overflowY: "auto" },
+                }}
                 value={prompt}
                 onChange={(e) => {
                   setPrompt(e.currentTarget.value);
