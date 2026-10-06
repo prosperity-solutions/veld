@@ -300,6 +300,163 @@ impl AgentTool {
             Self::Pi => "",
         }
     }
+
+    /// Whether this tool's wrapper hands it a launch prompt as its startup argument
+    /// (see [`LAUNCH_PROMPT_ENV`]).
+    ///
+    /// **Claude only, because Claude is the one measured.** Claude Code 2.1.291 takes
+    /// `claude -- "<prompt>"`, opens with that message already submitted, and reads an
+    /// `@"<path>"` in it as an attachment — an image arrives as an image, with no tool
+    /// call and no permission prompt, even outside the working directory. Codex takes a
+    /// positional prompt too, but an image there has to travel as `-i <path>` rather
+    /// than in the text, which is a different composition this wrapper does not do;
+    /// Pi was not measured. For both, the prompt stays where it was — typed in by the
+    /// window once the agent opens its input — which is exactly what an unclaimed
+    /// launch prompt falls back to anyway.
+    #[must_use]
+    pub fn takes_launch_prompt(self) -> bool {
+        matches!(self, Self::Claude)
+    }
+
+    /// The flags of this tool that always take one value, as a shell `case` pattern —
+    /// how the wrapper tells a flag's value from a prompt the pane's own command
+    /// already passes (see `agent_script` in `veld-daemon/src/pty/shims.rs`).
+    ///
+    /// **An allowlist, so a miss is safe.** A bare word after anything not listed —
+    /// a boolean flag (`--dangerously-skip-permissions "Read AGENTS.md"`), a flag
+    /// whose value is optional (`--resume`, `--debug`), a second value of a variadic
+    /// one — is taken for a standing prompt, and the wrapper leaves the launch prompt
+    /// for the window to type rather than append a second positional the agent would
+    /// silently drop. From `claude --help` (2.1.291): every `<value>` flag, none of the
+    /// `[value]` ones. Empty for a tool that does not take a launch prompt.
+    #[must_use]
+    pub fn launch_prompt_value_flags(self) -> &'static str {
+        match self {
+            Self::Claude => {
+                "--add-dir | --agent | --agents | --allowedTools | --allowed-tools \
+                 | --append-system-prompt | --append-system-prompt-file | --autocompact \
+                 | --betas | --debug-file | --disallowedTools | --disallowed-tools \
+                 | --effort | --environment | --fallback-model | --file | --input-format \
+                 | --json-schema | --max-budget-usd | --mcp-config | --model | -n | --name \
+                 | --output-format | --permission-mode | --permission-prompts | --plugin-dir \
+                 | --plugin-url | --remote-control-session-name-prefix | --session-id \
+                 | --setting-sources | --settings | --system-prompt | --system-prompt-file \
+                 | --system-prompt-snapshot | --tools"
+            }
+            Self::Codex | Self::Pi => "",
+        }
+    }
+}
+
+/// The variable that tells an agent wrapper where its launch prompt is waiting.
+///
+/// Set by the daemon on a config pane's **fresh** launch when the New worktree dialog
+/// sent a prompt with it, and only then. The value is a *path*, never the text: the
+/// variable is inherited by everything the pane's shell starts, and a prompt in the
+/// environment would be readable by all of it. Every wrapper unsets it before `exec`,
+/// whether or not it took the prompt, so a nested agent cannot claim it later — but
+/// only the wrapper does: the pane's shell, and a command that reaches the agent
+/// without it (an absolute path, `npx`), keep the variable for the pane's lifetime.
+/// Harmless, because it names a file that is gone once either side claims it.
+pub const LAUNCH_PROMPT_ENV: &str = "VELD_LAUNCH_PROMPT";
+
+/// The largest launch prompt handed over as an argument rather than typed.
+///
+/// A ceiling on `argv`, not on what a user may write: macOS's `ARG_MAX` is 1 MiB for
+/// arguments *and* environment together, and a pane's environment is the user's
+/// whole login environment. Anything longer is typed in, as before.
+pub const MAX_LAUNCH_PROMPT_BYTES: usize = 64 * 1024;
+
+/// How a launch prompt's file name ends. The rest is the paste directory's own
+/// 32-hex-character random prefix, so that directory's reaper — which deletes only
+/// names of that shape — sweeps a prompt nobody ever claimed.
+pub const LAUNCH_PROMPT_SUFFIX: &str = "-launch-prompt.txt";
+
+/// A fresh, unguessable launch-prompt file name.
+#[must_use]
+pub fn launch_prompt_file_name() -> String {
+    format!("{}{LAUNCH_PROMPT_SUFFIX}", uuid::Uuid::new_v4().simple())
+}
+
+/// Whether `name` is one [`launch_prompt_file_name`] could have produced.
+#[must_use]
+pub fn is_launch_prompt_name(name: &str) -> bool {
+    name.strip_suffix(LAUNCH_PROMPT_SUFFIX)
+        .is_some_and(|hex| hex.len() == 32 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
+
+/// Claim a launch prompt, at most once across every process that tries.
+///
+/// **One prompt, two claimants, and exactly one of them may win.** The agent wrapper
+/// claims it at launch (through `veld agent-prompt --take`); the window claims it once
+/// the agent has opened its input, and types it in if it got it — which it only can
+/// if no wrapper took it first. A prompt neither sent nor typed is lost, and one both
+/// sent and typed is a second turn the user never asked for, so the claim is a
+/// `rename`: atomic on one filesystem, and the loser sees `NotFound`.
+///
+/// `Ok(None)` means somebody else got there first (or nothing was ever written).
+/// Refuses a path whose name this module did not mint, because the CLI half takes
+/// the path from its argv and then deletes what it names.
+pub fn take_launch_prompt(path: &Path) -> std::io::Result<Option<String>> {
+    deliver_launch_prompt(path, |_| Ok(()))
+}
+
+/// [`take_launch_prompt`], holding the file until `deliver` has the text.
+///
+/// Winning the claim is not the same as handing the prompt on: the wrapper's half
+/// still has to write it to the pipe its `$(…)` reads, and a claim that deleted
+/// first would lose the prompt on a failed write while telling the window the
+/// wrapper took it. So the file is removed only once `deliver` succeeds, and put
+/// back under its own name when it fails — where the window's later claim finds it
+/// and types it in.
+pub fn deliver_launch_prompt(
+    path: &Path,
+    deliver: impl FnOnce(&str) -> std::io::Result<()>,
+) -> std::io::Result<Option<String>> {
+    use std::io::Read as _;
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| is_launch_prompt_name(n))
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a launch prompt file")
+        })?;
+    // Still a paste-shaped name, so a claimed file whose removal fails below is
+    // swept like an unclaimed one.
+    let claimed = path.with_file_name(format!("{name}.taken-{}", std::process::id()));
+    match std::fs::rename(path, &claimed) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    }
+    let mut text = String::new();
+    let read = std::fs::File::open(&claimed).and_then(|f| {
+        f.take(MAX_LAUNCH_PROMPT_BYTES as u64 + 1)
+            .read_to_string(&mut text)
+    });
+    // A file that cannot be read, or is too large to pass, is no use to the
+    // window either: gone, not put back.
+    let readable = read.and_then(|_| {
+        if text.len() > MAX_LAUNCH_PROMPT_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "launch prompt is larger than an argument may be",
+            ));
+        }
+        Ok(())
+    });
+    if let Err(e) = readable {
+        let _ = std::fs::remove_file(&claimed);
+        return Err(e);
+    }
+    if let Err(e) = deliver(&text) {
+        // If even this fails, the claimed name is still paste-shaped and the
+        // reaper sweeps it.
+        let _ = std::fs::rename(&claimed, path);
+        return Err(e);
+    }
+    let _ = std::fs::remove_file(&claimed);
+    Ok(Some(text))
 }
 
 /// The two shapes a tool's ephemeral hook configuration can take, and therefore the
@@ -1592,5 +1749,66 @@ mod tests {
             assert_eq!(State::parse(state.as_str()), Some(state));
         }
         assert_eq!(State::parse("busy"), None);
+    }
+
+    #[test]
+    fn a_launch_prompt_is_taken_once_and_then_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(launch_prompt_file_name());
+        std::fs::write(&path, "fix it\n\n@\"/tmp/a b.png\"").unwrap();
+        assert_eq!(
+            take_launch_prompt(&path).unwrap().as_deref(),
+            Some("fix it\n\n@\"/tmp/a b.png\"")
+        );
+        // The second claimant — the window, after the wrapper — gets nothing, and
+        // nothing is left behind for the reaper to find.
+        assert_eq!(take_launch_prompt(&path).unwrap(), None);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_launch_prompt_that_could_not_be_handed_on_is_put_back_for_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(launch_prompt_file_name());
+        std::fs::write(&path, "fix it").unwrap();
+        let failed = deliver_launch_prompt(&path, |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))
+        });
+        assert!(failed.is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "fix it");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(
+            take_launch_prompt(&path).unwrap().as_deref(),
+            Some("fix it")
+        );
+    }
+
+    #[test]
+    fn take_refuses_a_file_this_module_did_not_name() {
+        let dir = tempfile::tempdir().unwrap();
+        // The CLI half deletes whatever its argv names, so the name is the guard.
+        for name in ["id_rsa", "launch-prompt.txt", "0123-launch-prompt.txt"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "x").unwrap();
+            assert!(take_launch_prompt(&path).is_err(), "{name}");
+            assert!(path.exists(), "{name} was touched");
+        }
+        assert!(is_launch_prompt_name(&launch_prompt_file_name()));
+    }
+
+    #[test]
+    fn an_oversized_launch_prompt_is_refused_rather_than_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(launch_prompt_file_name());
+        std::fs::write(&path, "x".repeat(MAX_LAUNCH_PROMPT_BYTES + 1)).unwrap();
+        assert!(take_launch_prompt(&path).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn only_claude_takes_a_launch_prompt() {
+        assert!(AgentTool::Claude.takes_launch_prompt());
+        assert!(!AgentTool::Codex.takes_launch_prompt());
+        assert!(!AgentTool::Pi.takes_launch_prompt());
     }
 }

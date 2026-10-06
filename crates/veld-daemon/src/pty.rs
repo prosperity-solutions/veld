@@ -384,6 +384,15 @@ pub fn routes() -> Router {
         // the pane-push tail.
         .route("/api/pty/sessions/{id}/open-file", post(open_file))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
+        // The New worktree dialog's first message, in two halves: the files it
+        // carries go up before the pane exists (`reserve`), and the window asks
+        // afterwards whether the agent took the message at launch (`take`). See
+        // [`stage_launch_prompt`].
+        .route("/api/pty/sessions/{id}/reserve", post(reserve_uploads))
+        .route(
+            "/api/pty/sessions/{id}/launch-prompt/take",
+            post(take_launch_prompt),
+        )
         // **The one route with its own body limit.** axum's default is 2 MB, and
         // a paste is the only thing here that carries a file — so without this
         // the handler's own [`MAX_PASTE_BYTES`] check is unreachable and any
@@ -844,6 +853,15 @@ fn valid_session_id(id: &str) -> bool {
 /// The signalling happens in the holder, not here — see [`Session::closing`].
 /// This function must not signal the pid itself.
 async fn end_session(id: &str, reason: &str) -> bool {
+    // A pane closed before its agent's input opened never has its prompt claimed:
+    // the window stops asking once the pane is gone.
+    let unclaimed = LAUNCH_PROMPTS
+        .lock()
+        .expect("launch prompts poisoned")
+        .remove(id);
+    if let Some(path) = unclaimed {
+        discard_launch_prompt(path);
+    }
     let session = SESSIONS.lock().await.remove(id);
     let Some(session) = session else {
         // Not in the registry is not the same as not running: [`release_session`]
@@ -1602,6 +1620,16 @@ struct TicketRequest {
     /// rendered from is long gone by the time the ticket is minted.
     #[serde(default)]
     session_token: Option<String>,
+    /// The first message for a fresh agent pane — the New worktree dialog's
+    /// prompt, with the files it carries already composed in as `@"path"`
+    /// mentions by the client.
+    ///
+    /// **Text for the agent to read, never an argv.** It reaches the agent's
+    /// wrapper as a *file* named in `VELD_LAUNCH_PROMPT`, and the wrapper passes
+    /// its content as one argument after `--`; nothing evaluates it. See
+    /// [`stage_launch_prompt`] for when it is taken and when it is ignored.
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1611,6 +1639,13 @@ struct TicketResponse {
     /// True when a live session with this id is waiting — the client uses it to
     /// distinguish "your shell is still here" from "starting a new one".
     resumed: bool,
+    /// True when the request's `prompt` was handed to the launch. The agent's
+    /// wrapper may still decline it (a tool that takes no first message as an
+    /// argument, a pane whose command is not an agent at all), so this is "ask
+    /// before typing it", not "it was sent": the client claims it through
+    /// `launch-prompt/take` once the agent is up, and types it only if the claim
+    /// succeeds. False means type it, as before.
+    prompt_at_launch: bool,
 }
 
 /// Resolve a config-declared pane into the command a holder should run.
@@ -2398,7 +2433,7 @@ async fn mint_ticket(
         ));
     }
 
-    let pane = match (&body.pane, registered) {
+    let mut pane = match (&body.pane, registered) {
         (Some(spec_id), false) => Some(
             resolve_pane(
                 &db,
@@ -2416,6 +2451,18 @@ async fn mint_ticket(
         ),
         _ => None,
     };
+    let prompt_at_launch = match (body.prompt.as_deref(), pane.as_mut()) {
+        (Some(prompt), Some(launch)) if launch_takes_prompt(resumed, body.mode, &shim_env) => {
+            stage_launch_prompt(&body.session_id, prompt, launch).await
+        }
+        _ => false,
+    };
+    // Its files are up by now — the client uploads before it mints — so the
+    // window [`reserve_uploads`] opened has done its job.
+    UPLOAD_RESERVATIONS
+        .lock()
+        .expect("upload reservations poisoned")
+        .remove(&body.session_id);
     let ticket = uuid::Uuid::new_v4().simple().to_string();
     let now = Instant::now();
     {
@@ -2444,7 +2491,256 @@ async fn mint_ticket(
         ticket,
         expires_in_ms: TICKET_TTL.as_millis() as u64,
         resumed,
+        prompt_at_launch,
     }))
+}
+
+/// Launch prompts handed to a pane and not yet claimed back by its window, by
+/// session id.
+///
+/// The client never names the file: [`take_launch_prompt`] looks it up here, so
+/// that route cannot be pointed at anything but a file [`stage_launch_prompt`]
+/// wrote. In memory on purpose: a daemon restart between the spawn and the claim
+/// loses the entry while the pane — whose holder outlives the daemon — runs on,
+/// and the claim then answers `staged: false`. The window cannot tell from that
+/// whether the wrapper sent the message, so it neither types it (a second turn?)
+/// nor drops it, and hands the text back on a toast. Cheaper than persisting a
+/// claim for the few seconds between a launch and its input opening.
+static LAUNCH_PROMPTS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Whether a pane launch can be handed its first message.
+///
+/// Only a fresh start: a resumed or adopted conversation already has one, and a
+/// reattach spawns nothing. And only through the agent wrapper, which is not on
+/// PATH — and would not look — without `VELD_AGENT_HOOKS`, i.e. with agent
+/// integration off. Every "no" means the window types it, which is what it did
+/// before this existed.
+fn launch_takes_prompt(
+    resumed: bool,
+    mode: Option<PaneMode>,
+    shim_env: &BTreeMap<String, String>,
+) -> bool {
+    !resumed
+        && mode.unwrap_or(PaneMode::Fresh) == PaneMode::Fresh
+        && shim_env.contains_key("VELD_AGENT_HOOKS")
+}
+
+/// Write a launch prompt for `launch` to run with, and say whether it was.
+///
+/// The prompt goes into the paste directory as a one-shot file
+/// (`veld_core::agent::launch_prompt_file_name`) and the pane's environment names
+/// it in `VELD_LAUNCH_PROMPT`. **A file, not the variable's value**: the
+/// environment is inherited by everything the agent runs, for as long as it runs,
+/// and a file can be *claimed* — renamed away atomically — by whichever of two
+/// readers gets there first, which is the whole protocol:
+///
+/// - the agent's wrapper (`shims::agent_script`) takes it at launch and passes it
+///   as the first message, for a tool that accepts one (Claude); or
+/// - the window takes it once the agent is up (`launch-prompt/take`) and types it
+///   in, for any launch the wrapper declined.
+///
+/// Exactly one of them gets it, so the message is neither lost nor sent twice.
+/// Any failure here answers `false` and the window types it, as before.
+///
+/// **Not a secret once the wrapper takes it.** The wrapper's whole job is to put
+/// the text in the agent's argv, which `ps` shows for the agent's lifetime — the
+/// same exposure as typing `claude "<prompt>"` yourself, and the price of a first
+/// message that is never typed. The file keeps it out of the *environment* of
+/// everything the agent starts; it does not keep it out of the process table.
+async fn stage_launch_prompt(session_id: &str, prompt: &str, launch: &mut PaneLaunch) -> bool {
+    use veld_core::agent::{LAUNCH_PROMPT_ENV, MAX_LAUNCH_PROMPT_BYTES, launch_prompt_file_name};
+    // Refused for launch rather than for the request: the window can still type
+    // what the wrapper cannot pass, and an argv cannot hold a NUL at all.
+    if prompt.trim().is_empty() || prompt.len() > MAX_LAUNCH_PROMPT_BYTES || prompt.contains('\0') {
+        return false;
+    }
+    let body = prompt.to_owned();
+    // Off the async worker, like every paste-directory write.
+    let written = tokio::task::spawn_blocking(move || {
+        let dir = ensure_paste_dir()?;
+        let path = dir.join(launch_prompt_file_name());
+        write_private(&path, body.as_bytes())
+            .map_err(|e| format!("could not write {}: {e}", path.display()))?;
+        Ok::<_, String>(path)
+    })
+    .await;
+    let path = match written {
+        Ok(Ok(path)) => path,
+        Ok(Err(e)) => {
+            warn!("launch prompt not staged, the window will type it: {e}");
+            return false;
+        }
+        Err(e) => {
+            warn!("launch prompt write panicked, the window will type it: {e}");
+            return false;
+        }
+    };
+    launch
+        .env
+        .push((LAUNCH_PROMPT_ENV.to_owned(), path.display().to_string()));
+    let replaced = LAUNCH_PROMPTS
+        .lock()
+        .expect("launch prompts poisoned")
+        .insert(session_id.to_owned(), path);
+    // A second mint for the same pane — a connect retried after its ticket went
+    // unredeemed — supersedes the first, whose file nothing will ever claim now.
+    if let Some(old) = replaced {
+        discard_launch_prompt(old);
+    }
+    true
+}
+
+/// Delete a launch prompt nobody will claim now, rather than leave the text on
+/// disk until the paste reaper's day is up. Taken rather than removed, so a name
+/// this module did not write is refused.
+fn discard_launch_prompt(path: PathBuf) {
+    tokio::task::spawn_blocking(move || {
+        let _ = veld_core::agent::take_launch_prompt(&path);
+    });
+}
+
+#[derive(Serialize)]
+struct LaunchPromptClaim {
+    /// True when the window now owns the prompt and must type it in; false when
+    /// the agent's wrapper already took it at launch, or there never was one.
+    claimed: bool,
+    /// False when this daemon has no record of a prompt for the session. A window
+    /// asks only after a launch it was told took one, so that means the daemon
+    /// restarted in between ([`LAUNCH_PROMPTS`] is memory), and nobody can say
+    /// whether the agent got it — the window hands it back rather than guess.
+    staged: bool,
+}
+
+/// The window's half of the claim [`stage_launch_prompt`] describes.
+///
+/// Asked once the agent's input is ready, which is after its wrapper has run —
+/// so a file still here is one the wrapper declined, and one already gone is one
+/// it passed on. Any failure past the lookup counts as claimed: the wrapper takes
+/// the file by renaming it away, so if this side could not, neither could the
+/// wrapper, and the message is only sent if the window types it.
+async fn take_launch_prompt(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<LaunchPromptClaim>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    window_origin(&headers, "launch prompt claim")?;
+    let Some(path) = LAUNCH_PROMPTS
+        .lock()
+        .expect("launch prompts poisoned")
+        .remove(&id)
+    else {
+        return Ok(Json(LaunchPromptClaim {
+            claimed: false,
+            staged: false,
+        }));
+    };
+    let taken =
+        tokio::task::spawn_blocking(move || veld_core::agent::take_launch_prompt(&path)).await;
+    let claimed = match taken {
+        Ok(Ok(Some(_))) => true,
+        Ok(Ok(None)) => false,
+        Ok(Err(e)) => {
+            warn!("launch prompt for {id} unreadable, the window will type it: {e}");
+            true
+        }
+        Err(e) => {
+            warn!("launch prompt claim for {id} panicked, the window will type it: {e}");
+            true
+        }
+    };
+    Ok(Json(LaunchPromptClaim {
+        claimed,
+        staged: true,
+    }))
+}
+
+/// Refuse a request that did not come from a Veld window.
+///
+/// For the two launch-prompt routes, which only the New worktree dialog and the
+/// terminal it opens ever call — from the same origin as the terminal socket, so
+/// the same allowlist. The CSRF header alone is not enough here: a page a veld run
+/// serves reaches this router same-origin through the run's `/__veld__/*` Caddy
+/// route, and could set it.
+fn window_origin(headers: &HeaderMap, what: &str) -> Result<(), ApiError> {
+    if origin_allowed(headers) {
+        return Ok(());
+    }
+    log_rejected_origin(what, headers);
+    Err(err(StatusCode::FORBIDDEN, "origin not allowed"))
+}
+
+/// Session ids allowed to [`paste_file`] before their terminal exists, each until
+/// its deadline.
+///
+/// The New worktree dialog's files have to be on disk *before* the pane is
+/// minted — their paths are part of the first message, and the first message is
+/// part of the launch — but the paste route only writes for a live session. This
+/// is the window between the two, opened by [`reserve_uploads`] and closed by the
+/// mint.
+static UPLOAD_RESERVATIONS: LazyLock<Mutex<HashMap<String, Instant>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// How long a reservation stands *between files*. Generous, because a large
+/// screenshot over a slow tunnel is the case it exists for; bounded, because it
+/// is a write grant. Each file that lands restarts it ([`upload_reserved`]): the
+/// dialog uploads one at a time, and twenty large files over a slow link can
+/// take longer than this in total without any single one coming close.
+const UPLOAD_RESERVATION_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// More reservations than anyone has dialogs open is a page doing something
+/// else. Refused rather than evicted, so a flood cannot cancel a real one.
+const MAX_UPLOAD_RESERVATIONS: usize = 64;
+
+/// Whether `id` holds a live reservation — and, if it does, restart its clock,
+/// because the caller is a file that just arrived for it.
+fn upload_reserved(id: &str) -> bool {
+    let now = Instant::now();
+    let mut held = UPLOAD_RESERVATIONS
+        .lock()
+        .expect("upload reservations poisoned");
+    match held.get_mut(id) {
+        Some(until) if *until > now => {
+            *until = now + UPLOAD_RESERVATION_TTL;
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Let [`paste_file`] write for a session that does not exist yet.
+///
+/// The paste route's own gate — CSRF and a well-formed id — plus the terminal
+/// socket's origin check ([`window_origin`]), so it grants nothing a page could
+/// not already get by opening a terminal; what it saves is spawning one before
+/// its first message is ready.
+async fn reserve_uploads(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    window_origin(&headers, "upload reservation")?;
+    let now = Instant::now();
+    let mut held = UPLOAD_RESERVATIONS
+        .lock()
+        .expect("upload reservations poisoned");
+    held.retain(|_, until| *until > now);
+    if held.len() >= MAX_UPLOAD_RESERVATIONS && !held.contains_key(&id) {
+        return Err(err(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many terminals waiting for their files",
+        ));
+    }
+    held.insert(id, now + UPLOAD_RESERVATION_TTL);
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Consume a ticket. Returns `None` if it is unknown, already used, or
@@ -3280,7 +3576,8 @@ struct PasteFileResponse {
 ///   could drop files onto the developer's disk.
 /// - **A live session id**, which a cross-origin page cannot guess: ids are
 ///   client-chosen but the session must already exist in [`SESSIONS`], so this
-///   writes only for someone who already has a terminal open.
+///   writes only for someone who already has a terminal open — or is about to,
+///   and said so through [`reserve_uploads`] with the same CSRF header.
 /// - **A size cap** ([`MAX_PASTE_BYTES`]), enforced by the route's own body limit
 ///   layer and re-checked here.
 ///
@@ -3307,7 +3604,7 @@ async fn paste_file(
     if body.len() > MAX_PASTE_BYTES {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "file is too large"));
     }
-    if !SESSIONS.lock().await.contains_key(&id) {
+    if !SESSIONS.lock().await.contains_key(&id) && !upload_reserved(&id) {
         return Err(err(StatusCode::NOT_FOUND, "no such terminal session"));
     }
 
@@ -6010,6 +6307,9 @@ mod tests {
                 "/api/pty/sessions/a/agent-state",
                 r#"{"tool":"claude","state":"blocked"}"#,
             ),
+            // A write grant for the paste directory, and a claim on a prompt.
+            ("POST", "/api/pty/sessions/a/reserve", ""),
+            ("POST", "/api/pty/sessions/a/launch-prompt/take", ""),
         ] {
             let res = routes()
                 .oneshot(
@@ -6495,6 +6795,235 @@ mod tests {
             assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
 
             end_session(&sid, "test cleanup").await;
+        }
+
+        /// A POST with no body from a Veld window's origin, for the two
+        /// launch-prompt routes — CSRF-headed when `csrf`.
+        async fn post_route(
+            addr: SocketAddr,
+            sid: &str,
+            route: &str,
+            csrf: bool,
+        ) -> reqwest::Response {
+            let mut req = reqwest::Client::new()
+                .post(format!("http://{addr}/api/pty/sessions/{sid}/{route}"));
+            if csrf {
+                req = req.header("X-Veld-Request", "1");
+            }
+            req.header("Origin", allowed_origins()[0].as_str())
+                .send()
+                .await
+                .expect("request")
+        }
+
+        async fn claim(addr: SocketAddr, sid: &str) -> bool {
+            let res = post_route(addr, sid, "launch-prompt/take", true).await;
+            assert_eq!(res.status(), reqwest::StatusCode::OK);
+            res.json::<serde_json::Value>().await.unwrap()["claimed"]
+                .as_bool()
+                .expect("a claimed flag")
+        }
+
+        fn agent_launch() -> PaneLaunch {
+            PaneLaunch {
+                spec_id: "claude".to_owned(),
+                label: "Claude".to_owned(),
+                argv: vec!["claude".to_owned()],
+                env: Vec::new(),
+                token: "tok".to_owned(),
+                record_token: true,
+            }
+        }
+
+        #[tokio::test]
+        async fn a_reserved_session_takes_uploads_before_it_exists() {
+            isolate_paste_dir();
+            // The New worktree dialog's files go up before the pane is minted —
+            // their paths are part of its first message — so the paste route has
+            // to write for a session that is not live yet, and only that one.
+            let addr = serve().await;
+            let sid = session_id();
+            let res = post_route(addr, &sid, "reserve", false).await;
+            assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+            // A dev app's page reaches this router same-origin through its run's
+            // `/__veld__/*` route and can set the CSRF header; the origin is what
+            // tells it from a Veld window.
+            for route in ["reserve", "launch-prompt/take"] {
+                let res = reqwest::Client::new()
+                    .post(format!("http://{addr}/api/pty/sessions/{sid}/{route}"))
+                    .header("X-Veld-Request", "1")
+                    .header("Origin", "https://web.my-run.my-app.localhost")
+                    .send()
+                    .await
+                    .expect("request");
+                assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN, "{route}");
+            }
+            let (status, _) = post_paste(addr, &sid, "x.png", b"png".to_vec()).await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "a refused reservation granted nothing"
+            );
+
+            let res = post_route(addr, &sid, "reserve", true).await;
+            assert_eq!(res.status(), reqwest::StatusCode::NO_CONTENT);
+            let (status, body) = post_paste(addr, &sid, "x.png", b"png".to_vec()).await;
+            assert_eq!(status, reqwest::StatusCode::OK, "{body}");
+            let path = serde_json::from_str::<serde_json::Value>(&body).unwrap()["path"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            let _ = std::fs::remove_file(path);
+
+            let (status, _) = post_paste(addr, &session_id(), "x.png", b"png".to_vec()).await;
+            assert_eq!(
+                status,
+                reqwest::StatusCode::NOT_FOUND,
+                "another id was let through"
+            );
+        }
+
+        #[test]
+        fn each_upload_restarts_its_reservation_and_a_lapsed_one_stays_lapsed() {
+            // Twenty large files over a slow link can outlast the TTL in total, so
+            // the clock runs between files, not from the reservation.
+            let now = Instant::now();
+            let (live, lapsed) = (session_id(), session_id());
+            {
+                let mut held = UPLOAD_RESERVATIONS.lock().unwrap();
+                held.insert(live.clone(), now + Duration::from_secs(1));
+                held.insert(lapsed.clone(), now);
+            }
+            assert!(upload_reserved(&live));
+            let until = UPLOAD_RESERVATIONS.lock().unwrap()[&live];
+            assert!(until > now + UPLOAD_RESERVATION_TTL - Duration::from_secs(1));
+            assert!(!upload_reserved(&lapsed));
+            // Not revived. (A concurrent test's `reserve` may have swept it.)
+            assert!(
+                UPLOAD_RESERVATIONS
+                    .lock()
+                    .unwrap()
+                    .get(&lapsed)
+                    .is_none_or(|until| *until == now)
+            );
+            let mut held = UPLOAD_RESERVATIONS.lock().unwrap();
+            held.remove(&live);
+            held.remove(&lapsed);
+        }
+
+        #[tokio::test]
+        async fn a_launch_prompt_goes_to_whoever_claims_it_first_and_only_to_them() {
+            isolate_paste_dir();
+            let addr = serve().await;
+            let prompt = "Fix the header.\n\n@\"/tmp/shot.png\"";
+
+            // Staged: a private file the pane's environment names.
+            let sid = session_id();
+            let mut launch = agent_launch();
+            assert!(stage_launch_prompt(&sid, prompt, &mut launch).await);
+            let [(key, path)] = launch.env.as_slice() else {
+                panic!(
+                    "expected exactly the launch prompt variable: {:?}",
+                    launch.env
+                );
+            };
+            assert_eq!(key, "VELD_LAUNCH_PROMPT");
+            let path = PathBuf::from(path);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), prompt);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+                assert_eq!(mode & 0o777, 0o600);
+            }
+
+            // The wrapper declined it, so the window gets it — once.
+            assert!(claim(addr, &sid).await);
+            assert!(!path.exists(), "the claim must consume the file");
+            assert!(
+                !claim(addr, &sid).await,
+                "a second claim would type it twice"
+            );
+
+            // The wrapper took it at launch, so the window must not type it.
+            let sid = session_id();
+            let mut launch = agent_launch();
+            assert!(stage_launch_prompt(&sid, prompt, &mut launch).await);
+            let path = PathBuf::from(&launch.env[0].1);
+            assert_eq!(
+                veld_core::agent::take_launch_prompt(&path)
+                    .unwrap()
+                    .as_deref(),
+                Some(prompt)
+            );
+            // Not the window's — and known to be sent, not merely unknown.
+            let res = post_route(addr, &sid, "launch-prompt/take", true).await;
+            let body = res.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(body["claimed"], false);
+            assert_eq!(body["staged"], true);
+
+            // Nothing staged for an id at all — after a restart, the same answer
+            // for one that was: not the window's to type, and not known to be sent.
+            let res = post_route(addr, &session_id(), "launch-prompt/take", true).await;
+            let body = res.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(body["claimed"], false);
+            assert_eq!(body["staged"], false);
+            let res = post_route(addr, &sid, "launch-prompt/take", false).await;
+            assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+        }
+
+        #[test]
+        fn only_a_fresh_launch_with_agent_integration_takes_a_prompt() {
+            let on: BTreeMap<String, String> =
+                [("VELD_AGENT_HOOKS".to_owned(), "1".to_owned())].into();
+            let off = BTreeMap::new();
+            assert!(launch_takes_prompt(false, None, &on));
+            assert!(launch_takes_prompt(false, Some(PaneMode::Fresh), &on));
+            // Each "no" is the window typing it in instead.
+            assert!(!launch_takes_prompt(false, Some(PaneMode::Fresh), &off));
+            assert!(!launch_takes_prompt(true, Some(PaneMode::Fresh), &on));
+            assert!(!launch_takes_prompt(false, Some(PaneMode::Resume), &on));
+            assert!(!launch_takes_prompt(false, Some(PaneMode::Adopt), &on));
+        }
+
+        #[tokio::test]
+        async fn a_prompt_an_argument_cannot_carry_is_left_for_the_window() {
+            isolate_paste_dir();
+            let too_long = "x".repeat(veld_core::agent::MAX_LAUNCH_PROMPT_BYTES + 1);
+            for prompt in ["", "  \n", "nul\0inside", too_long.as_str()] {
+                let sid = session_id();
+                let mut launch = agent_launch();
+                assert!(!stage_launch_prompt(&sid, prompt, &mut launch).await);
+                assert!(
+                    launch.env.is_empty(),
+                    "nothing may reach the pane's environment"
+                );
+                assert!(!LAUNCH_PROMPTS.lock().unwrap().contains_key(&sid));
+            }
+        }
+
+        #[tokio::test]
+        async fn a_restaged_prompt_retires_the_one_it_replaces() {
+            isolate_paste_dir();
+            // A connect retried after its ticket went unredeemed mints again; the
+            // first file has no reader left and must not wait a day for the sweep.
+            let sid = session_id();
+            let mut first = agent_launch();
+            assert!(stage_launch_prompt(&sid, "one", &mut first).await);
+            let first = PathBuf::from(&first.env[0].1);
+            let mut second = agent_launch();
+            assert!(stage_launch_prompt(&sid, "two", &mut second).await);
+            let second = PathBuf::from(&second.env[0].1);
+            for _ in 0..100 {
+                if !first.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert!(!first.exists());
+            assert_eq!(std::fs::read_to_string(&second).unwrap(), "two");
+            let _ = veld_core::agent::take_launch_prompt(&second);
+            LAUNCH_PROMPTS.lock().unwrap().remove(&sid);
         }
 
         #[tokio::test]
@@ -8387,6 +8916,11 @@ mod tests {
         assert!(!is_paste_name(&format!("{}-a.png", "z".repeat(32))));
         // No hint at all.
         assert!(!is_paste_name(&format!("{}-", "a".repeat(32))));
+        // A launch prompt nobody claimed, and one whose claim could not remove it:
+        // both are the reaper's to sweep (`veld_core::agent::take_launch_prompt`).
+        let prompt = veld_core::agent::launch_prompt_file_name();
+        assert!(is_paste_name(&prompt));
+        assert!(is_paste_name(&format!("{prompt}.taken-123")));
     }
 
     #[test]

@@ -1033,6 +1033,62 @@ fn agent_script(tool: veld_core::agent::AgentTool, dir: &Path, cli: &Path) -> St
             ),
         ),
     };
+    // Only for a tool that takes its first message as an argument. Every other
+    // wrapper just drops the variable, and the window types the prompt in once the
+    // agent opens its input — the claim below is what tells it to.
+    let prompt_block = if tool.takes_launch_prompt() {
+        format!(
+            r#"veld_prompt=
+if [ -n "$veld_prompt_file" ]; then
+  # Interactive launches only: rule 1's bare test, deliberately without the
+  # tool's extra first words — after a subcommand a trailing argument need not
+  # be a prompt, and declining only means the window types it. Also not after
+  # `--`, where the prompt would not be the prompt, nor in print mode, which
+  # has its own. Nor when the argv already carries a prompt of its own — a bare
+  # word that is not the value of the flag before it, as in
+  # `--dangerously-skip-permissions "Read AGENTS.md"` — because the agent keeps
+  # the first positional and silently drops a second. A bare word counts as a
+  # value only after a flag known to take one (`launch_prompt_value_flags`), so
+  # a flag missing from that list costs the flash-free launch, never the prompt:
+  # the window types it instead.
+  case "${{1-}}" in
+    "" | -*) veld_prompt=1 ;;
+  esac
+  veld_prev=
+  for veld_arg in "$@"; do
+    case "$veld_arg" in
+      -p* | --print | --) veld_prompt= ; break ;;
+      -*) ;;
+      *)
+        case "$veld_prev" in
+          {value_flags}) ;;
+          *) veld_prompt= ; break ;;
+        esac
+        ;;
+    esac
+    veld_prev=$veld_arg
+  done
+  unset veld_arg veld_prev
+  # The claim is atomic: if the window already typed it in, this gets nothing and
+  # the agent starts bare, which is the right answer. A file that is gone, or a CLI
+  # that fails, is the same nothing.
+  if [ -n "$veld_prompt" ]; then
+    veld_prompt=$({cli} agent-prompt --take "$veld_prompt_file" 2>/dev/null) || veld_prompt=
+  fi
+  # LAST, after `--`: a prompt that begins with `-` is not a flag, and one after a
+  # multi-value flag such as `--add-dir <dirs...>` is not another directory.
+  if [ -n "$veld_prompt" ]; then
+    set -- "$@" -- "$veld_prompt"
+  fi
+fi
+unset veld_prompt veld_prompt_file
+"#,
+            cli = quote(cli),
+            value_flags = tool.launch_prompt_value_flags(),
+        )
+    } else {
+        "unset veld_prompt_file\n".to_owned()
+    };
     format!(
         r#"#!/bin/sh
 {header}
@@ -1141,6 +1197,12 @@ if [ -n "${{VELD_AGENT_HOOKS-}}" ] && [ -n "${{VELD_PTY_SESSION-}}" ]; then
   unset veld_arg
 fi
 
+# The New worktree dialog's prompt, when this launch was given one (`VELD_LAUNCH_PROMPT`
+# names a one-shot file). Out of the environment first and whatever happens next: it
+# is inherited by everything the agent runs, and a nested agent must not find it.
+veld_prompt_file=${{VELD_LAUNCH_PROMPT-}}
+unset VELD_LAUNCH_PROMPT
+{prompt_block}
 if [ -n "$veld_inject" ]; then
   # Say "an agent lives here now, and it is idle". Only this script knows that: the shell
   # sees one long-running command and would otherwise drive an activity spinner for a
@@ -1170,6 +1232,7 @@ exec "$veld_real" "$@"
         file_check = file_check,
         rule1_pattern = rule1_pattern,
         value_guard = value_guard,
+        prompt_block = prompt_block,
     )
 }
 
@@ -1776,6 +1839,138 @@ mod tests {
             "{:?}",
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    /// The launch prompt, run for real: which launches take it, where it goes in the
+    /// argv, and that the variable never reaches the agent — taken or not.
+    ///
+    /// The stand-in `veld` claims the file the way the real `agent-prompt --take` does
+    /// (print it, remove it, fail if it is gone), so "taken" is observable as the file
+    /// disappearing and "left for the window" as it staying put. Its tools are named by
+    /// absolute path: the wrapper runs with a cleared environment, PATH included.
+    #[test]
+    fn the_claude_wrapper_takes_a_launch_prompt_last_after_a_double_dash() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+
+        let settings = tmp.path().join("ephemeral.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let fake_cli = tmp.path().join("veld");
+        std::fs::write(
+            &fake_cli,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 agent-settings) printf '%s\\n' {} ;;\n\
+                 agent-prompt) [ \"$2\" = --take ] && [ -f \"$3\" ] || exit 1; /bin/cat \"$3\"; /bin/rm \"$3\" ;;\n\
+                 *) exit 2 ;;\n\
+                 esac\n",
+                quote(&settings)
+            ),
+        )
+        .unwrap();
+        set_mode(&fake_cli, 0o755).unwrap();
+        prepare_in(&shims, &fake_cli).unwrap();
+
+        // Each argument bracketed, so one argument holding a newline and a space is
+        // told apart from several; then whether the variable leaked through `exec`.
+        for tool in ["claude", "codex"] {
+            let real = real_dir.join(tool);
+            std::fs::write(
+                &real,
+                "#!/bin/sh\nprintf 'REAL'\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\n\
+                 printf ' env=%s\\n' \"${VELD_LAUNCH_PROMPT-unset}\"\n",
+            )
+            .unwrap();
+            set_mode(&real, 0o755).unwrap();
+        }
+
+        let path = format!("{}:{}", shims.display(), real_dir.display());
+        let prompt_file = tmp
+            .path()
+            .join("0123456789abcdef0123456789abcdef-launch-prompt.txt");
+        let run = |tool: &str, args: &[&str], prompt: Option<&str>| -> String {
+            match prompt {
+                Some(text) => std::fs::write(&prompt_file, text).unwrap(),
+                None => {
+                    let _ = std::fs::remove_file(&prompt_file);
+                }
+            }
+            let out = std::process::Command::new(shims.join(tool))
+                .args(args)
+                .env_clear()
+                .env("PATH", &path)
+                .env("VELD_AGENT_HOOKS", "1")
+                .env("VELD_PTY_SESSION", "pane-1")
+                .env("VELD_LAUNCH_PROMPT", &prompt_file)
+                .output()
+                .expect("run the shim");
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let settings = format!("[--settings][{}]", settings.display());
+        let prompt = "Fix the header.\n\n@\"/tmp/Bild schirm.png\"";
+
+        // The case this exists for: taken, last, after `--`, as ONE argument.
+        assert_eq!(
+            run("claude", &[], Some(prompt)).trim(),
+            format!("REAL{settings}[--][{prompt}] env=unset")
+        );
+        assert!(!prompt_file.exists(), "the claim must consume the file");
+        // A prompt that looks like a flag is still the prompt, and the user's own
+        // flags stay ahead of it.
+        assert_eq!(
+            run("claude", &["--add-dir", "../x"], Some("--help me")).trim(),
+            format!("REAL{settings}[--add-dir][../x][--][--help me] env=unset")
+        );
+        // A boolean flag with no word after it is no standing prompt.
+        assert_eq!(
+            run(
+                "claude",
+                &["--dangerously-skip-permissions", "-c"],
+                Some("go")
+            )
+            .trim(),
+            format!("REAL{settings}[--dangerously-skip-permissions][-c][--][go] env=unset")
+        );
+
+        // Left for the window to type in — the file stays — wherever a trailing
+        // argument would not be the first message: print mode, a subcommand, and an
+        // argv that already has its own `--`.
+        for args in [
+            &["-p", "hi"][..],
+            &["--print"],
+            &["mcp", "list"],
+            &["--", "mine"],
+            // Its own standing prompt, which a second positional would lose to —
+            // after a value flag's value, an inline value, a boolean flag, and a
+            // flag whose value is optional.
+            &["--permission-mode", "plan", "Read AGENTS.md first"],
+            &["--model=opus", "Read AGENTS.md first"],
+            &["--dangerously-skip-permissions", "Read AGENTS.md first"],
+            &["--resume", "Read AGENTS.md first"],
+        ] {
+            let out = run("claude", args, Some(prompt));
+            assert!(!out.contains("Fix the header"), "{args:?}: {out}");
+            assert!(out.trim().ends_with("env=unset"), "{args:?}: {out}");
+            assert!(prompt_file.exists(), "{args:?} took the prompt");
+        }
+        // Already claimed by the window: the agent starts bare.
+        assert_eq!(
+            run("claude", &[], None).trim(),
+            format!("REAL{settings} env=unset")
+        );
+        // A tool that does not take one leaves it for the window, and still drops the
+        // variable so nothing it runs can find it.
+        let out = run("codex", &[], Some(prompt));
+        assert!(!out.contains("Fix the header"), "{out}");
+        assert!(out.trim().ends_with("env=unset"), "{out}");
+        assert!(prompt_file.exists());
     }
 
     /// The `codex` wrapper's injection differs from `claude`'s in exactly the way

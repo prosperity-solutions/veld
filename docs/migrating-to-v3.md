@@ -523,8 +523,8 @@ the pane chooser is on screen, under the same bounds and the same
 `extensions.autoRefresh` off switch as `ide.extensions`.
 
 `ide.panes[]` also gained `agent` — whether the pane is a coding agent, i.e.
-whether the IDE's *New worktree…* dialog offers it and types the prompt you typed
-into it. Additive and usually unnecessary: with the key absent the answer is
+whether the IDE's *New worktree…* dialog offers it and hands it the prompt you
+typed as its first message. Additive and usually unnecessary: with the key absent the answer is
 inferred from `resume`, so an agent pane written the way this guide already
 describes is offered without any change. Set it where the inference is wrong —
 `true` for an agent with no resume flag, `false` to keep a resumable pane (a

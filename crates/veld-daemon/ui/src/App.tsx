@@ -47,6 +47,7 @@ import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
 import { recallPromptDraft, rememberPromptDraft } from "./ide/promptDraft";
 import {
   applyTerminalPrefs,
+  type QueuedFile,
   queueInitialPrompt,
   setBellSuppressed,
   setPaneCloseHandler,
@@ -365,6 +366,7 @@ import {
   isElectron,
   layoutSlot,
   openSettingsOnBoot,
+  pathForFile,
   topbarClass,
   windowRestored,
   windowSeed,
@@ -3884,6 +3886,7 @@ function AppInner(props: {
     worktreeId: number;
     spec: PaneSpec;
     prompt: string;
+    attachments: QueuedFile[];
   } | null>(null);
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
@@ -4019,7 +4022,7 @@ function AppInner(props: {
         // Queued before the pane can mount, which is what makes the prompt
         // arrive on this pane's *first* launch rather than on whatever it is
         // doing by the time a later effect gets round to it.
-        queueInitialPrompt(agentTab.id, wanted.prompt, wanted.spec.label);
+        queueInitialPrompt(agentTab.id, wanted.prompt, wanted.spec.label, wanted.attachments);
       }
       // Idempotent, because a React updater may run twice: `hasTab` makes a
       // second pass a no-op instead of a second copy of the same pane.
@@ -7541,6 +7544,7 @@ function AppInner(props: {
           onAgentPicked={(agentId) =>
             rememberLastAgent(window.localStorage, repo.root, agentId)
           }
+          pathOf={pathForFile}
           // Also per project and also this client's own storage — see
           // `ide/promptDraft.ts`. Read here rather than in an effect because the
           // dialog seeds its field from it once, at mount.
@@ -7560,7 +7564,9 @@ function AppInner(props: {
             // for no reason, and left a create that would 422 the day anyone
             // added that attribute (as two other bodies in `desktop.rs` already
             // have).
-            const { agent, prompt, ...create } = body;
+            // `attachments` likewise: they are `File`s for the pane to paste,
+            // and a `File` spread into a JSON body serialises as `{}`.
+            const { agent, prompt, attachments, ...create } = body;
             try {
               created = await api.createWorktree({
                 repo_root: repo.root,
@@ -7591,6 +7597,7 @@ function AppInner(props: {
                   worktreeId: created.id,
                   spec,
                   prompt,
+                  attachments: attachments ?? [],
                 };
               } else {
                 // The checkout is made and is perfectly usable; only the agent
