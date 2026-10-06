@@ -368,6 +368,9 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onState: (fn) => on("veld:browser:state", fn),
     /** A `target=_blank` inside a pane: the UI decides where the tab opens. */
     onOpenRequest: (fn) => on("veld:browser:open-request", fn),
+    /** A pane's page closed itself (`window.close()`): its view is already
+     *  gone, and the UI closes the tab. */
+    onClosed: (fn) => on("veld:browser:closed", fn),
     /** An app accelerator a focused view would otherwise have swallowed. */
     onAccelerator: (fn) => on("veld:browser:accelerator", fn),
     /** A pane's page took the keyboard. A native view is outside the host
