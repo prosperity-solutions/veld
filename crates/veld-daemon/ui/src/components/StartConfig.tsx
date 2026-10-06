@@ -115,7 +115,7 @@ export function startStorageKey(path: string): string {
  * The user's *stored* choice for `w` — without the fallback to the default.
  *
  * `null` means the user has not deliberately picked a preset/node set yet. The
- * top bar's ▶ (and the rail's) open the picker on this state rather than
+ * top bar's ▶ (and ⌘⇧Enter) open the picker on this state rather than
  * guessing at the default — the point of the first-user-test change.
  */
 export function resolveStoredSelection(w: Worktree): StartSelection | null {
@@ -132,7 +132,7 @@ export function resolveStoredSelection(w: Worktree): StartSelection | null {
 
 /**
  * What ▶ would start for `w`, resolved straight from localStorage. The rail's
- * per-row controls need this for worktrees other than the selected one, where
+ * per-row menu needs this for worktrees other than the selected one, where
  * the `usePersisted` hook backing the top bar isn't available.
  */
 export function resolveStartSelection(w: Worktree): StartSelection | null {

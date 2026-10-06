@@ -2063,8 +2063,8 @@ function AppInner(props: {
   // Start configuration (preset or explicit node selections), remembered
   // per worktree. Falls back to a sensible default: first preset, else all
   // nodes at their default variants.
-  // Reactive copy for the top bar's StartConfig; the rail's per-row controls
-  // read the same storage through `resolveStartSelection` instead, since a
+  // Reactive copy for the top bar's StartConfig; the rail's context menu
+  // reads the same storage through `resolveStartSelection` instead, since a
   // hook can't be called per row.
   const startKey = startStorageKey(worktree?.path ?? "_");
   const [startRaw, setStartRaw] = usePersisted(startKey, "");
@@ -2251,8 +2251,8 @@ function AppInner(props: {
   }, [worktree?.path, varsTick]);
 
   /**
-   * Whether ▶ can do anything for this worktree. One predicate for ALL FOUR
-   * entry points (top bar, rail row, context menu, palette) — they disagreed
+   * Whether ▶ can do anything for this worktree. One predicate for every
+   * entry point (top bar, context menu, palette — the rail row once had one too) — they disagreed
    * before: some checked "is anything in flight", others "is there anything
    * to start", so one surface offered an enabled button whose click was a
    * silent no-op while another allowed a double-spawned `veld start`.
@@ -2308,7 +2308,7 @@ function AppInner(props: {
    * menu, the palette.
    *
    * Still `activeRun`, deliberately. Those surfaces name a worktree and never a
-   * run — a rail row cannot ask "which one" — and their ■ appears exactly when
+   * run — a rail row cannot ask "which one" — and their ■ appears whenever
    * `worktreeStatus` says something is live. Binding them to the window's *chosen*
    * run instead would silently break that pairing: with an ended run selected and
    * a sibling live, the row would show ■ (a run IS up) and clicking it would do
@@ -2366,15 +2366,15 @@ function AppInner(props: {
     liveRuns(runsForWorktree(envs, w)).length > 0 &&
     pendingForRun(w, anotherNameFor(w)) === null;
 
-  // Run actions for ANY worktree, not just the selected one — the rail rows,
-  // the context menu and the palette all drive these.
+  // Run actions for ANY worktree, not just the selected one — the rail rows
+  // (■ only; start via their menu), the context menu and the palette all drive these.
   //
   // `name` overrides the default target, which is how "start another run" asks for
   // a fresh environment rather than for whatever ▶ would have started.
   const startWorktree = (w: Worktree, name?: string) => {
     const sel = resolveStartSelection(w);
     if (!sel) {
-      // Defence in depth: all four ▶ surfaces gate on `canStartWorktree`,
+      // Defence in depth: every start surface gates on `canStartWorktree`,
       // which rejects exactly this case, so this should be unreachable. If a
       // future caller skips the guard, say what's wrong instead of no-opping.
       notifyError(
@@ -2426,7 +2426,7 @@ function AppInner(props: {
        * poll-time rule like "select the newest run" would also hijack the selection
        * when the *other* thing in this directory — a coding agent — starts one.
        *
-       * Only for the selected worktree: a rail row's ▶ deliberately does not move
+       * Only for the selected worktree: starting a rail row from its menu deliberately does not move
        * the selection, and another worktree's choice is stored under its own key.
        */
       const previous = worktree && w.id === worktree.id ? selectedRunName : null;
@@ -2461,7 +2461,7 @@ function AppInner(props: {
   };
 
   /**
-   * ▶ from any surface — the rail, the top bar, ⌘⇧Enter. With a stored choice
+   * ▶ from the top bar and ⌘⇧Enter. With a stored choice
    * it starts straight through; with **no** choice yet it selects the worktree
    * and opens the picker, so a first start is "choose, then Done" — not a
    * silent default run of the first preset.
@@ -2471,9 +2471,8 @@ function AppInner(props: {
    * keyboard one shipped missing the picker check the other two already had.
    * `resolveStoredSelection`, not the top bar's reactive `storedStart`: the
    * latter is a hook value scoped to whichever worktree is on screen when it
-   * renders, and both the rail (per-row, no hook) and the keyboard chord
-   * (fires long after render, off a ref) need to ask the question fresh for
-   * an arbitrary worktree instead.
+   * renders, and the keyboard chord (fires long after render, off a ref)
+   * needs to ask the question fresh for an arbitrary worktree instead.
    */
   const startOrOpenPicker = (w: Worktree) => {
     if (resolveStoredSelection(w)) {
@@ -3751,7 +3750,7 @@ function AppInner(props: {
           // same choice of target by `running || starting`. The start side
           // goes through `startOrOpenPickerRef` rather than starting the
           // worktree directly — a worktree with no stored selection yet needs
-          // the picker, the same as the ▶ button and the rail's row already do.
+          // the picker, the same as the ▶ button already does.
           const pendingAction = pendingActionRef.current;
           const starting = startingRef.current;
           const running = runningRef.current;
@@ -7380,7 +7379,6 @@ function AppInner(props: {
             wide={railWide}
             width={railW}
             canRun={canRunWorktreeNow}
-            canStart={canStartWorktree}
             pendingFor={pendingFor}
             elsewhere={elsewhere}
             onToggle={() => setRailWide((v) => !v)}
@@ -7388,7 +7386,6 @@ function AppInner(props: {
             onSelect={(w) => void selectWorktree(w)}
             onAdd={(lane) => setDialog({ kind: "new-worktree", lane })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
-            onStart={startOrOpenPicker}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
             showWorking={activity.showWorking}
@@ -9158,7 +9155,6 @@ function Rail(props: {
   wide: boolean;
   width: number;
   canRun: (w: Worktree) => boolean;
-  canStart: (w: Worktree) => boolean;
   pendingFor: (w: Worktree) => PendingAction | null;
   /** Worktrees another client is showing, and which one has each. Clicking one
    *  goes there instead of opening it here, so it is marked — and named, because
@@ -9171,7 +9167,6 @@ function Rail(props: {
   /** Open the create dialog, filing the result into `lane` (`""` = ungrouped). */
   onAdd: (lane: string) => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
-  onStart: (w: Worktree) => void;
   onStop: (w: Worktree) => void;
   /** Go to this worktree and show its node health — the attention affordance on a
    *  failed or recovering row. Selects first, so it can be refused like any other
@@ -10295,8 +10290,18 @@ function Rail(props: {
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.
+              //
+              // Stop-only: the control appears while a run is live (or this
+              // window's action on it is in flight) and is gone otherwise. A ▶ on
+              // every idle row was a column of green nobody clicked — starting
+              // stays on the top bar, the context menu and the palette — while
+              // the ■ doubles as the at-a-glance "this one is running" marker.
               const showRunControl =
-                props.wide && !trashed && !discoveredRow && props.canRun(w);
+                props.wide &&
+                !trashed &&
+                !discoveredRow &&
+                props.canRun(w) &&
+                (running || spinner !== null);
               const holder = props.elsewhere.get(w.id);
               const away = holder !== undefined;
               // One pass over this worktree's sessions, here rather than inside the
@@ -10518,38 +10523,23 @@ function Rail(props: {
                     />
                   )}
                   {showRunControl && (
-                    <Tooltip
-                      label={
-                        pending
-                          ? `${pending}…`
-                          : running
-                            ? `Stop ${worktreeLabel(w)}`
-                            : `Start ${worktreeLabel(w)}`
-                      }
-                    >
+                    <Tooltip label={pending ? `${pending}…` : `Stop ${worktreeLabel(w)}`}>
                       <button
                         type="button"
-                        className={`wt-run${running ? " on" : ""}`}
-                        aria-label={running ? `Stop ${worktreeLabel(w)}` : `Start ${worktreeLabel(w)}`}
-                        // Mirrors the context menu and the palette. Without the
-                        // start guard the button looked live but its click hit a
-                        // no-op for a worktree with no presets and no nodes.
-                        //
+                        className="wt-run"
+                        aria-label={`Stop ${worktreeLabel(w)}`}
                         // Deliberately keyed on `pending`, not on `spinner`: a
                         // spinner is a state *display*, and a run that some other
                         // surface started is still legitimately stoppable while it
                         // comes up. Only an action this window fired and has not
                         // seen land disables the control, which is what stops a
                         // double fire.
-                        disabled={
-                          pending !== null || (!running && !props.canStart(w))
-                        }
+                        disabled={pending !== null}
                         onClick={(e) => {
-                          // The row is clickable too; without this, starting a run
+                          // The row is clickable too; without this, stopping a run
                           // would also switch the selection out from under the user.
                           e.stopPropagation();
-                          if (running) props.onStop(w);
-                          else props.onStart(w);
+                          props.onStop(w);
                         }}
                       >
                         {spinner ? (
@@ -10558,10 +10548,8 @@ function Rail(props: {
                           // held only for locally-fired actions before `spinner`
                           // took the observed transition into account too.
                           <Loader size={10} color={actionColor(spinner)} />
-                        ) : running ? (
-                          <IconPlayerStopFilled size={10} />
                         ) : (
-                          <IconPlayerPlayFilled size={10} />
+                          <IconPlayerStopFilled size={10} />
                         )}
                       </button>
                     </Tooltip>
