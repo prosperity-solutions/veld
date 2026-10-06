@@ -1314,23 +1314,30 @@ const CAPABILITY_GATES: Record<string, CapabilityGate> = {
 };
 
 /**
- * The panel scrolls, the sidebar and the footnote do not — the same inner-scroll
+ * The panel scrolls, the footnote does not, and the sidebar only on a window
+ * shorter than its list of groups — the same inner-scroll
  * shape `NewWorktreeDialog` uses, and for the same reason: with the modal body as
  * the scroller, choosing a group would scroll the sidebar out of reach of the next
- * choice. `minHeight` is a floor, not a fixed height — it stops the two-row Browser
- * panes group from collapsing to a modal barely taller than its own title bar. The
- * modal does still grow between that floor and the `maxHeight` cap, which is the
- * shared `min(58vh, …)` so a laptop sees the bottom of the tallest panel; a fixed
- * height would stop the growth at the cost of a lot of dead space under the short
- * groups.
+ * choice.
+ *
+ * **Its height is whatever the window leaves**, not a cap of its own. The modal
+ * `ownsScroll`, so it stops at the viewport and the panel is the one thing that
+ * shrinks into it. A `maxHeight` here used to do that job by guessing, and guessed
+ * wrong at both ends: a short window ran out of room above the cap, so the modal
+ * scrolled as well and the footnote went below the fold, while a tall one stopped
+ * at the cap with the bottom of a long group out of sight and screen to spare.
+ *
+ * `minHeight` is a floor, not a fixed height — it stops the two-row Browser panes
+ * group from collapsing to a modal barely taller than its own title bar. It yields
+ * to a short window (`40dvh`), because a floor the window cannot fit is the modal
+ * scrolling a second time.
  */
 const PANEL_STYLE = {
   flex: 1,
   // The repo's flexbox idiom: without it, one long help line sets the panel's
   // width and the sidebar gets squeezed instead of the text wrapping.
   minWidth: 0,
-  minHeight: 260,
-  maxHeight: "min(58vh, 520px)",
+  minHeight: "min(260px, 40dvh)",
   overflowY: "auto" as const,
   // Keeps a focused control's ring off the scrollbar, as in NewWorktreeDialog.
   paddingRight: 8,
@@ -1539,8 +1546,11 @@ export function SettingsDialog(props: {
   };
 
   return (
-    <Modal title="Settings" size={820} onClose={props.onClose}>
-      <Stack gap="md">
+    <Modal title="Settings" size={820} onClose={props.onClose} ownsScroll>
+      {/* The `minHeight: 0` chain `ownsScroll` asks for: Stack, then Tabs, then
+          the panel — each shrinks into its parent rather than overflowing it,
+          down to the panel's floor (`PANEL_STYLE`). */}
+      <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
         {(!settings || !catalog) && !catalogError && (
           <Text size="sm" c="dimmed">
             Loading settings from the daemon…
@@ -1596,8 +1606,23 @@ export function SettingsDialog(props: {
                  lengths started at four different x positions. `flex: 1` stays, so the
                  label still fills the row and the whole tab is the hit target. */
               styles={{ tabLabel: { textAlign: "left" } }}
+              style={{ flex: 1, minHeight: 0 }}
             >
-              <Tabs.List visibleFrom="sm" w={180} style={{ flex: "none" }}>
+              {/* Scrolls only when the window is shorter than the list of groups —
+                  the one case where shrinking it would put a group out of reach.
+                  `nowrap` because Mantine's list wraps, and a sidebar shorter
+                  than its tabs would start a second column of them behind the
+                  panel instead of scrolling. */}
+              <Tabs.List
+                visibleFrom="sm"
+                w={180}
+                style={{
+                  flex: "none",
+                  flexWrap: "nowrap",
+                  minHeight: 0,
+                  overflowY: "auto",
+                }}
+              >
                 {catalog.groups.map((g) => (
                   <Tabs.Tab
                     key={g.id}

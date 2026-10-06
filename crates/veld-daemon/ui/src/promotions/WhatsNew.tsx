@@ -38,15 +38,22 @@
  * project's cards in the same list they would be Veld putting its name over text a
  * teammate wrote. Attribution belongs on each card, and it is there.
  *
- * **The card list is the scroll region**, bounded to `min(58vh, 560px)`, with the
- * filter above it and the footer below it — the same shape `NewWorktreeDialog`
- * uses, and worth copying rather than reinventing, because three other shapes were
- * tried here first. A Mantine `ScrollArea` inside an unbounded modal body gave two
- * scrollbars side by side (the body scrolls too). Making the body a fixed-height
- * flex column fixed that and clipped the filter row off the *top*. `position:
- * sticky` on the footer fixed *that* and left the button floating over the cards
- * with the body's scrollbar pinned to the dialog's outer edge. Bounding the list is
- * the version with one scrollbar, inset, and nothing overlapping anything.
+ * **The card list is the scroll region**, with the filter above it and the footer
+ * below it — the same shape `NewWorktreeDialog` uses, and worth copying rather than
+ * reinventing, because three other shapes were tried here first. A Mantine
+ * `ScrollArea` inside an unbounded modal body gave two scrollbars side by side (the
+ * body scrolls too). Making the body a fixed-height flex column fixed that and
+ * clipped the filter row off the *top*. `position: sticky` on the footer fixed
+ * *that* and left the button floating over the cards with the body's scrollbar
+ * pinned to the dialog's outer edge.
+ *
+ * Bounding the list to `min(58vh, 560px)` came next, and was one scrollbar only
+ * while the window had room for the cap plus the filter and the footer; on a
+ * shorter one the body scrolled as well. So the list's bound is now the window
+ * itself: the modal `ownsScroll`, which caps the *content* at the viewport and
+ * leaves the body a column with no fixed height — the flex column that clipped
+ * the filter, minus the fixed height that did the clipping — and the list is the
+ * one child allowed to shrink.
  */
 
 import { Button, SegmentedControl, Stack, Text } from "@mantine/core";
@@ -82,14 +89,18 @@ export function WhatsNewDialog(props: {
     <Modal
       title="What's new"
       size={720}
+      ownsScroll
       // Esc / close button / overlay. Reading is the button's job alone.
       onClose={props.automatic ? props.onDismiss : props.onRead}
     >
-      <Stack gap="md">
+      <Stack gap="md" style={{ flex: 1, minHeight: 0 }}>
         {tabs && (
           <SegmentedControl
             size="xs"
             fullWidth
+            // Its root clips (`overflow: hidden`), which makes its flex minimum
+            // zero: without this a short window squashes it, not the list.
+            style={{ flexShrink: 0 }}
             value={filter}
             onChange={(v) => setFilter(v as SourceFilter)}
             data={tabs}
@@ -106,9 +117,10 @@ export function WhatsNewDialog(props: {
           // change that landed on a day, so the date is the only grouping the
           // reader needs — and a taxonomy above a list of three is a label to skip.
           //
-          // The list is the scroller, not the modal body: bounded height here is
-          // what leaves exactly one scrollbar, inset from the dialog's edge, with
-          // the filter above it and the footer below it both staying put.
+          // The list is the scroller, not the modal body: it is the one child
+          // here that shrinks (`min-height: 0` in styles.css), which leaves
+          // exactly one scrollbar, inset from the dialog's edge, with the filter
+          // above it and the footer below it both staying put.
           <div className="promo-dialog-scroll">
             <div className="promo-stack">
               {shown.map((c) => (

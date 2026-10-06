@@ -518,13 +518,20 @@ export function WebShareStrip(props: {
           {MODE_COPY.web.stop}
         </Button>
       </Group>
-      {/* Scrolls past four services rather than growing without limit: a run can share
-          as many services as the config declares, and this panel lives inside a modal
-          and inside a card, neither of which can absorb ten rows. */}
+      {/* In a card, scrolls past four services rather than growing without limit: a
+          run can share as many services as the config declares, and a card cannot
+          absorb ten rows. In the sharing modal it does not — the list is most of
+          the dialog, so the modal scrolls it once it reaches the window. A cap there too scrolled inside a modal that was already
+          scrolling, two scrollbars on a short window and dead space on a tall one.
+          `collapsible` is the tell: only the card passes it. */}
       {expanded && (
       <Stack
         gap={8}
-        style={{ maxHeight: "min(46vh, 420px)", overflowY: "auto" }}
+        style={
+          props.collapsible
+            ? { maxHeight: "min(46vh, 420px)", overflowY: "auto" }
+            : undefined
+        }
       >
       {w.public_urls.map((u) => {
         const withPassword = !!w.web_password && u.access !== "link";

@@ -1,5 +1,5 @@
 import { Fragment } from "react";
-import { Badge, Group, Kbd, ScrollArea, Stack, Table, Text } from "@mantine/core";
+import { Badge, Group, Kbd, Stack, Table, Text } from "@mantine/core";
 import { Modal } from "../components/dialogs";
 import {
   CATEGORY_ORDER,
@@ -35,76 +35,79 @@ export function ShortcutsDialog(props: {
   const mac = isMac();
   const all = props.shortcuts ?? SHORTCUTS;
   return (
+    // No scroll region of its own: there is nothing to pin above or below the
+    // list, so the modal scrolls once it reaches the window — one scrollbar, and
+    // as many rows as fit. A capped `ScrollArea` here scrolled inside a modal
+    // that was scrolling too on a short window, and stopped well short of a tall
+    // one.
     <Modal title="Keyboard shortcuts" onClose={props.onClose} size={860}>
-      <ScrollArea.Autosize mah="min(70vh, 560px)" type="auto" offsetScrollbars>
-        <Stack gap="lg">
-          {CATEGORY_ORDER.map((category) => {
-            // Filtered by **platform as well as category** — see
-            // `visibleShortcuts`, which is shared with the test that pins this.
-            const rows = visibleShortcuts(all, mac).filter(
-              (s) => s.category === category,
-            );
-            if (rows.length === 0) return null;
-            return (
-              <div key={category}>
-                <Text size="xs" fw={600} tt="uppercase" c="dimmed" mb={6}>
-                  {categoryLabel(category)}
-                </Text>
-                <Table verticalSpacing="xs" withRowBorders>
-                  <Table.Tbody>
-                    {rows.map((s) => (
-                      <Table.Tr key={s.id}>
-                        <Table.Td style={{ whiteSpace: "nowrap", width: "26%" }}>
-                          {s.title}
-                        </Table.Td>
-                        <Table.Td style={{ whiteSpace: "nowrap", width: "24%" }}>
-                          <Group gap={6} wrap="nowrap">
-                            {combosFor(s, mac).map((combo, i) => (
-                              <Fragment key={i}>
-                                {i > 0 && (
-                                  <Text size="xs" c="dimmed">
-                                    /
-                                  </Text>
-                                )}
-                                <Group gap={2} wrap="nowrap">
-                                  {comboTokens(combo, mac).map((token, j) => (
-                                    <Kbd key={j} size="sm">
-                                      {token}
-                                    </Kbd>
-                                  ))}
-                                </Group>
-                              </Fragment>
-                            ))}
-                          </Group>
-                        </Table.Td>
-                        <Table.Td>
-                          {s.description && (
-                            <Text size="sm" c="dimmed">
-                              {s.description}
-                            </Text>
-                          )}
-                        </Table.Td>
-                        {/* Its own column, `width: 1` shrink-to-content —
+      <Stack gap="lg">
+        {CATEGORY_ORDER.map((category) => {
+          // Filtered by **platform as well as category** — see
+          // `visibleShortcuts`, which is shared with the test that pins this.
+          const rows = visibleShortcuts(all, mac).filter(
+            (s) => s.category === category,
+          );
+          if (rows.length === 0) return null;
+          return (
+            <div key={category}>
+              <Text size="xs" fw={600} tt="uppercase" c="dimmed" mb={6}>
+                {categoryLabel(category)}
+              </Text>
+              <Table verticalSpacing="xs" withRowBorders>
+                <Table.Tbody>
+                  {rows.map((s) => (
+                    <Table.Tr key={s.id}>
+                      <Table.Td style={{ whiteSpace: "nowrap", width: "26%" }}>
+                        {s.title}
+                      </Table.Td>
+                      <Table.Td style={{ whiteSpace: "nowrap", width: "24%" }}>
+                        <Group gap={6} wrap="nowrap">
+                          {combosFor(s, mac).map((combo, i) => (
+                            <Fragment key={i}>
+                              {i > 0 && (
+                                <Text size="xs" c="dimmed">
+                                  /
+                                </Text>
+                              )}
+                              <Group gap={2} wrap="nowrap">
+                                {comboTokens(combo, mac).map((token, j) => (
+                                  <Kbd key={j} size="sm">
+                                    {token}
+                                  </Kbd>
+                                ))}
+                              </Group>
+                            </Fragment>
+                          ))}
+                        </Group>
+                      </Table.Td>
+                      <Table.Td>
+                        {s.description && (
+                          <Text size="sm" c="dimmed">
+                            {s.description}
+                          </Text>
+                        )}
+                      </Table.Td>
+                      {/* Its own column, `width: 1` shrink-to-content —
                             inline with the description (the previous layout)
                             let a long description's own `nowrap` Group push
                             the badge past the row's width with nothing left
                             to render it in, which is what truncated it. */}
-                        <Table.Td style={{ whiteSpace: "nowrap", width: 1 }}>
-                          {s.desktopOnly && (
-                            <Badge size="xs" variant="light" color="gray">
-                              Desktop app
-                            </Badge>
-                          )}
-                        </Table.Td>
-                      </Table.Tr>
-                    ))}
-                  </Table.Tbody>
-                </Table>
-              </div>
-            );
-          })}
-        </Stack>
-      </ScrollArea.Autosize>
+                      <Table.Td style={{ whiteSpace: "nowrap", width: 1 }}>
+                        {s.desktopOnly && (
+                          <Badge size="xs" variant="light" color="gray">
+                            Desktop app
+                          </Badge>
+                        )}
+                      </Table.Td>
+                    </Table.Tr>
+                  ))}
+                </Table.Tbody>
+              </Table>
+            </div>
+          );
+        })}
+      </Stack>
     </Modal>
   );
 }

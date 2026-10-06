@@ -187,10 +187,18 @@ export function startSelectionLabel(
   return n === 1 ? sel.selections[0] : `${n} nodes`;
 }
 
-/** The fixed height of the two scrollable lists, so the scrollbar is always
- *  visible (`ScrollArea type="always"`) — the first test's user did not notice
- *  the lists scrolled, so this makes the scroll affordance impossible to miss. */
+/** The height of the two scrollable lists, so the scrollbar is always visible
+ *  (`ScrollArea type="always"`) — the first test's user did not notice the lists
+ *  scrolled, so this makes the scroll affordance impossible to miss. It is the
+ *  height on any window with room for it; a shorter one shrinks the list rather
+ *  than scrolling the modal around it, which is what a fixed height used to do —
+ *  two scrollbars, and the Done button below the fold. */
 const LIST_HEIGHT = 340;
+
+/** The column the list shrinks through — see `LIST_HEIGHT`. Each level gives way
+ *  to its parent (`minHeight: 0`) rather than overflowing it, down to the modal,
+ *  which stops at the viewport. */
+const SHRINKS = { display: "flex", flexDirection: "column", minHeight: 0 } as const;
 
 /**
  * Start-configuration modal.
@@ -257,12 +265,12 @@ export function StartConfig(props: {
   };
 
   const customPanel = (
-    <Stack gap={0} style={{ minWidth: 0 }}>
+    <Stack gap={0} style={{ ...SHRINKS, minWidth: 0 }}>
       <Text size="xs" fw={600} c="dimmed" tt="uppercase" pb={6}>
         Custom node selection
       </Text>
       {hasNodes ? (
-        <ScrollArea type="always" offsetScrollbars style={{ height: LIST_HEIGHT }}>
+        <ScrollArea type="always" offsetScrollbars style={{ height: LIST_HEIGHT, minHeight: 0 }}>
           <Stack gap={8} pr={10}>
             {w.nodes.map((n) => {
               const variant = selectedVariant(n.name);
@@ -321,11 +329,11 @@ export function StartConfig(props: {
   );
 
   const presetsPanel = (
-    <Stack gap={0} style={{ minWidth: 0 }}>
+    <Stack gap={0} style={{ ...SHRINKS, minWidth: 0 }}>
       <Text size="xs" fw={600} c="dimmed" tt="uppercase" pb={6}>
         Presets
       </Text>
-      <ScrollArea type="always" offsetScrollbars style={{ height: LIST_HEIGHT }}>
+      <ScrollArea type="always" offsetScrollbars style={{ height: LIST_HEIGHT, minHeight: 0 }}>
         <Radio.Group
           value={draft?.kind === "preset" ? draft.name : null}
           onChange={(name) => setDraft({ kind: "preset", name })}
@@ -385,6 +393,9 @@ export function StartConfig(props: {
     <SegmentedControl
       size="xs"
       fullWidth
+      // Its root clips (`overflow: hidden`), which makes its flex minimum zero:
+      // without this it is the first thing a short window squashes, not the list.
+      style={{ flexShrink: 0 }}
       value={mode}
       onChange={(v) => setMode(v as StartMode)}
       data={[
@@ -463,12 +474,16 @@ export function StartConfig(props: {
         onClose={props.onClose}
         title="Start configuration"
         size={760}
-        yOffset={88}
+        // The shared `Modal`'s `ownsScroll`, spelled out because this one is a
+        // raw Mantine modal: the content stops at the viewport, and the body is
+        // a column the list can shrink into.
+        yOffset="clamp(16px, 10dvh, 88px)"
         radius="lg"
         overlayProps={{ backgroundOpacity: 0.42 }}
         styles={{
+          content: { display: "flex", flexDirection: "column" },
           header: { borderBottom: "1px solid var(--border)" },
-          body: { paddingTop: "var(--mantine-spacing-md)" },
+          body: { ...SHRINKS, paddingTop: "var(--mantine-spacing-md)" },
         }}
       >
         {nothingToStart ? (
@@ -479,9 +494,12 @@ export function StartConfig(props: {
         ) : mode === "choose" ? (
           choiceCards
         ) : (
-          <Stack gap="md">
+          <Stack gap="md" style={SHRINKS}>
             {tabs}
-            <div style={{ minHeight: LIST_HEIGHT }}>
+            {/* The floor keeps the modal one height across both tabs — an empty
+                node list would otherwise shrink it — and yields to a short
+                window for the same reason the list does. */}
+            <div style={{ ...SHRINKS, minHeight: `min(${LIST_HEIGHT}px, 40dvh)` }}>
               {mode === "preset" ? presetsPanel : customPanel}
             </div>
           </Stack>
