@@ -5256,11 +5256,13 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   border-top: 1px solid var(--border);
 }
 
-/* The list's own scroll region, bounded so the modal body never becomes a second
-   scroller. The right padding keeps a card's border off the scrollbar, and the
-   equal negative margin gives that space back so the cards stay full width. */
+/* The list's own scroll region. No height of its own: it shrinks into what the
+   modal (`ownsScroll`) leaves under the filter and over the footer, so the modal
+   body never becomes a second scroller. The right padding keeps a card's border
+   off the scrollbar, and the equal negative margin gives that space back so the
+   cards stay full width. */
 .promo-dialog-scroll {
-  max-height: min(58vh, 560px);
+  min-height: 0;
   overflow-y: auto;
   padding-right: 8px;
   margin-right: -8px;
