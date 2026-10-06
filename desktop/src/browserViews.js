@@ -98,7 +98,8 @@ const MAX_VIEWS_PER_WINDOW = 16;
  */
 
 /**
- * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
+ * @typedef {{view: import('electron').WebContentsView, wc: import('electron').WebContents,
+ *            closed: boolean, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
  *            media: Record<string, string>|null, scale: number, radius: number,
  *            touchActive: boolean, mediaActive: boolean, safeAreaActive: boolean,
@@ -159,7 +160,7 @@ function entriesFor(windowId) {
  */
 
 function stateOf(viewId, entry, error) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   // A crashed renderer still emits an event, and every getter below throws on a
   // destroyed WebContents — so the pane would lose the one message that explains
   // why it is blank.
@@ -221,7 +222,7 @@ function pushState(window, viewId, entry) {
  * change: the first commit, a renderer death, and a theme switch.
  */
 function applyBaseBackground(entry) {
-  if (entry.view.webContents.isDestroyed()) return;
+  if (entry.wc.isDestroyed()) return;
   entry.view.setBackgroundColor(baseBackground(entry));
 }
 
@@ -282,7 +283,7 @@ function applyBaseBackground(entry) {
  * produced.
  */
 function applyMetrics(entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed()) return;
   const emulation = entry.emulation;
   // Rule 2: both calls below segfault the process on a view with no committed
@@ -343,14 +344,14 @@ function applyRadius(entry) {
  * claiming to be one after emulation is switched off.
  */
 function applyUserAgent(entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed()) return;
   wc.setUserAgent(entry.emulation?.userAgent ?? entry.defaultUserAgent);
 }
 
 /** Re-assert the pane's zoom. See rule 2 above for why this is not a one-shot. */
 function applyZoom(entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed()) return;
   wc.setZoomFactor(entry.zoom);
 }
@@ -411,7 +412,7 @@ function hasMediaOverrides(media) {
  * runs are exactly what the queue exists to prevent.
  */
 async function applyCdpNow(window, viewId, entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed()) return;
   const wantTouch = entry.emulation?.touch === true;
   const wantMedia = hasMediaOverrides(entry.media);
@@ -609,7 +610,7 @@ async function applySafeArea(dbg, insets) {
  * nothing left to revoke.
  */
 function forgetSafeAreaIfSessionGone(entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed() || !wc.debugger.isAttached()) entry.safeAreaApplied = null;
 }
 
@@ -704,7 +705,7 @@ function handBackFocus(window, viewId) {
   const previous = owner !== undefined && owner !== viewId
     ? byWindow.get(window.id)?.get(owner)
     : undefined;
-  if (previous && !previous.view.webContents.isDestroyed()) {
+  if (previous && !previous.wc.isDestroyed()) {
     // **Vouched for, exactly as the IPC `focus` command is.** The steal blurred
     // this view on its way past, so its `focused` is already false — and if it is
     // itself an auto-refreshing preview, its own navigation window may still be
@@ -713,7 +714,7 @@ function handBackFocus(window, viewId) {
     // through to the host, and empties the keyboard out of the pane the user is
     // typing in. Two dev-server previews, one per dock, is all that takes.
     previous.requestedAt = guardNow();
-    previous.view.webContents.focus();
+    previous.wc.focus();
     return;
   }
   if (!window.webContents.isDestroyed()) window.webContents.focus();
@@ -790,7 +791,7 @@ function closeContextMenu(window, viewId) {
  * choosing.
  */
 function runContextMenuAction(window, viewId, entry, id, params) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   const p = params ?? {};
   // The page can close itself, crash, or have its pane destroyed while the menu
   // is open — an OS menu runs its own event loop, so that gap is real rather
@@ -949,7 +950,7 @@ function dispatchContextMenuAction(window, viewId, entry, wc, id, p) {
  * outside what the option accepts.
  */
 function popupContextMenu(window, viewId, entry, params) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   if (wc.isDestroyed() || window.isDestroyed()) return;
   // **The `try` starts here, not at the `popup` call.** `canGoBack`,
   // `canGoForward` and `contextMenuItems` are all inside it deliberately: the
@@ -1042,9 +1043,36 @@ function popupContextMenu(window, viewId, entry, params) {
 }
 
 function attachListeners(window, viewId, entry) {
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   trackHostFocus(window);
   const push = (error) => send(window, "veld:browser:state", stateOf(viewId, entry, error));
+
+  // The page closed itself. `window.close()` is how an OAuth or SSO popup
+  // finishes, and a popup here is a tab (`setWindowOpenHandler` below), so this is
+  // routine rather than exotic — and Electron answers it by destroying the
+  // WebContents outright, not by asking. Nothing else retires the entry: left
+  // registered, it was a pane with no page that every walk of `byWindow` still
+  // visited, and the next permission check threw in the main process from
+  // `paneOf` — a modal error box, again on every check, until the window closed.
+  //
+  // So the entry goes, and the tab with it: the renderer owns the layout. *Any*
+  // tab, not only a popup — a browser honours `window.close()` only in a window a
+  // script opened, but here every tab's page is destroyed either way, and a tab
+  // with no page behind it is nothing worth keeping.
+  //
+  // Two guards, because `destroyed` also follows every disposal this process does
+  // on purpose. `closed` covers one already under way (`wc.close()` may emit
+  // synchronously, while the entry is still registered). Identity covers one that
+  // finished: a profile switch and a page reload both re-create the *same* view id,
+  // and a late `destroyed` from the old view must not close the new one's tab.
+  wc.once("destroyed", () => {
+    if (entry.closed) return;
+    const entries = byWindow.get(window.id);
+    if (entries?.get(viewId) !== entry) return;
+    disposeEntry(window, entry, viewId);
+    entries.delete(viewId);
+    send(window, "veld:browser:closed", { viewId });
+  });
 
   wc.on("did-start-loading", () => push(null));
   wc.on("did-stop-loading", () => push());
@@ -1118,7 +1146,7 @@ function attachListeners(window, viewId, entry) {
   // session it was opened from. The renderer decides where the tab goes; if it
   // ignores the request nothing opens, which is the safe direction. Non-http
   // targets go to the real browser, matching the main window's policy.
-  entry.view.webContents.setWindowOpenHandler(({ url }) => {
+  entry.wc.setWindowOpenHandler(({ url }) => {
     const safe = safeUrl(url);
     if (safe) {
       send(window, "veld:browser:open-request", { viewId, url: safe, profile: entry.profile });
@@ -1704,8 +1732,8 @@ function persistPermissions() {
  */
 function paneOf(wc) {
   if (!wc || wc.isDestroyed()) return null;
-  // **By id, not by object identity.** `view.webContents` is a getter, and a
-  // WebContents reached another way — `webContents.fromFrame`, or the argument
+  // **By id, not by object identity.** `entry.wc` is the wrapper captured at
+  // creation, and a WebContents reached another way — `webContents.fromFrame`, or the argument
   // Electron hands a session handler — is not guaranteed to be the same JS
   // wrapper as the one held here. Identity compared equal often enough to look
   // right and failed in exactly the place that matters: a miss here is a silent
@@ -1715,7 +1743,7 @@ function paneOf(wc) {
   const id = wc.id;
   for (const [windowId, entries] of byWindow) {
     for (const [viewId, entry] of entries) {
-      const paneWc = entry.view.webContents;
+      const paneWc = entry.wc;
       if (!paneWc.isDestroyed() && paneWc.id === id) {
         return { windowId, viewId, entry };
       }
@@ -1750,7 +1778,7 @@ function requestOrigin(pane, isMainFrame, ...candidates) {
     if (origin) return origin;
   }
   if (!isMainFrame) return null;
-  const wc = pane.entry.view.webContents;
+  const wc = pane.entry.wc;
   return wc.isDestroyed() ? null : permissions.parseOrigin(wc.getURL());
 }
 
@@ -1831,7 +1859,7 @@ function askUser(window, viewId, entry, ids, origin, details) {
       // A cross-origin subframe asking is a different sentence from the page
       // asking, and the pane is the only surface that can say which it was.
       isMainFrame: details?.isMainFrame !== false,
-      paneUrl: entry.view.webContents.isDestroyed() ? "" : entry.view.webContents.getURL(),
+      paneUrl: entry.wc.isDestroyed() ? "" : entry.wc.getURL(),
     });
   });
 }
@@ -1983,7 +2011,7 @@ function wirePermissionHandlers(ses, partition) {
     }
     // The display-media request carries a frame rather than a flag, so the
     // main-frame test is the frame itself.
-    const paneWc = pane.entry.view.webContents;
+    const paneWc = pane.entry.wc;
     const fromMainFrame = !paneWc.isDestroyed() && request.frame === paneWc.mainFrame;
     const origin = requestOrigin(pane, fromMainFrame, request.securityOrigin);
     const outcome = permissions.resolve({
@@ -2030,8 +2058,8 @@ function denyUnattributable(callback, permission, why) {
 
 /** Tell a pane's chrome what its current site is allowed to do. */
 function pushPermissionState(window, viewId, entry) {
-  if (window.isDestroyed() || entry.view.webContents.isDestroyed()) return;
-  const origin = permissions.parseOrigin(entry.view.webContents.getURL());
+  if (window.isDestroyed() || entry.wc.isDestroyed()) return;
+  const origin = permissions.parseOrigin(entry.wc.getURL());
   const { rules, trustedOrigins } = policyFor(window.id);
   send(window, "veld:browser:permissions", {
     viewId,
@@ -2048,6 +2076,9 @@ function pushPermissionState(window, viewId, entry) {
 }
 
 function disposeEntry(window, entry, viewId) {
+  // First, because `wc.close()` below can emit `destroyed` before this returns,
+  // and the listener in [`attachListeners`] must read that as ours, not the page's.
+  entry.closed = true;
   // A prompt this pane raised can no longer be answered — its chrome is going
   // away — and the page behind it is blocked on the callback.
   if (viewId !== undefined) abandonPrompts({ windowId: window.id, viewId });
@@ -2064,7 +2095,7 @@ function disposeEntry(window, entry, viewId) {
   // entry is unreachable, and a forwarding view costs a cursor read and an IPC message
   // per mouse move.
   entry.dragging = false;
-  const wc = entry.view.webContents;
+  const wc = entry.wc;
   // Before the view goes: a detached inspector is a window of its own, and one
   // left open for a pane that no longer exists is a window with no way back to
   // the app that opened it. The debugger goes with it, so a closing pane cannot
@@ -2207,6 +2238,15 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     // starting visible costs nothing.
     const entry = {
       view,
+      // **Read once, here, and never through `view.webContents` again.** That
+      // getter answers `undefined` — not a destroyed WebContents — once the page
+      // has gone, so every `isDestroyed()` guard written against it was itself the
+      // crash: `undefined.isDestroyed()`, thrown in the main process. The wrapper
+      // held here keeps answering `isDestroyed()` truthfully for life.
+      wc: view.webContents,
+      // Set the moment this process starts disposing the entry on purpose, so the
+      // `destroyed` that follows is not mistaken for the page closing itself.
+      closed: false,
       profile,
       visible: true,
       // Emulation and zoom arrive with `create` rather than in a follow-up call,
@@ -2360,7 +2400,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     const found = lookup(event, args?.viewId);
     if (!found) return;
     const { window, entry } = found;
-    const wc = entry.view.webContents;
+    const wc = entry.wc;
     if (wc.isDestroyed()) return;
     const next = safeEmulation(args?.emulation);
     const prev = entry.emulation;
@@ -2387,7 +2427,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     const found = lookup(event, args?.viewId);
     if (!found) return;
     const { window, entry } = found;
-    if (entry.view.webContents.isDestroyed()) return;
+    if (entry.wc.isDestroyed()) return;
     entry.media = safeMedia(args?.media);
     // Through the same queue as touch, because they share one debugger session.
     void applyTouch(window, args.viewId, entry);
@@ -2437,7 +2477,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     const color = safeColor(args?.background);
     if (!color) return;
     for (const entry of byWindow.get(window.id)?.values() ?? []) {
-      if (entry.view.webContents.isDestroyed()) continue;
+      if (entry.wc.isDestroyed()) continue;
       // Recorded as well as applied. `baseBackground` re-reads it — a view that
       // has not committed yet is *on* this colour, and one whose renderer later
       // dies comes back to it — so a view that only had the new colour pushed at
@@ -2477,7 +2517,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     const found = lookup(event, args?.viewId);
     if (!found) return;
     const { window, entry } = found;
-    const wc = entry.view.webContents;
+    const wc = entry.wc;
     if (wc.isDestroyed()) return;
     const action = args?.action;
     const open = action === "open" || (action === "toggle" && !wc.isDevToolsOpened());
@@ -2500,7 +2540,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     if (!found) return;
     const url = safeUrl(args?.url);
     if (!url) throw new Error("only http and https URLs can be opened in a pane");
-    void found.entry.view.webContents.loadURL(url).catch(() => {
+    void found.entry.wc.loadURL(url).catch(() => {
       // `did-fail-load` already reported it to the pane; the rejected promise
       // here would just be an unhandled duplicate.
     });
@@ -2509,9 +2549,10 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
   ipcMain.handle("veld:browser:command", (event, args) => {
     const found = lookup(event, args?.viewId);
     if (!found) return;
-    const wc = found.entry.view.webContents;
-    // A guest that closed itself leaves the entry holding a dead WebContents, and
-    // every call below throws on one. The renderer has already patched the pane
+    const wc = found.entry.wc;
+    // A dead WebContents throws on every call below. A guest that closed itself no
+    // longer gets here — its entry is retired on `destroyed` — but one destroyed
+    // mid-dispose, or by anything later added, would. The renderer has already patched the pane
     // optimistically by this point (`loading: true, error: null`), so a throw here
     // strands it on a spinner with the real error wiped — see `stateOf`, which
     // guards for the same reason.
@@ -2558,7 +2599,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
   ipcMain.handle("veld:browser:find", (event, args) => {
     const found = lookup(event, args?.viewId);
     if (!found) return;
-    const wc = found.entry.view.webContents;
+    const wc = found.entry.wc;
     if (wc.isDestroyed()) return;
     if (args?.action === "stop") {
       wc.stopFindInPage("clearSelection");
@@ -2605,10 +2646,10 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
    */
   ipcMain.handle("veld:browser:capture", async (event, args) => {
     const found = lookup(event, args?.viewId);
-    if (!found || found.entry.view.webContents.isDestroyed()) return null;
+    if (!found || found.entry.wc.isDestroyed()) return null;
     if (!found.entry.visible) return null;
     try {
-      const image = await found.entry.view.webContents.capturePage();
+      const image = await found.entry.wc.capturePage();
       if (image.isEmpty()) return null;
       return `data:image/jpeg;base64,${image.toJPEG(72).toString("base64")}`;
     } catch {
@@ -2652,7 +2693,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     for (const entries of byWindow.values()) {
       for (const entry of entries.values()) {
         if (entry.profile !== profile) continue;
-        if (!entry.view.webContents.isDestroyed()) entry.view.webContents.reload();
+        if (!entry.wc.isDestroyed()) entry.wc.reload();
       }
     }
     // Permissions the user granted this session go with it. A grant that

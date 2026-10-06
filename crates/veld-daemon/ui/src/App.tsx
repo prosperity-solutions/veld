@@ -314,6 +314,7 @@ import {
 } from "./panes/terminalHost";
 import {
   onBrowserAccelerator,
+  onBrowserClosed,
   onBrowserFocused,
   onBrowserOpenRequest,
   clearBrowserSession,
@@ -4401,6 +4402,26 @@ function AppInner(props: {
             const dock = dockOf(l, viewId);
             if (dock === null) continue;
             return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url, profile })) };
+          }
+          return prev;
+        });
+      }),
+    [],
+  );
+
+  // The other end of that popup: its page called `window.close()`, which is how a
+  // sign-in flow finishes. The shell has already lost the view, so the tab goes
+  // too — what a browser does with the popup, and here with any tab whose page
+  // did it, popup or not (see the `destroyed` listener in the shell's
+  // browserViews.js). Keyed by view id across every worktree's layout for the
+  // same reason as above.
+  useEffect(
+    () =>
+      onBrowserClosed(({ viewId }) => {
+        setLayouts((prev) => {
+          for (const [key, l] of Object.entries(prev)) {
+            const next = closeTab(l, viewId);
+            if (next !== l) return { ...prev, [Number(key)]: next };
           }
           return prev;
         });

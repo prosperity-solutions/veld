@@ -226,6 +226,9 @@ interface DesktopBrowserApi {
    *  older shell has no such channel, and the focused dock then stays as
    *  imprecise as it was before ⌘W had a reason to read it. */
   onFocused?(fn: (payload: { viewId: string }) => void): () => void;
+  /** A pane's page closed itself — see [`onBrowserClosed`]. Optional, for the
+   *  same reason as `onFocused`. */
+  onClosed?(fn: (payload: { viewId: string }) => void): () => void;
   onPointer(
     fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
   ): () => void;
@@ -1838,6 +1841,33 @@ export function onBrowserAccelerator(
  */
 export function onBrowserFocused(fn: (payload: { viewId: string }) => void): () => void {
   return desktop?.onFocused ? desktop.onFocused(fn) : () => {};
+}
+
+/**
+ * A browser pane's page closed itself with `window.close()` — typically the last
+ * step of a sign-in popup, which a pane opens as a tab rather than a window.
+ *
+ * The shell has already destroyed the view by the time this arrives (Electron
+ * gives it no say), so the tab is all that is left, and the app closes it — any
+ * tab, popup or not. Its `pruneBrowsers` then finds a view the shell no longer
+ * holds, and the `destroy` it sends is a no-op there.
+ *
+ * `shellHasView` is cleared here, before the app hears of it, for the tab that
+ * does *not* close — one in no loaded layout. Left set, every later call for
+ * that view would go to a shell entry that no longer exists and be dropped
+ * there in silence; cleared, the next navigate or reload asks for a fresh view.
+ *
+ * Optional on the shell side, like [`onBrowserFocused`]: an older shell never
+ * sends it. Absent under the iframe backend too, where a framed page's
+ * `window.close()` does nothing at all.
+ */
+export function onBrowserClosed(fn: (payload: { viewId: string }) => void): () => void {
+  if (!desktop?.onClosed) return () => {};
+  return desktop.onClosed((payload) => {
+    const v = views.get(payload.viewId);
+    if (v) v.shellHasView = false;
+    fn(payload);
+  });
 }
 
 // ---------------------------------------------------------------------------
