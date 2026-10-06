@@ -1,10 +1,23 @@
-import { type FormEvent, type ReactNode, useEffect, useRef, useState } from "react";
 import {
+  type ClipboardEvent,
+  type DragEvent,
+  type FormEvent,
+  type HTMLAttributes,
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import {
+  ActionIcon,
   Alert,
   Autocomplete,
   Badge,
   Button,
   Checkbox,
+  FileButton,
   Group,
   Loader,
   Modal as MantineModal,
@@ -18,6 +31,7 @@ import {
   Textarea,
   TextInput,
   Tooltip,
+  VisuallyHidden,
 } from "@mantine/core";
 import {
   api,
@@ -54,6 +68,20 @@ import {
   worktreeLabel,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
+import { IconPaperclip, IconX } from "@tabler/icons-react";
+import { clipboardImageIndex, clipboardImageName, isFileDrop } from "../panes/terminalPaste";
+import {
+  addAttachments,
+  extensionOf,
+  formatSize,
+  type IncomingFile,
+  isTemporaryPath,
+  type PromptAttachment,
+  STRIP_FADE_LABEL,
+  STRIP_FADE_MIN,
+  snapshotIncoming,
+  stripFade,
+} from "../ide/promptAttachments";
 
 /**
  * Shared dialog shell on Mantine's Modal (scrim, esc, focus trap, a11y) —
@@ -84,17 +112,33 @@ export function Modal(props: {
    * scrolls.
    */
   ownsScroll?: boolean;
+  /**
+   * Handlers and attributes for the dialog's own surface — the panel, header
+   * included, but not the scrim around it.
+   *
+   * **Why this is composed from `Modal.Root` and not the one-piece `Modal`.**
+   * The one-piece component forwards its extra props to the root, which wraps
+   * the scrim as well, and offers nothing that reaches the panel. A drop target
+   * that is "the whole dialog" has to be the panel: the scrim is the part you
+   * click to dismiss, and catching a drop there would make it a second, invisible
+   * target.
+   *
+   * Style it by a `data-*` attribute, not a `className`: `Modal.Content` copies
+   * its className onto the full-viewport wrapper around the panel as well, so a
+   * class rule meant for the panel lands on both.
+   */
+  surfaceProps?: HTMLAttributes<HTMLElement> & { [data: `data-${string}`]: string | boolean | undefined };
+  /** Rendered over the whole panel, on top of the body — the file-drop veil. */
+  veil?: ReactNode;
   children: ReactNode;
 }) {
   return (
-    <MantineModal
+    <MantineModal.Root
       opened
       onClose={props.onClose}
-      title={props.title}
       yOffset={props.ownsScroll ? "clamp(16px, 10dvh, 88px)" : 88}
       size={props.size ?? 560}
       radius="lg"
-      overlayProps={{ backgroundOpacity: 0.42 }}
       styles={
         props.ownsScroll
           ? {
@@ -108,8 +152,16 @@ export function Modal(props: {
           : undefined
       }
     >
-      {props.children}
-    </MantineModal>
+      <MantineModal.Overlay backgroundOpacity={0.42} />
+      <MantineModal.Content radius="lg" {...props.surfaceProps}>
+        <MantineModal.Header>
+          <MantineModal.Title>{props.title}</MantineModal.Title>
+          <MantineModal.CloseButton />
+        </MantineModal.Header>
+        <MantineModal.Body>{props.children}</MantineModal.Body>
+        {props.veil}
+      </MantineModal.Content>
+    </MantineModal.Root>
   );
 }
 
@@ -692,6 +744,9 @@ export function chooseAgent(
   return agents.find((a) => a.id === picked)?.id ?? agents[0]?.id ?? null;
 }
 
+/** The least of the prompt field a short window squeezes it to: about three rows. */
+const PROMPT_FLOOR = "5rem";
+
 export function NewWorktreeDialog(props: {
   onCreate: (body: {
     branch: string;
@@ -713,6 +768,9 @@ export function NewWorktreeDialog(props: {
      *  client, `name_prompt` rides the create request and is only sent when the
      *  project declares a naming command. */
     name_prompt?: string;
+    /** Files to paste after the prompt, as paths — see `ide/promptAttachments.ts`.
+     *  Like `prompt`, an instruction to this client and never sent to the daemon. */
+    attachments?: IncomingFile[];
   }) => Promise<void>;
   /** The repo whose branches the source picker lists. */
   repoRoot: string;
@@ -777,6 +835,13 @@ export function NewWorktreeDialog(props: {
   onPromptDraft: (text: string) => void;
   /** Remember the agent a create actually used, for this project's next one. */
   onAgentPicked: (agentId: string) => void;
+  /**
+   * A dropped or picked file's absolute path, where the shell can tell — the
+   * desktop's `pathForFile`, `null` in a browser tab. A prop rather than an
+   * import because `shell.ts` reads `window` as it loads, and this module is
+   * imported by tests that run without one.
+   */
+  pathOf: (file: File) => string | null;
   /** Which rail section the "＋" was clicked in — `""` for ungrouped. Shown, not
    *  editable: the click already chose it, and a second control saying the same
    *  thing is one more thing to disagree with. */
@@ -817,6 +882,55 @@ export function NewWorktreeDialog(props: {
    */
   const [openedWith] = useState(props.promptDraft);
   const restoredDraft = openedWith.trim() !== "";
+  /** Files going with the prompt — see `ide/promptAttachments.ts`. Not drafted. */
+  const [attachments, setAttachments] = useState<PromptAttachment[]>([]);
+  /** The row of files' height, which the prompt's box adds to its floor. */
+  const [stripHeight, setStripHeight] = useState(0);
+  /** Why the last add left some files out, said under the list until the next
+   *  add or remove. */
+  const [refused, setRefused] = useState<string[]>([]);
+  const nextAttachmentId = useRef(0);
+  /** The list as of the last render, for an add that finishes after a read. */
+  const attachmentsNow = useRef(attachments);
+  attachmentsNow.current = attachments;
+  const attach = (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const incoming = files.map((file) => ({ file, path: props.pathOf(file) }));
+    const add = (ready: readonly IncomingFile[]) => {
+      // Computed from the current list rather than inside a state updater: the
+      // refusals are a second piece of state, and an updater may run twice.
+      const { next, refused: why } = addAttachments(
+        attachmentsNow.current,
+        ready,
+        () => `a${nextAttachmentId.current++}`,
+      );
+      attachmentsNow.current = next;
+      setAttachments(next);
+      setRefused(why);
+    };
+    // A temporary file is read now, in the drop's own turn, because it may not
+    // outlast the gesture (`snapshotIncoming`). Everything else is added at once.
+    if (!incoming.some((f) => f.path !== null && isTemporaryPath(f.path))) {
+      add(incoming);
+      return;
+    }
+    void Promise.all(incoming.map(snapshotIncoming)).then(add);
+  };
+  const detach = (id: string) => {
+    setAttachments((list) => list.filter((a) => a.id !== id));
+    setRefused([]);
+  };
+  /**
+   * Whether a file is being dragged over the dialog, as a depth count.
+   *
+   * **A count, not a flag.** `dragenter` and `dragleave` fire for every child the
+   * pointer crosses, and a leave from one child arrives *after* the enter into
+   * the next — so a flag cleared on leave flickers the veil off and on across
+   * every field. The count returns to zero only when the pointer has left the
+   * panel itself.
+   */
+  const [dragDepth, setDragDepth] = useState(0);
+  const resetFilePicker = useRef<() => void>(null);
   /**
    * Which pane the prompt goes to.
    *
@@ -1036,9 +1150,13 @@ export function NewWorktreeDialog(props: {
    * about *this* prompt, not a per-checkout setting, and leaving the prompt
    * empty is how you say "no thanks" without also having to say it twice.
    */
+  /** What the prompt column would hand an agent: its text, its files, or both.
+   *  Files alone count — "look at this screenshot" can be the whole ask, and
+   *  the text field is not the only way to say it. */
+  const hasPayload = prompt.trim() !== "" || attachments.length > 0;
   const launch =
-    shownMode === "prompt" && prompt.trim() !== "" && agentId !== null
-      ? { agent: agentId, prompt: prompt.trim() }
+    shownMode === "prompt" && hasPayload && agentId !== null
+      ? { agent: agentId, prompt: prompt.trim(), attachments }
       : null;
   /**
    * A prompt with no agent left to run it.
@@ -1052,7 +1170,7 @@ export function NewWorktreeDialog(props: {
    * is the one part of the dialog that cannot unmount.
    */
   const promptHasNoAgent =
-    shownMode === "prompt" && prompt.trim() !== "" && agentId === null;
+    shownMode === "prompt" && hasPayload && agentId === null;
   const formRef = useRef<HTMLFormElement>(null);
   const { busy, error, submit } = useSubmit(() => {
     // Recorded at submit, not on every keystroke in the picker: what is worth
@@ -1090,7 +1208,9 @@ export function NewWorktreeDialog(props: {
         // Only when the project declares a naming command. Otherwise the daemon
         // has nothing to do with it and the dialog has already named the
         // checkout — see the `generatesNames` prop.
-        name_prompt: props.generatesNames ? launch?.prompt : undefined,
+        // `|| undefined`: a files-only launch has no words to name it by.
+        name_prompt: props.generatesNames ? launch?.prompt || undefined : undefined,
+        attachments: launch?.attachments.map((a) => ({ file: a.file, path: a.path })),
       })
       .then(() => {
         // **Cleared by a create that carried it, not by any create.** Typing a
@@ -1522,9 +1642,74 @@ export function NewWorktreeDialog(props: {
     </Stack>
   );
 
+  /**
+   * The panel as a file-drop target, while the prompt column is on screen.
+   *
+   * Only then: the files go with the prompt, so a drop with no prompt field to
+   * attach them to has nowhere honest to land. Outside it nothing here calls
+   * `preventDefault`, and `guardStrayFileDrops` (`panes/terminalHost.ts`)
+   * swallows the drop at the window as it does anywhere else — which is also
+   * why accepting one *must* call it: that guard steps aside only for a drop
+   * something has already claimed.
+   */
+  const acceptsFiles = shownMode === "prompt";
+  const takesDrag = (e: DragEvent) =>
+    acceptsFiles && isFileDrop([...e.dataTransfer.types]);
+  const surfaceProps = {
+    "data-drop-surface": true,
+    onDragEnter: (e) => {
+      if (!takesDrag(e)) return;
+      e.preventDefault();
+      setDragDepth((d) => d + 1);
+    },
+    onDragOver: (e) => {
+      if (!takesDrag(e)) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave: (e) => {
+      if (!takesDrag(e)) return;
+      setDragDepth((d) => Math.max(0, d - 1));
+    },
+    onDrop: (e) => {
+      if (!takesDrag(e)) return;
+      e.preventDefault();
+      setDragDepth(0);
+      attach([...e.dataTransfer.files]);
+    },
+  } satisfies HTMLAttributes<HTMLElement> & { "data-drop-surface": boolean };
+  /**
+   * A pasted screenshot becomes an attachment rather than nothing.
+   *
+   * The decision is the terminal's own (`clipboardImageIndex`): any plain text on
+   * the clipboard wins, so pasting a sentence copied from a web page that also
+   * carried an image still pastes the sentence.
+   */
+  const pasteImage = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const items = [...e.clipboardData.items];
+    const index = clipboardImageIndex(items.map((i) => ({ kind: i.kind, type: i.type })));
+    if (index === -1) return;
+    const file = items[index].getAsFile();
+    if (!file) return;
+    e.preventDefault();
+    attach([file.name ? file : new File([file], clipboardImageName(file.type), { type: file.type })]);
+  };
+  const agentLabel = launch
+    ? (props.agents.find((a) => a.id === launch.agent)?.label ?? launch.agent)
+    : "";
+
   return (
     <Modal
       title="New worktree"
+      surfaceProps={surfaceProps}
+      veil={
+        acceptsFiles && dragDepth > 0 ? (
+          <div className="new-worktree-drop-veil" aria-hidden>
+            <IconPaperclip size={22} stroke={1.6} />
+            <span>Drop to attach to the prompt</span>
+          </div>
+        ) : null
+      }
       // One width for every state, because the width must not change under a
       // mode switch — a dialog that resizes when you press a segment reads as a
       // different dialog. 680 rather than the 560 default: one mode is a prompt
@@ -1633,11 +1818,16 @@ export function NewWorktreeDialog(props: {
                 // to what the modal has left.
                 minRows={10}
                 styles={{
-                  root: {
-                    display: "flex",
-                    flexDirection: "column",
-                    minHeight: 0,
-                  },
+                  // No box of its own, so the label and `.prompt-composer` are
+                  // items of the `Stack` itself. A floor only holds on a flex
+                  // item whose container cannot shrink it past that floor —
+                  // and a root in between, needing `minHeight: 0` to pass the
+                  // squeeze down at all, would be one: it collapsed under the
+                  // box and the hint text below landed on the field. The
+                  // label cancels the gap it now gets, to sit on the box as
+                  // every other label in the dialog sits on its field.
+                  root: { display: "contents" },
+                  label: { marginBottom: "calc(var(--stack-gap) * -1)" },
                   wrapper: {
                     display: "flex",
                     flexDirection: "column",
@@ -1649,8 +1839,33 @@ export function NewWorktreeDialog(props: {
                   // window with the field empty. `overflowY` because autosize
                   // without `maxRows` sets `--input-overflow: hidden`,
                   // expecting never to clip.
-                  input: { minHeight: "5rem", overflowY: "auto" },
+                  input: { minHeight: PROMPT_FLOOR, overflowY: "auto", border: 0, background: "transparent" },
                 }}
+                // The box is drawn around the field *and* its files, so they
+                // read as part of the prompt rather than something under it:
+                // the field gives up its own border to `.prompt-composer`.
+                //
+                // The box's floor is the field's plus the row of files plus its
+                // own border, stated rather than left to the browser: in a
+                // column, a flex item's automatic minimum is its full content
+                // height, which is the autosized ten rows, so the floor has to
+                // be a number. Without it the row of files stayed put while the
+                // field under it gave way, and the tiles covered the text.
+                inputContainer={(field) => (
+                  <div
+                    className="prompt-composer"
+                    style={{
+                      minHeight: `calc(${PROMPT_FLOOR} + 2 * var(--prompt-composer-border) + ${
+                        attachments.length > 0 ? stripHeight : 0
+                      }px)`,
+                    }}
+                  >
+                    {field}
+                    {attachments.length > 0 && (
+                      <AttachmentStrip attachments={attachments} onRemove={detach} onHeight={setStripHeight} />
+                    )}
+                  </div>
+                )}
                 value={prompt}
                 onChange={(e) => {
                   setPrompt(e.currentTarget.value);
@@ -1675,12 +1890,59 @@ export function NewWorktreeDialog(props: {
                   if (!ready || busy || promptHasNoAgent) return;
                   formRef.current?.requestSubmit();
                 }}
+                onPaste={pasteImage}
                 data-autofocus
               />
+              {/* Once for the strip, not on every tile: in a browser tab it is
+                  true of every file, so per tile it would be the same sentence
+                  twenty times. */}
+              {attachments.some((a) => a.path === null && a.copiedFrom === null) && (
+                <Text size="xs" c="dimmed">
+                  This browser tab can't see where files live, so the agent gets a
+                  copy of each.
+                </Text>
+              )}
+              {refused.map((why) => (
+                <Text key={why} size="xs" c="red">
+                  {why}
+                </Text>
+              ))}
+              {/* The control for anyone who does not drag — and the one that
+                  says dragging works at all. `resetRef` clears the input after
+                  each pick, so a file removed from the list can be picked again:
+                  an input still holding it fires no `change` for the same file. */}
+              <Group gap="xs" wrap="nowrap">
+                <FileButton
+                  multiple
+                  onChange={(files) => {
+                    attach(files);
+                    resetFilePicker.current?.();
+                  }}
+                  resetRef={resetFilePicker}
+                >
+                  {(picker) => (
+                    <Button
+                      {...picker}
+                      variant="subtle"
+                      size="compact-sm"
+                      leftSection={<IconPaperclip size={14} />}
+                    >
+                      Add files
+                    </Button>
+                  )}
+                </FileButton>
+                <Text size="xs" c="dimmed">
+                  or drop them anywhere on this dialog, or paste a screenshot.
+                </Text>
+              </Group>
               <Text size="xs" c="dimmed">
-                {launch
-                  ? `Opens ${props.agents.find((a) => a.id === launch.agent)?.label ?? launch.agent} in the new checkout and types this in once it is ready.`
-                  : "Optional. Left empty, the checkout just opens — nothing is started."}
+                {launch === null
+                  ? "Optional. Left empty, the checkout just opens — nothing is started."
+                  : launch.attachments.length === 0
+                    ? `Opens ${agentLabel} in the new checkout with this as its first message.`
+                    : launch.prompt === ""
+                      ? `Opens ${agentLabel} in the new checkout with the files as its first message.`
+                      : `Opens ${agentLabel} in the new checkout with this and the files as its first message.`}
               </Text>
               {/* Text appearing in a field nobody just typed into needs a
                   provenance, or it reads as a bug. Said once, on the open that
@@ -1695,7 +1957,7 @@ export function NewWorktreeDialog(props: {
                   rather than left to be discovered on the rail. The name is the
                   one worth stating: it is the thing they did not type. */}
               <Text size="xs" c="dimmed">
-                {props.generatesNames && launch
+                {props.generatesNames && launch?.prompt
                   ? "Named for you once the checkout is open — this project has a naming command."
                   : `Named ${displayName}. Switch to “Start with a name” to choose the name, source or marker.`}
               </Text>
@@ -1738,7 +2000,9 @@ export function NewWorktreeDialog(props: {
           {promptHasNoAgent && (
             <Text size="xs" c="red">
               This project no longer offers an agent that could run your prompt.
-              Clear the prompt to create the checkout on its own.
+              {attachments.length > 0
+                ? " Clear the prompt and remove its files to create the checkout on its own."
+                : " Clear the prompt to create the checkout on its own."}
             </Text>
           )}
           <ErrorText error={error} />
@@ -1758,6 +2022,202 @@ export function NewWorktreeDialog(props: {
       </form>
     </Modal>
   );
+}
+
+/**
+ * One attached file as a tile: what it is, how big, and a way to take it back.
+ *
+ * Tiles rather than rows, the way Claude Desktop shows a composer's files: a
+ * row per file cost a line of dialog height each, and the prompt field above is
+ * what gives way when the dialog runs short. They sit in one sideways-scrolling
+ * row, `AttachmentStrip`, inside the prompt's box.
+ *
+ * An image is shown as itself, with its type and size on a chip — the name is
+ * still there for a screen reader, and on hover. Anything else leads with its
+ * name, because that is what the user recognises, then its size, then a chip
+ * with its extension. The size is on every tile, in every state. Where the file
+ * is — the path the agent is handed, or that a temporary file goes as a copy —
+ * no longer fits and is in the tooltip; a browser tab's files have no path, and
+ * the note saying why is under the prompt's box, once (see `ide/promptAttachments.ts`).
+ *
+ * The remove button is revealed on hover but is never `display: none`: it stays
+ * in the tab order and shows on focus, and it is always visible where there is
+ * no hover at all (`styles.css`, `.prompt-attachment`).
+ */
+function AttachmentTile(props: { attachment: PromptAttachment; onRemove: () => void }) {
+  const { attachment: a } = props;
+  const thumb = useThumbnail(a);
+  const size = formatSize(a.file.size);
+  const ext = extensionOf(a.name).toUpperCase();
+  const where =
+    a.path !== null ? a.path : a.copiedFrom !== null ? `Copied from a temporary file: ${a.copiedFrom}` : null;
+  return (
+    <li
+      className={thumb === null ? "prompt-attachment" : "prompt-attachment is-image"}
+      title={[a.name, size, where].filter((line) => line !== null).join("\n")}
+    >
+      {thumb !== null ? (
+        <>
+          <img className="prompt-attachment-thumb" src={thumb.url} alt="" onError={thumb.broke} />
+          <VisuallyHidden>{a.name}</VisuallyHidden>
+          <span className="prompt-attachment-chip">{ext === "" ? size : `${ext} · ${size}`}</span>
+        </>
+      ) : (
+        <>
+          <Text size="sm" fw={500} lineClamp={2} className="prompt-attachment-name">
+            {a.name}
+          </Text>
+          <Text size="xs" c="dimmed">
+            {size}
+          </Text>
+          {ext !== "" && <span className="prompt-attachment-chip">{ext}</span>}
+        </>
+      )}
+      <ActionIcon
+        className="prompt-attachment-remove"
+        variant="default"
+        radius="xl"
+        size="sm"
+        aria-label={`Remove ${a.name}`}
+        onClick={props.onRemove}
+      >
+        <IconX size={12} />
+      </ActionIcon>
+    </li>
+  );
+}
+
+/**
+ * The attached files: one row of tiles inside the prompt's box, scrolling
+ * sideways once there are more than fit.
+ *
+ * **One row, whatever the count.** Wrapping put eleven files on three lines and
+ * pushed the field the dialog is for out of view; a row is the same height for
+ * one file or twenty. What does not fit is said by a fade over the row's right
+ * end, with how many files are behind it — see `stripFade` for how it shrinks
+ * as you scroll and why it is gone at the end.
+ *
+ * A vertical wheel scrolls the row while it has somewhere to go, because a
+ * mouse without a sideways wheel otherwise needs Shift to reach anything past
+ * the fade. At either end the wheel is left alone, so the dialog still scrolls.
+ */
+function AttachmentStrip(props: {
+  attachments: PromptAttachment[];
+  onRemove: (id: string) => void;
+  /** The row's height, scrollbar included, for the floor of the box it sits in. */
+  onHeight: (px: number) => void;
+}) {
+  const ref = useRef<HTMLUListElement>(null);
+  const [fade, setFade] = useState({ width: 0, more: 0, gutter: 0, height: 0 });
+  const measure = useCallback(() => {
+    const el = ref.current;
+    if (el === null) return;
+    // `offsetLeft` is against the list itself, which is positioned for this.
+    const tiles = Array.from(el.children, (child) => {
+      const tile = child as HTMLElement;
+      return { left: tile.offsetLeft, right: tile.offsetLeft + tile.offsetWidth };
+    });
+    // A classic scrollbar takes height from the row; the fade stops above it.
+    const next = {
+      ...stripFade(el, tiles),
+      gutter: el.offsetHeight - el.clientHeight,
+      height: el.offsetHeight,
+    };
+    setFade((prev) =>
+      prev.width === next.width &&
+      prev.more === next.more &&
+      prev.gutter === next.gutter &&
+      prev.height === next.height
+        ? prev
+        : next,
+    );
+  }, []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: a file added or removed moves every tile after it
+  useLayoutEffect(measure, [measure, props.attachments]);
+  const { onHeight } = props;
+  useLayoutEffect(() => onHeight(fade.height), [onHeight, fade.height]);
+  useEffect(() => {
+    const el = ref.current;
+    // jsdom has none, and a fade that never re-measures is still a fade.
+    if (el === null || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [measure]);
+  useEffect(() => {
+    const el = ref.current;
+    if (el === null) return;
+    // Not React's `onWheel`: that listener is passive, and this one has to be
+    // able to keep the dialog from scrolling too.
+    const onWheel = (e: WheelEvent) => {
+      if (Math.abs(e.deltaY) <= Math.abs(e.deltaX)) return;
+      // Firefox reports a mouse wheel in lines (about 3 a notch), which taken as
+      // pixels barely moves the row.
+      const unit =
+        e.deltaMode === WheelEvent.DOM_DELTA_LINE ? 40 : e.deltaMode === WheelEvent.DOM_DELTA_PAGE ? el.clientWidth : 1;
+      const max = el.scrollWidth - el.clientWidth;
+      // At the end it is heading for, the wheel is the dialog's. Within half a
+      // pixel, not exactly: at a fractional zoom `scrollLeft` can sit just past
+      // the rounded end, and an exact test would hold the wheel there.
+      if (e.deltaY > 0 ? el.scrollLeft >= max - 0.5 : el.scrollLeft <= 0.5) return;
+      const to = Math.min(max, Math.max(0, el.scrollLeft + e.deltaY * unit));
+      e.preventDefault();
+      el.scrollLeft = to;
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+  return (
+    <div className="prompt-attachments-frame">
+      <ul ref={ref} className="prompt-attachments" aria-label="Attached files" onScroll={measure}>
+        {props.attachments.map((a) => (
+          <AttachmentTile key={a.id} attachment={a} onRemove={() => props.onRemove(a.id)} />
+        ))}
+      </ul>
+      {/* Hidden from a screen reader, which has the whole list already. The
+          label fades with the fade, which is narrower than it soon after the
+          row starts to move. */}
+      {fade.more > 0 && (
+        <div
+          className="prompt-attachments-fade"
+          style={{ width: fade.width, bottom: fade.gutter }}
+          aria-hidden
+        >
+          <span
+            style={{
+              opacity: Math.min(1, Math.max(0, (fade.width - STRIP_FADE_MIN) / (STRIP_FADE_LABEL - STRIP_FADE_MIN))),
+            }}
+          >
+            {fade.more === 1 ? "1 more file" : `${fade.more} more files`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The file itself where Chromium can draw it, as an object URL — or `null`, and
+ * the tile shows the file's name instead.
+ *
+ * An object URL rather than a data URL: it is a reference to bytes already in
+ * memory, not a second base64 copy of a screenshot. Revoked with the tile, so a
+ * dialog that attached and removed twenty images does not hold twenty of them.
+ * A file that claims an image type and then fails to decode calls `broke`, and
+ * falls back to the named tile instead of a broken-image box.
+ */
+function useThumbnail(attachment: PromptAttachment): { url: string; broke: () => void } | null {
+  const { file, image } = attachment;
+  const [url, setUrl] = useState<string | null>(null);
+  const [broken, setBroken] = useState(false);
+  useEffect(() => {
+    if (!image) return;
+    const made = URL.createObjectURL(file);
+    setUrl(made);
+    return () => URL.revokeObjectURL(made);
+  }, [file, image]);
+  if (url === null || broken) return null;
+  return { url, broke: () => setBroken(true) };
 }
 
 /**

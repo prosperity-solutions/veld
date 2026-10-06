@@ -101,6 +101,126 @@ export function pathPayload(paths: readonly string[]): string {
 }
 
 /**
+ * The pastes a queued prompt with attachments goes in, in order.
+ *
+ * **The text, then each path as its own paste** — the order a person would
+ * produce by typing the prompt and then dropping the files on the pane. That is
+ * what makes Claude Code attach them: it recognises an image path when a paste
+ * *is* one, so a path buried inside the prompt's own paste would arrive as text
+ * the agent may or may not go and read. A blank line closes the prose when paths
+ * follow, so a composer that keeps the text keeps the two apart.
+ *
+ * Paths a terminal cannot carry are left out, as [`pathPayload`] does — the
+ * caller has already counted them as failures and said so.
+ */
+export function promptPastes(text: string, paths: readonly string[]): string[] {
+  const files = paths.map((p) => pathPayload([p])).filter((p) => p !== "");
+  if (text === "") return files;
+  return [files.length > 0 ? `${text}\n\n` : text, ...files];
+}
+
+/**
+ * The first message an agent takes at launch: the prompt, then a blank line,
+ * then each file as an `@"path"` mention.
+ *
+ * `@` is Claude Code's own "read this file" — it attaches an image *as an image*,
+ * and the quotes carry a path with spaces in it (both measured against 2.1.291
+ * started with the message as its argument). One string, because it travels as
+ * one argument.
+ *
+ * `null` when a path cannot be written that way — a `"` or a line break in it has
+ * no escape inside the quotes. The window then types the prompt and paths in once
+ * the agent is up, which carries any path [`isPastable`] accepts.
+ */
+export function launchPrompt(text: string, paths: readonly string[]): string | null {
+  if (paths.some((p) => !isPastable(p) || p.includes('"'))) return null;
+  const mentions = paths.map((p) => `@"${p}"`).join(" ");
+  const message = [text, mentions].filter((part) => part !== "").join("\n\n");
+  return message === "" ? null : message;
+}
+
+/** The slice of an xterm `Terminal` [`echoed`] listens on. */
+export interface WriteSource {
+  onWriteParsed(listener: () => void): { dispose(): void };
+}
+
+/**
+ * Resolve once the program has answered a paste: output after this call that
+ * passes `until`, followed by `quietMs` of none. `true` if it answered, `false`
+ * if `capMs` passed first.
+ *
+ * **Call it before the paste, await it after** — output that lands between the
+ * two would otherwise be missed and the wait would run to the cap.
+ *
+ * This is what a fixed pause after a paste cannot be. A path is echoed back the
+ * moment it arrives, and for text that redraw is the answer — `until` defaults
+ * to any output. An *image* path is not answered by the first redraw: Claude
+ * Code reads, resizes and re-encodes the file before `[Image #N]` appears, and
+ * a Return arriving in that window is held and then **discarded** when the
+ * read finishes (2.1.291: the paste handler's `B()` clears the held Return,
+ * where a text paste's `Z()` replays it). So for an image the caller passes an
+ * `until` that looks for the placeholder itself — see [`pasteLanded`]. The
+ * quiet window is what lets a redraw that comes in several writes finish
+ * before the next keystroke.
+ */
+export function echoed(
+  source: WriteSource,
+  quietMs: number,
+  capMs: number,
+  until: () => boolean = () => true,
+): Promise<boolean> {
+  return new Promise((done) => {
+    let quiet: ReturnType<typeof setTimeout> | undefined;
+    const finish = (answered: boolean) => {
+      clearTimeout(quiet);
+      clearTimeout(cap);
+      sub.dispose();
+      done(answered);
+    };
+    const cap = setTimeout(() => finish(false), capMs);
+    const sub = source.onWriteParsed(() => {
+      clearTimeout(quiet);
+      if (!until()) return;
+      quiet = setTimeout(() => finish(true), quietMs);
+    });
+  });
+}
+
+/**
+ * Whether an agent will read this path as an image rather than as text: the
+ * extensions Claude Code's paste handler takes (`/\.(png|jpe?g|gif|webp)$/i`
+ * in 2.1.291). Only these are worth waiting on — any other path is answered by
+ * its own echo.
+ */
+export function isImagePath(path: string): boolean {
+  return /\.(png|jpe?g|gif|webp)$/i.test(path);
+}
+
+function occurrences(haystack: string, needle: string): number {
+  if (needle === "") return 0;
+  let n = 0;
+  for (let i = haystack.indexOf(needle); i !== -1; i = haystack.indexOf(needle, i + needle.length)) n += 1;
+  return n;
+}
+
+/**
+ * Whether the screen shows an image paste has been dealt with, comparing it now
+ * against before the paste.
+ *
+ * Either answer counts: one more image placeholder (`[Image #2]` in Claude
+ * Code; matched loosely, as `[image`, so another agent's chip counts too), or
+ * the file's name appearing once more — which is what an agent that could not
+ * read the image, or does not read images at all, shows instead. A screen
+ * showing neither is an agent still reading, and a Return then is lost.
+ */
+export function pasteLanded(before: string, after: string, path: string): boolean {
+  const marker = /\[image\b/gi;
+  if ((after.match(marker)?.length ?? 0) > (before.match(marker)?.length ?? 0)) return true;
+  const name = path.slice(Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\")) + 1);
+  return [name, escapePath(name)].some((n) => occurrences(after, n) > occurrences(before, n));
+}
+
+/**
  * Whether a drag carries files this pane should take.
  *
  * `types` rather than the items themselves because `dragover` — which has to

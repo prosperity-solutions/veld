@@ -5518,3 +5518,179 @@ body[data-theme="light"] .project-sq.active {
 .session-name-input:focus {
   border-color: var(--accent);
 }
+
+/* ---- New worktree: prompt attachments (components/dialogs.tsx) ------------ */
+
+/* The panel is the drop target, so the veil is positioned against it. An
+   attribute rather than a class: `Modal.Content` copies a className onto the
+   full-viewport wrapper around the panel too. */
+[data-drop-surface] {
+  position: relative;
+}
+
+/* Over the whole panel, header included, because the whole panel takes the
+   drop — a veil over the body alone would say the header does not. Pointer
+   events off, so the drag keeps landing on the panel underneath and the veil
+   cannot become a child the drag "leaves" into. */
+.new-worktree-drop-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 2px dashed var(--accent);
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  pointer-events: none;
+}
+
+/* The prompt's box, drawn around the field and its files together so the files
+   read as part of the prompt. Mantine's own input colours, so it is the same box
+   as every other field in either theme; the field inside gives up its border.
+   `:has(textarea:focus)`, not `:focus-within`, so focusing a tile's remove
+   button does not make it look like you are typing. A flex column whose floor is
+   set inline (the field's, plus the row of files): it is what the dialog
+   squeezes, and the field inside is what gives way. */
+.prompt-composer {
+  /* NewWorktreeDialog's height floor counts this border twice — keep it a var. */
+  --prompt-composer-border: 1px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: var(--prompt-composer-border) solid var(--mantine-color-default-border);
+  border-radius: var(--mantine-radius-default);
+  background: var(--mantine-color-default);
+}
+
+.prompt-composer:has(textarea:focus) {
+  border-color: var(--mantine-primary-color-filled);
+}
+
+.prompt-attachments-frame {
+  position: relative;
+  flex: none;
+}
+
+/* One row of square tiles, as Claude Desktop's composer shows files, scrolling
+   sideways past what fits. Positioned so the tiles' `offsetLeft` is against the
+   row, which is what the fade measures. The end of the scroll padding leaves room
+   for the fade's sliver, so a tile tabbed to is not scrolled in under it. */
+.prompt-attachments {
+  position: relative;
+  display: flex;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 10px 10px;
+  list-style: none;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scroll-padding-inline: 10px 40px;
+  scrollbar-width: thin;
+}
+
+/* Over the end of the row, fading to the box's own background, with how many
+   files are behind it. Clicks go through to the tiles underneath. */
+.prompt-attachments-fade {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 10px;
+  overflow: hidden;
+  background: linear-gradient(to right, transparent, var(--mantine-color-default) 55%);
+  pointer-events: none;
+}
+
+.prompt-attachments-fade > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.prompt-attachment {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: none;
+  width: 112px;
+  height: 112px;
+  padding: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--elev);
+}
+
+.prompt-attachment.is-image {
+  padding: 0;
+  background: var(--bg);
+}
+
+/* `overflow-wrap: anywhere` so a long name with no spaces wraps onto its second
+   line before the clamp cuts it, rather than being one clipped word. */
+.prompt-attachment-name {
+  padding-right: 16px;
+  overflow-wrap: anywhere;
+  line-height: 1.25;
+}
+
+.prompt-attachment-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* The type chip, bottom-left. Opaque on a picture so it reads over any image. */
+.prompt-attachment-chip {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  max-width: calc(100% - 16px);
+  overflow: hidden;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Revealed on hover, as asked for — but by opacity, never `display: none`, so
+   the button stays in the tab order and shows the moment it takes focus (the
+   trap `.lane-edit`'s note describes). Where there is no hover at all, it is
+   simply always there. */
+.prompt-attachment-remove {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.prompt-attachment:hover .prompt-attachment-remove,
+.prompt-attachment:focus-within .prompt-attachment-remove {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .prompt-attachment-remove {
+    opacity: 1;
+  }
+}

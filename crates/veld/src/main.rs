@@ -280,6 +280,19 @@ enum Command {
         payload: Option<String>,
     },
 
+    /// Claim this pane's launch prompt and print it, once.
+    ///
+    /// Called by the generated `claude` wrapper, not by hand: the New worktree dialog's
+    /// prompt waits in a one-shot file (`$VELD_LAUNCH_PROMPT`) so the agent can start
+    /// with it already sent. Exits non-zero, printing nothing, when the prompt has
+    /// already been claimed — by an earlier launch, or by the window typing it in.
+    #[command(name = "agent-prompt", hide = true)]
+    AgentPrompt {
+        /// The launch-prompt file to claim. Removed by the claim.
+        #[arg(long, value_name = "PATH")]
+        take: std::path::PathBuf,
+    },
+
     /// Show URLs of a running environment.
     Urls {
         /// Name of the run to inspect.
@@ -1163,6 +1176,8 @@ async fn main() {
             payload,
         } => commands::agent::state(tool, session, launched, payload).await,
 
+        Command::AgentPrompt { take } => commands::agent::take_prompt(&take),
+
         Command::Action {
             action,
             name,
@@ -1772,6 +1787,8 @@ fn command_survives_an_update(command: &Command) -> bool {
             // Claude Code transcript is worse than a badge that does not arrive.
             | Command::AgentSettings { .. }
             | Command::AgentState { .. }
+            // Same reason again: it reads one file and prints it into an argv.
+            | Command::AgentPrompt { .. }
             | Command::Desktop {
                 command: None | Some(DesktopCommand::Status { .. })
             }
@@ -2243,6 +2260,19 @@ mod update_gate_tests {
                 json: false,
             }
         ))));
+    }
+
+    /// The spelling `veld`'s agent wrappers call (`pty/shims.rs` in the daemon): a
+    /// rename here would leave every wrapper falling back to typing the prompt in,
+    /// with nothing failing to say so.
+    #[test]
+    fn the_agent_prompt_claim_parses_as_the_wrappers_spell_it() {
+        let cli = Cli::try_parse_from(["veld", "agent-prompt", "--take", "/p/x-launch-prompt.txt"])
+            .expect("should parse");
+        let Some(Command::AgentPrompt { take }) = cli.command else {
+            panic!("parsed into the wrong command")
+        };
+        assert_eq!(take, std::path::Path::new("/p/x-launch-prompt.txt"));
     }
 
     /// `--dir` reads after the verb, which is where it is typed.

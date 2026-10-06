@@ -1124,6 +1124,14 @@ export interface PtyTicket {
   /** True when a live session with this id was waiting — i.e. the shell
    *  survived whatever disconnected us, and attaching resumes it. */
   resumed: boolean;
+  /**
+   * True when the request's `prompt` went to the launch. "Ask before typing
+   * it", not "it was sent": the agent's wrapper may still have declined it, so
+   * the window claims it with `ptyTakeLaunchPrompt` once the agent is up and
+   * types it only if that claim succeeds. False, or absent from an older
+   * daemon, means type it.
+   */
+  prompt_at_launch?: boolean;
 }
 
 /**
@@ -2052,6 +2060,9 @@ export const api = {
     worktreeId: number,
     sessionId: string,
     pane?: { spec: string; mode: PaneLaunchMode; sessionToken?: string },
+    /** A fresh agent pane's first message, for the daemon to hand the launch —
+     *  text for the agent to read, never a command. */
+    prompt?: string,
   ) =>
     request<PtyTicket>("/api/pty/tickets", {
       method: "POST",
@@ -2065,8 +2076,32 @@ export const api = {
         // Likewise a *value*, never a command — which session the pane's own
         // declared `resume` is pointed at. Only `adopt` reads it.
         ...(pane?.sessionToken ? { session_token: pane.sessionToken } : {}),
+        ...(prompt !== undefined ? { prompt } : {}),
       }),
     }),
+  /**
+   * Let `ptyPasteFile` write for a session that does not exist yet — the New
+   * worktree dialog's files go up before its pane is minted, because their paths
+   * are part of the first message. Spent by the next ticket for the id.
+   */
+  ptyReserveUploads: (sessionId: string) =>
+    request<void>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/reserve`, {
+      method: "POST",
+    }),
+  /**
+   * Claim a launch prompt back from the agent's wrapper. `true` means the
+   * window owns it now and must type it; `false` means the agent took it at
+   * launch — or there never was one — and typing it would send it twice;
+   * `null` means the daemon has no record of it (it restarted since the launch),
+   * so nobody can say which.
+   */
+  ptyTakeLaunchPrompt: async (sessionId: string): Promise<boolean | null> => {
+    const r = await request<{ claimed: boolean; staged: boolean }>(
+      `/api/pty/sessions/${encodeURIComponent(sessionId)}/launch-prompt/take`,
+      { method: "POST" },
+    );
+    return r.staged ? r.claimed : null;
+  },
   /**
    * Mint a single-use ticket for the IDE control socket.
    *

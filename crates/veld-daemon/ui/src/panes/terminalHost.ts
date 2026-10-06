@@ -46,6 +46,11 @@ import {
   clipboardImageName,
   isFileDrop,
   promptPayload,
+  echoed,
+  isImagePath,
+  launchPrompt,
+  pasteLanded,
+  promptPastes,
   isPastable,
   pathPayload,
 } from "./terminalPaste";
@@ -540,6 +545,33 @@ function playBell(): void {
 const MAX_DROP_FILES = 20;
 
 /**
+ * Resolve one file to a path a session's program can read — the shell's own, or
+ * the daemon's copy.
+ *
+ * `known` is the path the shell already gave (desktop), passed in rather than
+ * looked up here so the New worktree dialog, which resolved it at drop time,
+ * does not have to resolve it twice.
+ *
+ * Returns the failure alongside rather than throwing: one unreadable file in a
+ * multi-file drop must not cost the user the others, but the reason still has
+ * to reach them. Returned rather than stashed in a shared variable, so two
+ * overlapping drops cannot clear each other's cause.
+ */
+async function resolveFilePath(
+  sessionId: string,
+  file: File,
+  known: string | null,
+): Promise<[string | null, unknown]> {
+  if (known) return [known, undefined];
+  try {
+    return [await api.ptyPasteFile(sessionId, file, file.name), undefined];
+  } catch (e) {
+    console.warn("veld: could not upload a file for the terminal", e);
+    return [null, e];
+  }
+}
+
+/**
  * Files a terminal pane accepts: a drop onto it, and an image pasted into it.
  *
  * **Both end as a path typed at the prompt**, never as bytes on the wire — a pty
@@ -637,24 +669,7 @@ function attachFileInput(s: Session, canSend: () => boolean): void {
     }
   };
 
-  /**
-   * Resolve one dropped file to a path — the shell's own, or the daemon's copy.
-   *
-   * Returns the failure alongside rather than throwing: one unreadable file in a
-   * multi-file drop must not cost the user the others, but the reason still has
-   * to reach them. Returned rather than stashed in a shared variable, so two
-   * overlapping drops cannot clear each other's cause.
-   */
-  const resolve = async (file: File): Promise<[string | null, unknown]> => {
-    const local = pathForFile(file);
-    if (local) return [local, undefined];
-    try {
-      return [await api.ptyPasteFile(s.id, file, file.name), undefined];
-    } catch (e) {
-      console.warn("veld: could not upload a dropped file", e);
-      return [null, e];
-    }
-  };
+  const resolve = (file: File) => resolveFilePath(s.id, file, pathForFile(file));
 
   s.container.addEventListener("dragover", (e) => {
     if (!isFileDrop([...(e.dataTransfer?.types ?? [])])) return;
@@ -994,7 +1009,37 @@ function ensure(
  * reload loses it, and losing it is the correct outcome — the agent already has
  * it, or the pane never came up and the user is looking at an empty one.
  */
-const INITIAL_PROMPTS = new Map<string, { text: string; label: string }>();
+const INITIAL_PROMPTS = new Map<string, QueuedPrompt>();
+
+interface QueuedPrompt {
+  text: string;
+  label: string;
+  files: readonly QueuedFile[];
+  /**
+   * Set by the first fresh connect, which is the only one that offers the
+   * prompt to the launch ([`offerAtLaunch`]): a reconnect's spawn may follow a
+   * launch that already sent it.
+   */
+  offered?: boolean;
+  /** The files' paths, once that connect has resolved them — uploads included,
+   *  so delivery does not upload them a second time. */
+  paths?: string[];
+  /** True once a launch was handed the prompt. Never cleared: the window then
+   *  types it only if [`armInitialPrompt`]'s claim says the agent did not take it. */
+  atLaunch?: boolean;
+}
+
+/**
+ * A file to paste after a queued prompt — see `ide/promptAttachments.ts`.
+ *
+ * Structural rather than that module's `PromptAttachment`, because this end needs
+ * only what it delivers: the bytes, and the path the shell already gave if it
+ * gave one.
+ */
+export interface QueuedFile {
+  file: File;
+  path: string | null;
+}
 
 /** How often the delivery gate is re-checked while an agent starts up. */
 const PROMPT_POLL_MS = 120;
@@ -1010,18 +1055,58 @@ const PROMPT_POLL_MS = 120;
 const PROMPT_WAIT_MS = 25_000;
 
 /**
- * Pause between the gate opening and the paste, and between the paste and the
- * newline that submits it.
+ * Pause between the gate opening and the first paste.
  *
  * `bracketedPasteMode` flips when xterm *parses* the escape, which is when the
  * program asked for it — a beat before its input loop is necessarily reading.
- * The second pause is the same bet in the other direction: a composer that
- * receives paste-and-newline in one write can process the newline first.
- * Neither is load-bearing for correctness; both are what makes the common case
- * work on the first try rather than on the retry the user has to notice.
+ * Not load-bearing for correctness; it is what makes the common case work on
+ * the first try rather than on the retry the user has to notice.
  */
 const PROMPT_SETTLE_MS = 300;
-const PROMPT_SUBMIT_MS = 150;
+
+/**
+ * How a paste is known to have landed before the next write: the program's
+ * redraw, then this long without output (see [`echoed`]).
+ *
+ * Every paste waits, not only the last before the `\r`: each attachment is its
+ * own paste so a composer recognises it on its own, and an image path still
+ * being read when the next path arrives would have its placeholder land after
+ * it — out of order, or in the next message.
+ */
+const PROMPT_ECHO_QUIET_MS = 250;
+
+/**
+ * The longest a paste waits for its redraw before the next write goes anyway.
+ *
+ * A paste that never shows at all still gets its `\r`, which is what the fixed
+ * pause used to do.
+ */
+const PROMPT_ECHO_CAP_MS = 5_000;
+
+/**
+ * The same for an image path, which waits for its placeholder rather than for
+ * any redraw (see [`pasteLanded`]). Longer, because the agent decodes, resizes
+ * and re-encodes the picture first, and a full-resolution Retina screenshot is
+ * the common case. Only an agent that shows neither a placeholder nor the name
+ * ever waits this long.
+ */
+const PROMPT_IMAGE_CAP_MS = 15_000;
+
+/** Rows from the bottom of the buffer that [`screenText`] reads — a composer
+ *  draws at the bottom, and a long scrollback is not worth rereading per write. */
+const SCREEN_TAIL_ROWS = 200;
+
+/** The bottom of the active buffer as text, wrapped rows joined back up. */
+function screenText(term: Terminal): string {
+  const buf = term.buffer.active;
+  let out = "";
+  for (let y = Math.max(0, buf.length - SCREEN_TAIL_ROWS); y < buf.length; y++) {
+    const line = buf.getLine(y);
+    if (!line) continue;
+    out += (line.isWrapped ? "" : "\n") + line.translateToString(true);
+  }
+  return out;
+}
 
 /** [`promptStep`] for a live session, at this instant. */
 function stepFor(s: Session, deadline: number): PromptStep {
@@ -1048,11 +1133,18 @@ function stepFor(s: Session, deadline: number): PromptStep {
  * program is ready for it. See [`armInitialPrompt`] for the gate that decides
  * when that is, and why a gate rather than a delay is what makes it safe.
  */
-export function queueInitialPrompt(sessionId: string, prompt: string, label: string): void {
+export function queueInitialPrompt(
+  sessionId: string,
+  prompt: string,
+  label: string,
+  files: readonly QueuedFile[] = [],
+): void {
   // Shaped here rather than at the paste, so the text that is stored is the text
   // that will be sent — see [`promptPayload`] for what it removes and why.
   const text = promptPayload(prompt).trim();
-  if (text === "") return;
+  // Files alone are something to hand over: "look at this screenshot" can be
+  // the whole instruction.
+  if (text === "" && files.length === 0) return;
   // **One prompt per session, and a second one is a bug, not a replacement.** A
   // `Map.set` would silently discard the first — the only silent failure in a
   // module where every other one reaches the user as a toast. There is one call
@@ -1068,7 +1160,71 @@ export function queueInitialPrompt(sessionId: string, prompt: string, label: str
   // and a `Session` holds only its `spec` id. Every label surface in this app
   // renders the label, never the identifier — the rule `worktreeName.ts` states
   // for worktrees and this toast was breaking for panes.
-  INITIAL_PROMPTS.set(sessionId, { text, label });
+  INITIAL_PROMPTS.set(sessionId, { text, label, files });
+}
+
+/**
+ * Resolve each queued file to a path, saying out loud which did not make it.
+ *
+ * One that fails costs only itself: the prompt still goes, with the rest, and the
+ * toast names what is missing.
+ */
+async function resolveQueuedFiles(
+  sessionId: string,
+  files: readonly QueuedFile[],
+  label: string,
+): Promise<string[]> {
+  const paths: string[] = [];
+  let failed = 0;
+  let cause: unknown;
+  for (const f of files) {
+    const [path, err] = await resolveFilePath(sessionId, f.file, f.path);
+    // A path a terminal cannot carry — a newline in the name — is a failure
+    // here rather than something `pathPayload` drops without a word.
+    if (path !== null && isPastable(path)) paths.push(path);
+    else {
+      failed += 1;
+      cause ??= err;
+    }
+  }
+  if (failed > 0) {
+    notifyError(
+      failed === 1 ? `One attachment did not reach ${label}` : `${failed} attachments did not reach ${label}`,
+      cause ?? new Error("could not be read"),
+    );
+  }
+  return paths;
+}
+
+/**
+ * The queued prompt as a launch argument, for the first fresh spawn of its pane.
+ *
+ * **Why at launch at all:** typed in, the message is visible in the agent's input
+ * for the second or so it takes to paste the text, each path and the Return —
+ * the user watches it being composed. Passed at launch, the agent opens with it
+ * already sent. The daemon hands it to the agent's wrapper, which takes it only
+ * for a tool that accepts a first message as an argument (Claude Code); any other
+ * launch leaves it, and [`armInitialPrompt`] claims it back and types it in.
+ *
+ * The files have to be on disk first, since their paths are part of the message
+ * — so a browser tab's are uploaded here, against a reservation for the session
+ * that does not exist yet. A reservation that fails leaves the prompt to be typed,
+ * with the files uploaded at delivery as before.
+ */
+async function offerAtLaunch(s: Session): Promise<string | undefined> {
+  const queued = INITIAL_PROMPTS.get(s.id);
+  if (queued === undefined || queued.offered) return undefined;
+  queued.offered = true;
+  if (queued.files.some((f) => f.path === null)) {
+    try {
+      await api.ptyReserveUploads(s.id);
+    } catch (e) {
+      console.warn("veld: could not reserve uploads; the prompt will be typed in", e);
+      return undefined;
+    }
+  }
+  queued.paths = await resolveQueuedFiles(s.id, queued.files, queued.label);
+  return launchPrompt(queued.text, queued.paths) ?? undefined;
 }
 
 /** Forget a queued prompt — the pane is gone, or it has been delivered. */
@@ -1113,7 +1269,7 @@ function dropInitialPrompt(id: string): void {
 function armInitialPrompt(s: Session, generation: number): void {
   const queued = INITIAL_PROMPTS.get(s.id);
   if (queued === undefined) return;
-  const { text, label } = queued;
+  const { text, label, files } = queued;
   const deadline = Date.now() + PROMPT_WAIT_MS;
   const sendable = () => stepFor(s, deadline) === "send" && s.generation === generation;
   const tick = () => {
@@ -1130,44 +1286,17 @@ function armInitialPrompt(s: Session, generation: number): void {
     if (step === "no-pane" || step === "give-up") {
       dropInitialPrompt(s.id);
       if (step === "no-pane") return;
-      report();
+      void reportUnlessSent();
       return;
     }
     if (step === "send") {
       dropInitialPrompt(s.id);
-      window.setTimeout(() => {
-        // **Re-read the gate, do not trust the tick that scheduled this.** The
-        // mode is a mutable terminal state, and `Terminal.paste` reads it at
-        // call time: it wraps the text in `ESC[200~`/`ESC[201~` only while the
-        // mode is on, and rewrites every `\n` to `\r` either way (measured in
-        // the installed build — `xterm.js` module 3614). So a program that
-        // cleared DECSET 2004 inside this 300ms — exiting, or a nested reader
-        // that sets and resets it per line — would turn a multi-line prompt
-        // into one bare `\r`-terminated line per line of it, each submitting
-        // itself. That is the exact outcome pasting rather than typing exists
-        // to prevent.
-        if (!sendable()) return;
-        // `paste`, not `input`, for the reason the file drop uses it: an agent
-        // reads a bracketed paste as one block, so a multi-line prompt arrives
-        // as one message instead of as a line that submits itself at every
-        // newline.
-        s.term.paste(text);
-        window.setTimeout(() => {
-          // Re-read again: between the paste and the newline the program can
-          // still have gone, and a `\r` into whatever replaced it is a
-          // keystroke nobody asked for.
-          if (!sendable()) return;
-          // `\r`, the byte Return sends. Through `term.input` so it takes the
-          // same route as a keystroke — including marking the pane read, which
-          // is honest: the user is the reason something was just typed here.
-          s.term.input("\r");
-        }, PROMPT_SUBMIT_MS);
-      }, PROMPT_SETTLE_MS);
+      void deliver();
       return;
     }
     if (step === "expired") {
       dropInitialPrompt(s.id);
-      report();
+      void reportUnlessSent();
       return;
     }
     window.setTimeout(tick, PROMPT_POLL_MS);
@@ -1181,14 +1310,117 @@ function armInitialPrompt(s: Session, generation: number): void {
    * this on a session that has ended or errored would paint it `live` again and
    * cover the reason it stopped.
    */
-  const report = () => {
+  const report = (title = `Your prompt was not sent — the ${label} pane never opened one`) => {
     if (s.state === "live") flash(s, "prompt not sent");
-    notifyError(
-      `Your prompt was not sent — the ${label} pane never opened one`,
-      new Error(text),
-    );
+    // The attachments are named too: a browser tab's are bytes held in this
+    // page, so the names are all that is left to re-attach them by.
+    const attached = files.length > 0 ? `Attached: ${files.map((f) => f.file.name).join(", ")}` : "";
+    notifyError(title, new Error([text, attached].filter((part) => part !== "").join("\n\n")));
+  };
+  /**
+   * Whether this window still owes the prompt: always, unless a launch was handed
+   * it — then only if the claim says the agent's wrapper left it.
+   *
+   * Asked once the agent's input is up (or never will be), which is after its
+   * wrapper ran, so the answer is final. `null` when the daemon could not say —
+   * unreachable, or restarted since the launch and holding no record of it:
+   * the agent may or may not have it, and neither typing it (twice?) nor saying
+   * nothing (lost?) is safe, so the caller hands it back and says so.
+   */
+  const owed = async (): Promise<boolean | null> => {
+    if (!queued.atLaunch) return true;
+    try {
+      return await api.ptyTakeLaunchPrompt(s.id);
+    } catch (e) {
+      console.warn("veld: could not claim the launch prompt", e);
+      return null;
+    }
+  };
+  const unsure = () => report(`Could not tell whether ${label} got your prompt — check the pane before resending`);
+  /**
+   * The pane never opened an input. Owed, it was never sent; taken by the
+   * wrapper, the agent had it and then stopped before showing anything — an
+   * auth or update exit, a flag `--` did not suit — so it may have gone down
+   * with the agent. Neither is a case to stay quiet about.
+   */
+  const reportUnlessSent = async () => {
+    const mine = await owed();
+    if (mine === true) report();
+    else unsure();
+  };
+  /**
+   * Paste the prompt, then each attachment's path, then submit — in the order
+   * `promptPastes` gives, which owns why.
+   *
+   * **Every gap re-reads the gate**, for the reason the single paste always did
+   * (see the note on `Terminal.paste` below): the program can leave or drop
+   * bracketed paste between any two writes, and a path or a `\r` written into
+   * whatever replaced it is keystrokes nobody asked for.
+   *
+   * A browser tab's files are uploaded here, against this session — the first
+   * moment one exists — and the uploads overlap the settle pause rather than
+   * adding to it. One that fails costs only itself: the prompt still goes, with
+   * the rest, and the toast names what is missing.
+   */
+  const deliver = async () => {
+    const settled = pause(PROMPT_SETTLE_MS);
+    // The agent opened with it already sent: nothing to type.
+    const mine = await owed();
+    if (mine === null) return unsure();
+    if (!mine) return;
+    // Already resolved when the launch was offered it, so not uploaded twice.
+    const paths = queued.paths ?? (await resolveQueuedFiles(s.id, files, label));
+    await settled;
+    const pastes = promptPastes(text, paths);
+    if (pastes.length === 0) return;
+    // **Re-read the gate, do not trust the tick that scheduled this.** The
+    // mode is a mutable terminal state, and `Terminal.paste` reads it at
+    // call time: it wraps the text in `ESC[200~`/`ESC[201~` only while the
+    // mode is on, and rewrites every `\n` to `\r` either way (measured in
+    // the installed build — `xterm.js` module 3614). The claim, the uploads
+    // and the settle all await before this, and every paste below waits on
+    // its echo, so seconds can pass between reads. A program that cleared
+    // DECSET 2004 in that time — exiting, or a nested reader that sets and
+    // resets it per line — would turn a multi-line prompt into one bare
+    // `\r`-terminated line per line of it, each submitting itself. That is
+    // the exact outcome pasting rather than typing exists to prevent.
+    if (!sendable()) return;
+    // `paste`, not `input`, for the reason the file drop uses it: an agent
+    // reads a bracketed paste as one block, so a multi-line prompt arrives
+    // as one message instead of as a line that submits itself at every
+    // newline.
+    //
+    // Each paste waits for the program to show it before anything else is
+    // written — the `\r` included, which sent too early submits the message
+    // without an image the agent was still reading (see [`echoed`]).
+    const images = new Map(paths.filter(isImagePath).map((p) => [pathPayload([p]), p]));
+    for (const paste of pastes) {
+      const image = images.get(paste);
+      const before = image === undefined ? "" : screenText(s.term);
+      const shown =
+        image === undefined
+          ? echoed(s.term, PROMPT_ECHO_QUIET_MS, PROMPT_ECHO_CAP_MS)
+          : echoed(s.term, PROMPT_ECHO_QUIET_MS, PROMPT_IMAGE_CAP_MS, () =>
+              pasteLanded(before, screenText(s.term), image),
+            );
+      s.term.paste(paste);
+      await shown;
+      // Re-read after every wait: the program can have gone in it, and a
+      // path or a `\r` into whatever replaced it is keystrokes nobody asked
+      // for.
+      if (!sendable()) return;
+    }
+    // `\r`, the byte Return sends. Through `term.input` so it takes the
+    // same route as a keystroke — including marking the pane read, which
+    // is honest: the user is the reason something was just typed here.
+    s.term.input("\r");
   };
   tick();
+}
+
+/** A `setTimeout` to await. */
+function pause(ms: number): Promise<void> {
+  return new Promise((done) => window.setTimeout(done, ms));
 }
 
 /** Tell the pty the size xterm has now. A no-op until the socket is open. */
@@ -1231,7 +1463,12 @@ async function connect(
       s.spec !== undefined && mode !== undefined
         ? { spec: s.spec, mode, sessionToken }
         : undefined;
-    const minted = await api.ptyTicket(s.worktreeId, s.id, pane);
+    const prompt = pane?.mode === "fresh" ? await offerAtLaunch(s) : undefined;
+    const minted = await api.ptyTicket(s.worktreeId, s.id, pane, prompt);
+    if (prompt !== undefined && minted.prompt_at_launch === true) {
+      const queued = INITIAL_PROMPTS.get(s.id);
+      if (queued !== undefined) queued.atLaunch = true;
+    }
     // **The only path to `idle`.** A config pane attaching with no mode is
     // asking "is my session still there?" — from `startPlanFor`'s `reattach`, or
     // from the Reconnect button. If it is not, spawning is the wrong answer

@@ -235,6 +235,28 @@ async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
     }
 }
 
+/// `veld agent-prompt --take <PATH>`: print a launch prompt and remove it, or fail.
+///
+/// The wrapper reads stdout through `$(…)` and passes it as the agent's startup
+/// argument, so nothing else may be printed — not even a reason on failure, which
+/// would land in the same capture on a shell that merges the two. A non-zero exit is
+/// the whole message: the wrapper launches the agent without a prompt, and the window
+/// types it in instead.
+///
+/// The file goes only once stdout has the text; a failed write puts it back, so the
+/// window still types it in.
+pub fn take_prompt(path: &Path) -> i32 {
+    let delivered = agent::deliver_launch_prompt(path, |text| {
+        use std::io::Write as _;
+        let mut out = std::io::stdout().lock();
+        out.write_all(text.as_bytes()).and_then(|()| out.flush())
+    });
+    match delivered {
+        Ok(Some(_)) => 0,
+        Ok(None) | Err(_) => 1,
+    }
+}
+
 /// Parse `--tool`, or `None`.
 ///
 /// The caller exits **1** on `None`, never 2: on `UserPromptSubmit` and `Stop` — both of
@@ -351,6 +373,25 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wrapper reads only the exit status: 0 hands the agent the prompt, any
+    /// other code launches it bare and leaves the prompt to the window.
+    #[test]
+    fn take_prompt_exits_zero_only_for_a_prompt_it_claimed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(agent::launch_prompt_file_name());
+        std::fs::write(&path, "fix it").unwrap();
+        assert_eq!(take_prompt(&path), 0);
+        assert!(!path.exists(), "a claim consumes the file");
+        assert_eq!(take_prompt(&path), 1, "already claimed");
+        let foreign = dir.path().join("id_rsa");
+        std::fs::write(&foreign, "x").unwrap();
+        assert_eq!(take_prompt(&foreign), 1);
+        assert!(
+            foreign.exists(),
+            "a name veld did not mint is never touched"
+        );
+    }
 
     #[test]
     fn a_missing_argv_payload_is_an_error_but_a_malformed_one_is_unknown() {

@@ -1,15 +1,20 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 // `?raw` rather than `node:fs`, matching `paneAreaContract.test.ts`: this
 // package's tsconfig carries `vite/client` and not node's types.
 import TERMINAL_HOST from "./terminalHost.ts?raw";
 import {
   clipboardImageIndex,
   clipboardImageName,
+  echoed,
   escapePath,
   isFileDrop,
+  isImagePath,
   isPastable,
+  launchPrompt,
+  pasteLanded,
   pathPayload,
   promptPayload,
+  promptPastes,
   shouldSwallowDrop,
   TAB_MIME,
 } from "./terminalPaste";
@@ -168,6 +173,43 @@ describe("the paths reach the terminal as a paste", () => {
     expect(TERMINAL_HOST).toContain("s.term.paste(payload)");
   });
 
+  it("pastes a prompt's attachments, one paste each, the same way", () => {
+    // The prompt path is the second route a path takes into a pane, and the
+    // property above applies to it unchanged.
+    expect(TERMINAL_HOST).toContain("s.term.paste(paste)");
+  });
+
+  it("listens for a prompt paste's echo before pasting, and waits for it", () => {
+    // Armed after the paste, a fast echo lands before anyone listens and every
+    // paste waits out the cap instead.
+    expect(TERMINAL_HOST).toMatch(
+      /const shown =[^;]*echoed\(s\.term,[^;]*\);\s*s\.term\.paste\(paste\);\s*await shown;/,
+    );
+  });
+
+  it("an image path waits for its placeholder, not for the first redraw", () => {
+    // Claude Code drops a Return that arrives while it is still reading an
+    // image, so the `\r` after one must wait for `[Image #N]` itself.
+    expect(TERMINAL_HOST).toMatch(/echoed\(s\.term, PROMPT_ECHO_QUIET_MS, PROMPT_IMAGE_CAP_MS, \(\) =>\s*pasteLanded\(/);
+  });
+
+  it("types a prompt a launch was handed only after claiming it back", () => {
+    // The agent's wrapper and the window race for one file; the window asks only
+    // once the agent is up, so its claim is the answer to "did the launch send
+    // it?" — and typing without it sends the message twice.
+    const deliver = /const deliver = async \(\) => \{[\s\S]*?\n {2}\};/.exec(TERMINAL_HOST)?.[0] ?? "";
+    expect(deliver).toMatch(/const mine = await owed\(\);\s*if \(mine === null\) return unsure\(\);\s*if \(!mine\) return;/);
+    expect(deliver.indexOf("await owed()")).toBeLessThan(deliver.indexOf("s.term.paste(paste)"));
+    // A pane that never opened an input is not "your prompt was not sent" when
+    // its launch may have sent it.
+    expect(TERMINAL_HOST).not.toMatch(/dropInitialPrompt\(s\.id\);\s*report\(\);/);
+  });
+
+  it("offers the prompt to a fresh launch only, and only once", () => {
+    expect(TERMINAL_HOST).toContain('const prompt = pane?.mode === "fresh" ? await offerAtLaunch(s) : undefined;');
+    expect(TERMINAL_HOST).toMatch(/if \(queued === undefined \|\| queued\.offered\) return undefined;\s*queued\.offered = true;/);
+  });
+
   it("never writes the payload straight to the socket", () => {
     // `send(payload)` is the regression: it is what shipped first, and it typed
     // the path instead of attaching the image.
@@ -311,5 +353,168 @@ describe("promptPayload", () => {
     // `queueInitialPrompt` trims and drops an empty payload, so this is the
     // signal that there was never a prompt to send.
     expect(promptPayload("\u001b\u0003\u007f").trim()).toBe("");
+  });
+});
+
+describe("promptPastes", () => {
+  it("is the text alone when nothing is attached", () => {
+    expect(promptPastes("fix the bug", [])).toEqual(["fix the bug"]);
+  });
+
+  it("closes the prose with a blank line, then pastes each path on its own", () => {
+    expect(promptPastes("look at these", ["/tmp/a.png", "/tmp/My Shot.png"])).toEqual([
+      "look at these\n\n",
+      "/tmp/a.png ",
+      "/tmp/My\\ Shot.png ",
+    ]);
+  });
+
+  it("is only the paths for a files-only prompt", () => {
+    expect(promptPastes("", ["/tmp/a.png"])).toEqual(["/tmp/a.png "]);
+  });
+
+  it("leaves out a path a terminal cannot carry, and does not close the prose for it", () => {
+    expect(promptPastes("hi", ["/tmp/bad\nname.png"])).toEqual(["hi"]);
+    expect(promptPastes("", ["/tmp/bad\nname.png"])).toEqual([]);
+  });
+});
+
+describe("launchPrompt", () => {
+  it("is the text, a blank line, then each file as a quoted mention", () => {
+    expect(launchPrompt("look at these", ["/tmp/a.png", "/Users/me/My Shot.png"])).toBe(
+      'look at these\n\n@"/tmp/a.png" @"/Users/me/My Shot.png"',
+    );
+  });
+
+  it("is the text alone, or the mentions alone", () => {
+    expect(launchPrompt("fix the bug", [])).toBe("fix the bug");
+    expect(launchPrompt("", ["/tmp/a.png"])).toBe('@"/tmp/a.png"');
+  });
+
+  it("keeps a prompt that looks like a flag as it is — the wrapper puts it after `--`", () => {
+    expect(launchPrompt("--help me", [])).toBe("--help me");
+  });
+
+  it("gives up on a path the quotes cannot carry, so the window types them instead", () => {
+    expect(launchPrompt("hi", ['/tmp/say "hi".png'])).toBeNull();
+    expect(launchPrompt("hi", ["/tmp/bad\nname.png"])).toBeNull();
+  });
+
+  it("is nothing for nothing", () => {
+    expect(launchPrompt("", [])).toBeNull();
+  });
+});
+
+describe("echoed", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A terminal whose program writes when the test says so. */
+  const program = () => {
+    const listeners = new Set<() => void>();
+    return {
+      onWriteParsed(listener: () => void) {
+        listeners.add(listener);
+        return { dispose: () => listeners.delete(listener) };
+      },
+      write: () => {
+        for (const l of listeners) l();
+      },
+      listening: () => listeners.size,
+    };
+  };
+
+  it("waits out the time an agent spends reading an image before answering", async () => {
+    vi.useFakeTimers();
+    const term = program();
+    let answered: boolean | undefined;
+    void echoed(term, 250, 5_000).then((v) => {
+      answered = v;
+    });
+    // A fixed 150ms pause submitted here, before the placeholder existed.
+    await vi.advanceTimersByTimeAsync(900);
+    expect(answered).toBeUndefined();
+    term.write();
+    await vi.advanceTimersByTimeAsync(249);
+    expect(answered).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(answered).toBe(true);
+    expect(term.listening()).toBe(0);
+  });
+
+  it("lets a redraw that comes in several writes finish", async () => {
+    vi.useFakeTimers();
+    const term = program();
+    let answered: boolean | undefined;
+    void echoed(term, 250, 5_000).then((v) => {
+      answered = v;
+    });
+    term.write();
+    await vi.advanceTimersByTimeAsync(200);
+    term.write();
+    await vi.advanceTimersByTimeAsync(200);
+    expect(answered).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(50);
+    expect(answered).toBe(true);
+  });
+
+  it("with `until`, ignores output that is not the answer", async () => {
+    vi.useFakeTimers();
+    const term = program();
+    let ready = false;
+    let answered: boolean | undefined;
+    void echoed(term, 250, 15_000, () => ready).then((v) => {
+      answered = v;
+    });
+    // The agent redraws (a "pasting…" hint, a spinner) while it reads.
+    term.write();
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(answered).toBeUndefined();
+    ready = true;
+    term.write();
+    await vi.advanceTimersByTimeAsync(250);
+    expect(answered).toBe(true);
+  });
+
+  it("gives up at the cap, and stops listening", async () => {
+    vi.useFakeTimers();
+    const term = program();
+    let answered: boolean | undefined;
+    void echoed(term, 250, 5_000).then((v) => {
+      answered = v;
+    });
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(answered).toBe(false);
+    expect(term.listening()).toBe(0);
+  });
+});
+
+describe("isImagePath", () => {
+  it("takes the extensions Claude Code reads as images", () => {
+    for (const p of ["/a/b.png", "/a/b.JPG", "/a/b.jpeg", "/a/b.gif", "/a/b.webp"]) {
+      expect(isImagePath(p)).toBe(true);
+    }
+    for (const p of ["/a/b.json", "/a/b.svg", "/a/b.pdf", "/a/png"]) expect(isImagePath(p)).toBe(false);
+  });
+});
+
+describe("pasteLanded", () => {
+  const path = "/Users/me/.veld/pastes/e22a-image.png";
+
+  it("is not done while the agent is still reading", () => {
+    expect(pasteLanded("> fix this", "> fix this", path)).toBe(false);
+  });
+
+  it("is done when one more placeholder shows", () => {
+    expect(pasteLanded("> fix this", "> fix this [Image #1]", path)).toBe(true);
+    expect(pasteLanded("[Image #1]", "[Image #1] [Image #2]", path)).toBe(true);
+    expect(pasteLanded("[Image #1]", "[Image #1]", path)).toBe(false);
+  });
+
+  it("is done when the agent shows the path as text instead", () => {
+    expect(pasteLanded("> ", `> ${path}`, path)).toBe(true);
+    const spaced = "/tmp/My Shot.png";
+    expect(pasteLanded("> ", "> /tmp/My\\ Shot.png", spaced)).toBe(true);
   });
 });
