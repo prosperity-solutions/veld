@@ -2006,9 +2006,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--text);
 }
 
-/* Per-row run control, coloured by the action it performs: green to start,
-   red to stop. The colour is the affordance — you should not have to hover
-   to learn what the button will do. */
+/* Per-row stop control, shown only while a run is live — so it is also the
+   row's "running" marker. There is no per-row start: a ▶ on every idle row was
+   noise nobody used, and starting lives on the top bar, menu and palette. */
 .wt-run {
   flex: none;
   display: flex;
@@ -2019,12 +2019,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   border: none;
   border-radius: 5px;
   background: none;
-  color: var(--accent);
+  color: var(--danger);
   padding: 0;
   cursor: pointer;
-}
-.wt-run.on {
-  color: var(--danger);
 }
 .wt-run:hover {
   background: var(--elev);

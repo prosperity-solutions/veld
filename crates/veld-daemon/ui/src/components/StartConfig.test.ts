@@ -192,7 +192,7 @@ describe("resolveStoredSelection", () => {
   });
 
   it("returns the stored choice, without the default fallback", () => {
-    // The top bar's ▶ (and the rail's) open the picker on this state instead of
+    // The top bar's ▶ (and ⌘⇧Enter) open the picker on this state instead of
     // silently running the first preset — the point of the change.
     expect(resolveStoredSelection(w)).toBeNull();
     store.setItem(
