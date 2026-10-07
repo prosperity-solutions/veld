@@ -598,7 +598,9 @@ describe("persistence", () => {
       const raw = JSON.stringify({
         1: {
           docks: [
-            { tabs: [{ id: "a", kind, title: "t" }], activeId: "a" },
+            // `path` because a `file` tab without one is dropped by design; the
+            // other kinds ignore it.
+            { tabs: [{ id: "a", kind, title: "t", path: "a.md" }], activeId: "a" },
             { tabs: [], activeId: null },
           ],
           ratio: 0.5,

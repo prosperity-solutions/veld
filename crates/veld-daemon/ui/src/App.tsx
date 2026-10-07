@@ -23,6 +23,9 @@ import {
 } from "./api";
 import {
   filesWatchByDefault,
+  filesShowDeletions,
+  filesSplitDiff,
+  filesWrapLines,
   gitCreateFrom,
   worktreeNewMode,
   hideDisabledActions,
@@ -228,6 +231,7 @@ import {
   adoptTabs,
   adoptedTermTitle,
   allTabs,
+  besideDock,
   browserIds,
   browserTab,
   closeTab,
@@ -235,8 +239,15 @@ import {
   defaultLayout,
   diagTab,
   dockOf,
+  fileLabel,
+  fileTab,
+  fileTabIds,
+  findBrowserTab,
+  findFileTab,
   focusDock,
   hasTab,
+  openBrowserTab,
+  openFileTab,
   type PaneTab,
   lastBlankBrowserId,
   loadLayouts,
@@ -255,6 +266,7 @@ import {
   urlLabel,
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
+import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import {
   DIALOG_NONE,
@@ -1109,6 +1121,13 @@ function AppInner(props: {
   // Whether a pane opened on a local file watches it. Threaded for the same reason
   // as the two above.
   const watchFilesByDefault = filesWatchByDefault(settings ?? {});
+  // Whether a file pane wraps long lines — read here and written back by the pane's
+  // own toggle, so it holds for the next file and the next window.
+  const wrapFileLines = filesWrapLines(settings ?? {});
+  // Whether it shows deleted lines as diff rows — the same round trip as wrapping.
+  const showFileDeletions = filesShowDeletions(settings ?? {});
+  // …and whether that diff is side by side. Same round trip again.
+  const splitFileDiff = filesSplitDiff(settings ?? {});
 
   // Which zone the logs views spell a line's timestamp in. Read here and threaded for
   // the same reason as the two above, and it is the same key `veld logs` reads — so the
@@ -4489,7 +4508,107 @@ function AppInner(props: {
   );
 
   /**
-   * A file path clicked in a terminal, handed to the project's editor action.
+   * Show a file in a worktree's file pane — the one place every "open this file"
+   * request lands: `veld ide open`, the `open` shim, a click on a path in a
+   * terminal, an absolute path granted first.
+   *
+   * Decided from `layoutsRef` and written with an updater, the pattern the `open_url`
+   * handler above explains. The new tab is minted *here*, outside the updater, so the
+   * inbox event below names the same id the layout commits — an updater may run
+   * twice, and a second mint would file the event against a tab that never existed.
+   *
+   * **Never changes which worktree is selected.** A request for a worktree this
+   * window holds a layout for but is not showing opens its tab there, quietly; the
+   * inbox (with `notify`) is what tells you to go and look, which is the rule the
+   * whole IDE follows about other worktrees' news.
+   */
+  const openFileInWorktree = useCallback(
+    (req: {
+      worktreeId: number;
+      path: string;
+      line?: number;
+      sessionId?: string;
+      focus: boolean;
+      notify: boolean;
+    }): boolean => {
+      const current = layoutsRef.current[req.worktreeId];
+      if (!current) return false;
+      const beside = besideDock(current, req.sessionId);
+      const newTab = fileTab({ path: req.path, line: req.line });
+      const tabId = findFileTab(current, req.path)?.id ?? newTab.id;
+      setLayouts((prev) => {
+        const l = prev[req.worktreeId];
+        if (!l) return prev;
+        const next = openFileTab(l, {
+          path: req.path,
+          line: req.line,
+          beside,
+          focus: req.focus,
+          newTab,
+        }).layout;
+        return { ...prev, [req.worktreeId]: next };
+      });
+      if (req.notify) {
+        inbox.report(tabId, req.worktreeId, {
+          type: "opened",
+          detail: `Agent opened ${fileLabel(req.path)}`,
+        });
+      }
+      return true;
+    },
+    [],
+  );
+
+  // `open_file` from the daemon — see `files/openRequests.ts` for the two
+  // transports. Quiet unless the request says `notify`: an agent showing you its
+  // plan beside the terminal must not take the keyboard from you mid-sentence.
+  useEffect(
+    () =>
+      onOpenFileRequest((req) => {
+        openFileInWorktree({ ...req, focus: false });
+      }),
+    [openFileInWorktree],
+  );
+
+  // `veld ide open <url>` arrives on the IDE channel when no terminal of this page's
+  // asked — so there is no session socket for the ordinary `open_url` frame to use.
+  // Same placement rule as a file: beside the terminal it came from, else beside
+  // whatever is focused, and never moving the keyboard.
+  useEffect(
+    () =>
+      onOpenUrlRequest(({ worktreeId, sessionId, url, notify }) => {
+        const current = layoutsRef.current[worktreeId];
+        if (!current) return;
+        if (!normalizeBrowserUrl(url)) {
+          notifyRedirect(`Opened ${urlLabel(url)} outside Veld — it is not a page a pane can show`);
+          openExternally(url);
+          return;
+        }
+        const beside = besideDock(current, sessionId);
+        // One tab per page, as for files: an agent re-opening the page it is
+        // working on activates the tab already there. Minted and matched outside
+        // the updater so the inbox event names the id the layout commits.
+        const newTab = browserTab({ url });
+        const tabId = findBrowserTab(current, url)?.id ?? newTab.id;
+        setLayouts((prev) => {
+          const l = prev[worktreeId];
+          if (!l) return prev;
+          const next = openBrowserTab(l, { url, beside, focus: false, newTab }).layout;
+          return { ...prev, [worktreeId]: next };
+        });
+        if (notify) {
+          inbox.report(tabId, worktreeId, {
+            type: "opened",
+            detail: `Agent opened ${urlLabel(url)}`,
+          });
+        }
+      }),
+    [],
+  );
+
+  /**
+   * A file path clicked in a terminal: Veld's own file pane, or the project's
+   * editor action.
    *
    * `allWorktreesRef`, not `worktreesRef`, for the reason that ref exists: a second
    * window can be showing another project's worktree, and resolving the click in
@@ -4498,20 +4617,28 @@ function AppInner(props: {
    * The daemon does the resolving and the containment check, so `path` is passed
    * along as printed and never joined to anything here.
    *
+   * **View in Veld is the default, and the first choice.** A project that declares
+   * no `accepts: "file"` action gets the file pane with no question. One that does
+   * is asked *once* — View in Veld, then its actions — and the answer is remembered
+   * in `terminal.fileAction` (`"veld"`, or the action's id).
+   *
    * **The menu is a one-time question, not a toll.** A context menu puts a
    * full-screen dismiss overlay over the page, so while one is open the *next*
    * click anywhere is swallowed to close it — the terminal never sees it and no
    * link fires. Asking on every click therefore makes every second click dead,
    * which is the opposite of what a one-click feature promises. So the answer is
-   * remembered in `terminal.fileAction` and the question is not asked again.
+   * remembered and the question is not asked again.
    */
   useEffect(
     () =>
-      onTerminalFilePath(({ worktreeId, path, line, event }) => {
+      onTerminalFilePath(({ worktreeId, sessionId, path, line, event }) => {
         const worktree = allWorktreesRef.current.find((w) => w.id === worktreeId);
         const declared = (worktree?.ide.extensions ?? []).filter(
           (e) => e.kind === "action" && e.accepts === "file",
         );
+        // Only the runnable ones are offered: with the file pane always there, a
+        // declared action whose `requires_bin` is missing is no longer the only way
+        // to open the file, and offering it would be offering a 422.
         const actions = declared.filter((e) => e.available);
         const run = (chosen: { id: string; label: string }) => {
           void api
@@ -4521,38 +4648,49 @@ function AppInner(props: {
             })
             .catch((e) => notifyError(`Could not open ${path} in ${chosen.label}`, e));
         };
-        if (actions.length === 0) {
-          // **Declared-but-unavailable is a different problem from not declared**,
-          // and collapsing them told a correctly-configured project to configure
-          // itself. `available: false` means a `requires_bin` entry is missing, so
-          // the honest advice is to install it — and the daemon already words that
-          // well, so the click is let through to produce its own 422 rather than
-          // guessed at here. Only a genuinely empty list gets the authoring hint.
-          if (declared.length > 0) {
-            run(declared[0]);
-            return;
-          }
-          notifyRedirect(
-            `Nothing is declared to open ${path} — add an ide.extensions action with accepts: "file"`,
+        const view = () => {
+          // Every click goes through the daemon first, relative or absolute. A
+          // relative path is resolved the way the terminal printed it — against the
+          // root, else a unique suffix among tracked files — so opening it as-is
+          // would 404 on `src/main.rs` printed from a subdirectory. An absolute one
+          // may be outside the worktree, where this worktree may only read a file
+          // the user opened from it — and this click is that act, so it is granted
+          // there. Either way the daemon answers with the path as it displays it,
+          // which is what the tab is then matched by.
+          void api.grantFile(worktreeId, path).then(
+            (meta) =>
+              openFileInWorktree({
+                worktreeId,
+                path: meta.path,
+                line,
+                sessionId,
+                focus: true,
+                notify: false,
+              }),
+            () =>
+              notifyRedirect(
+                `Veld can't find or show ${path} — it is missing, not a text file, or one Veld never shows`,
+              ),
           );
-          return;
-        }
-        // One declared action is not a choice, so it is not a question — and it is
-        // deliberately *not* remembered either: writing a preference nobody
-        // expressed would silently decide the next project that offers two.
-        if (actions.length === 1) {
-          run(actions[0]);
+        };
+        const remembered = settingsRef.current?.["terminal.fileAction"];
+        if (actions.length === 0 || remembered === "veld") {
+          view();
           return;
         }
         // The remembered answer, when this project still offers it. One value
         // serves every project, so an id this one does not declare is an ordinary
         // outcome — ask again here — rather than something to repair.
-        const remembered = settingsRef.current?.["terminal.fileAction"];
         const already = actions.find((a) => a.id === remembered);
         if (already) {
           run(already);
           return;
         }
+        const remember = (value: string) =>
+          // Remembered before the open, and the failure is swallowed on purpose: the
+          // click's job is to open the file, and a settings write that did not land
+          // must not turn into an error about the file.
+          void saveSettingsRef.current({ "terminal.fileAction": value }).catch(() => {});
         // The cast is nominal, not a shrug. `showContextMenu` returns a handler typed
         // for a React synthetic event, and xterm hands a native one; the handler reads
         // `clientX`/`clientY` and calls `preventDefault`/`stopPropagation`, all of
@@ -4579,14 +4717,20 @@ function AppInner(props: {
             ),
           },
           { key: "divider-top" },
+          {
+            key: "veld",
+            title: "View in Veld",
+            onClick: () => {
+              remember("veld");
+              view();
+            },
+          },
+          { key: "divider-actions" },
           ...actions.map((a) => ({
             key: a.id,
             title: a.label,
             onClick: () => {
-              // Remembered before the run, and the failure is swallowed on purpose:
-              // the click's job is to open the file, and a settings write that did
-              // not land must not turn into an error about the file.
-              void saveSettingsRef.current({ "terminal.fileAction": a.id }).catch(() => {});
+              remember(a.id);
               run(a);
             },
           })),
@@ -4606,7 +4750,7 @@ function AppInner(props: {
           },
         ])(event as unknown as React.MouseEvent<Element, MouseEvent>);
       }),
-    [showContextMenu],
+    [showContextMenu, openFileInWorktree],
   );
 
   // A focused native view swallows every keystroke, so the shell forwards the
@@ -5019,9 +5163,10 @@ function AppInner(props: {
   useEffect(() => {
     const shownHere = worktree !== null && shownId === worktree.id;
     const active = shownHere && layout ? activeTab(layout, layout.focused) : null;
-    inbox.setWatching(
-      windowFocused && active?.kind === "terminal" ? active.id : null,
-    );
+    // Any kind, not only a terminal: a file or page an agent opened `--notify` is
+    // filed against its own pane, and looking at that pane is what reads it. A kind
+    // nothing ever reports against simply has nothing to read.
+    inbox.setWatching(windowFocused && active ? active.id : null);
   }, [windowFocused, worktree, shownId, layout]);
 
   /* The OSC 9 handler that used to live here is gone, and nothing replaced it.
@@ -5384,7 +5529,17 @@ function AppInner(props: {
     // the daemon one worktree at a time, so this effect's first run after a reload sees
     // `layouts === {}`. Pruning against that emptied the whole restored inbox — the guard
     // deleting the thing it guards.
-    inbox.retain(terminals, Object.keys(layouts).map(Number));
+    //
+    // File and browser panes count as well: an "opened for you" event is filed
+    // against the pane that was opened, not a terminal.
+    inbox.retain(
+      [
+        ...terminals,
+        ...Object.values(layouts).flatMap(fileTabIds),
+        ...Object.values(layouts).flatMap(browserIds),
+      ],
+      Object.keys(layouts).map(Number),
+    );
   }, [layouts]);
 
   // ---- browser sessions ---------------------------------------------------
@@ -7177,6 +7332,24 @@ function AppInner(props: {
             filesServing={viewableFilesServing}
             filesRoot={viewableFilesRoot}
             watchFilesByDefault={watchFilesByDefault}
+            wrapLines={wrapFileLines}
+            onWrapLines={(wrap) =>
+              void saveSettingsRef.current({ "files.wrapLines": wrap }).catch((e) =>
+                notifyError("Save the line-wrap setting", e),
+              )
+            }
+            showDeletions={showFileDeletions}
+            onShowDeletions={(show) =>
+              void saveSettingsRef.current({ "files.showDeletions": show }).catch((e) =>
+                notifyError("Save the show-deletions setting", e),
+              )
+            }
+            splitDiff={splitFileDiff}
+            onSplitDiff={(split) =>
+              void saveSettingsRef.current({ "files.splitDiff": split }).catch((e) =>
+                notifyError("Save the side-by-side setting", e),
+              )
+            }
             panes={worktree.ide.panes}
             paneSessions={paneSessions}
             urlsEmptyHint={
@@ -7470,6 +7643,24 @@ function AppInner(props: {
               filesServing={viewableFilesServing}
               filesRoot={viewableFilesRoot}
               watchFilesByDefault={watchFilesByDefault}
+              wrapLines={wrapFileLines}
+              onWrapLines={(wrap) =>
+                void saveSettingsRef.current({ "files.wrapLines": wrap }).catch((e) =>
+                  notifyError("Save the line-wrap setting", e),
+                )
+              }
+              showDeletions={showFileDeletions}
+              onShowDeletions={(show) =>
+                void saveSettingsRef.current({ "files.showDeletions": show }).catch((e) =>
+                  notifyError("Save the show-deletions setting", e),
+                )
+              }
+              splitDiff={splitFileDiff}
+              onSplitDiff={(split) =>
+                void saveSettingsRef.current({ "files.splitDiff": split }).catch((e) =>
+                  notifyError("Save the side-by-side setting", e),
+                )
+              }
               panes={worktree.ide.panes}
               paneSessions={paneSessions}
               urlsEmptyHint={

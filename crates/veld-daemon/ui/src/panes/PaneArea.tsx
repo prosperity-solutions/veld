@@ -47,12 +47,19 @@
  * Only 1-3, 9, 10 and 11 are enforced. Note what is *not* a kind: the run's
  * URLs, which are a launcher shown inside a pane rather than a pane of their own
  * (`PlaceList.tsx`).
+ *
+ * `file` is the most recent kind to land this way, and the one that *does* fetch on
+ * its own, against (8): its data is one file's text, keyed by the tab's own `path`
+ * rather than by anything the app holds, and it polls only while mounted — which
+ * for a dock is "while it is the active tab" — so the rule's reason does not apply.
  */
 
-import { ActionIcon, Button, Loader, Menu, Modal, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Grid, Loader, Menu, Modal, Text, Tooltip } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
+  IconFileDiff,
+  IconFileText,
   IconBolt,
   IconBookmark,
   IconExternalLink,
@@ -79,9 +86,11 @@ import {
   useState,
 } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
+import { ChangedFilesModal } from "../files/ChangedFiles";
+import { FilePane } from "../files/FilePane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
 import { BookmarksModal, FilesButton, FilesModal, PlaceList } from "./PlaceList";
-import { inlineFiles, placesFor, suggestionsFor } from "./places";
+import { fileKindOf, inlineFiles, placesFor, suggestionsFor } from "./places";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
   type BrowserProfile,
@@ -104,6 +113,8 @@ import {
   dockOf,
   dockVisible,
   fileLabel,
+  fileTab,
+  findFileTab,
   focusDock,
   hasTab,
   insertTab,
@@ -111,6 +122,7 @@ import {
   moveTabToOtherDock,
   newPaneTab,
   newTabId,
+  openFileTab,
   paneTabLabel,
   tabForTransport,
   parseTransferTabs,
@@ -269,8 +281,10 @@ function releaseForTransfer(tab: PaneTab): void {
       return;
     case "logs":
     case "nodes":
+    case "file":
     case "new":
-      // Pure React; they own nothing outside the layout.
+      // Pure React; they own nothing outside the layout. A file pane's text is
+      // re-read by whichever window shows it next.
       return;
     default:
       // `unhandledKind` returns `never`, so the missing `return` is deliberate:
@@ -376,6 +390,18 @@ export function PaneArea(props: {
   filesRoot: string | null;
   /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
+  /** `files.wrapLines` — whether a file pane's source views wrap, and how its
+   *  toggle writes the setting back. */
+  wrapLines: boolean;
+  onWrapLines: (wrap: boolean) => void;
+  /** `files.showDeletions` — whether a file pane's source views show deleted
+   *  lines as diff rows, and how its toggle writes the setting back. */
+  showDeletions: boolean;
+  onShowDeletions: (show: boolean) => void;
+  /** `files.splitDiff` — whether that diff is side by side, and how its toggle
+   *  writes the setting back. */
+  splitDiff: boolean;
+  onSplitDiff: (split: boolean) => void;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   /** Which of a worktree's config panes the daemon has a token for, **carrying
@@ -1181,6 +1207,9 @@ export function PaneArea(props: {
           }
           onBrowser={(tab) => onLayout(addTab(layout, 0, tab))}
           onDiag={(kind) => onLayout(addTab(layout, 0, diagTab(kind)))}
+          onFile={(path, jump) =>
+            onLayout(addTab(layout, 0, { ...fileTab({ path }), ...(jump ? { jump } : {}) }))
+          }
         />
       </div>
     );
@@ -1245,6 +1274,12 @@ export function PaneArea(props: {
             filesServing={props.filesServing}
               filesRoot={props.filesRoot}
               watchFilesByDefault={props.watchFilesByDefault}
+              wrapLines={props.wrapLines}
+              onWrapLines={props.onWrapLines}
+              showDeletions={props.showDeletions}
+              onShowDeletions={props.onShowDeletions}
+              splitDiff={props.splitDiff}
+              onSplitDiff={props.onSplitDiff}
               panes={props.panes}
               paneSessions={props.paneSessions}
               urlsEmptyHint={props.urlsEmptyHint}
@@ -1426,6 +1461,18 @@ function DockView(props: {
   filesRoot: string | null;
   /** `files.watchByDefault` — whether a pane showing a local file watches it. */
   watchFilesByDefault: boolean;
+  /** `files.wrapLines` — whether a file pane's source views wrap, and how its
+   *  toggle writes the setting back. */
+  wrapLines: boolean;
+  onWrapLines: (wrap: boolean) => void;
+  /** `files.showDeletions` — whether a file pane's source views show deleted
+   *  lines as diff rows, and how its toggle writes the setting back. */
+  showDeletions: boolean;
+  onShowDeletions: (show: boolean) => void;
+  /** `files.splitDiff` — whether that diff is side by side, and how its toggle
+   *  writes the setting back. */
+  splitDiff: boolean;
+  onSplitDiff: (split: boolean) => void;
   /** Pane types the project declares in `ide.panes`. */
   panes: PaneSpec[];
   /** Which of a worktree's config panes the daemon has a token for, **carrying
@@ -1510,6 +1557,24 @@ function DockView(props: {
     if (from && from.kind === "new") onLayout(replaceTab(layout, from.id, tab));
     else onLayout(addTab(layout, index, tab));
   };
+
+  /**
+   * Show a file picked in this dock — from the chooser or from Changed files.
+   *
+   * A file already open somewhere is that tab, not a second copy of it, the same
+   * rule `openFileTab` applies to every other way in. `jump` scrolls the pane to its
+   * first change, which is what picking a row out of Changed files is for.
+   */
+  const openFileHere = (path: string, jump?: "change") => {
+    const open = findFileTab(layout, path);
+    if (open) {
+      const patched = jump ? updateTab(layout, open.id, { jump }) : layout;
+      onLayout(activateTab(patched, open.id));
+    } else {
+      convertOrAdd(active, { ...fileTab({ path }), ...(jump ? { jump } : {}) });
+    }
+  };
+  const [changesOpen, setChangesOpen] = useState(false);
 
   /** Drop a dragged tab at a position in this dock. */
   const dropTab = (e: React.DragEvent, at?: number) => {
@@ -1836,6 +1901,12 @@ function DockView(props: {
             >
               Node health
             </Menu.Item>
+            <Menu.Item
+              leftSection={<IconFileDiff size={14} />}
+              onClick={() => setChangesOpen(true)}
+            >
+              Changed files…
+            </Menu.Item>
             {/* The project's own panes as their own labelled group, after the
                 four veld ships. Ungrouped, they read as more built-ins and the
                 menu's shape changed per checkout; a label says whose they are
@@ -1889,6 +1960,17 @@ function DockView(props: {
             ))}
           </Menu.Dropdown>
         </Menu>
+        {/* The same list the chooser's Changed files card opens. Owned here rather
+            than by the chooser so it works from a dock showing anything. */}
+        <ChangedFilesModal
+          worktreeId={props.worktreeId}
+          opened={changesOpen}
+          onClose={() => setChangesOpen(false)}
+          onOpen={(path) => {
+            setChangesOpen(false);
+            openFileHere(path, "change");
+          }}
+        />
         {/* Takes the rest of the strip, so a drop anywhere right of the tabs
             still appends to this dock. */}
         <div style={{ flex: 1 }} />
@@ -1936,9 +2018,28 @@ function DockView(props: {
             onPane={(spec, adopt) => convertOrAdd(active, configPaneTab(spec, adopt))}
             onBrowser={(tab) => convertOrAdd(active, tab)}
             onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
+            onFile={openFileHere}
           />
         )}
         {active?.kind === "logs" && <LogsPane ctx={props.runCtx} />}
+        {active?.kind === "file" && (
+          <FilePane
+            key={active.id}
+            tab={active}
+            worktreeId={props.worktreeId}
+            wrapLines={props.wrapLines}
+            onWrapLines={props.onWrapLines}
+            showDeletions={props.showDeletions}
+            onShowDeletions={props.onShowDeletions}
+            splitDiff={props.splitDiff}
+            onSplitDiff={props.onSplitDiff}
+            // Updater form, for the same reason as the browser pane's below.
+            onTab={(patch) => onLayout((prev) => updateTab(prev, active.id, patch))}
+            onOpenFile={(path, line) =>
+              onLayout((prev) => openFileTab(prev, { path, line, beside: index, focus: true }).layout)
+            }
+          />
+        )}
         {active?.kind === "nodes" && <NodesPane ctx={props.runCtx} />}
         {active?.kind === "browser" && (
           <BrowserPane
@@ -2046,9 +2147,24 @@ function PaneChooser(props: {
   onPane: (spec: PaneSpec, adopt?: string) => void;
   onBrowser: (tab: PaneTab) => void;
   onDiag: (kind: DiagKind) => void;
+  /** Show a worktree file in a file pane; `"change"` scrolls to its first change. */
+  onFile: (path: string, jump?: "change") => void;
 }) {
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [filesOpen, setFilesOpen] = useState(false);
+  const [changesOpen, setChangesOpen] = useState(false);
+  /**
+   * A recently-edited file, opened where it reads best.
+   *
+   * A text file goes to a file pane — rendered, selectable, referenceable — and
+   * everything else (a page, a PDF, an image) to a browser pane on the file origin,
+   * which is the only place agent-authored HTML may run. Same split the `open` shim
+   * makes for a path an agent hands it.
+   */
+  const openPlace = (url: string, title?: string, path?: string) => {
+    if (path && fileKindOf(path) === "text") props.onFile(path);
+    else props.onBrowser(browserTab({ url, title: path ? fileLabel(path) : title }));
+  };
   const paneSessions = usePaneSessions(props.worktreeId, props.panes);
   // Which pane's picker is open, or none. The spec rather than the id, because
   // the modal shows the pane's own label and icon and would otherwise have to
@@ -2076,123 +2192,183 @@ function PaneChooser(props: {
   const bookmarks = places.filter((p) => p.kind === "bookmark");
   return (
     <div className="pane-chooser">
-      {/* Cards of one size, in declaration order, with a plain shell as the last of
-          them. **Nothing is promoted.** The first cut of this gave the first declared
-          pane a full-width lead button, which read as a recommendation veld has no
-          business making: a repo that declares Claude, Pi, Codex and a git log has
-          four things a contributor might want, and picking one for them is a guess
-          dressed as a default. Equal cards let each one carry its own description
-          instead, which is the information that actually tells them apart. */}
-      <section className="chooser-group">
-        <h3 className="chooser-heading">
-          <IconTerminal2 size={16} /> Work in a terminal
-        </h3>
-        <div className="chooser-cards">
-          {/* An unavailable pane is shown disabled with the reason rather than
-              omitted — a repo that declares a Claude pane should not look like it
-              forgot to. */}
-          {/* One card per declared pane, always — a pane with earlier sessions
-              is still one thing you can open, so it does not get a second card
-              beside it. What changes is what the click *does*: by default it
-              asks which session, because a picker nobody sees is a picker
-              nobody uses, and "you already have a conversation about this
-              worktree" is worth being told before starting another. A project
-              that would rather click-to-launch sets `ask_first: false` and the
-              list moves into the card's other half. */}
-          {props.panes.map((spec) => (
-            <PaneButton
-              key={spec.id}
-              spec={spec}
-              onPick={props.onPane}
-              answer={paneSessions.get(spec.id)}
-              onPickSessions={() => setPicking(spec)}
-            />
-          ))}
-          <button className="pane-card" onClick={props.onTerminal}>
-            <span className="pane-card-main">
-              <IconTerminal2 size={15} /> Terminal
-            </span>
-            <span className="pane-card-sub">A shell in this worktree</span>
-          </button>
-        </div>
-      </section>
+      {/* Two columns on a wide pane, each a stack. The wide one is where you start
+          work: a terminal, then a page — the run's URLs and recent files, directly
+          under the terminals rather than below everything. The narrow one holds the
+          side jobs: review the branch, check the run. Narrow, the columns stack in
+          that order (terminals, page, review, run): the two ways to start come first.
+          A container grid, not a media one: the breakpoint is the *pane's* width,
+          and a dock at 30% of a wide window is a narrow pane on a wide screen, which
+          is exactly when the columns have to stack. */}
+      <div className="chooser-layout">
+        <Grid
+          type="container"
+          breakpoints={{ xs: "300px", sm: "400px", md: "640px", lg: "900px", xl: "1200px" }}
+          columnGap="xl"
+          rowGap={30}
+        >
+          <Grid.Col span={{ base: 12, md: 8 }}>
+            <div className="chooser-stack">
+              {/* Cards of one size, in declaration order, with a plain shell as the last of
+                  them. **Nothing is promoted.** The first cut of this gave the first declared
+                  pane a full-width lead button, which read as a recommendation veld has no
+                  business making: a repo that declares Claude, Pi, Codex and a git log has
+                  four things a contributor might want, and picking one for them is a guess
+                  dressed as a default. Equal cards let each one carry its own description
+                  instead, which is the information that actually tells them apart. */}
+              <section className="chooser-group">
+                <h3 className="chooser-heading">
+                  <IconTerminal2 size={16} /> Work in a terminal
+                </h3>
+                <div className="chooser-cards">
+                  {/* An unavailable pane is shown disabled with the reason rather than
+                      omitted — a repo that declares a Claude pane should not look like it
+                      forgot to. */}
+                  {/* One card per declared pane, always — a pane with earlier sessions
+                      is still one thing you can open, so it does not get a second card
+                      beside it. What changes is what the click *does*: by default it
+                      asks which session, because a picker nobody sees is a picker
+                      nobody uses, and "you already have a conversation about this
+                      worktree" is worth being told before starting another. A project
+                      that would rather click-to-launch sets `ask_first: false` and the
+                      list moves into the card's other half. */}
+                  {props.panes.map((spec) => (
+                    <PaneButton
+                      key={spec.id}
+                      spec={spec}
+                      onPick={props.onPane}
+                      answer={paneSessions.get(spec.id)}
+                      onPickSessions={() => setPicking(spec)}
+                    />
+                  ))}
+                  <button className="pane-card" onClick={props.onTerminal}>
+                    <span className="pane-card-main">
+                      <IconTerminal2 size={15} /> Terminal
+                    </span>
+                    <span className="pane-card-sub">A shell in this worktree</span>
+                  </button>
+                </div>
+              </section>
+              {/* The run's URLs as the list, with the two escape hatches in the heading.
+                  Emphatically *not* a `Browser` button up in the first group with the URLs
+                  somewhere below: that split is what made "open my app" undiscoverable, and
+                  the reason these two controls are allowed to be buttons is that they sit
+                  *on* the list they are alternatives to rather than in another section.
 
-      {/* The run's URLs as the list, with the two escape hatches in the heading.
-          Emphatically *not* a `Browser` button up in the first group with the URLs
-          somewhere below: that split is what made "open my app" undiscoverable, and
-          the reason these two controls are allowed to be buttons is that they sit
-          *on* the list they are alternatives to rather than in another section.
-
-          Blank was a dashed row at the bottom and the bookmarks were a second group
-          above it. In a project with four to eight services per run that put the
-          addresses veld is serving *now* — the answer, most of the time — in the
-          middle of a screen that scrolled, between a config's bookmarks and a row
-          nobody was looking for. */}
-      <section className="chooser-group">
-        <div className="chooser-head">
-          <h3 className="chooser-heading">
-            <IconWorld size={16} /> Open a page
-          </h3>
-          <div className="chooser-head-actions">
-            {/* Icon-only, both of these. They are peers — "files this worktree has"
-                and "addresses this project declared" — and a heading row with two
-                labelled buttons plus Blank browser had no room left for the third.
-                Never disabled, even with none to show: a disabled button dispatches
-                no pointer events, so its tooltip can never open (#205), and each
-                modal's own empty state is where the absence gets explained. */}
-            <FilesButton
-              count={props.files.length}
-              loading={props.filesLoading}
-              onOpen={() => setFilesOpen(true)}
-            />
-            <Tooltip
-              label="Every address this project declares"
-              openDelay={250}
-              withArrow
-            >
-              <ActionIcon
-                variant="default"
-                size="sm"
-                aria-label={`Project bookmarks (${bookmarks.length})`}
-                onClick={() => setBookmarksOpen(true)}
-              >
-                <IconBookmark size={13} />
-              </ActionIcon>
-            </Tooltip>
-            <Button
-              size="compact-xs"
-              variant="default"
-              leftSection={<IconWindow size={13} />}
-              title={
-                props.searchUrl.trim() === ""
-                  ? "A browser pane with nothing loaded — type any address"
-                  : "A browser pane with nothing loaded — type any address, or search"
-              }
-              onClick={() => props.onBrowser(browserTab({}))}
-            >
-              Blank browser
-            </Button>
-          </div>
-        </div>
-        <PlaceList
-          suggestions={suggestions}
-          emptyHint={props.urlsEmptyHint}
-          onOpen={(url, title, path) =>
-            props.onBrowser(
-              browserTab({ url, title: path ? fileLabel(path) : title }),
-            )
-          }
-        />
-        {/* Said out loud, and only where the answer is the main content of this part
-            of the screen — with a run serving URLs there are rows above and the
-            heading's spinner is enough. This exists because the same frame used to
-            render the *previous* worktree's files: they are now correctly absent, and
-            absent-because-not-answered has to look different from absent-because-none
-            or a switch reads as "this worktree has nothing". */}
-        {props.filesLoading && props.serviceUrls.length === 0 && (
-          <p className="faint place-nomatch">Looking for recently edited files…</p>
-        )}
-      </section>
+                  Blank was a dashed row at the bottom and the bookmarks were a second group
+                  above it. In a project with four to eight services per run that put the
+                  addresses veld is serving *now* — the answer, most of the time — in the
+                  middle of a screen that scrolled, between a config's bookmarks and a row
+                  nobody was looking for. */}
+              <section className="chooser-group">
+                <div className="chooser-head">
+                  <h3 className="chooser-heading">
+                    <IconWorld size={16} /> Open a page
+                  </h3>
+                  <div className="chooser-head-actions">
+                    {/* Icon-only, both of these. They are peers — "files this worktree has"
+                        and "addresses this project declared" — and a heading row with two
+                        labelled buttons plus Blank browser had no room left for the third.
+                        Never disabled, even with none to show: a disabled button dispatches
+                        no pointer events, so its tooltip can never open (#205), and each
+                        modal's own empty state is where the absence gets explained. */}
+                    <FilesButton
+                      count={props.files.length}
+                      loading={props.filesLoading}
+                      onOpen={() => setFilesOpen(true)}
+                    />
+                    <Tooltip
+                      label="Every address this project declares"
+                      openDelay={250}
+                      withArrow
+                    >
+                      <ActionIcon
+                        variant="default"
+                        size="sm"
+                        aria-label={`Project bookmarks (${bookmarks.length})`}
+                        onClick={() => setBookmarksOpen(true)}
+                      >
+                        <IconBookmark size={13} />
+                      </ActionIcon>
+                    </Tooltip>
+                    <Button
+                      size="compact-xs"
+                      variant="default"
+                      leftSection={<IconWindow size={13} />}
+                      title={
+                        props.searchUrl.trim() === ""
+                          ? "A browser pane with nothing loaded — type any address"
+                          : "A browser pane with nothing loaded — type any address, or search"
+                      }
+                      onClick={() => props.onBrowser(browserTab({}))}
+                    >
+                      Blank browser
+                    </Button>
+                  </div>
+                </div>
+                <PlaceList
+                  suggestions={suggestions}
+                  emptyHint={props.urlsEmptyHint}
+                  onOpen={openPlace}
+                />
+                {/* Said out loud, and only where the answer is the main content of this part
+                    of the screen — with a run serving URLs there are rows above and the
+                    heading's spinner is enough. This exists because the same frame used to
+                    render the *previous* worktree's files: they are now correctly absent, and
+                    absent-because-not-answered has to look different from absent-because-none
+                    or a switch reads as "this worktree has nothing". */}
+                {props.filesLoading && props.serviceUrls.length === 0 && (
+                  <p className="faint place-nomatch">Looking for recently edited files…</p>
+                )}
+              </section>
+            </div>
+          </Grid.Col>
+          <Grid.Col span={{ base: 12, md: 4 }}>
+            <div className="chooser-stack">
+              {/* The same cards as the terminals beside them: these are panes you sit in
+                  front of and arrange beside a shell, not toolbar actions, and rendering them
+                  as small chips made them look like a lesser class of thing. The run's node
+                  actions used to sit here as a fourth group; they are gone, because the top
+                  bar carries them permanently and a screen this crowded cannot afford the
+                  same surface twice. */}
+              {/* What the agent did, before what the run is doing: reviewing a branch is
+                  the more common reason to open a pane here than diagnosing a node. */}
+              <section className="chooser-group">
+                <h3 className="chooser-heading">
+                  <IconFileDiff size={16} /> Review the work
+                </h3>
+                <div className="chooser-cards">
+                  <button className="pane-card" onClick={() => setChangesOpen(true)}>
+                    <span className="pane-card-main">
+                      <IconFileDiff size={15} /> Changed files
+                    </span>
+                    <span className="pane-card-sub">Everything this branch changed, line by line</span>
+                  </button>
+                </div>
+              </section>
+              <section className="chooser-group">
+                <h3 className="chooser-heading">
+                  <IconActivityHeartbeat size={16} /> Check the run
+                </h3>
+                <div className="chooser-cards">
+                  <button className="pane-card" onClick={() => props.onDiag("logs")}>
+                    <span className="pane-card-main">
+                      <IconLogs size={15} /> Logs
+                    </span>
+                    <span className="pane-card-sub">Every node's output, interleaved</span>
+                  </button>
+                  <button className="pane-card" onClick={() => props.onDiag("nodes")}>
+                    <span className="pane-card-main">
+                      <IconActivityHeartbeat size={15} /> Nodes
+                    </span>
+                    <span className="pane-card-sub">Health, CPU and memory per node</span>
+                  </button>
+                </div>
+              </section>
+            </div>
+          </Grid.Col>
+        </Grid>
+      </div>
       <FilesModal
         files={fileplaces}
         serving={props.filesServing}
@@ -2200,9 +2376,16 @@ function PaneChooser(props: {
         onClose={() => setFilesOpen(false)}
         onOpen={(url, title, path) => {
           setFilesOpen(false);
-          props.onBrowser(
-            browserTab({ url, title: path ? fileLabel(path) : title }),
-          );
+          openPlace(url, title, path);
+        }}
+      />
+      <ChangedFilesModal
+        worktreeId={props.worktreeId}
+        opened={changesOpen}
+        onClose={() => setChangesOpen(false)}
+        onOpen={(path) => {
+          setChangesOpen(false);
+          props.onFile(path, "change");
         }}
       />
       <PaneSessionsModal
@@ -2228,32 +2411,6 @@ function PaneChooser(props: {
           props.onBrowser(browserTab({ url, title }));
         }}
       />
-
-      {/* Last, but the same cards as the terminals above: these are panes you sit in
-          front of and arrange beside a shell, not toolbar actions, and rendering them
-          as small chips made them look like a lesser class of thing. The run's node
-          actions used to sit here as a fourth group; they are gone, because the top
-          bar carries them permanently and a screen this crowded cannot afford the
-          same surface twice. */}
-      <section className="chooser-group">
-        <h3 className="chooser-heading">
-          <IconActivityHeartbeat size={16} /> Check the run
-        </h3>
-        <div className="chooser-cards">
-          <button className="pane-card" onClick={() => props.onDiag("logs")}>
-            <span className="pane-card-main">
-              <IconLogs size={15} /> Logs
-            </span>
-            <span className="pane-card-sub">Every node's output, interleaved</span>
-          </button>
-          <button className="pane-card" onClick={() => props.onDiag("nodes")}>
-            <span className="pane-card-main">
-              <IconActivityHeartbeat size={15} /> Nodes
-            </span>
-            <span className="pane-card-sub">Health, CPU and memory per node</span>
-          </button>
-        </div>
-      </section>
     </div>
   );
 }
@@ -2598,6 +2755,8 @@ function tabIcon(
       return <IconLogs size={12} />;
     case "nodes":
       return <IconActivityHeartbeat size={12} />;
+    case "file":
+      return <IconFileText size={12} />;
     case "new":
       return <IconPlus size={12} />;
     default:

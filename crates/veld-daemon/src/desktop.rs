@@ -765,6 +765,12 @@ pub(super) async fn git_cancellable(dir: &FsPath, args: &[&str]) -> Result<Strin
     )
 }
 
+/// [`git_cancellable`], untrimmed — for `-z` output, where a path may begin with a
+/// space and a `.trim()` would quietly rename it.
+pub(super) async fn git_raw_cancellable(dir: &FsPath, args: &[&str]) -> Result<Vec<u8>, String> {
+    git_raw_with_index(dir, None, args, true).await
+}
+
 pub(super) async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&git_raw(dir, args).await?)
         .trim()

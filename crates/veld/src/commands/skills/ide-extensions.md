@@ -148,8 +148,9 @@ malformed config, it is adding four badges nobody needed to a 42px bar.
   a timer), **`action`** (a button that runs a command on a click), **`menu`** (one
   control whose members are `action` entries).
 - An `action` can carry **`accepts: "file"`** instead of a `slot`, which offers it
-  on a file path clicked in terminal output and hands it the path as `$1` and the
-  line as `$2`. See `veld skills ide-extensions` → Opening a clicked file.
+  on a file path clicked in terminal output — listed under Veld's own *View in
+  Veld* — and hands it the path as `$1` and the line as `$2`. See `veld skills
+  ide-extensions` → Opening a clicked file.
 - A badge's command **prints a small JSON contract on stdout** and veld renders it.
   That is the whole extension mechanism: **veld never learns your code host's
   name.** The provider-specific knowledge lives in your command.
@@ -456,20 +457,29 @@ The second one is worth studying: `2>/dev/null` plus a missing file gives exit
 
 ## Opening a clicked file
 
-Veld underlines file paths in terminal output and hands a clicked one to an
-`action` declaring `accepts: "file"`. The path arrives as `$1`, absolute; the line
-as `$2`.
+Veld underlines file paths in terminal output. A click offers **View in Veld**
+first — Veld's own read-only file pane (see `veld skills ide`) — and then every
+`action` declaring `accepts: "file"`, which is how a project adds "open in my
+editor". The path arrives as `$1`, absolute; the line as `$2`.
 
 ```jsonc
 { "id": "vscode-file", "type": "action", "label": "VS Code", "accepts": "file",
   "shell": "command -v code >/dev/null 2>&1 && exec code -g \"$1:$2\" || exec open -a \"Visual Studio Code\" \"$1\"" }
 ```
 
-Declare none and a click says so. **Declare several and the user is asked once**:
-the first click offers a menu, the answer is kept in their *Open a clicked file
-path with* setting, and every click after it goes straight there. Do not expect a
-menu per click — a menu's dismiss overlay swallows the following click, so asking
-every time makes every second click dead.
+Declare none and a click opens the file pane directly — there is nothing to
+choose between. **Declare one or more and the user is asked once**: the first
+click offers a menu (*View in Veld*, a divider, then your actions), the answer is
+kept in their *Open a clicked file path with* setting (`terminal.fileAction`;
+`"veld"` is the file pane), and every click after it goes straight there. Do not
+expect a menu per click — a menu's dismiss overlay swallows the following click,
+so asking every time makes every second click dead.
+
+**Do you still need one?** For *reading* a file, no — the file pane renders
+markdown, tables and highlighted code, reloads itself, and lets the user copy a
+`path:line` reference. Declare an `accepts` action for what the pane will never
+do: **editing**, or jumping into the project's real IDE with its language
+server.
 
 **`accepts` and `slot` are mutually exclusive, and veld refuses both.** A control
 in the top bar is clicked with no file selected, so there would be nothing to hand

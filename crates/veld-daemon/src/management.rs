@@ -1190,6 +1190,64 @@ pub(super) fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCo
     }
 }
 
+/// Check that a request's `Host` names this machine — the DNS-rebinding guard for
+/// the routes that hand file contents to the page that asked (`file_pane`,
+/// `changes`).
+///
+/// [`check_csrf`] keeps a *cross-origin* page from sending the header, but DNS
+/// rebinding makes the page same-origin: `evil.example` re-resolves to 127.0.0.1,
+/// its scripts send any header they like, and the one thing left saying
+/// `evil.example` is `Host`. Every legitimate caller names a loopback address or a
+/// `.localhost` name, which cannot be rebound — the CLI (`daemon_base`, 127.0.0.1),
+/// Caddy's `veld.localhost` and `*.veld.localhost` routes (`reverse_proxy` keeps
+/// the client's `Host`), and vite's `/api` proxy (`localhost:5199` or its
+/// `.veld.localhost` name; no `changeOrigin`). A dev instance may also be reached
+/// at its `VELD_MANAGEMENT_HOST` or a `dev_trusted_origins` host, which need not
+/// be `.localhost`, so those are allowed by exact name.
+///
+/// A request with **no** `Host` passes: every browser sends one, so its absence is
+/// never a rebinding, and refusing it would only turn away a bare HTTP/1.0 tool.
+pub(super) fn check_host(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    let Some(raw) = headers.get(axum::http::header::HOST) else {
+        return Ok(());
+    };
+    let host = raw.to_str().map_err(|_| StatusCode::FORBIDDEN)?;
+    let extra: Vec<String> = veld_core::instance::management_host()
+        .into_iter()
+        .chain(
+            veld_core::instance::dev_trusted_origins()
+                .iter()
+                .filter_map(|o| o.split_once("://").map(|(_, h)| hostname_of(h))),
+        )
+        .collect();
+    if host_is_local(host, &extra) {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// The hostname half of a `host[:port]`, lowercased, without a trailing dot.
+fn hostname_of(authority: &str) -> String {
+    let name = match authority.strip_prefix('[') {
+        // `[::1]:19898` — the brackets are part of the name as `Host` spells it.
+        Some(rest) => rest
+            .split_once(']')
+            .map_or(authority, |(inner, _)| &authority[..inner.len() + 2]),
+        None => authority.split(':').next().unwrap_or_default(),
+    };
+    name.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// Whether `host` (a `Host` header's value) is loopback, a `.localhost` name, or
+/// one of `extra`. Pure, for the tests.
+fn host_is_local(host: &str, extra: &[String]) -> bool {
+    let name = hostname_of(host);
+    matches!(name.as_str(), "127.0.0.1" | "[::1]" | "localhost")
+        || name.ends_with(".localhost")
+        || extra.iter().any(|e| e.eq_ignore_ascii_case(&name))
+}
+
 /// Validate that a run name contains only safe characters.
 pub(super) fn validate_run_name(name: &str) -> Result<(), StatusCode> {
     if name.is_empty()
@@ -1805,6 +1863,48 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use veld_core::state::{RegistryEntry, RegistryRunInfo, RunStatus};
+
+    /// Every way the daemon is legitimately reached passes, and a rebound name
+    /// does not — however it dresses up as local.
+    #[test]
+    fn only_local_hosts_pass_the_rebinding_guard() {
+        let extra = ["veld-dev.example".to_owned()];
+        for ok in [
+            "127.0.0.1:19898",
+            "127.0.0.1",
+            "[::1]:19898",
+            "localhost:5199",
+            "LOCALHOST",
+            "veld.localhost",
+            "veld.localhost:18443",
+            "dev-daemon.run.veld.localhost",
+            "localhost.",
+            "veld-dev.example:443",
+        ] {
+            assert!(host_is_local(ok, &extra), "{ok}");
+        }
+        for refused in [
+            "evil.example",
+            "evil.example:19898",
+            "localhost.evil.example",
+            "evillocalhost",
+            "127.0.0.1.evil.example",
+            "[::2]:19898",
+            "",
+        ] {
+            assert!(!host_is_local(refused, &extra), "{refused}");
+        }
+    }
+
+    #[test]
+    fn check_host_refuses_a_rebound_name_and_allows_none() {
+        let mut headers = axum::http::HeaderMap::new();
+        assert!(check_host(&headers).is_ok(), "no Host is no browser");
+        headers.insert(axum::http::header::HOST, "veld.localhost".parse().unwrap());
+        assert!(check_host(&headers).is_ok());
+        headers.insert(axum::http::header::HOST, "evil.example".parse().unwrap());
+        assert_eq!(check_host(&headers), Err(StatusCode::FORBIDDEN));
+    }
 
     /// Two projects that each run an environment called `main` — the state the
     /// desktop UI produces from two repos both checked out on `main`.

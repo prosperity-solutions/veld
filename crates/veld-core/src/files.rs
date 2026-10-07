@@ -50,6 +50,9 @@ pub struct ViewPolicy {
 }
 
 /// Extensions covered by `files.viewWebPages`.
+///
+/// Also the file pane's `sourceOnly` kind ([`readable_text_kind`]), so it is in
+/// `text_kinds.json` — see the note above [`MARKDOWN_EXTS`].
 const WEB_PAGE_EXTS: &[&str] = &["html", "htm"];
 
 /// Extensions covered by `files.viewImages`.
@@ -173,6 +176,97 @@ pub fn servable_type(path: &str) -> Option<&'static str> {
     })
 }
 
+/// How the file pane renders a text file, decided by name alone.
+///
+/// The `/ide` bundle mirrors this table to pick a renderer; the daemon and the CLI
+/// use it to *route* — a path with a kind opens in the file pane, anything else
+/// goes to a browser pane or nowhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TextKind {
+    Markdown,
+    Csv,
+    Tsv,
+    /// Source, config and data shown with line numbers and highlighting.
+    Code,
+    /// Prose or logs with no syntax worth highlighting.
+    Plain,
+}
+
+// **The text-kind lists below have a second copy** in the `/ide` bundle
+// (`veld-daemon/ui/src/files/textKind.ts`), and both are checked against one
+// fixture, `text_kinds.json` beside this file: the test
+// `text_kind_lists_match_the_shared_fixture` here and "agrees with the shared
+// text-kind fixture" in `ui/src/files/files.test.ts`. Change a list, change the
+// fixture, and the other side's test says what it is missing.
+
+/// Extensions the file pane renders as Markdown.
+const MARKDOWN_EXTS: &[&str] = &["md", "markdown"];
+
+/// Extensions the file pane shows as plain text: prose or logs, no highlighting.
+const PLAIN_EXTS: &[&str] = &["txt", "log"];
+
+/// Extensions the file pane renders as code.
+///
+/// A closed list, like [`servable_type`], for the same reason: the read behind it
+/// sends the whole file to a renderer, and "anything that decodes as UTF-8" would
+/// include a lockfile's worth of noise and every extensionless secret.
+const CODE_EXTS: &[&str] = &[
+    "json", "jsonc", "yaml", "yml", "toml", "xml", "ini", "sql", "sh", "bash", "zsh", "rs", "ts",
+    "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "java", "kt", "swift", "c",
+    "h", "cpp", "hpp", "cs", "php", "css", "scss", "graphql", "proto", "diff", "patch",
+];
+
+/// Extensionless file names the file pane renders as code.
+const CODE_NAMES: &[&str] = &["Dockerfile", "Makefile", "justfile"];
+
+/// The kind of text file `path` is, for **routing**: `None` means "not for the file
+/// pane".
+///
+/// HTML is deliberately absent. A page an agent wrote is meant to be *seen*, and
+/// that is the browser pane's job; [`readable_text_kind`] is the wider question the
+/// file pane asks when somebody explicitly wants a page's source.
+#[must_use]
+pub fn text_kind(path: &str) -> Option<TextKind> {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    if CODE_NAMES.contains(&name) {
+        return Some(TextKind::Code);
+    }
+    let ext = extension_of(name)?;
+    Some(match ext.as_str() {
+        e if MARKDOWN_EXTS.contains(&e) => TextKind::Markdown,
+        "csv" => TextKind::Csv,
+        "tsv" => TextKind::Tsv,
+        e if PLAIN_EXTS.contains(&e) => TextKind::Plain,
+        e if CODE_EXTS.contains(&e) => TextKind::Code,
+        _ => return None,
+    })
+}
+
+/// [`text_kind`], plus the kinds the file pane will show as source when it is asked
+/// for one by name — today only `.html`/`.htm`.
+///
+/// The split exists so that "open this page" keeps meaning the rendered page
+/// everywhere a path is routed, while a file pane that was pointed at one (from the
+/// changed-files list, say) can still read it rather than refuse.
+#[must_use]
+pub fn readable_text_kind(path: &str) -> Option<TextKind> {
+    text_kind(path).or_else(|| {
+        extension_of(path)
+            .is_some_and(|e| WEB_PAGE_EXTS.contains(&e.as_str()))
+            .then_some(TextKind::Code)
+    })
+}
+
+/// Whether bytes look like a binary file rather than text: a NUL in the first 8 KB.
+///
+/// The heuristic git and most editors use. It misreads UTF-16, which is rare enough
+/// in a worktree that refusing it with a clear message beats rendering mojibake.
+#[must_use]
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(8 * 1024).any(|b| *b == 0)
+}
+
 /// Paths never served, whatever the extension table says.
 ///
 /// Defence in depth rather than the boundary — see the module docs. Deliberately
@@ -209,6 +303,125 @@ pub fn is_sensitive(rel_path: &str) -> bool {
             || segment.ends_with(".p12")
             || segment.ends_with(".keystore")
     })
+}
+
+/// Home-relative prefixes a file pane never reads **outside a worktree**, whatever
+/// grant or `files.extraFolders` entry names them. See [`is_home_credential`].
+const HOME_CREDENTIAL_DIRS: &[&str] = &[
+    ".ssh/",
+    ".gnupg/",
+    ".aws/",
+    ".kube/",
+    ".docker/",
+    ".codex/",
+    ".config/gh/",
+    ".config/gcloud/",
+];
+
+/// Home-relative files refused for the same reason as [`HOME_CREDENTIAL_DIRS`].
+const HOME_CREDENTIAL_FILES: &[&str] = &[
+    ".netrc",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".pypirc",
+    ".git-credentials",
+];
+
+/// File names that hold a login token wherever they sit.
+const CREDENTIAL_NAMES: &[&str] = &["auth.json", "hosts.yml", "token", "tokens.json"];
+
+/// Whether `full` — canonical, absolute, **outside** the worktree — is one of the
+/// places a CLI keeps a login, on top of [`is_sensitive`].
+///
+/// `is_sensitive` is about categories of secret anywhere in a checkout. This is
+/// about the home folder, where a grant or an extra folder can point and where the
+/// secrets have fixed, well-known homes with harmless-looking extensions:
+/// `~/.config/gh/hosts.yml`, `~/.aws/config`, `~/.docker/config.json`. A click on
+/// a path an agent printed is enough to grant a read, so these are refused however
+/// the file was named.
+///
+/// `~/.claude` is the one folder split rather than refused whole, because it is
+/// also where Claude Code writes the plans and memories an agent prints the path
+/// of: only Markdown under `.claude/plans/` and `.claude/projects/` reads, and
+/// everything else there (settings, `.credentials.json`, transcripts) does not.
+///
+/// `home` is the canonical home folder, passed in so the rule is testable.
+#[must_use]
+pub fn is_home_credential(full: &Path, home: Option<&Path>) -> bool {
+    let name = full
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if name.contains("credential") || CREDENTIAL_NAMES.contains(&name.as_str()) {
+        return true;
+    }
+    let Some(rel) = home
+        .and_then(|h| full.strip_prefix(h).ok())
+        .and_then(Path::to_str)
+    else {
+        return false;
+    };
+    let rel = rel.to_ascii_lowercase();
+    if HOME_CREDENTIAL_FILES.contains(&rel.as_str())
+        || HOME_CREDENTIAL_DIRS.iter().any(|d| rel.starts_with(d))
+    {
+        return true;
+    }
+    if let Some(inner) = rel.strip_prefix(".claude/") {
+        let plan_or_memory = inner.starts_with("plans/") || inner.starts_with("projects/");
+        return !(plan_or_memory && extension_of(&rel).as_deref() == Some("md"));
+    }
+    false
+}
+
+/// The folders under `$XDG_CONFIG_HOME` a CLI keeps a login in — the
+/// `.config/…` entries of [`HOME_CREDENTIAL_DIRS`], for a config folder that is
+/// not `~/.config`.
+const CONFIG_CREDENTIAL_DIRS: &[&str] = &["gh/", "gcloud/"];
+
+/// Whether `full` is under one of [`CONFIG_CREDENTIAL_DIRS`] in `config`, the
+/// user's `$XDG_CONFIG_HOME`. [`is_home_credential`] covers `~/.config`; `gh` and
+/// `gcloud` follow the variable when it is set, so their logins can live anywhere.
+#[must_use]
+pub fn is_config_credential(full: &Path, config: &Path) -> bool {
+    full.strip_prefix(config)
+        .ok()
+        .and_then(Path::to_str)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|rel| CONFIG_CREDENTIAL_DIRS.iter().any(|d| rel.starts_with(d)))
+}
+
+/// `p` in lexical normal form: `.` segments dropped and `..` applied to the
+/// spelling, without asking the filesystem. **Not** what the kernel would open
+/// when a symlink sits before a `..` — so use it to judge a spelling (a guard that
+/// refuses), never to pick the file that is read.
+#[must_use]
+pub fn lexical(p: &Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for part in p.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Whether a `files.extraFolders` entry would let a file pane read everything:
+/// `/`, the home folder, or any folder above it.
+///
+/// Judged on the **lexical** normal form — `.` segments dropped, `..` applied,
+/// trailing `/` ignored — so `/.`, `~/./` and `/Users/me/..` are the folders they
+/// name rather than strings that happen not to equal `/` or `~`. `folder` has its
+/// `~` expanded already; `home` is the home folder in the same form.
+#[must_use]
+pub fn folder_too_broad(folder: &Path, home: Option<&Path>) -> bool {
+    let folder = lexical(folder);
+    folder.parent().is_none() || home.is_some_and(|h| lexical(h).starts_with(&folder))
 }
 
 /// Directory names a recency scan never descends into.
@@ -585,6 +798,200 @@ mod tests {
             elapsed < std::time::Duration::from_secs(1),
             "glob matching took {elapsed:?} — the exponential backtracker is back"
         );
+    }
+
+    #[test]
+    fn text_kind_routes_by_name_and_leaves_pages_to_the_browser() {
+        assert_eq!(text_kind("docs/plan.md"), Some(TextKind::Markdown));
+        assert_eq!(text_kind("README.MARKDOWN"), Some(TextKind::Markdown));
+        assert_eq!(text_kind("data/q3.csv"), Some(TextKind::Csv));
+        assert_eq!(text_kind("q3.tsv"), Some(TextKind::Tsv));
+        assert_eq!(text_kind("run.log"), Some(TextKind::Plain));
+        assert_eq!(text_kind("src/main.rs"), Some(TextKind::Code));
+        assert_eq!(text_kind("app/Dockerfile"), Some(TextKind::Code));
+        assert_eq!(text_kind("justfile"), Some(TextKind::Code));
+        // TypeScript's ESM/CJS spellings.
+        assert_eq!(text_kind("vite.config.mts"), Some(TextKind::Code));
+        assert_eq!(text_kind("jest.config.cts"), Some(TextKind::Code));
+        // A page is for looking at, so routing sends it to a browser pane…
+        assert_eq!(text_kind("deck.html"), None);
+        // …while the file pane can still show its source when asked by name.
+        assert_eq!(readable_text_kind("deck.html"), Some(TextKind::Code));
+        for no in [
+            "shot.png",
+            "report.pdf",
+            "id_rsa",
+            "db.sqlite",
+            "Cargo.lock",
+        ] {
+            assert_eq!(text_kind(no), None, "{no}");
+            assert_eq!(readable_text_kind(no), None, "{no}");
+        }
+    }
+
+    /// The text-kind lists against `text_kinds.json`, which the `/ide` bundle's
+    /// `files.test.ts` checks `textKind.ts` against too — so a kind added on one
+    /// side only fails one of the two.
+    #[test]
+    fn text_kind_lists_match_the_shared_fixture() {
+        let fixture: std::collections::BTreeMap<String, Vec<String>> =
+            serde_json::from_str(include_str!("text_kinds.json")).unwrap();
+        let sorted = |list: &[&str]| {
+            let mut v: Vec<String> = list.iter().map(|s| (*s).to_owned()).collect();
+            v.sort();
+            v
+        };
+        let want = |kind: &str| {
+            let mut v = fixture[kind].clone();
+            v.sort();
+            v
+        };
+        assert_eq!(sorted(MARKDOWN_EXTS), want("markdown"));
+        assert_eq!(sorted(PLAIN_EXTS), want("plain"));
+        assert_eq!(sorted(CODE_EXTS), want("code"));
+        assert_eq!(sorted(CODE_NAMES), want("codeNames"));
+        assert_eq!(sorted(WEB_PAGE_EXTS), want("sourceOnly"));
+        // And each entry routes to its kind — which is what pins `csv`/`tsv`, the
+        // two kinds spelled as match arms rather than lists.
+        let kinds = [
+            ("markdown", TextKind::Markdown),
+            ("csv", TextKind::Csv),
+            ("tsv", TextKind::Tsv),
+            ("plain", TextKind::Plain),
+            ("code", TextKind::Code),
+        ];
+        for (key, kind) in kinds {
+            for ext in &fixture[key] {
+                assert_eq!(text_kind(&format!("a.{ext}")), Some(kind), "{ext}");
+            }
+        }
+        for name in &fixture["codeNames"] {
+            assert_eq!(text_kind(&format!("dir/{name}")), Some(TextKind::Code));
+        }
+        for ext in &fixture["sourceOnly"] {
+            assert_eq!(text_kind(&format!("a.{ext}")), None, "{ext}");
+            assert_eq!(
+                readable_text_kind(&format!("a.{ext}")),
+                Some(TextKind::Code)
+            );
+        }
+        let mut keys: Vec<&str> = fixture.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "code",
+                "codeNames",
+                "csv",
+                "markdown",
+                "plain",
+                "sourceOnly",
+                "tsv"
+            ],
+            "a new key in the fixture needs a list here to check it against"
+        );
+    }
+
+    #[test]
+    fn a_config_home_credential_is_refused_wherever_xdg_puts_it() {
+        let config = Path::new("/data/cfg");
+        assert!(is_config_credential(&config.join("gh/hosts.yml"), config));
+        assert!(is_config_credential(&config.join("GCloud/x.json"), config));
+        assert!(!is_config_credential(&config.join("nvim/init.lua"), config));
+        assert!(!is_config_credential(
+            Path::new("/elsewhere/gh/x.yml"),
+            config
+        ));
+    }
+
+    #[test]
+    fn home_credentials_are_refused_but_claude_plans_are_not() {
+        let home = Path::new("/home/me");
+        let at = |rel: &str| home.join(rel);
+        for refused in [
+            ".ssh/config",
+            ".aws/config",
+            ".kube/config",
+            ".docker/config.json",
+            ".gnupg/gpg.conf",
+            ".codex/config.toml",
+            ".config/gh/config.yml",
+            ".config/gcloud/configurations/config_default",
+            ".netrc",
+            ".npmrc",
+            ".yarnrc.yml",
+            ".pypirc",
+            ".git-credentials",
+            ".claude/settings.json",
+            ".claude/.credentials.json",
+            ".claude/projects/x/session.jsonl",
+            ".claude/plans/notes.txt",
+            ".claude/CLAUDE.md",
+        ] {
+            assert!(is_home_credential(&at(refused), Some(home)), "{refused}");
+        }
+        // By name, wherever the file sits — inside home or not.
+        for refused in [
+            "/srv/app/auth.json",
+            "/srv/app/hosts.yml",
+            "/srv/app/token",
+            "/srv/app/tokens.json",
+            "/srv/app/aws-credentials.txt",
+        ] {
+            assert!(
+                is_home_credential(Path::new(refused), Some(home)),
+                "{refused}"
+            );
+        }
+        for allowed in [
+            ".claude/plans/refactor.md",
+            ".claude/projects/-Users-me-repo/memory/MEMORY.md",
+            "notes/today.md",
+            ".config/nvim/init.lua",
+            ".sshfoo/readme.md",
+        ] {
+            assert!(!is_home_credential(&at(allowed), Some(home)), "{allowed}");
+        }
+        assert!(!is_home_credential(Path::new("/srv/app/config.yml"), None));
+    }
+
+    #[test]
+    fn an_extra_folder_naming_root_or_home_in_disguise_is_too_broad() {
+        let home = Path::new("/Users/me");
+        for broad in [
+            "/",
+            "/.",
+            "/./",
+            "//",
+            "/Users",
+            "/Users/",
+            "/Users/me",
+            "/Users/me/.",
+            "/Users/me/./",
+            "/Users/me/notes/..",
+            "/Users/me/..",
+            "/tmp/..",
+        ] {
+            assert!(folder_too_broad(Path::new(broad), Some(home)), "{broad}");
+        }
+        for fine in [
+            "/Users/me/notes",
+            "/Users/me/./notes/",
+            "/tmp/scratch",
+            "/Users/other",
+        ] {
+            assert!(!folder_too_broad(Path::new(fine), Some(home)), "{fine}");
+        }
+        assert!(folder_too_broad(Path::new("/."), None));
+    }
+
+    #[test]
+    fn a_nul_early_on_is_binary_and_one_past_8kb_is_not_looked_for() {
+        assert!(!looks_binary(b"plain text\n"));
+        assert!(looks_binary(b"PK\x03\x04\0\0"));
+        let mut late = vec![b'a'; 9 * 1024];
+        late.push(0);
+        assert!(!looks_binary(&late));
     }
 
     /// `**` collapses, so a run of stars cannot multiply the table's rows.

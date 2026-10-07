@@ -8,7 +8,7 @@
  * for you. So its unit is an **unseen event**, it is read by looking, and marking a
  * worktree read is an explicit gesture — the shape of an inbox, not of a light.
  *
- * # Two producers, one seam
+ * # Producers, one seam
  *
  * Everything arrives through {@link WorktreeInbox.report}. Today:
  *
@@ -18,6 +18,9 @@
  * - **Coding agents**, via lifecycle hooks the agent itself runs, relayed by the daemon
  *   over the IDE channel. An agent's state is an application-level fact that its output
  *   does not contain — see `veld_core::agent` for the measurement.
+ * - **`veld ide open … --notify`**: an agent put a file in front of you and asked you
+ *   to read it. Filed against the *file pane* it opened (`opened`), so looking at that
+ *   pane is what reads it — the same rule as everything else here.
  *
  * # An unseen event and a live state are different things
  *
@@ -54,8 +57,14 @@
  * the badge, which costs more than the events it catches.
  */
 
-/** What kind of unseen event this is. */
-export type UnseenKind = "finished" | "failed" | "attention";
+/**
+ * What kind of unseen event this is.
+ *
+ * `opened` is something put in front of you to read — `veld ide open --notify`. Not
+ * `attention`: nothing is blocked on you, and an agent that opens its plan and keeps
+ * working must not read as one stopped at a permission prompt.
+ */
+export type UnseenKind = "finished" | "failed" | "attention" | "opened";
 
 /**
  * What produced an event.
@@ -115,7 +124,10 @@ export type Signal =
   /** An OSC 9 / 777 / kitty 99 notification. Lowest authority — see {@link Source}. */
   | { type: "notify"; message: string }
   /** A coding agent said what it is doing. */
-  | { type: "agent"; state: AgentState; source: Source };
+  | { type: "agent"; state: AgentState; source: Source }
+  /** Something opened a file for you to read, and asked that you be told. `detail`
+   *  names the file ("Agent opened plan.md"). */
+  | { type: "opened"; detail: string };
 
 /** An unseen event, as the rail renders it. */
 export interface Unseen {
@@ -134,10 +146,16 @@ export interface Unseen {
  * `working` is last because it is the only entry that is not news — a row whose only
  * signal is "something is running" must not out-shout one with a blocked agent in it.
  */
-export type RowState = "attention" | "failed" | "finished" | "working";
+export type RowState = "attention" | "opened" | "failed" | "finished" | "working";
 
-/** Highest first. A row renders the first of these it has. */
-const PRECEDENCE: RowState[] = ["attention", "failed", "finished", "working"];
+/**
+ * Highest first. A row renders the first of these it has.
+ *
+ * `opened` sits under `attention` and over the rest: it was *sent to you* — an agent
+ * asked that you stop and read something — which outranks news you merely might want,
+ * but a blocked agent is stopped work and a plan to read is not.
+ */
+const PRECEDENCE: RowState[] = ["attention", "opened", "failed", "finished", "working"];
 
 /** What a whole worktree currently has to say, and the detail lines behind it. */
 export interface RowSummary {
@@ -520,6 +538,18 @@ class WorktreeInbox {
           // otherwise blew the storage quota, and that failure is swallowed — silently
           // disabling reload survival for the whole window.
           detail: bannerText(signal.message) || "Terminal activity",
+        };
+
+      case "opened":
+        // No state machine: it is not about a process. It replaces whatever this pane
+        // had unread, which for a file pane can only be an earlier `opened`.
+        return {
+          kind: "opened",
+          producer: "agent",
+          at: now,
+          // The daemon's own report of a request it served, not a guess.
+          source: "hook",
+          detail: bannerText(signal.detail) || "A file was opened for you",
         };
 
       case "agent": {
@@ -959,7 +989,7 @@ export interface PersistedInbox {
   >;
 }
 
-const KINDS: UnseenKind[] = ["finished", "failed", "attention"];
+const KINDS: UnseenKind[] = ["finished", "failed", "attention", "opened"];
 const PRODUCERS: Producer[] = ["command", "agent"];
 const SOURCES: Source[] = ["detected", "socket", "hook"];
 
@@ -1074,6 +1104,10 @@ export function isOsc9Notification(payload: string): boolean {
  * as a blocked agent, which is also why that row is not called "agent waiting".
  */
 export function notifyKey(unseen: Unseen): string {
+  // `--notify` is the agent saying "stop and read this", which is the same claim on
+  // you as an agent waiting — so it rides that row rather than adding a fifth one
+  // nobody would tick differently.
+  if (unseen.kind === "opened") return "activity.notifyAgentWaiting";
   if (unseen.kind === "attention") {
     // Two rows, not one, and the producer is what splits them: an agent stopped at a
     // permission prompt and a program that emitted OSC 9 are both "notice me", but a

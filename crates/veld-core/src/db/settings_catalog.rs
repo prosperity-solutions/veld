@@ -1229,6 +1229,15 @@ impl SettingKey {
                 Activity,
                 NOTICING,
             ),
+            Self::TerminalAgentContext => toggle_in(
+                "Tell coding agents how to show you files",
+                "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
+                 in a Veld terminal: that `veld ide open` puts a file or a page next to that \
+                 terminal. Nothing of yours is edited, and the text is the same every time. \
+                 Independent of the row above. Takes effect for new agents.",
+                Activity,
+                NOTICING,
+            ),
             Self::ActivityShowWorking => toggle_in(
                 "Show what is working",
                 "A spinner for any worktree with something running. Accuracy varies by \
@@ -1479,7 +1488,8 @@ impl SettingKey {
                 title: "Open a clicked file path with",
                 help: "The `ide.extensions` action a click on a file path runs, by its id. Veld \
                        fills this in the first time you click one and a project offers more than \
-                       one editor \u{2014} it asks once, then stops asking. Clear it to be asked \
+                       one editor \u{2014} it asks once, then stops asking. `veld` means \
+                       Veld\u{2019}s own file pane. Clear it to be asked \
                        again, or type another action\u{2019}s id. It is one answer for every \
                        project, so an id a project does not declare simply means you are asked \
                        once in that project and told what it chose; the value is only replaced \
@@ -1568,8 +1578,9 @@ impl SettingKey {
             ),
             Self::FilesViewPlainText => toggle_in(
                 "Plain text",
-                "`.txt`, `.log`, `.md`, `.json`, `.csv`, `.tsv`, `.yaml`, `.toml`, `.xml`, shown \
-                 verbatim rather than rendered. Off by default because text files outnumber \
+                "`.txt`, `.log`, `.md`, `.json`, `.csv`, `.tsv`, `.yaml`, `.toml`, `.xml`, which \
+                 `open` in a terminal then shows in a file pane (Markdown rendered, CSV as a \
+                 table, the rest with line numbers). Off by default because text files outnumber \
                  everything else in a repository — switching them on means every `README.md` is \
                  a candidate, and the recently-edited list stops being a short one.",
                 Browser,
@@ -1591,6 +1602,56 @@ impl SettingKey {
                 shape: ValueShape::TextList,
                 choices: Choices::Free,
                 requires: None,
+            },
+            Self::FilesExtraFolders => Spec {
+                title: "Folders a file pane may also open",
+                help: "One folder per line, absolute or starting with `~/` \u{2014} a notes \
+                       folder, a scratch directory. A file pane can always show files in its \
+                       own worktree, and any file you open from a terminal or that \
+                       `veld ide open` names; this is for everything else. Some secrets \
+                       are refused here too \u{2014} `.env*`, `*.pem`, `*.key`, anything under \
+                       `~/.ssh`, `~/.aws`, `~/.config/gh` and the other usual CLI login \
+                       folders, files like `auth.json` \u{2014} but that is a deny list, not a \
+                       guarantee, so list only folders you would show anyone. Of `~/.claude` \
+                       only Markdown under `plans/` and `projects/` opens. `/`, your home \
+                       folder and any folder above it are not accepted.",
+                group: Browser,
+                section: LOCAL_FILES,
+                shape: ValueShape::TextList,
+                choices: Choices::Free,
+                requires: None,
+            },
+            Self::FilesWrapLines => toggle_in(
+                "Wrap long lines in a file pane",
+                "In the source and code view, long lines wrap to the pane's width instead of \
+                 scrolling sideways. Line numbers stay with the line they belong to. The file \
+                 pane's header has the same switch.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesShowDeletions => toggle_in(
+                "Show deleted lines in a file pane",
+                "In the code and Source view of a file in the worktree, show the lines this \
+                 branch deleted as red rows between the current ones, like a unified diff, \
+                 instead of a thin marker in the gutter. Measured from the same base as the \
+                 gutter markers. The file pane's header has the same switch.",
+                Browser,
+                LOCAL_FILES,
+            ),
+            Self::FilesSplitDiff => Spec {
+                // Only means something while deleted lines are shown: without them
+                // there is no diff to lay out in two columns.
+                requires: requires_true("files.showDeletions"),
+                ..toggle_in(
+                    "Show deleted lines side by side",
+                    "With deleted lines shown, lay the file out as a side-by-side diff \
+                     \u{2014} what the base had on the left, what is on disk on the right \
+                     \u{2014} instead of one column with the deleted rows between the current \
+                     ones. Needs a wide pane to read well. The file pane's header has the \
+                     same switch.",
+                    Browser,
+                    LOCAL_FILES,
+                )
             },
             Self::FilesWatchByDefault => toggle_in(
                 "Reload a file pane when the file changes",

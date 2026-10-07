@@ -9,6 +9,7 @@ pub mod feedback;
 pub mod gc;
 pub mod graph;
 pub mod helper_install;
+pub mod ide;
 pub mod init;
 pub mod lint;
 pub mod list;

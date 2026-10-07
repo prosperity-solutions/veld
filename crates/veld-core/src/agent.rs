@@ -59,6 +59,18 @@
 //! the right-shaped hook for a tool with no `hooks`/`notify` config key at all, and
 //! [`pi_state`] for why it can report `Working`/`Idle` but never `Blocked`.
 //!
+//! # The second thing the wrapper carries: what the agent is told
+//!
+//! The same wrapper also hands the agent [`agent_context`] — a few lines, static per
+//! daemon instance, saying it is in a Veld terminal and that `veld ide open` (spelled as
+//! *this* daemon's CLI — [`context_cli_word`]) puts a file in front of the human.
+//! It rides the tool's own *append* mechanism ([`ContextInjection`]): Claude's
+//! `--append-system-prompt`, Codex's `-c developer_instructions=…`, and a second `pi -e`
+//! extension that chains onto the assembled prompt. Gated on `VELD_AGENT_CONTEXT`
+//! (`terminal.agentContext`), independent of the hooks' `VELD_AGENT_HOOKS` — and under
+//! the same invariants: plain interactive launch only, the user's own colliding flag
+//! wins, nothing of theirs is edited.
+//!
 //! # Adding another agent
 //!
 //! Everything downstream of this module is **already generic** — the daemon endpoint
@@ -69,7 +81,8 @@
 //!
 //! 1. A variant on [`AgentTool`], and an arm in every `match self` on it — `ALL`,
 //!    `shim_name`, `as_str`, `injection`, `own_injection_flag_patterns`,
-//!    `extra_interactive_first_words` today, and whatever this list has grown to by
+//!    `extra_interactive_first_words`, `context_injection`, `own_context_flag_patterns`
+//!    today, and whatever this list has grown to by
 //!    the time you read it; the compiler enforces exhaustiveness, this comment does
 //!    not. `shim_name` is the command the wrapper stands in front of.
 //! 2. A `<tool>_state(&HookPayload) -> State` beside [`claude_state`]/[`codex_state`],
@@ -265,6 +278,69 @@ impl AgentTool {
             // shell for an edge case (running `pi --mode rpc` inside a Veld terminal
             // pane at all) this narrow.
             Self::Pi => "-p* | --print | -e* | --extension | --extension=*",
+        }
+    }
+
+    /// How the context `text` ([`agent_context`]) reaches this tool's invocation. See
+    /// [`ContextInjection`].
+    #[must_use]
+    pub fn context_injection(self, text: &str) -> ContextInjection {
+        match self {
+            // **Appends**, by the flag's own definition ("Append a system prompt to the
+            // default system prompt", `claude --help`, 2.1.291), so the user's own
+            // `CLAUDE.md` and output style are untouched. Not `--append-system-prompt-file`:
+            // `--help` does not list it, and a temp file buys nothing for static text.
+            Self::Claude => ContextInjection::Argv {
+                flag: "--append-system-prompt",
+                value: text.to_owned(),
+                user_config_key: None,
+            },
+            // A `-c` override like `notify`, with the same property and the same cost:
+            // nothing of the user's is edited, and a `developer_instructions` they set
+            // themselves would be *replaced* for the launch — which, unlike a silenced
+            // notifier, would quietly take their own instructions away. So the wrapper
+            // reads their `config.toml` for the key and steps out if it is there; see
+            // [`ContextInjection::Argv::user_config_key`]. The key was confirmed as a
+            // top-level `ConfigToml` field in the codex-cli 0.160.1 binary; codex is not
+            // installed where this was written, so the effect on a session was not driven.
+            Self::Codex => ContextInjection::Argv {
+                flag: "-c",
+                value: codex_context_config(text),
+                user_config_key: Some((
+                    "${CODEX_HOME:-$HOME/.codex}/config.toml",
+                    "developer_instructions",
+                )),
+            },
+            // A second generated extension, static, beside the per-session reporter —
+            // see [`pi_context_extension_doc`] for why it is its own file.
+            Self::Pi => ContextInjection::ExtensionFile { flag: "-e" },
+        }
+    }
+
+    /// Shell `case` patterns for a user flag that collides with the *context* injection
+    /// specifically, on top of [`Self::own_injection_flag_patterns`] (which steps out of
+    /// both). Empty when nothing beyond those collides.
+    ///
+    /// Separate because the collisions are separate: a user's own
+    /// `--append-system-prompt` does not touch the hooks `--settings` carries, so it must
+    /// not cost the badge — it only means veld's text stays out of a prompt the user is
+    /// already shaping by hand. `--system-prompt` too: appending to a prompt somebody
+    /// replaced on purpose is adding to something they took ownership of.
+    #[must_use]
+    pub fn own_context_flag_patterns(self) -> &'static str {
+        match self {
+            Self::Claude => {
+                "--append-system-prompt | --append-system-prompt=* | --append-system-prompt-file \
+                 | --append-system-prompt-file=* | --system-prompt | --system-prompt=* \
+                 | --system-prompt-file | --system-prompt-file=*"
+            }
+            // Every `-c` already steps out of everything (see
+            // `own_injection_flag_patterns`), which covers a user's own
+            // `-c developer_instructions=…`.
+            Self::Codex => "",
+            // The extension *chains* onto whatever prompt Pi assembled, `--system-prompt`
+            // and `--append-system-prompt` included, so there is nothing to collide with.
+            Self::Pi => "",
         }
     }
 
@@ -1169,6 +1245,163 @@ export default function (pi) {{
     )
 }
 
+/// What an agent in a Veld terminal is told about the terminal it is in, naming the
+/// command to run as `cli` — see [`context_cli_word`] for which spelling that is.
+///
+/// # Static per daemon instance, on purpose
+///
+/// **Byte-identical in every session one daemon spawns** — no session id, no worktree,
+/// no cwd. Three reasons, each enough: a system prompt is the head of every request, so
+/// a per-session byte here defeats prompt caching for the whole conversation; Claude
+/// records the prompt once per conversation and replays the record on resume
+/// (`--system-prompt-snapshot`, default on), so anything dynamic would be stale by the
+/// second launch anyway; and everything an agent needs to act on (which terminal, which
+/// worktree) `veld ide open` already resolves from `VELD_PTY_SESSION` at run time.
+///
+/// The one thing that is *not* the same everywhere is the CLI it names, and that is
+/// not optional. The text first said a bare `veld`, and in a dev stack's terminal that
+/// is the **installed** release on `PATH` — which talks to the installed daemon and,
+/// in the report that found this, had no `ide` command at all. The hooks never had the
+/// problem because they name the daemon's own CLI by absolute path; this now does the
+/// same. It varies by instance only, so the cache argument above still holds.
+///
+/// Short, and it points at `skills ide` rather than explaining: this is paid for on
+/// every turn by every session, including the ones that never open a file.
+#[must_use]
+pub fn agent_context(cli: &str) -> String {
+    format!(
+        "You are running inside a Veld IDE terminal. To show the human a file (markdown, CSV, \
+         code) or a web page next to this terminal, run `{cli} ide open <path-or-url>[:line] \
+         --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
+         not for every file you touch. Details: `{cli} skills ide`."
+    )
+}
+
+/// How [`agent_context`] spells the CLI: the bare word `veld` when this daemon is the
+/// installed one, else the absolute path of the CLI that belongs to it, shell-quoted
+/// when it needs to be (a home directory with a space in it).
+///
+/// `installed` is [`crate::db::Db::uses_installed_database`] — the existing answer to
+/// "is this process the real one, not a cargo build or a `VELD_DB_PATH` sandbox", and
+/// the same question the CLI asks before trusting the daemon on the default port. Not a
+/// `PATH` lookup: what `PATH` says in the daemon's environment is not what it says in a
+/// user's shell. The bare word is preferred where it is right because it is what a
+/// human reading the transcript would type, and the installed `veld` is the one on
+/// their `PATH` by construction of the installer.
+#[must_use]
+pub fn context_cli_word(cli: &Path, installed: bool) -> String {
+    if installed {
+        return "veld".to_owned();
+    }
+    let path = cli.to_string_lossy();
+    let plain = path
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/._-+@%:,=".contains(c));
+    if plain {
+        path.into_owned()
+    } else {
+        sh_quote(&path)
+    }
+}
+
+/// How [`agent_context`]'s text is handed to one tool. Independent of [`Injection`], and of
+/// `VELD_AGENT_HOOKS`: either can be on without the other, so each has its own gate
+/// (`VELD_AGENT_CONTEXT` for this one) and its own argv.
+///
+/// Unlike the hooks, the text is the same for every session of a daemon, so it is baked
+/// into the generated wrapper at daemon start instead of fetched from `veld agent-settings` at
+/// launch — one fewer process on the launch path and nothing that can print garbage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContextInjection {
+    /// `<flag> <value>` ahead of the user's argv.
+    Argv {
+        flag: &'static str,
+        value: String,
+        /// `(config file as a shell word, key)`: when the user's own config sets
+        /// `key`, the override would replace theirs, so the wrapper leaves the context
+        /// out. A plain line scan with shell builtins, not a TOML parse — any line
+        /// mentioning the key counts, which errs toward injecting nothing. It covers the
+        /// user's global config and its profiles, **not** a project's `.codex/config.toml`
+        /// found by walking up from the cwd; that one is replaced silently, the same
+        /// documented cost `notify` has.
+        user_config_key: Option<(&'static str, &'static str)>,
+    },
+    /// `<flag> <path>` to [`context_extension_path`], checked for existence at launch.
+    ExtensionFile { flag: &'static str },
+}
+
+/// The literal value handed to Codex's `-c` for the context `text`:
+/// `developer_instructions="…"`.
+///
+/// Through [`json_string`], for the reason [`codex_notify_config`] gives — with the one
+/// gap that function's docs name closed, since `text` now carries a path.
+#[must_use]
+pub fn codex_context_config(text: &str) -> String {
+    format!("developer_instructions={}", json_string(text))
+}
+
+/// A string literal valid as JSON, as a TOML basic string, and as JS.
+///
+/// `serde_json` escapes `"`, `\` and every control character below U+0020, which TOML
+/// and JS read identically. It leaves U+007F (DEL) raw, which TOML forbids in a basic
+/// string — harmless while the input was a constant, not once it carries a filesystem
+/// path. `\u007F` means the same thing in all three.
+fn json_string(s: &str) -> String {
+    serde_json::to_string(s)
+        .expect("a str serializes to JSON infallibly")
+        .replace('\u{7f}', "\\u007F")
+}
+
+/// The extension handed to `pi -e` that appends the context `text` to Pi's system
+/// prompt — static per daemon, like the text.
+///
+/// # Why its own file, and not a handler in [`pi_extension_doc`]
+///
+/// The reporter is per session and only exists when hooks are on; this has to work with
+/// hooks off, and has nothing per session in it. `-e` is repeatable and additive (the
+/// same measurement [`AgentTool::own_injection_flag_patterns`] relies on), so two files
+/// cost nothing — and one static file, rewritten every daemon start, is the shape the
+/// text already has.
+///
+/// # Appended, never replaced
+///
+/// `before_agent_start` hands each handler the prompt as assembled so far and **chains**
+/// whatever `systemPrompt` it returns into the next handler ("If multiple extensions
+/// return this, they are chained" — `BeforeAgentStartEventResult`, read in
+/// `@mariozechner/pi-coding-agent` 0.73.1's `extensions/types.d.ts` and `runner.js`). So
+/// returning `event.systemPrompt` plus a section keeps Pi's own prompt, the user's
+/// `--system-prompt`/`--append-system-prompt`, and every other extension's change.
+/// Returning the text alone would replace all of it. The `includes` guard keeps a
+/// reloaded extension from appending twice. Pi is not installed where this was written,
+/// so this was read, not driven.
+#[must_use]
+pub fn pi_context_extension_doc(text: &str) -> String {
+    let text = json_string(text);
+    format!(
+        r#"// pi-veld-context — generated by veld, rewritten on every daemon start. Never edit by hand.
+// Appends Veld's terminal context to the system prompt; never replaces it.
+const CONTEXT = {text};
+
+export default function (pi) {{
+  pi.on("before_agent_start", async (event) => {{
+    if (typeof event.systemPrompt !== "string" || event.systemPrompt.includes(CONTEXT)) return;
+    return {{ systemPrompt: event.systemPrompt + "\n\n" + CONTEXT }};
+  }});
+}}
+"#
+    )
+}
+
+/// Where [`pi_context_extension_doc`] is written, inside this daemon's shim directory.
+///
+/// **Not under `agent/`**: that directory is swept of files older than
+/// [`SETTINGS_MAX_AGE`] by `veld agent-settings`, and this one is written once per
+/// daemon start, so a daemon up for a week would lose it.
+#[must_use]
+pub fn context_extension_path(shim_dir: &Path) -> PathBuf {
+    shim_dir.join("context").join("pi-veld-context.ts")
+}
+
 /// What each generated hook is allowed to take, in seconds.
 ///
 /// Two, not zero: the request itself is to `127.0.0.1` and answers in single-digit
@@ -1810,5 +2043,73 @@ mod tests {
         assert!(AgentTool::Claude.takes_launch_prompt());
         assert!(!AgentTool::Codex.takes_launch_prompt());
         assert!(!AgentTool::Pi.takes_launch_prompt());
+    }
+
+    /// The context names the CLI of the daemon that wrote it — the bare `veld` only for
+    /// the installed instance — in both places it names one, with the flag pair the CLI
+    /// requires. The reported bug: a dev stack's agent was told `veld`, ran the installed
+    /// release, and got "no ide command".
+    #[test]
+    fn the_agent_context_names_this_instances_cli() {
+        let dev = Path::new("/Users/me/git/veld/target/debug/veld");
+        assert_eq!(context_cli_word(dev, true), "veld");
+        assert_eq!(context_cli_word(dev, false), dev.display().to_string());
+        // A path with a space is one shell word, so the line still pastes.
+        assert_eq!(
+            context_cli_word(Path::new("/Users/Jo Doe/bin/veld"), false),
+            "'/Users/Jo Doe/bin/veld'"
+        );
+
+        let text = agent_context(&context_cli_word(dev, false));
+        assert!(text.contains(&format!("`{} ide open <path-or-url>", dev.display())));
+        assert!(text.contains(&format!("`{} skills ide`", dev.display())));
+        assert!(text.contains("--quiet") && text.contains("--notify"));
+        assert!(
+            !text.contains("`veld "),
+            "no bare word left for a dev instance: {text}"
+        );
+        let installed = agent_context("veld");
+        assert!(installed.contains("`veld ide open ") && installed.contains("`veld skills ide`"));
+        // Static per instance: the same input is the same bytes, every time.
+        assert_eq!(installed, agent_context(&context_cli_word(dev, true)));
+    }
+
+    /// The encoders survive a hostile path: quotes, a backslash, a newline and DEL. Each
+    /// output decodes back to the exact text, and carries no raw DEL (TOML forbids it in
+    /// a basic string; `serde_json` alone would leave it in).
+    #[test]
+    fn the_context_encodings_survive_any_path() {
+        let text = agent_context(&context_cli_word(
+            Path::new("/tmp/it's \"odd\"\\dir\n\u{7f}/veld"),
+            false,
+        ));
+        let codex = codex_context_config(&text);
+        let literal = codex
+            .strip_prefix("developer_instructions=")
+            .expect("the key prefix the wrapper's guard checks");
+        assert!(
+            !literal.contains('\u{7f}') && !literal.contains('\n'),
+            "{literal}"
+        );
+        assert_eq!(serde_json::from_str::<String>(literal).unwrap(), text);
+
+        let pi = pi_context_extension_doc(&text);
+        let line = pi
+            .lines()
+            .find_map(|l| l.strip_prefix("const CONTEXT = "))
+            .and_then(|l| l.strip_suffix(';'))
+            .expect("one CONTEXT line");
+        assert_eq!(serde_json::from_str::<String>(line).unwrap(), text);
+        // Appended to the prompt it was handed — never a bare replacement.
+        assert!(
+            pi.contains("systemPrompt: event.systemPrompt + \"\\n\\n\" + CONTEXT"),
+            "{pi}"
+        );
+        assert_eq!(pi, pi_context_extension_doc(&text));
+        assert_eq!(
+            context_extension_path(Path::new("/tmp/shims")),
+            PathBuf::from("/tmp/shims/context/pi-veld-context.ts"),
+            "outside `agent/`, whose sweep would delete a file written once per daemon"
+        );
     }
 }

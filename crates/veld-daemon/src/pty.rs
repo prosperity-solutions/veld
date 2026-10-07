@@ -801,6 +801,19 @@ fn released_worktree(id: &str) -> Option<i64> {
     Some(worktree_id)
 }
 
+/// The worktree a terminal session belongs to — registered, or released and still
+/// served by its holder. The same lookup [`agent_state`] makes, for a caller in a
+/// sibling module (`veld ide open`).
+pub(super) async fn session_worktree(id: &str) -> Option<i64> {
+    if !valid_session_id(id) {
+        return None;
+    }
+    // Its own statement, so the async guard is dropped before `released_worktree`
+    // takes a `std` mutex — see the note in `agent_state`.
+    let registered = SESSIONS.lock().await.get(id).map(|s| s.worktree_id);
+    registered.or_else(|| released_worktree(id))
+}
+
 /// Reserved slot in the [`MAX_SESSIONS`] budget, released on drop.
 struct SessionSlot {
     /// The counter to credit on drop. A field rather than a hardcoded
@@ -2373,6 +2386,7 @@ async fn mint_ticket(
         intercept: db.terminal_intercept_system_open(),
         shell_integration: db.terminal_shell_integration(),
         agent_integration: db.terminal_agent_integration(),
+        agent_context: db.terminal_agent_context(),
         // Filled in below: it is the one field that is not a setting.
         bash_handoff: false,
     };
@@ -2984,6 +2998,11 @@ const MAX_PATH_LEN: usize = 4096;
 /// same [`push_to_pane`], so the frame on the socket still carries a
 /// [`veld_core::ide::CanonicalUrl`] and every guard downstream still sees a web URL.
 ///
+/// The exception is a viewable **text** file (`veld_core::files::text_kind`), which
+/// opens in the file pane instead, by path, over the IDE channel
+/// (`ide::push_open`) — no URL is involved, because the file pane reads text on the
+/// management origin (see `file_pane.rs`).
+///
 /// # What the reply means, and when it stays quiet
 ///
 /// `system` with **no reason** is the common answer and must print nothing: the shim
@@ -3031,6 +3050,8 @@ async fn open_file(
         /// A file Veld would show, but cannot serve right now.
         Unserved,
         Url(String),
+        /// A text file for the file pane, by its worktree-relative path.
+        Text(String),
     }
     let found = crate::offload::blocking(move || -> Result<Found, ApiError> {
         let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
@@ -3052,11 +3073,40 @@ async fn open_file(
         if !veld_core::files::is_viewable(&rel, &db.view_policy()) {
             return Ok(Found::Quiet);
         }
+        // A viewable *text* file goes to the file pane rather than to a browser pane
+        // showing it as raw text — the same gate as before (`is_viewable`, so the
+        // `files.viewPlainText` switch still decides whether `open notes.md` is
+        // Veld's at all), a better destination once it is.
+        if for_file_pane(&worktree.path, &rel) {
+            return Ok(Found::Text(rel));
+        }
         Ok(super::files::url_for(&db, &worktree.path, &rel).map_or(Found::Unserved, Found::Url))
     })
     .await?;
     let url = match found {
         Found::Url(url) => url,
+        // Through the IDE channel, quietly: this is somebody typing `open notes.md`,
+        // which is a request to see it, not a reason to interrupt anyone.
+        Found::Text(path) => {
+            let shown = super::ide::push_open(
+                worktree_id,
+                Some(id.clone()),
+                super::ide::OpenTarget::File { path, line: None },
+                false,
+            )
+            .await;
+            return Ok(Json(if shown {
+                OpenUrlResponse {
+                    target: veld_core::ide::UrlTarget::Pane,
+                    reason: None,
+                }
+            } else {
+                OpenUrlResponse {
+                    target: veld_core::ide::UrlTarget::System,
+                    reason: Some("no Veld window is showing this worktree right now".to_owned()),
+                }
+            }));
+        }
         Found::Quiet => return quiet(),
         // Viewable, so this failure is worth a sentence.
         Found::Unserved => {
@@ -3080,6 +3130,16 @@ async fn open_file(
         ));
     };
     Ok(Json(push_to_pane(&session, &id, web.canonical)))
+}
+
+/// Whether the viewable file `rel` in `root` opens in the file pane: a text kind,
+/// and one the pane would show — the size and binary checks its first read makes
+/// (`file_pane::check_showable_text`). A text file that fails them goes where it
+/// went before the file pane existed, a browser pane on the file origin, rather
+/// than into a pane that can only say it will not show it.
+fn for_file_pane(root: &str, rel: &str) -> bool {
+    veld_core::files::text_kind(rel).is_some()
+        && super::file_pane::check_showable_text(&std::path::Path::new(root).join(rel)).is_ok()
 }
 
 /// `path` expressed relative to `root`, or `None` if it is not inside it.
@@ -5258,6 +5318,22 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_text_file_the_pane_would_refuse_stays_on_the_browser_route() {
+        let root = tempfile::TempDir::new().unwrap();
+        let r = root.path().to_str().unwrap();
+        std::fs::write(root.path().join("notes.md"), "# hi").unwrap();
+        std::fs::write(root.path().join("blob.json"), b"{\0}").unwrap();
+        let big = std::fs::File::create(root.path().join("huge.log")).unwrap();
+        big.set_len(super::super::file_pane::MAX_TEXT_BYTES + 1)
+            .unwrap();
+        std::fs::write(root.path().join("deck.html"), "<p>").unwrap();
+        assert!(super::for_file_pane(r, "notes.md"));
+        assert!(!super::for_file_pane(r, "blob.json"), "binary");
+        assert!(!super::for_file_pane(r, "huge.log"), "over the cap");
+        assert!(!super::for_file_pane(r, "deck.html"), "not a text kind");
+    }
+
     /// A path is only a candidate if it is genuinely inside the session's worktree.
     ///
     /// The symlink case is the one worth a test: `..` never appears, so nothing

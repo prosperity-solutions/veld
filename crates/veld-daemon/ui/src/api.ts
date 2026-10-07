@@ -1201,6 +1201,80 @@ export interface FileStat {
   size: number;
 }
 
+/**
+ * A text file the file pane may show, read through the management origin. See
+ * `api.fileText`.
+ *
+ * Read here — on `/ide`'s own origin — rather than from the file origin a browser
+ * pane loads, because a file pane *renders* what it reads into this page. The file
+ * origin also serves agent-authored HTML, so nothing it returns may ever be trusted
+ * with a way back in; this route returns text, and the pane decides how to draw it.
+ */
+export interface FileMeta {
+  /** How the daemon displays it: worktree-relative inside the worktree, absolute
+   *  outside. Also the identity a file tab is matched by (`openFileTab`). */
+  path: string;
+  absPath: string;
+  etag: string;
+  mtimeMs: number;
+  size: number;
+  insideWorktree: boolean;
+}
+
+export interface FileText extends FileMeta {
+  text: string;
+}
+
+/**
+ * One read of a file pane, as the pane needs to tell the cases apart.
+ *
+ * Not `request`'s thrown `Error`, because the *status* is the message here: 404 is
+ * "not found or not allowed" (one status for every refusal, as the file origin
+ * does), 413 is too large and 415 is binary — three different sentences in the
+ * pane, which a flattened error string cannot carry.
+ */
+export type FileTextResult =
+  | { kind: "text"; file: FileText }
+  | { kind: "unchanged"; etag: string }
+  | { kind: "error"; status: number; message: string };
+
+/** One row of the Changed files list. See `api.worktreeChanges`. */
+export interface ChangedFile {
+  /** Worktree-relative. */
+  path: string;
+  status: "added" | "modified" | "deleted" | "renamed" | "untracked";
+  oldPath?: string;
+}
+
+export interface WorktreeChanges {
+  /** The merge-base the list is relative to, or `null` when no default branch
+   *  could be found — then it is only what is uncommitted. */
+  base: string | null;
+  /** The ref the base was found from (`origin/main`…), when there was one. */
+  baseRef?: string | null;
+  /** The list was cut at the daemon's row cap. */
+  truncated?: boolean;
+  files: ChangedFile[];
+}
+
+/**
+ * A file's changed lines, for the code view's gutter. 1-based, new-side lines;
+ * ranges are inclusive. `deleted` names the line each deletion comes *after* —
+ * git's `+N,0` — so `0` is a deletion above line 1.
+ */
+export interface FileLineChanges {
+  added: [number, number][];
+  modified: [number, number][];
+  deleted: number[];
+}
+
+/** A file's text at the base its gutter markers are measured from. `base` is the
+ *  merge-base sha, `HEAD`, or null in a repository with no commits. */
+export interface FileBase {
+  base: string | null;
+  text: string | null;
+}
+
 /** Where a URL from a terminal is going. See `api.ptyOpenUrl`. */
 export interface PtyOpenUrl {
   target: "pane" | "system";
@@ -2256,6 +2330,68 @@ export const api = {
   fileStat: (worktreeId: number, path: string) =>
     request<FileStat>(
       `/api/worktrees/${worktreeId}/file-stat?path=${encodeURIComponent(path)}`,
+      { headers: { "X-Veld-Request": "1" } },
+    ),
+  /**
+   * A text file's contents, for the file pane. `path` is worktree-relative or
+   * absolute; the daemon decides whether this worktree may read it (inside it, a
+   * `files.extraFolders` entry, or a file the user opened from here before).
+   *
+   * `etag` makes a poll cheap: the answer is `unchanged` rather than the bytes
+   * again. Carries the CSRF header although it is a GET, like the two file routes
+   * above and for their reason: it reads files off disk on a page's say-so, so it
+   * must not be reachable from a page the user merely visited.
+   */
+  fileText: async (
+    worktreeId: number,
+    path: string,
+    etag?: string,
+  ): Promise<FileTextResult> => {
+    const q = `path=${encodeURIComponent(path)}${etag ? `&etag=${encodeURIComponent(etag)}` : ""}`;
+    const res = await fetch(`/api/worktrees/${worktreeId}/file-text?${q}`, {
+      headers: { "X-Veld-Request": "1" },
+    });
+    if (!res.ok) {
+      return { kind: "error", status: res.status, message: await errorMessage(res) };
+    }
+    const body = (await res.json()) as Partial<FileText> & { unchanged?: boolean };
+    if (body.unchanged === true && typeof body.etag === "string") {
+      return { kind: "unchanged", etag: body.etag };
+    }
+    return { kind: "text", file: body as FileText };
+  },
+  /**
+   * Resolve a path clicked in this worktree's terminal, and let the worktree read
+   * it if it lies outside. `path` may be relative or absolute, as printed: the
+   * daemon resolves a relative one like a terminal click (against the worktree
+   * root, else a unique suffix match among tracked files), writes a grant only for
+   * a file outside the worktree, and answers with `path` as the pane displays it —
+   * worktree-relative inside, absolute outside. It refuses (404) a path it cannot
+   * resolve and anything that is not a regular, text-viewable, non-sensitive file.
+   */
+  grantFile: (worktreeId: number, path: string) =>
+    request<FileMeta>(`/api/worktrees/${worktreeId}/file-grants`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  /** What changed on this branch: against the merge-base with the default branch,
+   *  plus anything uncommitted or untracked. */
+  worktreeChanges: (worktreeId: number) =>
+    request<WorktreeChanges>(`/api/worktrees/${worktreeId}/changes`, {
+      // Runs git in the worktree; gated like the other file routes.
+      headers: { "X-Veld-Request": "1" },
+    }),
+  /** One file's changed lines against the same base, for the gutter. */
+  fileLineChanges: (worktreeId: number, path: string) =>
+    request<FileLineChanges>(
+      `/api/worktrees/${worktreeId}/file-changes?path=${encodeURIComponent(path)}`,
+      { headers: { "X-Veld-Request": "1" } },
+    ),
+  /** One file's text at that same base, for the "Show deletions" diff. `text` is
+   *  null when there is nothing to diff against (untracked, added, no commits). */
+  fileBase: (worktreeId: number, path: string) =>
+    request<FileBase>(
+      `/api/worktrees/${worktreeId}/file-base?path=${encodeURIComponent(path)}`,
       { headers: { "X-Veld-Request": "1" } },
     ),
   ptyOpenUrl: (sessionId: string, url: string) =>

@@ -109,6 +109,9 @@ const FALLBACK = {
   // lit watch button must actually be watching, so a daemon too old to know the key
   // has to agree with the shipped default rather than with the release before it.
   filesWatchByDefault: true,
+  filesWrapLines: true,
+  filesShowDeletions: false,
+  filesSplitDiff: false,
   // Keep until emptied. Matches the Rust default, and the direction to err in if it
   // ever drifts: the value that cannot delete anybody's checkout.
   trashRetentionDays: 0,
@@ -437,6 +440,38 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
  */
 export function filesWatchByDefault(doc: SettingsDoc): boolean {
   return bool(doc, "files.watchByDefault", FALLBACK.filesWatchByDefault);
+}
+
+/**
+ * Whether a file pane's code and Source views wrap long lines. **Defaults on.**
+ *
+ * Unlike the watch toggle above, the pane's own wrap button *writes* this: wrapping
+ * is how you like to read code, which is a preference that should hold for the next
+ * file too, not a statement about this one. Rendered Markdown always wraps — it is
+ * prose — so this governs only the views that show source lines.
+ */
+export function filesWrapLines(doc: SettingsDoc): boolean {
+  return bool(doc, "files.wrapLines", FALLBACK.filesWrapLines);
+}
+
+/**
+ * Whether a file pane's code and Source views show this branch's deleted lines as
+ * rows of a unified diff, rather than as a notch in the gutter. **Defaults off.**
+ *
+ * Written by the pane's own toggle, for the reason wrapping is: it is how you like
+ * to review, not a statement about one file.
+ */
+export function filesShowDeletions(doc: SettingsDoc): boolean {
+  return bool(doc, "files.showDeletions", FALLBACK.filesShowDeletions);
+}
+
+/**
+ * Whether that diff is laid out side by side (base left, disk right) rather than
+ * unified. **Defaults off.** Means nothing while `files.showDeletions` is off —
+ * there is no diff then — and is written by the pane's toggle for the same reason.
+ */
+export function filesSplitDiff(doc: SettingsDoc): boolean {
+  return bool(doc, "files.splitDiff", FALLBACK.filesSplitDiff);
 }
 
 /**

@@ -853,12 +853,14 @@ internationalised host must be written punycoded.
 replacing it. A project cannot remove a user's entry, and cannot switch the
 feature off — that is the user's `terminal.openUrlsInApp`.
 
-Not to be confused with the two user settings that ride the same shell handoff
+Not to be confused with the three user settings that ride the same shell handoff
 and that a project cannot influence either: `terminal.shellIntegration` (a
 terminal reports when a command started and how it ended, which marks a
-worktree in the rail) and `terminal.agentIntegration` (an agent wrapper —
-`claude`, `codex` — installs lifecycle hooks so an agent waiting on the user
-reaches the same glyph). Both sit under *Settings → Activity* with
+worktree in the rail), `terminal.agentIntegration` (an agent wrapper —
+`claude`, `codex`, `pi` — installs lifecycle hooks so an agent waiting on the user
+reaches the same glyph) and `terminal.agentContext` (the same wrapper tells the
+agent that `veld ide open` exists — see `veld skills ide`). All three sit under
+*Settings → Activity* with
 `activity.showWorking`, the
 four `activity.notify*` rows, and the *Focus mode* block that can silence
 that notification (plus the terminal bell) on demand. All of these switches
@@ -1023,7 +1025,7 @@ string. `type` discriminates the shape.
 | `open_in` | `status` only. `system` (default) \| `pane` — where `href` opens |
 | `display` | `status` only. `text` (default) \| `icon` — render the glyph alone as the whole badge, label kept as the accessible name |
 | `items` | `menu` only. Ids of declared `action` extensions, ≥1. An action declaring `accepts` is refused here for the same reason `slot` is |
-| `accepts` | `action` only. `file` — offered on a file path clicked in terminal output instead of as a control, and handed that file's absolute path as `$1` and its line as `$2` (positional parameters, **not** `${veld.*}`: quote them, and write `$1` not `${1}`) |
+| `accepts` | `action` only. `file` — offered on a file path clicked in terminal output instead of as a control (listed under Veld's own *View in Veld*), and handed that file's absolute path as `$1` and its line as `$2` (positional parameters, **not** `${veld.*}`: quote them, and write `$1` not `${1}`) |
 
 A `status` command's stdout is the badge:
 `{ "text", "tone": neutral|info|success|warning|danger, "icon", "tooltip", "href", "open_in", "display", "actions": [{ "id", "label" }] }`.

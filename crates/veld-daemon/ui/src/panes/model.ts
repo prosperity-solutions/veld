@@ -57,8 +57,16 @@ import {
  * (`panes/PlaceList.tsx`). Having a kind for it meant a singleton tab id, a
  * "does it already exist" check at every call site that could open one, and a
  * second place to render the same rows.
+ *
+ * `file` is a read-only text file — Markdown rendered, a CSV as a table, anything
+ * else as code — drawn by this page rather than loaded into a browser pane. That
+ * split is the security boundary, not a styling choice: the file origin also serves
+ * agent-authored HTML, so nothing rendered *there* may ever be given a way back into
+ * `/ide`, and a reference you copy out of a file pane has to come from here. The tab
+ * names its file by `path` and nothing else, so it needs none of the live-state
+ * machinery above: the bytes are re-fetchable, which is the browser pane's position.
  */
-export const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "new"] as const;
+export const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "file", "new"] as const;
 
 export type PaneKind = (typeof PANE_KINDS)[number];
 
@@ -239,6 +247,27 @@ export interface PaneTab {
    * at and the pane's own setting has to be re-asserted over it.
    */
   zoom?: number;
+  /**
+   * `file` only: the file, as the daemon *displays* it — worktree-relative when it
+   * is inside the worktree, absolute otherwise (`file-text`'s `path`).
+   *
+   * The display form rather than an absolute path because it is also the identity
+   * a second open is matched against ([`openFileTab`]), and every producer that
+   * can name a file — a terminal click, the `open_file` push, the Changed files
+   * list — is told the display form by the daemon or already holds it. A pane that
+   * opened on a spelling the daemon canonicalises differently (`./notes/a.md`)
+   * adopts the daemon's answer on its first read, so the next open finds it.
+   */
+  path?: string;
+  /** `file` only: the 1-based line the pane was asked to show, if any. */
+  line?: number;
+  /**
+   * `file` only: scroll to the first changed line once the pane knows where that is
+   * — set when the file was picked from Changed files, cleared by the pane once it
+   * has jumped. A one-shot request, so `parseTab` deliberately drops it: a reload
+   * must not yank a pane back to the top of its diff.
+   */
+  jump?: "change";
 }
 
 export interface Dock {
@@ -663,6 +692,174 @@ export function browserIds(layout: PaneLayout): string[] {
 }
 
 /** Which sessions this layout's browser panes are actually on. */
+/** Every file pane's id, in either dock. The inbox's `retain` needs them: an
+ *  "opened for you" event belongs to the file pane it opened. */
+export function fileTabIds(layout: PaneLayout): string[] {
+  return allTabs(layout)
+    .filter((t) => t.kind === "file")
+    .map((t) => t.id);
+}
+
+/**
+ * A path as a file tab compares it: without a leading `./`, which a terminal
+ * prints and the daemon never answers with.
+ *
+ * Deliberately no further: `a/../b.md` and a symlinked spelling are the daemon's
+ * to canonicalise, and the pane adopts its answer on the first read.
+ */
+export function sameFilePath(path: string): string {
+  let p = path;
+  while (p.startsWith("./")) p = p.slice(2);
+  return p;
+}
+
+/** The longest path a file tab carries. Far past `PATH_MAX`, short enough that a
+ *  hand-edited layout cannot make a tab the size of the document. */
+const MAX_FILE_PATH = 4096;
+
+function cleanLine(line: unknown): number | undefined {
+  return typeof line === "number" && Number.isInteger(line) && line > 0 ? line : undefined;
+}
+
+/**
+ * Which dock a file opened "beside" something goes to: the one that is *not*
+ * holding the terminal it came from, or — with no terminal to stand beside — the
+ * one that is not focused. Either way the thing you were looking at stays where it
+ * is, and a single-dock layout splits.
+ */
+export function besideDock(layout: PaneLayout, sessionId?: string): DockIndex {
+  const from = sessionId ? dockOf(layout, sessionId) : null;
+  const anchor = from ?? layout.focused;
+  return anchor === 0 ? 1 : 0;
+}
+
+/** The tab showing `path`, in either dock, or `null`. */
+export function findFileTab(layout: PaneLayout, path: string): PaneTab | null {
+  const want = sameFilePath(path);
+  return (
+    allTabs(layout).find(
+      (t) => t.kind === "file" && t.path !== undefined && sameFilePath(t.path) === want,
+    ) ?? null
+  );
+}
+
+/** A new file tab. */
+export function fileTab(opts: { path: string; line?: number }): PaneTab {
+  const path = sameFilePath(opts.path);
+  const line = cleanLine(opts.line);
+  return {
+    id: newTabId(),
+    kind: "file",
+    title: fileLabel(path),
+    path,
+    ...(line ? { line } : {}),
+  };
+}
+
+/**
+ * Show a file in a layout: the tab already showing it if there is one, else a new
+ * one in the dock `beside` names.
+ *
+ * **One tab per file.** `veld ide open plan.md` run three times by an agent that is
+ * revising the plan is one document being looked at three times, and three tabs of
+ * it is the agent filling your strip. The existing tab is activated in its own dock
+ * and takes the new `line`; a call with no line leaves the old one alone, because
+ * "show me this file" is not "scroll it to the top".
+ *
+ * **`focus: false` never moves `layout.focused`**, and that is the half that matters
+ * for a push. `focused` is where the keyboard goes — a terminal takes it when its
+ * dock is focused — so an agent opening a file beside the terminal you are typing in
+ * must not move it out from under your hands. A click asked to look, so it focuses.
+ */
+export function openFileTab(
+  layout: PaneLayout,
+  opts: {
+    path: string;
+    line?: number;
+    beside: DockIndex;
+    focus: boolean;
+    /** The tab to add when none shows the file yet. Passed in by a caller that
+     *  must know the id before the layout commits (to file an inbox event against
+     *  it), so a re-run of a state updater cannot mint a second one. */
+    newTab?: PaneTab;
+  },
+): { layout: PaneLayout; tabId: string } {
+  const path = sameFilePath(opts.path);
+  const line = cleanLine(opts.line);
+  const existing = findFileTab(layout, path);
+  if (existing) {
+    const patched = line ? updateTab(layout, existing.id, { line }) : layout;
+    const activated = activateTab(patched, existing.id);
+    return {
+      layout: opts.focus ? activated : { ...activated, focused: layout.focused },
+      tabId: existing.id,
+    };
+  }
+  const tab = opts.newTab ?? fileTab({ path, line });
+  return { layout: placeTab(layout, tab, opts.beside, opts.focus), tabId: tab.id };
+}
+
+/** The browser tab currently at `url`, in either dock, or `null`. Compared in
+ *  {@link normalizeBrowserUrl}'s form, which is what a tab's `url` is stored in. */
+export function findBrowserTab(layout: PaneLayout, url: string): PaneTab | null {
+  const want = normalizeBrowserUrl(url);
+  if (!want) return null;
+  return (
+    allTabs(layout).find(
+      (t) => t.kind === "browser" && t.url !== undefined && normalizeBrowserUrl(t.url) === want,
+    ) ?? null
+  );
+}
+
+/**
+ * Show a URL in a layout the way {@link openFileTab} shows a file: the browser tab
+ * already at that URL if there is one, activated where it is, else a new tab in
+ * the dock `beside` names.
+ *
+ * Matched on the tab's *current* `url`, so a tab the user has since navigated away
+ * from is theirs now and gets a sibling rather than being dragged back. The match
+ * is only activated, never reloaded — `veld ide open` run twice is "show me this",
+ * and a reload would throw away the page's state for nothing. `focus` follows the
+ * same rule as files: a push never moves the keyboard.
+ */
+export function openBrowserTab(
+  layout: PaneLayout,
+  opts: { url: string; beside: DockIndex; focus: boolean; newTab?: PaneTab },
+): { layout: PaneLayout; tabId: string } {
+  const existing = findBrowserTab(layout, opts.url);
+  if (existing) {
+    const activated = activateTab(layout, existing.id);
+    return {
+      layout: opts.focus ? activated : { ...activated, focused: layout.focused },
+      tabId: existing.id,
+    };
+  }
+  const tab = opts.newTab ?? browserTab({ url: opts.url });
+  return { layout: placeTab(layout, tab, opts.beside, opts.focus), tabId: tab.id };
+}
+
+/**
+ * Add a tab to a dock, optionally without taking focus — what a request from
+ * outside the page (an agent, the daemon) uses, where {@link addTab} is what a
+ * click uses. See {@link openFileTab} on why `focus: false` matters.
+ *
+ * Normalised afterwards: "beside" an empty layout is dock 1, and a left-empty layout
+ * is not one this model allows (`normalizeDocks`).
+ */
+export function placeTab(
+  layout: PaneLayout,
+  tab: PaneTab,
+  dock: DockIndex,
+  focus: boolean,
+): PaneLayout {
+  const added = addTab(layout, dock, tab);
+  const kept =
+    focus || layout.docks[layout.focused].tabs.length === 0
+      ? added
+      : { ...added, focused: layout.focused };
+  return normalizeDocks(kept);
+}
+
 export function sessionsInUse(layouts: Iterable<PaneLayout>): Set<BrowserProfile> {
   const used = new Set<BrowserProfile>();
   for (const layout of layouts) {
@@ -2080,6 +2277,8 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
       return "Nodes";
     case "browser":
       return tab.title || urlLabel(tab.url);
+    case "file":
+      return tab.path ? fileLabel(tab.path) : "File";
   }
 }
 
@@ -2384,6 +2583,24 @@ function parseTab(value: unknown): PaneTab | null {
     if (media) tab.media = media;
     const zoom = sanitizeZoom(t.zoom);
     if (zoom !== null) tab.zoom = zoom;
+  }
+  if (t.kind === "file") {
+    // A file tab with no file shows nothing and can never be told which one, so it
+    // is dropped rather than restored as an empty pane. The daemon confines the
+    // path again on every read — this only keeps a hand-edited layout from putting
+    // a control character or a megabyte of text on the wire.
+    if (
+      typeof t.path !== "string" ||
+      t.path === "" ||
+      t.path.length > MAX_FILE_PATH ||
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: the point is to refuse them.
+      /[\u0000-\u001f]/.test(t.path)
+    ) {
+      return null;
+    }
+    tab.path = t.path;
+    const line = cleanLine(t.line);
+    if (line) tab.line = line;
   }
   return tab;
 }

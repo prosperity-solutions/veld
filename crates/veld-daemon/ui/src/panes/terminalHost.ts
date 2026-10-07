@@ -15,11 +15,12 @@
 
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { findFilePaths } from "./filePaths";
-import { cellOf, logicalBlockAt } from "./linkRanges";
+import { continuesPath, findFilePaths } from "./filePaths";
+import { hardWrappedBlockAt, rangesOf } from "./linkRanges";
 import { type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api, type PaneLaunchMode } from "../api";
+import { dispatchOpenFile } from "../files/openRequests";
 import { inbox, isOsc9Notification, parseOsc133 } from "../inbox/inbox";
 import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { notifyError, notifyRedirect } from "../shared/notify";
@@ -1633,8 +1634,19 @@ async function activateLink(sessionId: string, url: string, event: MouseEvent): 
  * extensions.rs:445` is 44 characters and a narrow pane breaks it in half, so a
  * provider that reads one row sees two fragments and links neither — the exact
  * reason `WebLinksAddon` is kept for URLs (see where it is loaded). The assembly and
- * the offset→cell arithmetic live in `linkRanges.ts`, where they are testable; this
- * keeps the matches that touch the row asked about.
+ * the text→cell map live in `linkRanges.ts`, where they are testable; this keeps
+ * the matches that touch the row asked about.
+ *
+ * The cell-by-cell assembly is a fix to #375's original, made with the file pane:
+ * a path on a logical line holding any full-width character (an agent's ✅, a CJK
+ * name), or wrapped where a wide character left the row's last cell empty, got no
+ * underline and no click on any of its rows. A click is now the main way into the
+ * file pane, so it had to work wherever the path is printed.
+ *
+ * On top of that, an agent that word-wraps its own output (Claude Code) breaks a
+ * long path with a real newline and indents the rest — no row is `isWrapped`, so
+ * the logical line ends mid-path. `hardWrappedBlockAt` joins such lines when
+ * `continuesPath` says the seam is inside one path, conservatively; see both.
  */
 function filePathLinkProvider(
   term: Terminal,
@@ -1651,63 +1663,166 @@ function filePathLinkProvider(
         return;
       }
       const buf = term.buffer.active;
-      const cols = term.cols;
+      // One cell object reused for every read: this runs per row the pointer
+      // crosses, over every row of the logical line.
+      const scratch = buf.getNullCell();
       // xterm counts buffer lines from 1; the buffer API from 0.
-      const block = logicalBlockAt(
-        (y) => {
-          const row = buf.getLine(y);
-          // `translateToString(false)` — untrimmed, so a row is exactly `cols`
-          // characters wide whenever the arithmetic in `linkRanges` is valid. That
-          // is the property it checks; see its doc comment.
-          return row && { text: row.translateToString(false), isWrapped: row.isWrapped };
-        },
-        bufferLineNumber - 1,
-        cols,
-      );
+      const block = hardWrappedBlockAt((y) => {
+        const row = buf.getLine(y);
+        if (!row) return undefined;
+        const cells: { chars: string; width: number }[] = [];
+        for (let x = 0; x < row.length; x += 1) {
+          const cell = row.getCell(x, scratch);
+          cells.push(cell ? { chars: cell.getChars(), width: cell.getWidth() } : { chars: "", width: 1 });
+        }
+        return { cells, isWrapped: row.isWrapped };
+      }, bufferLineNumber - 1, continuesPath);
       if (!block) {
         callback(undefined);
         return;
       }
-      const { text, startY } = block;
-      const cell = (offset: number) => cellOf(offset, startY, cols);
       const links: ILink[] = [];
-      for (const match of findFilePaths(text)) {
-        const start = cell(match.start);
-        // `end` is inclusive in an xterm range, so it names the last character.
-        const end = cell(match.end - 1);
-        if (bufferLineNumber < start.y || bufferLineNumber > end.y) {
-          // Belongs to a different row of this same wrapped block. Skipping it
-          // rather than returning it keeps one row's answer about that row, and
-          // xterm asks again for the others.
-          continue;
+      for (const match of findFilePaths(block.text)) {
+        // One range per printed piece: a soft-wrapped path is one piece spanning
+        // rows, a hard-wrapped one (an agent's own line break) one per line, so the
+        // indentation between pieces is never underlined. Every piece carries the
+        // same click — the whole joined path.
+        const pieces = rangesOf(block, match.start, match.end);
+        for (const range of pieces) {
+          if (bufferLineNumber < range.start.y || bufferLineNumber > range.end.y) {
+            // Belongs to a different row of this same block. Skipping it rather than
+            // returning it keeps one row's answer about that row, and xterm asks
+            // again for the others — which get the same ranges.
+            continue;
+          }
+          // xterm underlines only the link under the pointer, so a hard-wrapped
+          // path would light up one piece at a time. The other pieces get the same
+          // underline drawn as an overlay (`underlineRanges`) while any piece is hovered — keyed by
+          // the whole path's position, see `siblingUnderline`.
+          const key = `${pieces[0].start.y}:${pieces[0].start.x}:${match.path}`;
+          links.push({
+            range,
+            text: match.path,
+            // Ours draws the whole path, the hovered piece included; xterm's on
+            // top of it would double the line on that one piece.
+            decorations: { pointerCursor: true, underline: pieces.length < 2 },
+            hover: pieces.length < 2 ? undefined : () => siblingUnderline.show(term, key, pieces),
+            leave: pieces.length < 2 ? undefined : () => siblingUnderline.hide(term, key),
+            activate: (event) => {
+              // xterm fires this from **mouseup** (`Linkifier._handleMouseUp`), and the
+              // mousedown that preceded it already armed a selection drag — so a click
+              // that travels even one cell leaves a highlight behind, on a click that
+              // changed nothing else on screen. Its own `SelectionService` has torn the
+              // drag down by now (it does that unconditionally), so clearing is all
+              // that is left to do, and it is why this handler does *not* call
+              // `preventDefault`: xterm never reads that flag, and setting it only
+              // suppressed the browser behaviour nobody asked about.
+              term.clearSelection();
+              activateFilePath({
+                sessionId,
+                worktreeId,
+                path: match.path,
+                line: match.line,
+                event,
+              });
+            },
+          });
         }
-        links.push({
-          range: { start, end },
-          text: match.path,
-          activate: (event) => {
-            // xterm fires this from **mouseup** (`Linkifier._handleMouseUp`), and the
-            // mousedown that preceded it already armed a selection drag — so a click
-            // that travels even one cell leaves a highlight behind, on a click that
-            // changed nothing else on screen. Its own `SelectionService` has torn the
-            // drag down by now (it does that unconditionally), so clearing is all
-            // that is left to do, and it is why this handler does *not* call
-            // `preventDefault`: xterm never reads that flag, and setting it only
-            // suppressed the browser behaviour nobody asked about.
-            term.clearSelection();
-            activateFilePath({
-              sessionId,
-              worktreeId,
-              path: match.path,
-              line: match.line,
-              event,
-            });
-          },
-        });
       }
       callback(links.length > 0 ? links : undefined);
     },
   };
 }
+
+/**
+ * Draw a link underline under `ranges` (1-based buffer cells, as `ILink` uses) and
+ * return the undo, and whether it is still drawn. For the pieces of a hard-wrapped path — see
+ * `filePathLinkProvider`.
+ *
+ * Plain elements over `.xterm-screen`, not xterm decorations: a decoration needs a
+ * marker, and markers live in the normal buffer only — an agent drawing on the
+ * alternate screen got no underline at all. Elements also never make xterm repaint,
+ * which is what fed the hover loop described at `siblingUnderline`. The price is
+ * that they do not follow a scroll or resize, so either one removes them; the
+ * pointer moving again draws them anew.
+ */
+function underlineRanges(
+  term: Terminal,
+  ranges: { start: { x: number; y: number }; end: { x: number; y: number } }[],
+): { undo: () => void; live: () => boolean } {
+  const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+  if (!screen || term.cols === 0 || term.rows === 0) return { undo: () => {}, live: () => false };
+  const cellW = screen.clientWidth / term.cols;
+  const cellH = screen.clientHeight / term.rows;
+  const top = term.buffer.active.viewportY;
+  const color = term.options.theme?.foreground ?? "currentColor";
+  const layer = document.createElement("div");
+  layer.style.cssText = "position:absolute;inset:0;pointer-events:none;z-index:7";
+  for (const r of ranges) {
+    for (let y = r.start.y; y <= r.end.y; y += 1) {
+      const row = y - 1 - top;
+      if (row < 0 || row >= term.rows) continue;
+      const x0 = y === r.start.y ? r.start.x : 1;
+      const x1 = y === r.end.y ? r.end.x : term.cols;
+      if (x1 < x0) continue;
+      const line = document.createElement("div");
+      line.style.cssText = `position:absolute;height:1px;background:${color};left:${(x0 - 1) * cellW}px;width:${(x1 - x0 + 1) * cellW}px;top:${(row + 1) * cellH - 1}px`;
+      layer.appendChild(line);
+    }
+  }
+  screen.appendChild(layer);
+  const subs = [term.onScroll(() => undo()), term.onResize(() => undo())];
+  let done = false;
+  const undo = () => {
+    if (done) return;
+    done = true;
+    for (const d of subs) d.dispose();
+    layer.remove();
+  };
+  return { undo, live: () => !done };
+}
+
+/**
+ * The pieces of one hard-wrapped path, underlined while it is hovered. One per
+ * terminal at most, since one path is hovered at a time.
+ *
+ * Hiding waits a moment, and showing the same path again cancels it. xterm's
+ * Linkifier drops the hovered link whenever its rows re-render — new output, a
+ * cursor blink on that row — fires `leave`, asks again and gets the same link back
+ * (`hover`). Hiding at once would blink the underline on every one of those; kept
+ * by key, the second `hover` finds it already drawn.
+ */
+const siblingUnderline = (() => {
+  const shown = new WeakMap<
+    Terminal,
+    { key: string; drawn: ReturnType<typeof underlineRanges>; timer?: number }
+  >();
+  return {
+    show(term: Terminal, key: string, pieces: Parameters<typeof underlineRanges>[1]) {
+      const cur = shown.get(term);
+      if (cur?.timer !== undefined) window.clearTimeout(cur.timer);
+      // Still drawn for this path: keep it. A scroll or resize took it down, so
+      // the same path hovered again draws afresh.
+      if (cur?.key === key && cur.drawn.live()) {
+        cur.timer = undefined;
+        return;
+      }
+      cur?.drawn.undo();
+      // Every piece, the hovered one too: xterm's own underline on it comes and
+      // goes with each re-ask above, this one does not.
+      shown.set(term, { key, drawn: underlineRanges(term, pieces) });
+    },
+    hide(term: Terminal, key: string) {
+      const cur = shown.get(term);
+      if (cur?.key !== key || cur.timer !== undefined) return;
+      cur.timer = window.setTimeout(() => {
+        if (shown.get(term) !== cur) return;
+        shown.delete(term);
+        cur.drawn.undo();
+      }, 80);
+    },
+  };
+})();
 
 /** A file path a user clicked in terminal output. */
 export interface FilePathClick {
@@ -1900,6 +2015,12 @@ function handleControl(s: Session, raw: string): void {
       if (typeof msg.url === "string" && msg.url !== "") {
         for (const fn of openUrlListeners) fn({ sessionId: s.id, url: msg.url });
       }
+      break;
+    case "open_file":
+      // A text file this terminal's process asked to show. Today's daemon sends these
+      // on the IDE channel instead (see `files/openRequests.ts`); accepted here too so
+      // the transport stays the daemon's choice. Opened beside this terminal.
+      dispatchOpenFile(msg as unknown as Record<string, unknown>, s.worktreeId, s.id);
       break;
     case "lagged":
       // The daemon dropped output we were too slow to take, so the screen is

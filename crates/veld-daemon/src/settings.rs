@@ -251,6 +251,7 @@ async fn shell_intercept_report() -> Result<Value, StatusCode> {
         intercept,
         shell_integration: db.terminal_shell_integration(),
         agent_integration: db.terminal_agent_integration(),
+        agent_context: db.terminal_agent_context(),
         bash_handoff: false,
     };
     opts.bash_handoff = opts.wants_handoff()

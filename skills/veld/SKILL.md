@@ -53,14 +53,14 @@ documentation, so what you read describes **the veld installed here** rather
 than whichever version this file was written against:
 
 ```sh
-veld skills            # the index: thirteen topics, one line each
+veld skills            # the index: fourteen topics, one line each
 veld skills basics     # start here — the command surface and the traps
 veld skills <topic>    # the one you need, when you need it
 ```
 
 Read `veld skills basics` before your first `veld` command. Fetch any other
 topic only when the task reaches it; each one is a full reference and there is
-no reason to pay for all thirteen.
+no reason to pay for all fourteen.
 
 **Do not load project state up front either.** Nothing about *this* project —
 its presets, nodes, ports or config — belongs in your context until you have a
