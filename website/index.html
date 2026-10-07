@@ -442,6 +442,7 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
         <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
         <div class="cell"><h3>Read what your agent wrote, in place</h3><p>Ask for a slide deck or an analysis written as HTML and you used to leave for Chrome to look at it. Run <code>open&nbsp;deck.html</code> in a Veld terminal, or pick it off a newest-first list showing what changed and how long ago, and it opens in a pane beside the shell that made it &mdash; then reloads itself each time that file changes &mdash; including one you reached by a link out of it, so a set of decks that link to each other behaves like one document. Served over HTTP from an origin of its own, so module scripts and <code>fetch</code> work where a <code>file://</code> URL would render the page blank.</p></div>
+        <div class="cell"><h3>Your agent hands you the file</h3><p>A plan, a CSV, the function it wants you to look at: the agent runs <code>veld&nbsp;ide&nbsp;open&nbsp;plan.md&nbsp;--notify</code> and it opens beside its terminal &mdash; markdown rendered, tables sortable, code highlighted with this branch&rsquo;s changes in the gutter &mdash; and the worktree is marked until you&rsquo;ve looked. Agents started in a Veld terminal are told they can. Select a few lines and copy them as <code>plan.md:12-18</code> with the excerpt, ready to paste back. Read-only on purpose: your editor is still where you edit.</p></div>
         <div class="cell cell-next">
           <div class="next-line">
             <span class="next-prompt">$ claude</span>
@@ -500,6 +501,7 @@ veld share <span class="kw">--web</span>
         <div class="cli-row"><code>veld init</code><span>Create a new veld.json (veld reads veld.jsonc too)</span></div>
         <div class="cli-row"><code>veld ui</code><span>Open the management dashboard</span></div>
         <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
+        <div class="cli-row"><code>veld ide open PATH|URL --notify|--quiet</code><span>Show a file or a page in the Veld window, beside the terminal that asked (agent-facing)</span></div>
         <div class="cli-row"><code>veld doctor / gc</code><span>Check extension status; clean up stale state</span></div>
         <div class="cli-row"><code>veld backup [now / restore]</code><span>Copies of veld's own state database, and putting one back — and it says when copies have stopped being written</span></div>
       </div>
@@ -549,7 +551,7 @@ veld share <span class="kw">--web</span>
       <p class="lead" style="font-size:14px; margin-bottom:6px;">The skill is a pointer, a few kilobytes. The documentation ships inside the binary, so your agent reads the docs for the veld you actually have — and reads only the page it needs, when it needs it, instead of loading a manual and your whole config into its context first.</p>
       <pre data-copy="veld skills
 veld skills basics
-veld skills config"><code><span class="cmt"># the index — thirteen topics, one line each:</span>
+veld skills config"><code><span class="cmt"># the index — fourteen topics, one line each:</span>
 veld skills
 
 <span class="cmt"># then just the page the task needs:</span>

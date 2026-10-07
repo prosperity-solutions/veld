@@ -559,6 +559,14 @@ pub const MAX_VIEW_PATTERNS: usize = 64;
 /// pattern, it is a path someone pasted.
 const MAX_VIEW_PATTERN_LEN: usize = 256;
 
+/// Most folders `files.extraFolders` may hold, and the longest one may be.
+///
+/// A handful is the real use — a notes folder, a scratch directory, `~/Downloads` —
+/// and every read outside a worktree is checked against the whole list.
+pub const MAX_EXTRA_FOLDERS: usize = 32;
+/// See [`MAX_EXTRA_FOLDERS`]. `PATH_MAX` on Linux.
+const MAX_EXTRA_FOLDER_LEN: usize = 4096;
+
 /// Where a browser pane sends words that are not an address.
 ///
 /// A pane's address bar takes http(s) URLs and nothing else
@@ -691,6 +699,7 @@ pub enum SettingKey {
     TerminalFileAction,
     TerminalShellIntegration,
     TerminalAgentIntegration,
+    TerminalAgentContext,
     KeepAwakeSharingOnPower,
     KeepAwakeSharingOnPowerMinutes,
     KeepAwakeSharingOnBattery,
@@ -723,6 +732,10 @@ pub enum SettingKey {
     FilesViewPlainText,
     FilesViewPatterns,
     FilesWatchByDefault,
+    FilesExtraFolders,
+    FilesWrapLines,
+    FilesShowDeletions,
+    FilesSplitDiff,
     UiHideDisabledActions,
     UiShowProjectNews,
     UiShowProjectColumn,
@@ -820,6 +833,7 @@ impl SettingKey {
         // ── Activity › Noticing ──────────────────────────────────────────────
         Self::TerminalShellIntegration,
         Self::TerminalAgentIntegration,
+        Self::TerminalAgentContext,
         Self::ActivityShowWorking,
         // ── Activity › Notifying ─────────────────────────────────────────────
         Self::ActivityNotifyCommandFinished,
@@ -868,6 +882,12 @@ impl SettingKey {
         Self::FilesViewPlainText,
         Self::FilesViewPatterns,
         Self::FilesWatchByDefault,
+        // Last in the section: it is about the file pane rather than a browser
+        // pane, and the one row here that reaches outside a worktree.
+        Self::FilesExtraFolders,
+        Self::FilesWrapLines,
+        Self::FilesShowDeletions,
+        Self::FilesSplitDiff,
     ];
 
     pub fn as_str(&self) -> &str {
@@ -893,6 +913,7 @@ impl SettingKey {
             Self::TerminalFileAction => "terminal.fileAction",
             Self::TerminalShellIntegration => "terminal.shellIntegration",
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
+            Self::TerminalAgentContext => "terminal.agentContext",
             Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
             Self::ExtensionsSource => "extensions.source",
             Self::NewsSource => "news.source",
@@ -917,6 +938,10 @@ impl SettingKey {
             Self::FilesViewPlainText => "files.viewPlainText",
             Self::FilesViewPatterns => "files.viewPatterns",
             Self::FilesWatchByDefault => "files.watchByDefault",
+            Self::FilesExtraFolders => "files.extraFolders",
+            Self::FilesWrapLines => "files.wrapLines",
+            Self::FilesShowDeletions => "files.showDeletions",
+            Self::FilesSplitDiff => "files.splitDiff",
             Self::UiHideDisabledActions => "ui.hideDisabledActions",
             Self::UiShowProjectNews => "ui.showProjectNews",
             Self::UiShowProjectColumn => "ui.showProjectColumn",
@@ -971,6 +996,7 @@ impl SettingKey {
             "terminal.fileAction" => Self::TerminalFileAction,
             "terminal.shellIntegration" => Self::TerminalShellIntegration,
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
+            "terminal.agentContext" => Self::TerminalAgentContext,
             "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
             "extensions.source" => Self::ExtensionsSource,
             "news.source" => Self::NewsSource,
@@ -995,6 +1021,10 @@ impl SettingKey {
             "files.viewPlainText" => Self::FilesViewPlainText,
             "files.viewPatterns" => Self::FilesViewPatterns,
             "files.watchByDefault" => Self::FilesWatchByDefault,
+            "files.extraFolders" => Self::FilesExtraFolders,
+            "files.wrapLines" => Self::FilesWrapLines,
+            "files.showDeletions" => Self::FilesShowDeletions,
+            "files.splitDiff" => Self::FilesSplitDiff,
             "ui.hideDisabledActions" => Self::UiHideDisabledActions,
             "ui.showProjectNews" => Self::UiShowProjectNews,
             "ui.showProjectColumn" => Self::UiShowProjectColumn,
@@ -1120,6 +1150,7 @@ impl SettingKey {
             | Self::TerminalClickableFilePaths
             | Self::TerminalShellIntegration
             | Self::TerminalAgentIntegration
+            | Self::TerminalAgentContext
             | Self::ExtensionsAutoRefresh
             | Self::ActivityShowWorking
             | Self::ActivityNotifyCommandFinished
@@ -1147,7 +1178,10 @@ impl SettingKey {
             | Self::FilesViewImages
             | Self::FilesViewPdfs
             | Self::FilesViewPlainText
-            | Self::FilesWatchByDefault => Value::from(value.as_bool().ok_or_else(bad)?),
+            | Self::FilesWatchByDefault
+            | Self::FilesWrapLines
+            | Self::FilesShowDeletions
+            | Self::FilesSplitDiff => Value::from(value.as_bool().ok_or_else(bad)?),
             // Clamped like every other duration here. The daemon acts on this one
             // — it is the period of its own timer — so it is normalised at the
             // store rather than trusted from the wire.
@@ -1279,6 +1313,11 @@ impl SettingKey {
             // id *grammar* rather than against any project: one answer is shared by
             // every project, so an id this one does not declare is an ordinary
             // outcome (you are asked once more there), not a bad value to refuse.
+            //
+            // `"veld"` is the one reserved value: "show it in Veld's own file pane".
+            // It passes the grammar check below unchanged, which is why it needs no
+            // arm of its own — and a project that declares an action with that id is
+            // shadowed by it, which is the right way round for a built-in.
             Self::TerminalFileAction => {
                 let s = value.as_str().ok_or_else(bad)?.trim();
                 // `ide::valid_pane_id` rather than a second copy of the rule — it is
@@ -1328,6 +1367,62 @@ impl SettingKey {
                     }
                     if raw.split('/').any(|seg| seg == "..") {
                         return Err(because(format!("{raw:?} must not contain ..")));
+                    }
+                    if !out.iter().any(|v| v == &Value::from(raw)) {
+                        out.push(Value::from(raw));
+                    }
+                }
+                Value::Array(out)
+            }
+            // Folders outside any worktree whose files a file pane may read. Stored as
+            // typed (`~/notes` stays `~/notes`, so the row reads back as written) and
+            // expanded at read time by `Db::files_extra_folders`.
+            //
+            // `/`, a bare `~` and any folder above `~` are refused: each turns "these
+            // folders too" into "everything", and the containment check that is the
+            // whole point of the list stops meaning anything. Somebody who wants that
+            // has said so by typing the subfolder they actually mean.
+            Self::FilesExtraFolders => {
+                let items = value.as_array().ok_or_else(bad)?;
+                if items.len() > MAX_EXTRA_FOLDERS {
+                    return Err(because(format!("more than {MAX_EXTRA_FOLDERS} folders")));
+                }
+                let mut out = Vec::with_capacity(items.len());
+                for item in items {
+                    let raw = item.as_str().ok_or_else(bad)?.trim();
+                    if raw.is_empty() {
+                        continue;
+                    }
+                    if raw.len() > MAX_EXTRA_FOLDER_LEN {
+                        return Err(because(format!(
+                            "{raw:?} is longer than {MAX_EXTRA_FOLDER_LEN} bytes"
+                        )));
+                    }
+                    if raw.chars().any(char::is_control) {
+                        return Err(because(format!("{raw:?} contains a control character")));
+                    }
+                    let rest = raw.strip_prefix('~');
+                    if !(raw.starts_with('/') || rest.is_some_and(|r| r.starts_with('/'))) {
+                        return Err(because(format!(
+                            "{raw:?} must be an absolute path or start with ~/"
+                        )));
+                    }
+                    if raw.split('/').any(|seg| seg == "..") {
+                        return Err(because(format!("{raw:?} must not contain ..")));
+                    }
+                    // Judged on what the entry names, not how it is spelled: `/.`,
+                    // `~/./` and `/Users` are `/`, `~` and an ancestor of `~`. With
+                    // no home folder to expand against, `~` stands for a placeholder
+                    // so `~/.` is still caught.
+                    let home = dirs::home_dir().unwrap_or_else(|| "/~".into());
+                    let expanded = match rest {
+                        Some(r) => home.join(r.trim_start_matches('/')),
+                        None => std::path::PathBuf::from(raw),
+                    };
+                    if crate::files::folder_too_broad(&expanded, Some(&home)) {
+                        return Err(because(format!(
+                            "{raw:?} would allow every file; name the folder you mean"
+                        )));
                     }
                     if !out.iter().any(|v| v == &Value::from(raw)) {
                         out.push(Value::from(raw));
@@ -1811,6 +1906,11 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // agents. Nothing of the user's is edited either way: no
         // `~/.claude/settings.json` merge, ever.
         (SettingKey::TerminalAgentIntegration, Value::from(true)),
+        // On, and its own key rather than a rider on the one above. Integration is
+        // hooks that report *to* Veld; this is a few lines of text handed *to* the
+        // agent so it knows `veld ide open` exists. Someone who wants the badge but
+        // not a word added to their agent's prompt — or the reverse — gets that.
+        (SettingKey::TerminalAgentContext, Value::from(true)),
         // On: a project that declares badges declared them to be seen, and the
         // switch exists for the machine that wants none rather than as a gate
         // everybody steps through. See `Db::extensions_auto_refresh`.
@@ -1915,6 +2015,20 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // watch an agent rewrite, and a stale deck that silently does not reload is
         // worse than a poll nobody notices.
         (SettingKey::FilesWatchByDefault, Value::from(true)),
+        // Empty: a worktree's own files need no entry, and any folder outside one
+        // is a decision about the user's disk that only they can make.
+        (SettingKey::FilesExtraFolders, Value::Array(Vec::new())),
+        // On: a log line or a minified JSON blob that runs off the right edge is
+        // a horizontal scroll per line read, and the pane is usually a narrow
+        // split beside a terminal.
+        (SettingKey::FilesWrapLines, Value::from(true)),
+        // Off: the gutter already says where lines went, and a diff interleaves
+        // text that is no longer in the file with text that is — the wrong default
+        // for a pane mostly used to read what an agent just wrote.
+        (SettingKey::FilesShowDeletions, Value::from(false)),
+        // Off: a file pane is often a third of the window, where two columns of
+        // code each get half of too little. Wide panes are the exception.
+        (SettingKey::FilesSplitDiff, Value::from(false)),
         // An engine *is* shipped, unlike the exempt list above, and the difference is
         // which way the empty default fails. An empty exempt list works — every host
         // opens in a pane, which is the feature. An empty search template makes a
@@ -2366,6 +2480,18 @@ impl Db {
             .unwrap_or(true)
     }
 
+    /// Whether a coding agent launched in a Veld terminal is told, in a few lines
+    /// appended to its prompt, how to show the human a file (`veld ide open`).
+    ///
+    /// Separate from [`Self::terminal_agent_integration`]; see the default's note.
+    pub fn terminal_agent_context(&self) -> bool {
+        self.setting(&SettingKey::TerminalAgentContext)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
     /// Whether the daemon may evaluate a project's `ide.extensions` status badges
     /// automatically.
     ///
@@ -2666,6 +2792,38 @@ impl Db {
                 .map(str::to_owned)
                 .collect(),
         }
+    }
+
+    /// `files.extraFolders`, with a leading `~` expanded against the home directory.
+    ///
+    /// Not canonicalised: the reader does that per request, because a folder that
+    /// does not exist yet (a notes directory created later) is a legitimate entry
+    /// and canonicalising here would drop it. An entry that needs a home directory
+    /// nobody can find is skipped rather than read as relative.
+    ///
+    /// An entry naming `/`, the home folder or an ancestor of it is dropped here too,
+    /// although the validator refuses one: [`Db::setting`] returns stored bytes
+    /// without revalidating, so a row written before that rule, or by hand, would
+    /// otherwise open everything.
+    pub fn files_extra_folders(&self) -> Vec<std::path::PathBuf> {
+        let home = dirs::home_dir();
+        self.setting(&SettingKey::FilesExtraFolders)
+            .ok()
+            .flatten()
+            .and_then(|v| match v {
+                Value::Array(items) => Some(items),
+                _ => None,
+            })
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|raw| match raw.strip_prefix('~') {
+                Some(rest) => home.as_ref().map(|h| h.join(rest.trim_start_matches('/'))),
+                None => Some(std::path::PathBuf::from(raw)),
+            })
+            .filter(|p| p.is_absolute())
+            .filter(|p| !crate::files::folder_too_broad(p, home.as_deref()))
+            .collect()
     }
 
     /// Whether a pane opened on a file watches it for changes unless told not to.
@@ -3102,6 +3260,54 @@ mod tests {
         db.patch_settings(&patch(&[("terminal.openUrlsInApp", Value::from(false))]))
             .unwrap();
         assert!(!db.terminal_open_urls_in_app());
+    }
+
+    /// The "not everything" guard judges what an entry names, so a spelling of `/`
+    /// or `~` that is not literally `/` or `~` is refused too — and the reader drops
+    /// one that reached the row some other way.
+    #[test]
+    fn extra_folders_refuse_root_and_home_however_spelled() {
+        let (_dir, db) = test_db();
+        let home = dirs::home_dir().expect("a home folder");
+        let above_home = home.parent().expect("home has a parent").to_owned();
+        for broad in [
+            "/".to_owned(),
+            "/.".to_owned(),
+            "/./".to_owned(),
+            "~".to_owned(),
+            "~/".to_owned(),
+            "~/.".to_owned(),
+            "~/./".to_owned(),
+            home.to_string_lossy().into_owned(),
+            above_home.to_string_lossy().into_owned(),
+        ] {
+            assert!(
+                db.patch_settings(&patch(&[(
+                    "files.extraFolders",
+                    Value::Array(vec![Value::from(broad.clone())])
+                )]))
+                .is_err(),
+                "{broad:?} must be refused"
+            );
+        }
+        db.patch_settings(&patch(&[(
+            "files.extraFolders",
+            Value::Array(vec![Value::from("~/notes"), Value::from("/tmp/scratch")]),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.files_extra_folders(),
+            vec![home.join("notes"), std::path::PathBuf::from("/tmp/scratch")]
+        );
+
+        // A row that skipped the validator is still not "everything" when read.
+        db.lock()
+            .execute(
+                "UPDATE settings SET value = ?1 WHERE scope = 'global' AND key = 'files.extraFolders'",
+                [r#"["~/.", "/./", "~/notes"]"#],
+            )
+            .unwrap();
+        assert_eq!(db.files_extra_folders(), vec![home.join("notes")]);
     }
 
     /// The view-pattern list is normalised the way its cited precedent is.

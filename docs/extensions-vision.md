@@ -1370,10 +1370,10 @@ idea.
 |---|---|---|---|
 | PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog, and now the *only* route to this — core deliberately renders no merged glyph (decision log, 2026-09-08). Rendering is half-built already: per-value `icon` override plus `display: "icon"`; missing is `rail` in `EXTENSION_SLOTS` and the per-worktree fan-out |
 | Open a worktree in an external IDE (WebStorm, VS Code, …) | a local binary per editor | top bar | **Tier 1 round 1** (`type: "action"`) |
-| Open a **clicked file or directory** in an external IDE, at its line | a local binary per editor | a file path in terminal output | **shipped** (`type: "action"` + `accepts: "file"`) — see both 2026-09-21 decision log entries |
+| Open a **clicked file or directory** in an external IDE, at its line | a local binary per editor | a file path in terminal output | **shipped** (`type: "action"` + `accepts: "file"`) — see both 2026-09-21 decision log entries; listed under core's *View in Veld* since 2026-10-06 |
 | CI check status for a worktree's branch | provider API | top bar, worktree detail | backlog — expressible as a second `type: "status"` today |
 | Per-worktree staleness ("branch is N behind origin") | **already exposed as core data** — see note | rail row, worktree detail | core data shipped; badge = extension |
-| Inline file blame / "who touched this" | provider API or tool output | editor surfaces | backlog — still no in-app file *viewer* to hang it on; `accepts: "file"` hands a path to an external editor and renders nothing itself |
+| Inline file blame / "who touched this" | provider API or tool output | editor surfaces | backlog — the read-only **file pane** (2026-10-06) is now the viewer to hang it on; what is missing is a contract for an extension to contribute per-line annotations to it |
 | Custom project health badges (coverage, lint gate) | project commands | rail row | backlog — needs the `rail` slot |
 | Per-project setup/teardown on worktree create/delete | lifecycle hooks (Tier 1) | n/a (background) | backlog — home is the reserved `hooks` key |
 | Launch a local review tool and open it in a browser pane (e.g. [difit](https://github.com/yoshiko-pg/difit)) | a local binary that serves HTTP on a port | top bar action + browser pane | backlog — needs an action that can *start a server and route a pane at it*, which round 1's fire-and-forget action cannot express |
@@ -1580,3 +1580,55 @@ The fix for the third is that rule (b) now requires an actual dot, which means a
 extensionless file (`Makefile`) is reachable only through rule (a) (`./Makefile`).
 That is the trade, taken deliberately: a missed path costs a copy-paste, a wrong
 underline costs trust in every other one.
+
+### 2026-10-06 — The file pane is core, on the IDE origin; agents are told, not wired
+
+**Chosen:** a read-only **file pane** (rendered markdown, a CSV table, highlighted
+code with changed-line gutters, live reload, *Copy reference*), reached by
+**`veld ide open`**, by a clicked path's *View in Veld*, by the `open` shim for text
+inside the worktree, and by a *Changed files* list. It is core and not an
+extension by the universal-primitive test: "show me this file" needs no provider,
+no provider schema and no auth.
+
+Six calls, recorded because each has an obvious alternative:
+
+- **The pane renders on the IDE origin, not the file origin.** The file origin
+  (`files.veld.localhost`) already serves agent-authored HTML, so it is the one
+  origin where nothing may be trusted to talk back to the IDE — a copy-reference
+  or "open this other file" channel from it would be a channel any served page
+  could use. Rendering in React on the IDE origin keeps the content *data*:
+  markdown-it with `html: false`, DOMPurify before `innerHTML`, no remote images in
+  v1. No CSP on `/ide` in this change; the two layers above stand in for it, and
+  the code says so where it renders.
+- **`accepts: "file"` is kept, and demoted under *View in Veld*.** The file pane
+  answers *reading*; it never edits, and it has no language server. So a project's
+  editor actions still have the job they were built for (2026-09-21) — they are
+  listed beneath the core choice, and with none declared a click goes straight to
+  the pane. `terminal.fileAction` gains `"veld"`, remembered exactly like an action
+  id.
+- **Agents learn about it from static context injected at launch.** The same
+  wrapper that carries the hooks appends a few lines to the agent's system prompt
+  (Claude `--append-system-prompt`, Codex `-c developer_instructions=…`, a Pi
+  `before_agent_start` extension), on its own setting, `terminal.agentContext`.
+  Static per daemon instance so it caches and survives resume snapshots — it names
+  that instance's CLI (bare `veld` only for the installed one), because a bare word
+  sent a dev stack's agent to the installed release; no
+  repo-supplied text and no config surface, for the hooks' reason (see
+  `veld_core::agent`). Codex's override *replaces*, so a user config mentioning
+  `developer_instructions` makes the wrapper leave the text out.
+- **A CLI, not MCP.** Every agent in a Veld terminal can already run a command;
+  an MCP server would need per-agent registration — an edit to the user's agent
+  config, which the agent integration has never done — and a server process per
+  session, to deliver one verb. `veld skills ide` is the documentation, in the
+  binary, as for every other command.
+- **`--notify` or `--quiet` is required.** An agent opening a tab is either asking
+  for attention or not, and only the agent knows which. A default would make one
+  of the two the thing nobody chose: default-notify trains the human to ignore the
+  book glyph; default-quiet makes "please read this before I go on" invisible.
+  The error message *is* the usage help an agent gets, so it names both.
+- **Notes and annotations are deferred to a unified "feedback anywhere" design.**
+  The feedback overlay already lets a human comment on a page; the file pane wants
+  the same on a line, the terminal arguably on output. Building a second,
+  file-only tray now would make three stores later. v1 ships *Copy reference* —
+  `path:12-18` plus the excerpt — which an agent reads with no new protocol, and
+  the tray waits for one design that covers all three surfaces.

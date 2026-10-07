@@ -1448,3 +1448,54 @@ describe("bookkeeping", () => {
     expect(box.unseen("nope")).toBeNull();
   });
 });
+
+describe("a file opened for you", () => {
+  const opened: Signal = { type: "opened", detail: "Agent opened plan.md" };
+
+  it("is an unread event on the pane that was opened, read by looking at it", () => {
+    const box = createInbox();
+    box.report("file-1", WT, opened, NOW);
+    expect(box.unseen("file-1")).toMatchObject({
+      kind: "opened",
+      producer: "agent",
+      detail: "Agent opened plan.md",
+    });
+    expect(rowState(box, WT)).toBe("opened");
+    box.setWatching("file-1");
+    expect(box.unseen("file-1")).toBeNull();
+  });
+
+  it("is not news in the pane you are already looking at", () => {
+    const box = createInbox();
+    const events: unknown[] = [];
+    box.onEvent((e) => events.push(e));
+    box.setWatching("file-1");
+    box.report("file-1", WT, opened, NOW);
+    expect(box.unseen("file-1")).toBeNull();
+    expect(events).toEqual([]);
+  });
+
+  it("ranks under a waiting agent and over a failure", () => {
+    const box = createInbox();
+    box.report("t1", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report("t1", WT, { type: "osc133", mark: "D", exit: 1 }, NOW);
+    box.report("file-1", WT, opened, NOW + 1);
+    expect(rowState(box, WT)).toBe("opened");
+    box.report("t2", WT, { type: "agent", state: "blocked", source: "hook" }, NOW + 2);
+    expect(rowState(box, WT)).toBe("attention");
+  });
+
+  it("rides the agent-waiting notification row", () => {
+    expect(
+      notifyKey({ kind: "opened", producer: "agent", at: NOW, source: "hook", detail: "x" }),
+    ).toBe("activity.notifyAgentWaiting");
+  });
+
+  it("survives a reload like every other event", () => {
+    const box = createInbox();
+    box.report("file-1", WT, opened, NOW);
+    const after = createInbox();
+    after.restore(JSON.parse(JSON.stringify(box.snapshot())));
+    expect(after.unseen("file-1")?.kind).toBe("opened");
+  });
+});

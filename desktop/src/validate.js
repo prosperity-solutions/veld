@@ -309,7 +309,7 @@ function safeRadius(raw) {
 /** Pane kinds, mirroring `PANE_KINDS` in `panes/model.ts`. A kind missing here
  *  is a tab that cannot be detached; a stale extra one is inert, because the
  *  receiving renderer validates the kind again. */
-const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "new"];
+const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "file", "new"];
 
 /**
  * Ceiling on a serialized seed, in **UTF-8 bytes**.

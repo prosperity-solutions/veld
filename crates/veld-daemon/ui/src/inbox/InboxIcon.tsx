@@ -1,5 +1,6 @@
 import {
   IconAlertTriangle,
+  IconBook,
   IconCircleCheck,
   IconLoader,
   IconMessageQuestion,
@@ -42,6 +43,9 @@ import type { RowState, RowSummary } from "./inbox";
  */
 export const ICONS: Record<RowState, typeof IconCircleCheck> = {
   attention: IconMessageQuestion,
+  // An open book: something was put in front of you to read (`veld ide open
+  // --notify`). The maintainer's pick, like the rest of this row.
+  opened: IconBook,
   failed: IconAlertTriangle,
   finished: IconCircleCheck,
   working: IconLoader,
@@ -49,6 +53,7 @@ export const ICONS: Record<RowState, typeof IconCircleCheck> = {
 
 export const HEADLINE: Record<RowState, string> = {
   attention: "waiting for you",
+  opened: "opened something for you to read",
   failed: "a command failed",
   finished: "finished",
   working: "working",

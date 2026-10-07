@@ -466,4 +466,20 @@ export const PROMOTIONS: Promotion[] = [
       "Choose Pixels as the marker and each worktree gets a small pattern in its colour. Switch it when you create one, or with Change marker… in its menu.",
     glyph: "panes",
   },
+  {
+    // A new pane kind, which is the category this channel exists for — and two of
+    // its three ways in are invisible until somebody tells you: clicking a path in
+    // a terminal changed what it does, and an agent can now open a file *for* you.
+    // The copy-a-reference half is what makes it more than a viewer, so it is the
+    // half the body ends on.
+    //
+    // From "you": what you stop doing is leaving Veld to read what an agent wrote.
+    // Not "Veld now has a file pane", which is true for somebody who never opens one.
+    id: "file-pane",
+    since: "2026-10-06",
+    eyebrow: "New",
+    headline: "Read your agent's plan next to its terminal",
+    body: "Click a path in a terminal, or let the agent open it for you. Markdown, CSVs and code show beside it — select lines to copy a reference back.",
+    glyph: "panes",
+  },
 ];

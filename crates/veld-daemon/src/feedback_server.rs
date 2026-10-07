@@ -64,6 +64,14 @@ mod promotions;
 // route can ask whether file serving is up before promising a pane.
 pub(crate) mod files;
 
+/// The file pane's text reads, its grants outside the worktree, and `veld ide open`.
+#[path = "file_pane.rs"]
+mod file_pane;
+
+/// What a worktree changed against its merge-base, for review.
+#[path = "changes.rs"]
+mod changes;
+
 /// Serialises the tests that point `VELD_DB_PATH` at a temp database.
 ///
 /// **Pre-existing flake, fixed here because it reddens CI at random.** Two modules
@@ -207,6 +215,11 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // that was wrong twice over — the listing mints and persists a grant, and it
         // spends a bounded but real amount of disk walking per call. See `list_viewable`.
         .merge(files::api_routes())
+        // The file pane's reads and `veld ide open`, then the changed-files list.
+        // Every handler checks CSRF itself, the GETs included, for the reason given
+        // for `files::api_routes` just above.
+        .merge(file_pane::routes())
+        .merge(changes::routes())
         // Keep-awake. Same reasoning as settings — machine-wide rather than
         // desktop-specific, and its mutating handlers call `check_csrf`
         // themselves rather than relying on that router's blanket layer.

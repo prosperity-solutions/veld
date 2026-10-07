@@ -15,12 +15,14 @@
 //! | `ENV` / `VELD_USER_ENV` | The bash equivalent, on a bash that was **probed** to honour it. See [`bashenv`]. |
 //! | `VELD_SHELL_INTEGRATION` | `terminal.shellIntegration`: the handoff's OSC 133 half registers its hooks only when this is set. |
 //! | `VELD_AGENT_HOOKS` | `terminal.agentIntegration`: an agent wrapper injects its ephemeral hook configuration only when this is set, and is a bare `exec` otherwise. |
+//! | `VELD_AGENT_CONTEXT` | `terminal.agentContext`: an agent wrapper hands the agent [`veld_core::agent::agent_context`] only when this is set. Independent of `VELD_AGENT_HOOKS` — either half runs without the other. |
 //! | `VELD_SHIM_BROWSER` | The same path as `BROWSER`, kept under its own name so the `veld_browser` hook can re-assert it after an rc file exports a `$BROWSER` of its own. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
 //!
-//! **Three independent settings gate them, one feature each** —
+//! **Four independent settings gate them, one feature each** —
 //! `terminal.openUrlsInApp` (with `terminal.interceptSystemOpen` under it),
-//! `terminal.shellIntegration`, and `terminal.agentIntegration`. All of them off means
+//! `terminal.shellIntegration`, `terminal.agentIntegration`, and
+//! `terminal.agentContext`. All of them off means
 //! veld is not in the shell at all, except for the session id. They share the
 //! *mechanism* (one handoff file) and not the *decision*: the file is written
 //! unconditionally and each half of it is gated on its own variable, which is what
@@ -93,6 +95,9 @@ pub struct SessionOptions {
     pub shell_integration: bool,
     /// `terminal.agentIntegration`.
     pub agent_integration: bool,
+    /// `terminal.agentContext`. Rides the same wrappers as `agent_integration`, so
+    /// either one wants them on `PATH`.
+    pub agent_context: bool,
     /// Whether this bash was **probed** to honour the `--posix`/`$ENV` handoff.
     ///
     /// Passed in rather than probed here because probing spawns a process and this
@@ -121,6 +126,7 @@ impl SessionOptions {
             intercept: true,
             shell_integration: true,
             agent_integration: true,
+            agent_context: true,
             bash_handoff: true,
         }
     }
@@ -131,7 +137,7 @@ impl SessionOptions {
     /// feature, so it needs `open_in_app` as well), and putting an agent wrapper
     /// (`claude`, `codex`) in front of the real one. Either alone is enough.
     pub fn wants_path(self) -> bool {
-        (self.open_in_app && self.intercept) || self.agent_integration
+        (self.open_in_app && self.intercept) || self.agent_integration || self.agent_context
     }
 
     /// Whether this session needs the shell-startup handoff file at all.
@@ -202,11 +208,12 @@ fn session_env_in(
         intercept,
         shell_integration,
         agent_integration,
+        agent_context,
         bash_handoff,
     } = opts;
     let mut env = BTreeMap::new();
     env.insert("VELD_PTY_SESSION".to_owned(), session_id.to_owned());
-    if !open_in_app && !shell_integration && !agent_integration {
+    if !open_in_app && !shell_integration && !agent_integration && !agent_context {
         return env;
     }
     let Some(dir) = dir else {
@@ -228,17 +235,20 @@ fn session_env_in(
     // off because a *browser* script went missing is the coupling the function's own
     // docs are about.
     let browser = open_in_app && dir.join(Tool::Browser.shim_name()).is_file();
-    let agent = agent_integration
-        && veld_core::agent::AgentTool::ALL
-            .iter()
-            .any(|tool| dir.join(tool.shim_name()).is_file());
+    let wrapper = veld_core::agent::AgentTool::ALL
+        .iter()
+        .any(|tool| dir.join(tool.shim_name()).is_file());
+    let agent = agent_integration && wrapper;
+    // The same wrappers carry the context, so the same file check gates it — and
+    // separately from `agent`, which is what lets either switch run without the other.
+    let context = agent_context && wrapper;
 
     // Two unrelated features want veld's directory on `PATH`: the `open`/`xdg-open`
     // shims (which belong to the browser feature, hence `browser` and not
     // `open_in_app`) and an agent wrapper. Either alone is enough, and the variable
     // is what the generated startup files gate their `PATH` line on — so not
     // setting it is how "neither wants it" reaches the shell.
-    let wants_path = (browser && intercept) || agent;
+    let wants_path = (browser && intercept) || agent || context;
     if wants_path {
         env.insert("VELD_SHIM_DIR".to_owned(), dir.display().to_string());
     }
@@ -255,6 +265,11 @@ fn session_env_in(
     // would still be wrong for every shell already open.
     if agent {
         env.insert("VELD_AGENT_HOOKS".to_owned(), "1".to_owned());
+    }
+    // The context's gate, by the same reasoning: the wrapper is always there and leaves
+    // the text out without this variable.
+    if context {
+        env.insert("VELD_AGENT_CONTEXT".to_owned(), "1".to_owned());
     }
     let wants_handoff = wants_path || shell_integration;
     // The handoff is only safe while the file that performs it exists. `ZDOTDIR`
@@ -827,13 +842,28 @@ pub(super) fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     // wrapper resolves it at run time precisely so that installing the agent after the
     // daemon started works. A wrapper in front of nothing says so and exits 127, which
     // is what the shell would have said anyway.
+    //
+    // The context text names *this* daemon's CLI, decided once here so every session
+    // of the daemon gets the same bytes — see `context_text`.
+    let context = context_text(cli);
     for tool in veld_core::agent::AgentTool::ALL.iter().copied() {
         let path = dir.join(tool.shim_name());
         let tmp = dir.join(format!(".{}.new", tool.shim_name()));
-        std::fs::write(&tmp, agent_script(tool, dir, cli))?;
+        std::fs::write(&tmp, agent_script(tool, dir, cli, &context))?;
         set_mode(&tmp, 0o755)?;
         std::fs::rename(&tmp, &path)?;
     }
+    // Pi's context extension — the one context injection that needs a file. Static, so
+    // written here with the wrappers rather than per launch; 0600 and in a directory of
+    // its own, since it is read by Pi's loader and never executed from `PATH`.
+    let context_file = veld_core::agent::context_extension_path(dir);
+    let context_dir = context_file.parent().expect("context path has a parent");
+    std::fs::create_dir_all(context_dir)?;
+    set_mode(context_dir, 0o700)?;
+    let tmp = context_dir.join(".pi-veld-context.ts.new");
+    std::fs::write(&tmp, veld_core::agent::pi_context_extension_doc(&context))?;
+    set_mode(&tmp, 0o600)?;
+    std::fs::rename(&tmp, &context_file)?;
     // The `ZDOTDIR` handoff. Written unconditionally — whether a session *uses* it
     // is `session_env`'s call, per shell and per setting — and by the same
     // write-then-rename, since a shell may be starting while the daemon restarts.
@@ -944,6 +974,13 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 /// [`veld_core::agent::Injection`] for why the two need different shell logic below
 /// and not just a different flag name.
 ///
+/// The same wrapper carries the agent context ([`veld_core::agent::agent_context`]) on
+/// its own switch, `VELD_AGENT_CONTEXT`. It obeys every rule below — rules 1 and 2
+/// decide "plain interactive launch" once, for both halves — and adds one of its own:
+/// a user flag or config key that shapes the same prompt
+/// ([`veld_core::agent::AgentTool::own_context_flag_patterns`],
+/// [`veld_core::agent::ContextInjection`]) leaves the text out and the hooks alone.
+///
 /// A PATH wrapper is the thing the spike wanted to avoid, and the reason is real:
 /// upstream has a standing bug where a wrapper injecting flags ahead of `"$@"`
 /// bypasses a subcommand's fast path and mangles argv
@@ -1005,7 +1042,12 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 /// 6. **`exec`, always**, so fds, stdin, signals and the exit status all belong to the
 ///    real process and nothing can tell the wrapper was there. Backgrounding would
 ///    break the agent's own stdin.
-fn agent_script(tool: veld_core::agent::AgentTool, dir: &Path, cli: &Path) -> String {
+fn agent_script(
+    tool: veld_core::agent::AgentTool,
+    dir: &Path,
+    cli: &Path,
+    context: &str,
+) -> String {
     let name = tool.shim_name();
     let (inject_flag, injection) = tool.injection();
     let own_patterns = tool.own_injection_flag_patterns();
@@ -1089,11 +1131,43 @@ unset veld_prompt veld_prompt_file
     } else {
         "unset veld_prompt_file\n".to_owned()
     };
+    // The context half, decided entirely at generation: the text is static per daemon
+    // (see `context_text`), so it is baked in here rather than fetched at launch, and
+    // nothing about it can fail at run time except a missing file.
+    let context_flag_patterns = tool.own_context_flag_patterns();
+    let mut context_guard = String::new();
+    if !context_flag_patterns.is_empty() {
+        context_guard.push_str(&format!(
+            "if [ -n \"$veld_context\" ]; then\n  for veld_arg in \"$@\"; do\n    case \"$veld_arg\" in\n      {context_flag_patterns}) veld_context= ; break ;;\n    esac\n  done\n  unset veld_arg\nfi\n"
+        ));
+    }
+    let context_prepend = match tool.context_injection(context) {
+        veld_core::agent::ContextInjection::Argv {
+            flag,
+            value,
+            user_config_key,
+        } => {
+            if let Some((file, key)) = user_config_key {
+                // Builtins only (`read`, `case`), like everything else on this path. A
+                // line that merely mentions the key counts — a comment, another table —
+                // which errs toward leaving the text out, never toward replacing theirs.
+                context_guard.push_str(&format!(
+                    "if [ -n \"$veld_context\" ]; then\n  veld_conf=\"{file}\"\n  if [ -f \"$veld_conf\" ]; then\n    while IFS= read -r veld_line || [ -n \"$veld_line\" ]; do\n      case \"$veld_line\" in\n        *{key}*) veld_context= ; break ;;\n      esac\n    done < \"$veld_conf\"\n  fi\n  unset veld_conf veld_line\nfi\n"
+                ));
+            }
+            format!("  set -- {flag} {} \"$@\"\n", sh_word(&value))
+        }
+        veld_core::agent::ContextInjection::ExtensionFile { flag } => {
+            let path = quote(&veld_core::agent::context_extension_path(dir));
+            format!("  if [ -f {path} ]; then\n    set -- {flag} {path} \"$@\"\n  fi\n")
+        }
+    };
     format!(
         r#"#!/bin/sh
 {header}
-# Wraps `{name}` so Veld's window learns when it is waiting on you.
-# Injects nothing unless VELD_AGENT_HOOKS is set. See `veld agent-settings --help`.
+# Wraps `{name}` so Veld's window learns when it is waiting on you, and so the agent
+# knows it is in a Veld terminal. Injects nothing unless VELD_AGENT_HOOKS or
+# VELD_AGENT_CONTEXT is set. See `veld agent-settings --help`.
 
 # This script's own PHYSICAL directory. Two sources, no external commands: the baked
 # path (this file is rewritten every daemon start) and `$0`, whose prefix is stripped by
@@ -1182,20 +1256,34 @@ fi
 # Rules 1 and 2. A bare first word is a subcommand and is never touched, except for
 # a short, named list of this tool's own subcommands that are themselves interactive
 # (Codex's `resume`/`fork` — see `AgentTool::extra_interactive_first_words`).
-veld_inject=
-if [ -n "${{VELD_AGENT_HOOKS-}}" ] && [ -n "${{VELD_PTY_SESSION-}}" ]; then
+# Decided once, for both halves: hooks and context are separate switches, but "is this
+# a plain interactive launch" has one answer.
+veld_plain=
+if [ -n "${{VELD_PTY_SESSION-}}" ] && {{ [ -n "${{VELD_AGENT_HOOKS-}}" ] || [ -n "${{VELD_AGENT_CONTEXT-}}" ]; }}; then
   case "${{1-}}" in
-    {rule1_pattern}) veld_inject=1 ;;
+    {rule1_pattern}) veld_plain=1 ;;
   esac
   for veld_arg in "$@"; do
     case "$veld_arg" in
       # The tool's own spelling of its injection flag (or something close enough):
       # see rule 2. Injecting on top of it is how one silently loses.
-      {own_patterns}) veld_inject= ; break ;;
+      {own_patterns}) veld_plain= ; break ;;
     esac
   done
   unset veld_arg
 fi
+veld_inject=
+if [ -n "${{VELD_AGENT_HOOKS-}}" ]; then veld_inject=$veld_plain; fi
+veld_context=
+if [ -n "${{VELD_AGENT_CONTEXT-}}" ]; then veld_context=$veld_plain; fi
+unset veld_plain
+
+# The context's own collisions: a flag of the user's that shapes the same prompt, or a
+# config key of theirs the override would replace. Either leaves the text out and the
+# hooks alone.
+{context_guard}if [ -n "$veld_context" ]; then
+{context_prepend}fi
+unset veld_context
 
 # The New worktree dialog's prompt, when this launch was given one (`VELD_LAUNCH_PROMPT`
 # names a one-shot file). Out of the environment first and whatever happens next: it
@@ -1233,14 +1321,34 @@ exec "$veld_real" "$@"
         rule1_pattern = rule1_pattern,
         value_guard = value_guard,
         prompt_block = prompt_block,
+        context_guard = context_guard,
+        context_prepend = context_prepend,
     )
+}
+
+/// The agent context for sessions of this daemon: [`veld_core::agent::agent_context`]
+/// naming `cli` — the same binary the hook commands in this file call, which is why
+/// those always reached the right daemon and a bare `veld` in the text did not (a dev
+/// stack's agent ran the installed release and found no `ide` command). The bare word
+/// only when this daemon is the installed one; see
+/// [`veld_core::agent::context_cli_word`].
+fn context_text(cli: &Path) -> String {
+    veld_core::agent::agent_context(&veld_core::agent::context_cli_word(
+        cli,
+        veld_core::db::Db::uses_installed_database(),
+    ))
 }
 
 /// Single-quote a path for `sh`. Paths here are veld's own — a home directory with
 /// a space in it is the realistic case, and an embedded quote is handled rather
 /// than assumed away.
 fn quote(path: &Path) -> String {
-    format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    sh_word(&path.display().to_string())
+}
+
+/// Single-quote any string for `sh`, by the same rule as [`quote`].
+fn sh_word(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 /// The `veld` CLI belonging to the running daemon.
@@ -1452,6 +1560,7 @@ mod tests {
                 intercept: false,
                 shell_integration: false,
                 agent_integration: false,
+                agent_context: false,
                 ..SessionOptions::all_on()
             },
         );
@@ -1470,6 +1579,7 @@ mod tests {
                 intercept: false,
                 shell_integration: false,
                 agent_integration: false,
+                agent_context: false,
                 bash_handoff: false,
             },
         );
@@ -1503,6 +1613,7 @@ mod tests {
             Some("1")
         );
         assert_eq!(all.get("VELD_AGENT_HOOKS").map(String::as_str), Some("1"));
+        assert_eq!(all.get("VELD_AGENT_CONTEXT").map(String::as_str), Some("1"));
         assert!(all.contains_key("VELD_SHIM_DIR"));
         assert!(all.contains_key("ZDOTDIR"));
 
@@ -1525,6 +1636,34 @@ mod tests {
         assert!(!no_agent.contains_key("VELD_AGENT_HOOKS"));
         assert!(no_agent.contains_key("VELD_SHELL_INTEGRATION"));
         assert!(no_agent.contains_key("BROWSER"));
+        // …and the context still reaches the agent: it rides the same wrapper and has
+        // its own switch, so hooks off must not take it along.
+        assert_eq!(
+            no_agent.get("VELD_AGENT_CONTEXT").map(String::as_str),
+            Some("1")
+        );
+
+        // The reverse: context off leaves the hooks alone.
+        let no_context = env(SessionOptions {
+            agent_context: false,
+            ..SessionOptions::all_on()
+        });
+        assert!(!no_context.contains_key("VELD_AGENT_CONTEXT"));
+        assert!(no_context.contains_key("VELD_AGENT_HOOKS"));
+
+        // Context alone is enough to want the wrappers on `PATH`, with every other
+        // feature off — otherwise the setting would do nothing for a user who turned
+        // the badge off.
+        let context_only = env(SessionOptions {
+            open_in_app: false,
+            intercept: false,
+            shell_integration: false,
+            agent_integration: false,
+            ..SessionOptions::all_on()
+        });
+        assert!(context_only.contains_key("VELD_SHIM_DIR"));
+        assert!(context_only.contains_key("VELD_AGENT_CONTEXT"));
+        assert!(!context_only.contains_key("VELD_AGENT_HOOKS"));
 
         // The URL feature off: no `$BROWSER`, no shim directory on `PATH` for the
         // openers — but shell integration still reaches the shell. This is the
@@ -1550,6 +1689,7 @@ mod tests {
         let no_intercept = env(SessionOptions {
             intercept: false,
             agent_integration: false,
+            agent_context: false,
             ..SessionOptions::all_on()
         });
         assert!(
@@ -1594,6 +1734,7 @@ mod tests {
         std::fs::remove_file(shims.join("pi")).unwrap();
         let no_wrapper = env(SessionOptions::all_on());
         assert!(!no_wrapper.contains_key("VELD_AGENT_HOOKS"));
+        assert!(!no_wrapper.contains_key("VELD_AGENT_CONTEXT"));
     }
 
     /// The `.zshenv` wins against a hostile rc file, and leaves the user's own
@@ -2182,6 +2323,207 @@ mod tests {
             "REAL",
             "a value not shaped like `notify=...` must fall through to a bare exec, \
              not reach codex as a `-c` override"
+        );
+    }
+
+    /// The agent context, run for real through all three wrappers: each tool's own
+    /// append mechanism, the text verbatim as one argv entry, its own switch
+    /// independent of the hooks', and every rule the hooks obey — plain interactive
+    /// launch only, the user's own colliding flag or config wins.
+    #[test]
+    fn the_agent_context_rides_each_tools_append_mechanism_on_its_own_switch() {
+        use veld_core::agent::{codex_context_config, context_extension_path};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        // A `veld` whose `agent-settings` prints a settings file's path — enough for
+        // Claude's hooks half; Codex's value guard drops it, which no case below
+        // turns hooks on for.
+        let settings = tmp.path().join("ephemeral.json");
+        std::fs::write(&settings, "{}").unwrap();
+        let fake_cli = tmp.path().join("veld");
+        std::fs::write(
+            &fake_cli,
+            format!(
+                "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 0\nprintf '%s\\n' {}\n",
+                quote(&settings)
+            ),
+        )
+        .unwrap();
+        set_mode(&fake_cli, 0o755).unwrap();
+        prepare_in(&shims, &fake_cli).unwrap();
+
+        // Each real tool prints its argv one bracketed entry at a time, so an entry
+        // with spaces in it (the text) is visibly ONE entry.
+        for tool in ["claude", "codex", "pi"] {
+            let real = real_dir.join(tool);
+            std::fs::write(
+                &real,
+                "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\necho\n",
+            )
+            .unwrap();
+            set_mode(&real, 0o755).unwrap();
+        }
+
+        let path = format!("{}:{}", shims.display(), real_dir.display());
+        let run = |tool: &str, args: &[&str], hooks: bool, context: bool| -> String {
+            let mut cmd = std::process::Command::new(shims.join(tool));
+            cmd.args(args)
+                .env_clear()
+                .env("PATH", &path)
+                .env("HOME", &home)
+                .env("VELD_PTY_SESSION", "pane-1");
+            if hooks {
+                cmd.env("VELD_AGENT_HOOKS", "1");
+            }
+            if context {
+                cmd.env("VELD_AGENT_CONTEXT", "1");
+            }
+            let out = cmd.output().expect("run the agent shim");
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        // The text names this daemon's own CLI — here, the stand-in `veld` — unless the
+        // process is the installed instance, where it is the bare word.
+        let context = context_text(&fake_cli);
+        if !veld_core::db::Db::uses_installed_database() {
+            assert!(
+                context.contains(&format!("`{} ide open", fake_cli.display())),
+                "{context}"
+            );
+        }
+        let text = format!("[--append-system-prompt][{context}]");
+        let hooks = format!("[--settings][{}]", settings.display());
+
+        // Claude: context alone, context ahead of the user's own flags, and context with
+        // hooks — both flags, the user's argv last.
+        assert_eq!(run("claude", &[], false, true), text);
+        assert_eq!(
+            run("claude", &["--resume"], false, true),
+            format!("{text}[--resume]")
+        );
+        assert_eq!(run("claude", &[], true, true), format!("{hooks}{text}"));
+        // Its own switch: hooks on, context off — no text.
+        assert_eq!(run("claude", &[], true, false), hooks);
+        // The wrapper rules, unchanged: a subcommand and `-p` are never touched.
+        assert_eq!(run("claude", &["mcp", "list"], true, true), "[mcp][list]");
+        assert_eq!(run("claude", &["-p", "hi"], true, true), "[-p][hi]");
+        // The user's own prompt flag keeps veld's text out — and ONLY the text: the
+        // hooks do not collide with it, so the badge must survive.
+        for args in [
+            vec!["--append-system-prompt", "mine"],
+            vec!["--append-system-prompt=mine"],
+            vec!["--system-prompt", "mine"],
+            vec!["--system-prompt-file", "/mine.txt"],
+        ] {
+            let theirs: String = args.iter().map(|a| format!("[{a}]")).collect();
+            assert_eq!(
+                run("claude", &args, true, true),
+                format!("{hooks}{theirs}"),
+                "{args:?}"
+            );
+        }
+
+        // Codex: a `-c` override, also ahead of its interactive `resume`.
+        let codex_text = format!("[-c][{}]", codex_context_config(&context));
+        assert_eq!(run("codex", &[], false, true), codex_text);
+        assert_eq!(
+            run("codex", &["resume", "--last"], false, true),
+            format!("{codex_text}[resume][--last]")
+        );
+        assert_eq!(run("codex", &["exec", "x"], false, true), "[exec][x]");
+        assert_eq!(
+            run("codex", &["-c", "model=o3"], false, true),
+            "[-c][model=o3]"
+        );
+        // A `developer_instructions` of the user's own would be REPLACED by the
+        // override, so its presence keeps veld's out.
+        let codex_home = home.join(".codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        std::fs::write(codex_home.join("config.toml"), "model = \"o3\"\n").unwrap();
+        assert_eq!(run("codex", &[], false, true), codex_text);
+        std::fs::write(
+            codex_home.join("config.toml"),
+            "model = \"o3\"\n[profiles.work]\n  developer_instructions = \"be terse\"",
+        )
+        .unwrap();
+        assert_eq!(run("codex", &[], false, true), "");
+
+        // Pi: the static extension, by absolute path, written by `prepare_in` itself.
+        let ext = context_extension_path(&shims);
+        assert_eq!(
+            std::fs::read_to_string(&ext).unwrap(),
+            veld_core::agent::pi_context_extension_doc(&context)
+        );
+        assert_eq!(
+            run("pi", &[], false, true),
+            format!("[-e][{}]", ext.display())
+        );
+        assert_eq!(
+            run("pi", &["-e", "/mine.ts"], false, true),
+            "[-e][/mine.ts]"
+        );
+        // A missing file fails open, like a missing settings file.
+        std::fs::remove_file(&ext).unwrap();
+        assert_eq!(run("pi", &[], false, true), "");
+
+        // Neither switch, or no session: a bare passthrough.
+        assert_eq!(run("claude", &[], false, false), "");
+        let out = std::process::Command::new(shims.join("claude"))
+            .env_clear()
+            .env("PATH", &path)
+            .env("VELD_AGENT_CONTEXT", "1")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "");
+    }
+
+    /// A CLI path with a space and a quote in it reaches the agent as one intact argv
+    /// entry: the text carries the path shell-quoted, and the wrapper quotes the whole
+    /// text again around that.
+    #[test]
+    fn the_agent_context_survives_a_cli_path_that_needs_quoting() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        let odd = tmp.path().join("Jo's dir");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&odd).unwrap();
+        let cli = odd.join("veld");
+        std::fs::write(
+            &cli,
+            "#!/bin/sh
+exit 0
+",
+        )
+        .unwrap();
+        set_mode(&cli, 0o755).unwrap();
+        prepare_in(&shims, &cli).unwrap();
+        let real = real_dir.join("claude");
+        std::fs::write(
+            &real,
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\necho\n",
+        )
+        .unwrap();
+        set_mode(&real, 0o755).unwrap();
+
+        let out = std::process::Command::new(shims.join("claude"))
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:{}", shims.display(), real_dir.display()),
+            )
+            .env("VELD_PTY_SESSION", "pane-1")
+            .env("VELD_AGENT_CONTEXT", "1")
+            .output()
+            .expect("run the claude shim");
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            format!("[--append-system-prompt][{}]", context_text(&cli))
         );
     }
 
@@ -2974,6 +3316,7 @@ exit
                 intercept: false,
                 shell_integration: false,
                 agent_integration: false,
+                agent_context: false,
                 ..SessionOptions::all_on()
             },
         );

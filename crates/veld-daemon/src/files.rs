@@ -83,8 +83,9 @@ const MAX_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// smuggled-in dependency bump.
 const MAX_CONCURRENT_READS: usize = 4;
 
-/// See [`MAX_CONCURRENT_READS`].
-static READ_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
+/// See [`MAX_CONCURRENT_READS`]. Shared with the file pane's text reads
+/// (`file_pane.rs`), so the bound is on the daemon's memory rather than per route.
+pub(super) static READ_SLOTS: std::sync::LazyLock<tokio::sync::Semaphore> =
     std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(MAX_CONCURRENT_READS));
 
 /// Whether the Caddy route was registered, so file URLs actually resolve.
@@ -166,7 +167,7 @@ fn url_in(origin: &str, grant: &str, rel_path: &str) -> Option<String> {
 /// there is no good answer to that question.
 ///
 /// `.` components are dropped, because `./deck.html` is what a person types.
-fn normalize_relative(rel: &str) -> Option<String> {
+pub(super) fn normalize_relative(rel: &str) -> Option<String> {
     if rel.is_empty() {
         return None;
     }

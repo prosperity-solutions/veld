@@ -1,0 +1,13 @@
+{
+  "markdown": ["md", "markdown"],
+  "csv": ["csv"],
+  "tsv": ["tsv"],
+  "plain": ["txt", "log"],
+  "code": [
+    "json", "jsonc", "yaml", "yml", "toml", "xml", "ini", "sql", "sh", "bash", "zsh", "rs", "ts",
+    "tsx", "mts", "cts", "js", "jsx", "mjs", "cjs", "py", "rb", "go", "java", "kt", "swift", "c",
+    "h", "cpp", "hpp", "cs", "php", "css", "scss", "graphql", "proto", "diff", "patch"
+  ],
+  "codeNames": ["Dockerfile", "Makefile", "justfile"],
+  "sourceOnly": ["html", "htm"]
+}

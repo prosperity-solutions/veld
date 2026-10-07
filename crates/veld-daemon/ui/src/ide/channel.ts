@@ -26,6 +26,7 @@
  */
 
 import { api } from "../api";
+import { dispatchOpenFile, dispatchOpenUrl } from "../files/openRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
 /** What kind of client this is, which decides whether it can be raised. */
@@ -395,6 +396,17 @@ class Channel {
         });
         return;
       }
+      case "open_file":
+        // `veld ide open <file>` with no terminal of this page's behind it, or one the
+        // daemon chose to route here. Same gate as the agent relay: a detached window
+        // shows no worktree of its own and must not grow tabs on one's behalf.
+        if (!this.relayInboxEvents) return;
+        dispatchOpenFile(msg);
+        return;
+      case "open_url":
+        if (!this.relayInboxEvents) return;
+        dispatchOpenUrl(msg);
+        return;
       default:
         // An older client meeting a newer daemon. Ignoring is right: every
         // message here is an optimisation over re-reading, never the only way

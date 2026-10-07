@@ -84,7 +84,7 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-**A shipped skill is a pointer, and the documentation lives in the binary.** The thirteen topics `veld skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld skills`. Three reasons, and the first is the one that decided it:
+**A shipped skill is a pointer, and the documentation lives in the binary.** The fourteen topics `veld skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld skills`. Three reasons, and the first is the one that decided it:
 
 - **An installed skill is a copy, frozen the day somebody ran `npx skills add`.** Documentation for a CLI, living in that copy, describes whichever veld they had then. The same text inside the binary describes the veld they are running, which is the only version whose behaviour makes the answer right or wrong. It also means the shells never need re-adding, and `.releaserc.json` no longer touches `skills/veld/SKILL.md` at all: the `compatibility:` pin is gone (pinning the current release made every user on a slightly older build read a false "your veld is too old"), and so is the release-time rewrite of `metadata.version`, which now belongs to the *shell* and is bumped by hand on the rare occasion the pointer itself changes. A release that rewrote the shell would contradict the claim on the website that it never changes.
 - **A skill's whole body enters context the moment the skill matches**, needed or not. The previous `skills/veld/SKILL.md` was 100KB, its `reference/` another 136KB, and six `!`-prefixed shell invocations in the body ran `veld -V`, `veld config`, `veld nodes`, `veld presets`, `veld runs` and `veld --help` at load time — in this repo `veld config` alone is 35KB of JSONC. An index plus the one topic a task reaches is the same information for a fraction of it, and the *state* half is better fetched when the question is asked, since by then it is also current. **Do not reintroduce a `!`-prefixed command in a shipped skill**; `commands/skills.rs`'s `the_installed_skill_shells_stay_shells` test fails on one, and on a shell over 6KB.
@@ -152,7 +152,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 |------|----------------|
 | `README.md` | Features list, CLI reference table, Configuration section |
 | `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
-| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld skills`.** Thirteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
+| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld skills`.** Fourteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
 | `skills/*/SKILL.md` | The shipped skill **shells**. Rarely — they say to run `veld skills` and little else, and a change here is a change to the pointer, not to the documentation. Keep them under 6KB and free of `!`-prefixed commands; a test enforces both |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
@@ -702,6 +702,15 @@ run, while a plain terminal in the same app works perfectly.
   this** — a `veld.json` that could name a binary to wrap and a command to run on its
   lifecycle events is repo-supplied remote code execution, which the hooks rule below
   already forbids.
+  The same wrapper also carries **what the agent is told** (`agent_context`, gated on
+  `VELD_AGENT_CONTEXT` / `terminal.agentContext`, independent of the hooks): text
+  appended through each tool's own *append* mechanism, under the same invariants.
+  Keep it static **per daemon instance** — a per-session byte in a system prompt
+  defeats prompt caching and goes stale under Claude's resume snapshot — and keep it
+  free of anything a repo supplies. The one per-instance part is load-bearing: it
+  names *this* daemon's CLI (bare `veld` only for the installed instance, else the
+  absolute path the hooks already use), because a dev stack's agent told a bare
+  `veld` ran the installed release and reached the wrong daemon.
 - **Which client is showing a worktree is the daemon's answer, never a shell's.**
   The IDE's ownership registry lives in `crates/veld-daemon/src/ide.rs`, behind a
   control WebSocket (`/api/ide/channel`, ticket-authed like the PTY attach because
@@ -921,6 +930,23 @@ run, while a plain terminal in the same app works perfectly.
   veld promises not to interpret. If a change seems to need a config rewriter,
   emit a precise diagnostic instead and let the author (or their agent) apply it;
   `veld lint` is the verification step.
+- **Adding a file type to the file pane touches both sides, and a fixture ties
+  them.** The daemon and the CLI route by name with `veld_core::files::text_kind`
+  / `readable_text_kind`; the `/ide` bundle picks a renderer with
+  `ui/src/files/textKind.ts`. One extension or name, three places
+  (`viewableAsText` and the Changed files list read the lists, so nothing else):
+  1. `crates/veld-core/src/files.rs` — `MARKDOWN_EXTS`, `PLAIN_EXTS`, the
+     `csv`/`tsv` arms, `CODE_EXTS`, `CODE_NAMES`, or `WEB_PAGE_EXTS` (source on
+     request only);
+  2. `crates/veld-core/src/text_kinds.json` — the shared fixture, same kind;
+  3. `ui/src/files/textKind.ts` — a code type with a Shiki grammar goes in
+     `LANGUAGES` **and** its grammar in `ui/src/files/shikiCurated.ts`; one
+     without goes in `CODE_EXTENSIONS`.
+
+  Miss one and a test says which: `text_kind_lists_match_the_shared_fixture`
+  (`cargo test -p veld-core`) for 1 vs 2, "agrees with the shared text-kind
+  fixture" in `ui/src/files/files.test.ts` for 3 vs 2, and "names exactly the
+  grammars the curated Shiki entry bundles" (same file) for the grammar half of 3.
 - Domain: `veld.oss.life.li` (not `veld.dev`)
 - Install URL: `https://veld.oss.life.li/get`
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`

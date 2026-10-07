@@ -930,7 +930,7 @@ fn resolve_within(root: &str, path: &str) -> Option<String> {
 ///
 /// This runs **only after** the literal path has failed, so the ordinary case costs
 /// no subprocess.
-async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError> {
+pub(crate) async fn resolve_by_suffix(root: &str, needle: &str) -> Result<String, ApiError> {
     let ambiguous_or_missing = |detail: String| err(StatusCode::UNPROCESSABLE_ENTITY, detail);
     // A needle with a leading `./` would never suffix-match a `git ls-files` entry.
     let needle = needle.trim_start_matches("./");

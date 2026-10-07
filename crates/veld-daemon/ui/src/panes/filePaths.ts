@@ -369,3 +369,63 @@ export function findFilePaths(text: string): PathMatch[] {
   }
   return out;
 }
+
+/** Whether a path's final segment ends in an extension from {@link LINKABLE_EXTENSIONS}. */
+function endsInLinkableExtension(path: string): boolean {
+  const last = path.split("/").pop() ?? path;
+  const dot = last.lastIndexOf(".");
+  return dot >= 0 && LINKABLE_EXTENSIONS.has(last.slice(dot + 1).toLowerCase());
+}
+
+/** Characters a piece of a hard-wrapped path may consist of. No `:` — a `:12` tail
+ *  is allowed only at the very end of the piece that finishes the path. */
+const PATH_PIECE = /^[A-Za-z0-9._\-/~@+%]+$/u;
+const PATH_PIECE_WITH_TAIL = /^([A-Za-z0-9._\-/~@+%]+)((?::\d+){0,2})([.,;)\]'"`]*)$/u;
+const OPENING = /^[(\['"`<]*/u;
+
+/**
+ * Whether the last token of one printed line and the first token of the next are
+ * one path the printer broke with a newline — an agent's own word wrap, which the
+ * terminal never marks as a wrap (`isWrapped`).
+ *
+ * Claude Code wraps its output itself, indenting each continuation:
+ *
+ * ```
+ *   File: /private/tmp/claude-501/…/5d7
+ *   6a76f-…/scratchpad/security-review
+ *   -plan.md
+ * ```
+ *
+ * **Conservative by construction, and every tie goes to "not joined"** — this file's
+ * rule: a missed join costs a copy-paste, a wrong one sends a click to a file that
+ * is not there. All of these must hold:
+ *
+ * - `tail` (the line's last token) is a path in progress: path characters only, and
+ *   at least one `/` — a lone word at a line end is prose, not half a path;
+ * - `tail` is **not already complete** — its last segment does not end in a linkable
+ *   extension, so `see src/a.ts` never swallows the next line's first word;
+ * - `head` (the next line's first token) is path characters only, optionally ending
+ *   in a `:line:col` tail and closing punctuation;
+ * - and the result reads as a path, decisively: the joined path is path-shaped
+ *   *and* either `head` carries a `/` of its own (it is plainly the middle of a
+ *   path) or the joined final segment ends in a linkable extension. Being absolute
+ *   is not enough on its own — `cd /usr/local` then `then run` would join;
+ * - and **not** `tail` ending in `/` with a `head` that has no `/` of its own.
+ *   That seam is a list of entries, not one path cut in two: `git status` prints
+ *   an untracked directory and the next untracked file on their own lines
+ *   (`\tnotes/review/` then `\tplan.md`), and joining them sends the click to a
+ *   `notes/review/plan.md` that does not exist. A break inside a path still joins
+ *   when `head` carries a `/` (`crates/veld-daemon/` + `src/main.rs`) or the cut
+ *   falls mid-segment (`docs/pl` + `an.md`); a printer that wraps exactly before
+ *   a bare final filename loses the join — the cheap side of the tie.
+ */
+export function continuesPath(tail: string, head: string): boolean {
+  const t = tail.replace(OPENING, "");
+  if (!PATH_PIECE.test(t) || !t.includes("/") || endsInLinkableExtension(t)) return false;
+  const m = PATH_PIECE_WITH_TAIL.exec(head);
+  if (!m) return false;
+  if (t.endsWith("/") && !m[1].includes("/")) return false;
+  const joined = t + m[1];
+  if (!isPathShaped(joined)) return false;
+  return m[1].includes("/") || endsInLinkableExtension(joined);
+}

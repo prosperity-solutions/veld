@@ -150,6 +150,12 @@ const TOPICS: &[Topic] = &[
         body: include_str!("skills/ide-panes.md"),
     },
     Topic {
+        name: "ide",
+        summary: "Show the human a file or a page beside your terminal (`veld ide open`), \
+                  and read the references they copy back.",
+        body: include_str!("skills/ide.md"),
+    },
+    Topic {
         name: "ide-news",
         summary: "Tell this project's team something changed (`ide.news`).",
         body: include_str!("skills/ide-news.md"),
@@ -282,7 +288,7 @@ fn render_index() -> String {
 /// A wrong topic name is the one error this command can produce, so it carries
 /// the whole index rather than sending the reader back for it — an agent that
 /// guessed a name is one round-trip from the right one either way, and the list
-/// is thirteen short words.
+/// is fourteen short words.
 fn unknown_topic_message(name: &str) -> String {
     let names = TOPICS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
     let mut msg = format!("Unknown skill topic `{}`.", output::one_line(name));
@@ -328,13 +334,13 @@ mod tests {
     /// The count is written out in prose in several places — AGENTS.md, the
     /// README, the shipped shell, the website, `llms-full.txt`. Nothing ties
     /// those to this array, and the checklist row in AGENTS.md actively invites
-    /// adding a topic, so the fourteenth would silently falsify all of them.
+    /// adding a topic, so the fifteenth would silently falsify all of them.
     /// This is the tie: adding a topic fails here, with the list of what to edit.
     #[test]
     fn the_topic_count_matches_what_the_prose_claims() {
         assert_eq!(
             TOPICS.len(),
-            13,
+            14,
             "the number of topics changed. Update the word in AGENTS.md (Agent \
              Skills + the Documentation Checklist row), README.md, \
              skills/veld/SKILL.md, website/index.html and website/llms-full.txt, \

@@ -60,7 +60,7 @@ describe("rowGlyph", () => {
   });
 
   it("lets every activity state outrank every git state", () => {
-    const states: RowState[] = ["attention", "failed", "finished", "working"];
+    const states: RowState[] = ["attention", "opened", "failed", "finished", "working"];
     const gits: WorktreeGitSignals[] = [signals({ dirty: true }), signals({ ahead: 4 })];
     for (const state of states) {
       for (const git of gits) {

@@ -195,6 +195,12 @@ enum Command {
     /// Show detailed CPU/memory stats, per subprocess and over time.
     Stats(commands::stats::StatsArgs),
 
+    /// Work with the Veld IDE window from a terminal: `veld ide open`.
+    Ide {
+        #[command(subcommand)]
+        command: commands::ide::IdeCommand,
+    },
+
     /// Open a web page in the Veld window that owns this terminal.
     ///
     /// Falls back to the system browser whenever Veld is not the right place:
@@ -1166,6 +1172,8 @@ async fn main() {
             session,
             args,
         } => commands::open_url::run(tool, session, args).await,
+
+        Command::Ide { command } => commands::ide::run(command).await,
 
         Command::AgentSettings { tool, session } => commands::agent::settings(tool, session),
 

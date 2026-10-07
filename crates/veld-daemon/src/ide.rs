@@ -884,6 +884,93 @@ enum ServerMsg {
         tool: &'static str,
         state: &'static str,
     },
+    /// Show a text file in a file pane of this worktree — `veld ide open`, the
+    /// `open` shim on a text file, or a click the daemon resolved.
+    ///
+    /// Sent to **one** client, the one showing the worktree (see
+    /// [`Registry::showing`]), unlike [`Self::AgentState`]: a pane is opened once,
+    /// and two windows each opening it would be two tabs for one request.
+    ///
+    /// snake_case fields, like every other frame on this channel.
+    ///
+    /// `path` is the display path the file-text route takes back — worktree-relative
+    /// inside the worktree, absolute outside it. `session_id` names the terminal that
+    /// asked, so the pane can open beside it; `notify` is whether the human should be
+    /// interrupted (an inbox entry, a toast) or the tab should just appear.
+    OpenFile {
+        worktree_id: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        path: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        line: Option<u32>,
+        notify: bool,
+    },
+    /// [`Self::OpenFile`] for a browser pane: a web page, or a local page, PDF or
+    /// image already turned into a file-origin URL.
+    ///
+    /// The PTY socket's `OpenUrl` frame does the same for the `open` shim, but it can
+    /// only reach a terminal that is attached; this one reaches the window showing
+    /// the worktree whether or not a terminal asked, and carries `notify`.
+    OpenUrl {
+        worktree_id: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        url: String,
+        notify: bool,
+    },
+}
+
+/// What [`push_open`] asks a window to show.
+#[derive(Debug, Clone)]
+pub enum OpenTarget {
+    /// A display path, as [`ServerMsg::OpenFile`] carries it.
+    File { path: String, line: Option<u32> },
+    /// An `https://` URL — already canonical, or composed by the daemon.
+    Url { url: String },
+}
+
+/// Ask the window showing `worktree_id` to open a pane. Returns whether one was
+/// there to ask.
+///
+/// **The IDE channel rather than the terminal's socket, deliberately.** The
+/// request has to reach "the window showing this worktree", and this registry is
+/// the only place that question has an answer: a PTY frame reaches a window only
+/// through an *attached terminal*, which `veld ide open` run from a plain cwd, or
+/// a terminal that is detached, does not have.
+///
+/// Awaited rather than spawned like the broadcasts above, because the caller's
+/// answer depends on it — `veld ide open` exits 4 when no window is showing the
+/// worktree, and saying "opened" for a frame nobody received is the silent drop
+/// the CLI exists to avoid. The lock is held for one map lookup and one queue push.
+///
+/// Never focuses, raises or switches anything: a window that has this worktree
+/// mounted but is showing another one gets the pane in the background. Taking the
+/// user somewhere is the client's decision, and only when `notify` asks for it.
+pub async fn push_open(
+    worktree_id: i64,
+    session_id: Option<String>,
+    target: OpenTarget,
+    notify: bool,
+) -> bool {
+    let msg = match target {
+        OpenTarget::File { path, line } => ServerMsg::OpenFile {
+            worktree_id,
+            session_id,
+            path,
+            line,
+            notify,
+        },
+        OpenTarget::Url { url } => ServerMsg::OpenUrl {
+            worktree_id,
+            session_id,
+            url,
+            notify,
+        },
+    };
+    let reg = REGISTRY.lock().await;
+    reg.showing(worktree_id)
+        .is_some_and(|client| client.tx.send(msg).is_ok())
 }
 
 /// A yield in flight: who was asked, under which id, and the channel their
@@ -1324,6 +1411,24 @@ impl Registry {
             }
         }
         Some(waits)
+    }
+
+    /// The connected client that should receive a request about `worktree_id`.
+    ///
+    /// The one **showing** it if anybody is, else one that has its panes mounted
+    /// while looking at another worktree. The second half is what lets an agent in
+    /// a background worktree's terminal open a file without yanking the window
+    /// over to it. An orphaned claim (a reloading client) has no queue to push to,
+    /// so it does not count — the reload is a few seconds, and a retry lands.
+    fn showing(&self, worktree_id: i64) -> Option<&Client> {
+        self.claims
+            .get(&worktree_id)
+            .and_then(|owner| self.clients.get(owner))
+            .or_else(|| {
+                self.clients
+                    .values()
+                    .find(|c| c.holds.contains(&worktree_id))
+            })
     }
 
     /// Give one worktree back. Returns whether anything changed.
@@ -2251,6 +2356,64 @@ mod tests {
         assert!(reg.claims.is_empty());
         assert!(reg.orphaned.is_empty());
         assert!(reg.clients["a"].holds.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Opening a pane on request
+    // -----------------------------------------------------------------------
+
+    /// The window showing a worktree gets the request; failing that, a window with
+    /// its panes mounted in the background; failing that, nobody.
+    #[test]
+    fn an_open_request_goes_to_the_window_showing_the_worktree() {
+        let mut reg = Registry::default();
+        let a = connect(&mut reg, "a", ClientKind::Electron);
+        let b = connect(&mut reg, "b", ClientKind::Browser);
+        claim_for(&mut reg, &a, 7, 1, true).unwrap();
+        holds(&mut reg, "b", &[9]);
+        assert_eq!(reg.showing(7).map(|c| c.conn), Some(a.conn));
+        // Mounted but not displayed: still reachable, so an agent in a background
+        // worktree does not need the user to switch to it first.
+        assert_eq!(reg.showing(9).map(|c| c.conn), Some(b.conn));
+        assert!(reg.showing(11).is_none());
+        // A claim whose client has gone (a reload) has no queue to push to.
+        reg.clients.remove("a");
+        assert!(reg.showing(7).is_none());
+    }
+
+    /// The two new frames are snake_case like the rest of the channel, and leave
+    /// out what they were not given — the shape the bundle parses.
+    #[test]
+    fn the_open_frames_have_the_documented_shape() {
+        let json = serde_json::to_value(ServerMsg::OpenFile {
+            worktree_id: 3,
+            session_id: Some("s1".to_owned()),
+            path: "docs/plan.md".to_owned(),
+            line: Some(12),
+            notify: true,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "open_file", "worktree_id": 3, "session_id": "s1",
+                "path": "docs/plan.md", "line": 12, "notify": true,
+            })
+        );
+        let json = serde_json::to_value(ServerMsg::OpenUrl {
+            worktree_id: 3,
+            session_id: None,
+            url: "https://example.com/".to_owned(),
+            notify: false,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "type": "open_url", "worktree_id": 3,
+                "url": "https://example.com/", "notify": false,
+            })
+        );
     }
 
     // -----------------------------------------------------------------------

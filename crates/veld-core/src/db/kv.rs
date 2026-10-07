@@ -38,6 +38,23 @@ const FILE_GRANT_PREFIX: &str = "files.grant:";
 /// Grant → the worktree root it stands for. The reverse of the above, stored so a
 /// request resolves in one row read.
 const FILE_ROOT_PREFIX: &str = "files.root:";
+/// Worktree root → the files outside it a file pane may read. See
+/// [`Db::grant_file_read`].
+const FILE_READS_PREFIX: &str = "files.reads:";
+
+/// How many outside files one worktree remembers having been shown.
+///
+/// A set that only grows is a permission that only grows, and nothing a person
+/// does in a day opens two hundred files outside the checkout. Past this the
+/// least recently granted falls off — it can be opened again the same way.
+pub const MAX_FILE_READS: usize = 200;
+
+/// The granted-reads list. Unparseable reads as empty — the failure direction that
+/// *withdraws* a permission rather than inventing one.
+fn decode_reads(raw: Option<&str>) -> Vec<String> {
+    raw.and_then(|r| serde_json::from_str::<Vec<String>>(r).ok())
+        .unwrap_or_default()
+}
 
 /// Parse the stored state map. **An unparseable value reads as empty**, and that
 /// direction is chosen deliberately: the alternative — treating garbage as
@@ -178,6 +195,82 @@ impl Db {
     /// This is the lookup, not the authorisation.
     pub fn file_grant_root(&self, grant: &str) -> Result<Option<String>, DbError> {
         self.kv_get(&format!("{FILE_ROOT_PREFIX}{grant}"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Granted reads — single files outside a worktree its file pane may show
+    // -----------------------------------------------------------------------
+
+    /// Let the file pane of the worktree at `root` read one exact file outside it.
+    ///
+    /// Called when the user opens that file from the worktree (a click on a path in
+    /// its terminal) or an agent there runs `veld ide open` on it — both of which
+    /// are somebody inside the worktree naming the file. The grant is the file, not
+    /// its folder, so `~/.claude/plans/x.md` does not open `~/.claude` to anything.
+    ///
+    /// Most recent last; re-granting moves an entry to the end, and the list is
+    /// trimmed from the front to [`MAX_FILE_READS`]. Keyed on the root path for the
+    /// same reason [`Self::file_grant_for_root`] is: a reused row id must not
+    /// inherit another worktree's reads.
+    ///
+    /// One transaction, so two grants racing cannot each read the old list and
+    /// have the second write drop the first's entry.
+    pub fn grant_file_read(&self, root: &str, path: &str) -> Result<(), DbError> {
+        let key = format!("{FILE_READS_PREFIX}{root}");
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let raw: Option<String> = tx
+            .query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0))
+            .optional()?;
+        let mut paths = decode_reads(raw.as_deref());
+        paths.retain(|p| p != path);
+        paths.push(path.to_owned());
+        if paths.len() > MAX_FILE_READS {
+            let excess = paths.len() - MAX_FILE_READS;
+            paths.drain(..excess);
+        }
+        let value = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_owned());
+        tx.execute(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, now_str()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Take back a grant [`Self::grant_file_read`] made, for an open that turned
+    /// out not to happen.
+    ///
+    /// `veld ide open` grants **before** it pushes the pane, because the pane's
+    /// first read can arrive before a grant written afterwards would; when no
+    /// window takes the push, this is what keeps a refused open from leaving a
+    /// read behind. One transaction, for the same reason as the grant.
+    pub fn revoke_file_read(&self, root: &str, path: &str) -> Result<(), DbError> {
+        let key = format!("{FILE_READS_PREFIX}{root}");
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let raw: Option<String> = tx
+            .query_row("SELECT value FROM kv WHERE key = ?1", [&key], |r| r.get(0))
+            .optional()?;
+        let mut paths = decode_reads(raw.as_deref());
+        let before = paths.len();
+        paths.retain(|p| p != path);
+        if paths.len() != before {
+            let value = serde_json::to_string(&paths).unwrap_or_else(|_| "[]".to_owned());
+            tx.execute(
+                "UPDATE kv SET value = ?2, updated_at = ?3 WHERE key = ?1",
+                params![key, value, now_str()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Whether [`Self::grant_file_read`] has granted exactly `path` to `root`.
+    pub fn file_read_granted(&self, root: &str, path: &str) -> Result<bool, DbError> {
+        let raw = self.kv_get(&format!("{FILE_READS_PREFIX}{root}"))?;
+        Ok(decode_reads(raw.as_deref()).iter().any(|p| p == path))
     }
 
     // -----------------------------------------------------------------------
@@ -397,6 +490,57 @@ mod tests {
     }
 
     use crate::db::test_db;
+
+    use super::MAX_FILE_READS;
+
+    #[test]
+    fn a_granted_read_is_per_root_exact_and_bounded() {
+        let (_dir, db) = test_db();
+        db.grant_file_read("/repos/a", "/home/me/plan.md").unwrap();
+        assert!(
+            db.file_read_granted("/repos/a", "/home/me/plan.md")
+                .unwrap()
+        );
+        // Exact file, not its folder, and not another worktree's.
+        assert!(
+            !db.file_read_granted("/repos/a", "/home/me/other.md")
+                .unwrap()
+        );
+        assert!(
+            !db.file_read_granted("/repos/b", "/home/me/plan.md")
+                .unwrap()
+        );
+
+        // Past the cap the oldest falls off, and re-granting refreshes an entry.
+        for i in 0..MAX_FILE_READS {
+            if i == MAX_FILE_READS / 2 {
+                db.grant_file_read("/repos/a", "/home/me/plan.md").unwrap();
+            }
+            db.grant_file_read("/repos/a", &format!("/tmp/f{i}.md"))
+                .unwrap();
+        }
+        assert!(
+            db.file_read_granted("/repos/a", "/home/me/plan.md")
+                .unwrap()
+        );
+        assert!(!db.file_read_granted("/repos/a", "/tmp/f0.md").unwrap());
+        assert!(
+            db.file_read_granted("/repos/a", &format!("/tmp/f{}.md", MAX_FILE_READS - 1))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_revoked_read_is_gone_and_the_rest_stay() {
+        let (_dir, db) = test_db();
+        db.grant_file_read("/repos/a", "/home/me/a.md").unwrap();
+        db.grant_file_read("/repos/a", "/home/me/b.md").unwrap();
+        db.revoke_file_read("/repos/a", "/home/me/a.md").unwrap();
+        assert!(!db.file_read_granted("/repos/a", "/home/me/a.md").unwrap());
+        assert!(db.file_read_granted("/repos/a", "/home/me/b.md").unwrap());
+        // Nothing to take back is not an error.
+        db.revoke_file_read("/repos/z", "/home/me/a.md").unwrap();
+    }
 
     #[test]
     fn kv_roundtrip() {

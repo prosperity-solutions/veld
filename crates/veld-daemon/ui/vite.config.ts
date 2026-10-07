@@ -51,8 +51,25 @@ const devPort = Number(process.env.VELD_PORT || "5199");
 // `process` shim above, so there are no Node globals to lean on.
 const veldHost = process.env.VELD_URL?.match(/^https?:\/\/([^/:]+)/)?.[1];
 
+/** An absolute path to a file beside this config. `URL`, not `node:path`: this
+ *  file's only ambient type is the `process` shim above. */
+const local = (rel: string) => decodeURIComponent(new URL(rel, import.meta.url).pathname);
+
 export default defineConfig({
   plugins: [react(), viteSingleFile()],
+  // The file pane's code view (`@pierre/diffs`) imports Shiki's full bundle and
+  // every theme it knows, as lazy loaders. A single-file build inlines every lazy
+  // chunk whether it is ever loaded or not, so these two point the library at
+  // curated subsets instead — see the header of each target for what is kept and
+  // why. Exact-match regexes: `shiki/core` and the other subpaths must still
+  // resolve to the real package, which is what the curated modules import.
+  resolve: {
+    alias: [
+      { find: /^shiki$/, replacement: local("./src/files/shikiCurated.ts") },
+      { find: /^shiki\/wasm$/, replacement: local("./src/files/shikiCurated.ts") },
+      { find: /^@pierre\/theming\/themes$/, replacement: local("./src/files/pierreThemes.ts") },
+    ],
+  },
   build: {
     assetsInlineLimit: 100_000_000,
     chunkSizeWarningLimit: 4_000,

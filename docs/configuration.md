@@ -2206,13 +2206,15 @@ only ever sends a URL to the real browser, which is where it would have gone
 before any of this existed. Turning the whole behaviour off is also the user's
 call (`terminal.openUrlsInApp`), not a project's.
 
-Two further user settings ride the same shell-startup handoff and are worth not
-confusing with this one, because a project cannot influence either:
+Three further user settings ride the same shell-startup handoff and are worth not
+confusing with this one, because a project cannot influence any of them:
 `terminal.shellIntegration` (*Settings → Activity → Notice when a command
 finishes*) makes a terminal report when a command started and how it ended, which
 is what marks a worktree in the rail; `terminal.agentIntegration`
 (*…Notice when a coding agent is waiting for you*) wraps `claude`/`codex`/`pi` so
-their lifecycle hooks report the same way. Both live under *Activity* alongside
+their lifecycle hooks report the same way; and `terminal.agentContext` (*…Tell
+coding agents how to show you files*) has the same wrapper append a few static
+lines to the agent's system prompt saying that `veld ide open` exists. All three live under *Activity* alongside
 `activity.showWorking`, the four `activity.notify*` rows that decide which of
 those events raise a system notification, and the *Focus mode* block that can
 silence that notification (plus the terminal bell) on demand. **All of these switches are independent** —
@@ -3163,7 +3165,7 @@ Every entry takes these:
 | `id` | Required. Stable, unique among this project's extensions, `[A-Za-z0-9_-]`, ≤64 chars. What a menu's `items` and a badge's `actions` name. |
 | `type` | Required. `status`, `action` or `menu`. |
 | `slot` | Where it renders — `topBar` today. **Omit it on an `action`** to declare one that is only reachable by reference. Required for `status` and `menu`. Refused on an `action` that declares `accepts`. |
-| `accepts` | `action` only, and optional. `file` offers this action on a **file path clicked in terminal output** instead of as a control — see [Opening a clicked file](#opening-a-clicked-file). |
+| `accepts` | `action` only, and optional. `file` offers this action on a **file path clicked in terminal output** instead of as a control, listed under Veld's own *View in Veld* — see [Opening a clicked file](#opening-a-clicked-file). |
 | `align` | `start` (default) or `end`. The bar's left cluster is what this project does and the right is what the app does, so a project's own things default left. |
 | `label` | The text or tooltip. Defaults to `id`. |
 | `description` | One line, used as the tooltip. |
@@ -3293,8 +3295,10 @@ and something still running after that (an editor starting up) counts as success
 #### Opening a clicked file
 
 Veld underlines file paths in terminal output — `src/api.ts`, or a compiler's
-`crates/veld-daemon/src/pty.rs:2529:17` — and a click hands that file to an
-`action` you declare with **`accepts: "file"`**:
+`crates/veld-daemon/src/pty.rs:2529:17`. A click offers **View in Veld** first,
+Veld's own read-only file pane, and then hands the file to any `action` you
+declare with **`accepts: "file"`** — which is how a project adds "open in my
+editor":
 
 ```jsonc
 { "id": "vscode-file", "type": "action", "label": "VS Code", "accepts": "file",
@@ -3302,13 +3306,15 @@ Veld underlines file paths in terminal output — `src/api.ts`, or a compiler's
 ```
 
 The file's **absolute** path arrives as `$1` and its line number as `$2`. Declare
-none and a click says so rather than doing nothing. There is no `slot` on one of
+none and a click opens the file pane directly, since there is nothing to choose
+between. There is no `slot` on one of
 these, and veld refuses the combination: a control in the top bar is clicked with
 no file selected, so there would be nothing to hand it.
 
-**Declare several and the user is asked once.** The first click offers them as a
-menu; the answer is kept in the *Open a clicked file path with* setting and every
-click after it goes straight there. Asking every time would be worse than it
+**Declare one or more and the user is asked once.** The first click offers a
+menu — *View in Veld*, a divider, then your actions; the answer is kept in the
+*Open a clicked file path with* setting (`terminal.fileAction`, where `veld` means
+the file pane) and every click after it goes straight there. Asking every time would be worse than it
 sounds: a menu puts a full-screen dismiss overlay over the page, so while one is
 open the next click anywhere is swallowed to close it — the terminal never sees it
 and no link fires. A user who wants to switch clears that setting, or types
