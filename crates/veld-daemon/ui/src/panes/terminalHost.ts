@@ -30,8 +30,6 @@ import { isMac } from "../shortcuts/registry";
 import {
   mayAdoptTerminalTitle,
   type PaneMount,
-  type PromptStep,
-  promptStep,
   parseLayouts,
   type RestartKind,
   shouldCloseOnExit,
@@ -40,6 +38,7 @@ import {
   storedTerminalIds,
   terminalIds,
 } from "./model";
+import { deliverQueuedPrompt } from "./promptDelivery";
 import { RETRY_STAGGER_MS, isStalled, planSweep } from "./retrySweep";
 import { handleKeyEvent } from "./terminalKeys";
 import {
@@ -47,11 +46,7 @@ import {
   clipboardImageName,
   isFileDrop,
   promptPayload,
-  echoed,
-  isImagePath,
   launchPrompt,
-  pasteLanded,
-  promptPastes,
   isPastable,
   pathPayload,
 } from "./terminalPaste";
@@ -1026,7 +1021,7 @@ interface QueuedPrompt {
    *  so delivery does not upload them a second time. */
   paths?: string[];
   /** True once a launch was handed the prompt. Never cleared: the window then
-   *  types it only if [`armInitialPrompt`]'s claim says the agent did not take it. */
+   *  types it only if [`deliverQueuedPrompt`]'s claim says the agent did not take it. */
   atLaunch?: boolean;
 }
 
@@ -1041,57 +1036,6 @@ export interface QueuedFile {
   file: File;
   path: string | null;
 }
-
-/** How often the delivery gate is re-checked while an agent starts up. */
-const PROMPT_POLL_MS = 120;
-
-/**
- * How long to wait for a pane's program to open an input before giving up.
- *
- * Generous, because the wait is invisible when it succeeds and the cost of it
- * being too short is a prompt silently not sent: an agent's first run in a fresh
- * checkout can spend several seconds on a version check or an auth refresh
- * before it draws anything.
- */
-const PROMPT_WAIT_MS = 25_000;
-
-/**
- * Pause between the gate opening and the first paste.
- *
- * `bracketedPasteMode` flips when xterm *parses* the escape, which is when the
- * program asked for it — a beat before its input loop is necessarily reading.
- * Not load-bearing for correctness; it is what makes the common case work on
- * the first try rather than on the retry the user has to notice.
- */
-const PROMPT_SETTLE_MS = 300;
-
-/**
- * How a paste is known to have landed before the next write: the program's
- * redraw, then this long without output (see [`echoed`]).
- *
- * Every paste waits, not only the last before the `\r`: each attachment is its
- * own paste so a composer recognises it on its own, and an image path still
- * being read when the next path arrives would have its placeholder land after
- * it — out of order, or in the next message.
- */
-const PROMPT_ECHO_QUIET_MS = 250;
-
-/**
- * The longest a paste waits for its redraw before the next write goes anyway.
- *
- * A paste that never shows at all still gets its `\r`, which is what the fixed
- * pause used to do.
- */
-const PROMPT_ECHO_CAP_MS = 5_000;
-
-/**
- * The same for an image path, which waits for its placeholder rather than for
- * any redraw (see [`pasteLanded`]). Longer, because the agent decodes, resizes
- * and re-encodes the picture first, and a full-resolution Retina screenshot is
- * the common case. Only an agent that shows neither a placeholder nor the name
- * ever waits this long.
- */
-const PROMPT_IMAGE_CAP_MS = 15_000;
 
 /** Rows from the bottom of the buffer that [`screenText`] reads — a composer
  *  draws at the bottom, and a long scrollback is not worth rereading per write. */
@@ -1109,29 +1053,11 @@ function screenText(term: Terminal): string {
   return out;
 }
 
-/** [`promptStep`] for a live session, at this instant. */
-function stepFor(s: Session, deadline: number): PromptStep {
-  return promptStep({
-    spec: s.spec,
-    registered: sessions.get(s.id) === s,
-    wsOpen: s.ws?.readyState === WebSocket.OPEN,
-    replaying: s.replaying,
-    // DECSET 2004, read at this instant — `Terminal.paste` reads it at call
-    // time too, so a value cached a moment ago is the wrong one.
-    bracketedPaste: s.term.modes.bracketedPasteMode,
-    // Only `ended` is passed, not the whole state: it is the one value the
-    // decision reads, and taking `TerminalState` would make `model.ts` import a
-    // type from the module that imports it.
-    ended: s.state === "ended",
-    expired: Date.now() >= deadline,
-  });
-}
-
 /**
  * Hand this pane a prompt when it opens one, or say why it never got it.
  *
  * Queue a prompt against a session id and the pane types it in for you once its
- * program is ready for it. See [`armInitialPrompt`] for the gate that decides
+ * program is ready for it. See [`deliverQueuedPrompt`] for the gate that decides
  * when that is, and why a gate rather than a delay is what makes it safe.
  */
 export function queueInitialPrompt(
@@ -1205,7 +1131,7 @@ async function resolveQueuedFiles(
  * the user watches it being composed. Passed at launch, the agent opens with it
  * already sent. The daemon hands it to the agent's wrapper, which takes it only
  * for a tool that accepts a first message as an argument (Claude Code); any other
- * launch leaves it, and [`armInitialPrompt`] claims it back and types it in.
+ * launch leaves it, and [`deliverQueuedPrompt`] claims it back and types it in.
  *
  * The files have to be on disk first, since their paths are part of the message
  * — so a browser tab's are uploaded here, against a reservation for the session
@@ -1234,194 +1160,49 @@ function dropInitialPrompt(id: string): void {
 }
 
 /**
- * Deliver a queued prompt once the pane's program is actually reading input.
- *
- * **The gate is `bracketedPasteMode`, and everything about this function is
- * downstream of that choice.** Writing the text after a fixed delay was the
- * obvious version and it is the dangerous one: a pane is
- * `<shell> -l -i -c '<command>'`, so anything written before the command has
- * taken the terminal over is read by whatever *is* there — and a newline after
- * it is an instruction to run it. DECSET 2004 is the narrowest available proof
- * that a full-screen input program has the keyboard: `-c` means the wrapping
- * shell never starts its line editor, so it cannot be the thing that set the
- * mode, and every agent TUI this exists for (Claude Code, Codex) sets it.
- *
- * Three further conditions, each guarding a real failure:
- *
- * - **`s.spec !== undefined`** — config-declared panes only. A plain terminal
- *   *is* an interactive shell with bracketed paste on, so the gate says nothing
- *   there and the newline would run the prompt as a command. Nothing queues a
- *   prompt against a plain terminal today; this is what keeps that true.
- * - **`!s.replaying`** — xterm sets the mode while parsing *replayed*
- *   scrollback, so a reattach can show the flag for a program that set it
- *   before the page was reloaded. `canSend` already refuses to send during a
- *   replay; reading the mode during one would pick the wrong moment rather than
- *   the wrong shell.
- * - **the entry is deleted before the paste is scheduled** — two connects (a
- *   drop and its auto-reconnect) can both arm this, and the second sees the
- *   entry gone. A prompt delivered twice is a second turn the user never asked
- *   for, which for an agent means real work done twice.
- *
- * A pane whose program never opens an input keeps its prompt un-sent, and the
- * text comes back on a toast rather than being written anyway: it is the case
- * where the gate has told us we do not know what is reading, and the whole
- * reason for the gate is not to type into that.
+ * Deliver a queued prompt once the pane's program is actually reading input —
+ * see [`deliverQueuedPrompt`] for the sequence and the gate that makes it safe.
+ * This is its wiring to a live session.
  */
 function armInitialPrompt(s: Session, generation: number): void {
   const queued = INITIAL_PROMPTS.get(s.id);
   if (queued === undefined) return;
-  const { text, label, files } = queued;
-  const deadline = Date.now() + PROMPT_WAIT_MS;
-  const sendable = () => stepFor(s, deadline) === "send" && s.generation === generation;
-  const tick = () => {
-    // Restarted: whatever is there now was not opened for this prompt. The
-    // generation is the one input `promptStep` cannot see, because it is a fact
-    // about this *armer* rather than about the terminal.
-    if (s.generation !== generation) {
-      dropInitialPrompt(s.id);
-      return;
-    }
-    // Another armer got there first.
-    if (!INITIAL_PROMPTS.has(s.id)) return;
-    const step = stepFor(s, deadline);
-    if (step === "no-pane" || step === "give-up") {
-      dropInitialPrompt(s.id);
-      if (step === "no-pane") return;
-      void reportUnlessSent();
-      return;
-    }
-    if (step === "send") {
-      dropInitialPrompt(s.id);
-      void deliver();
-      return;
-    }
-    if (step === "expired") {
-      dropInitialPrompt(s.id);
-      void reportUnlessSent();
-      return;
-    }
-    window.setTimeout(tick, PROMPT_POLL_MS);
-  };
-  /**
-   * Say the prompt was not sent, and hand it back.
-   *
-   * It travels on the toast because nothing was written into the pane and the
-   * user should not have to retype what they already said. The chip note only
-   * while the pane is live: `flash` sets the state it reports on, so noting
-   * this on a session that has ended or errored would paint it `live` again and
-   * cover the reason it stopped.
-   */
-  const report = (title = `Your prompt was not sent — the ${label} pane never opened one`) => {
-    if (s.state === "live") flash(s, "prompt not sent");
-    // The attachments are named too: a browser tab's are bytes held in this
-    // page, so the names are all that is left to re-attach them by.
-    const attached = files.length > 0 ? `Attached: ${files.map((f) => f.file.name).join(", ")}` : "";
-    notifyError(title, new Error([text, attached].filter((part) => part !== "").join("\n\n")));
-  };
-  /**
-   * Whether this window still owes the prompt: always, unless a launch was handed
-   * it — then only if the claim says the agent's wrapper left it.
-   *
-   * Asked once the agent's input is up (or never will be), which is after its
-   * wrapper ran, so the answer is final. `null` when the daemon could not say —
-   * unreachable, or restarted since the launch and holding no record of it:
-   * the agent may or may not have it, and neither typing it (twice?) nor saying
-   * nothing (lost?) is safe, so the caller hands it back and says so.
-   */
-  const owed = async (): Promise<boolean | null> => {
-    if (!queued.atLaunch) return true;
-    try {
-      return await api.ptyTakeLaunchPrompt(s.id);
-    } catch (e) {
-      console.warn("veld: could not claim the launch prompt", e);
-      return null;
-    }
-  };
-  const unsure = () => report(`Could not tell whether ${label} got your prompt — check the pane before resending`);
-  /**
-   * The pane never opened an input. Owed, it was never sent; taken by the
-   * wrapper, the agent had it and then stopped before showing anything — an
-   * auth or update exit, a flag `--` did not suit — so it may have gone down
-   * with the agent. Neither is a case to stay quiet about.
-   */
-  const reportUnlessSent = async () => {
-    const mine = await owed();
-    if (mine === true) report();
-    else unsure();
-  };
-  /**
-   * Paste the prompt, then each attachment's path, then submit — in the order
-   * `promptPastes` gives, which owns why.
-   *
-   * **Every gap re-reads the gate**, for the reason the single paste always did
-   * (see the note on `Terminal.paste` below): the program can leave or drop
-   * bracketed paste between any two writes, and a path or a `\r` written into
-   * whatever replaced it is keystrokes nobody asked for.
-   *
-   * A browser tab's files are uploaded here, against this session — the first
-   * moment one exists — and the uploads overlap the settle pause rather than
-   * adding to it. One that fails costs only itself: the prompt still goes, with
-   * the rest, and the toast names what is missing.
-   */
-  const deliver = async () => {
-    const settled = pause(PROMPT_SETTLE_MS);
-    // The agent opened with it already sent: nothing to type.
-    const mine = await owed();
-    if (mine === null) return unsure();
-    if (!mine) return;
-    // Already resolved when the launch was offered it, so not uploaded twice.
-    const paths = queued.paths ?? (await resolveQueuedFiles(s.id, files, label));
-    await settled;
-    const pastes = promptPastes(text, paths);
-    if (pastes.length === 0) return;
-    // **Re-read the gate, do not trust the tick that scheduled this.** The
-    // mode is a mutable terminal state, and `Terminal.paste` reads it at
-    // call time: it wraps the text in `ESC[200~`/`ESC[201~` only while the
-    // mode is on, and rewrites every `\n` to `\r` either way (measured in
-    // the installed build — `xterm.js` module 3614). The claim, the uploads
-    // and the settle all await before this, and every paste below waits on
-    // its echo, so seconds can pass between reads. A program that cleared
-    // DECSET 2004 in that time — exiting, or a nested reader that sets and
-    // resets it per line — would turn a multi-line prompt into one bare
-    // `\r`-terminated line per line of it, each submitting itself. That is
-    // the exact outcome pasting rather than typing exists to prevent.
-    if (!sendable()) return;
-    // `paste`, not `input`, for the reason the file drop uses it: an agent
-    // reads a bracketed paste as one block, so a multi-line prompt arrives
-    // as one message instead of as a line that submits itself at every
-    // newline.
-    //
-    // Each paste waits for the program to show it before anything else is
-    // written — the `\r` included, which sent too early submits the message
-    // without an image the agent was still reading (see [`echoed`]).
-    const images = new Map(paths.filter(isImagePath).map((p) => [pathPayload([p]), p]));
-    for (const paste of pastes) {
-      const image = images.get(paste);
-      const before = image === undefined ? "" : screenText(s.term);
-      const shown =
-        image === undefined
-          ? echoed(s.term, PROMPT_ECHO_QUIET_MS, PROMPT_ECHO_CAP_MS)
-          : echoed(s.term, PROMPT_ECHO_QUIET_MS, PROMPT_IMAGE_CAP_MS, () =>
-              pasteLanded(before, screenText(s.term), image),
-            );
-      s.term.paste(paste);
-      await shown;
-      // Re-read after every wait: the program can have gone in it, and a
-      // path or a `\r` into whatever replaced it is keystrokes nobody asked
-      // for.
-      if (!sendable()) return;
-    }
-    // `\r`, the byte Return sends. Through `term.input` so it takes the
-    // same route as a keystroke — including marking the pane read, which
-    // is honest: the user is the reason something was just typed here.
-    s.term.input("\r");
-  };
-  tick();
-}
-
-/** A `setTimeout` to await. */
-function pause(ms: number): Promise<void> {
-  return new Promise((done) => window.setTimeout(done, ms));
+  deliverQueuedPrompt(queued, {
+    queued: () => INITIAL_PROMPTS.has(s.id),
+    dequeue: () => dropInitialPrompt(s.id),
+    current: () => s.generation === generation,
+    gate: () => ({
+      spec: s.spec,
+      registered: sessions.get(s.id) === s,
+      wsOpen: s.ws?.readyState === WebSocket.OPEN,
+      replaying: s.replaying,
+      // DECSET 2004, read at this instant — `Terminal.paste` reads it at call
+      // time too, so a value cached a moment ago is the wrong one.
+      bracketedPaste: s.term.modes.bracketedPasteMode,
+      // Only `ended` is passed, not the whole state: it is the one value the
+      // decision reads, and taking `TerminalState` would make `model.ts` import a
+      // type from the module that imports it.
+      ended: s.state === "ended",
+    }),
+    claim: () => api.ptyTakeLaunchPrompt(s.id),
+    resolve: () => resolveQueuedFiles(s.id, queued.files, queued.label),
+    // `term.paste` and `term.input`, never the socket: see the route tests in
+    // `terminalPaste.test.ts` for why the difference is the whole feature.
+    term: {
+      paste: (text) => s.term.paste(text),
+      input: (data) => s.term.input(data),
+      screen: () => screenText(s.term),
+      onWriteParsed: (listener) => s.term.onWriteParsed(listener),
+    },
+    fail: (title, detail) => {
+      // The chip note only while the pane is live: `flash` sets the state it
+      // reports on, so noting this on a session that has ended or errored would
+      // paint it `live` again and cover the reason it stopped.
+      if (s.state === "live") flash(s, "prompt not sent");
+      notifyError(title, new Error(detail));
+    },
+    clock: { now: () => Date.now(), setTimeout: (fn, ms) => void window.setTimeout(fn, ms) },
+  });
 }
 
 /** Tell the pty the size xterm has now. A no-op until the socket is open. */

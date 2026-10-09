@@ -157,7 +157,9 @@ describe("the paths reach the terminal as a paste", () => {
   // reason, as `desktop/src/preload.test.js`: the code that matters lives in
   // `terminalHost.ts` around a live xterm `Terminal`, which cannot be constructed
   // under this runner's `environment: "node"`, and the property is exactly "the
-  // payload goes out by this route and not that one".
+  // payload goes out by this route and not that one". The prompt sequence's
+  // behaviour tests (`promptDelivery.test.ts`) pass in a fake terminal, so they
+  // cannot see the route at all; these pin it.
   //
   // Why it is worth pinning at all: a coding agent decides whether a path is a
   // file to attach or merely text by **whether it arrived as a paste**. Measured
@@ -173,36 +175,25 @@ describe("the paths reach the terminal as a paste", () => {
     expect(TERMINAL_HOST).toContain("s.term.paste(payload)");
   });
 
-  it("pastes a prompt's attachments, one paste each, the same way", () => {
+  it("pastes a prompt's pieces, and types its Return, through the terminal", () => {
     // The prompt path is the second route a path takes into a pane, and the
-    // property above applies to it unchanged.
-    expect(TERMINAL_HOST).toContain("s.term.paste(paste)");
+    // property above applies to it unchanged. The sequence itself — what is
+    // pasted, in what order, after which wait — is `promptDelivery.test.ts`'s,
+    // against a fake terminal; what a fake cannot see is that the real one is
+    // wired to `term.paste` and `term.input` rather than to the socket.
+    expect(TERMINAL_HOST).toContain("paste: (text) => s.term.paste(text),");
+    expect(TERMINAL_HOST).toContain("input: (data) => s.term.input(data),");
   });
 
-  it("listens for a prompt paste's echo before pasting, and waits for it", () => {
-    // Armed after the paste, a fast echo lands before anyone listens and every
-    // paste waits out the cap instead.
-    expect(TERMINAL_HOST).toMatch(
-      /const shown =[^;]*echoed\(s\.term,[^;]*\);\s*s\.term\.paste\(paste\);\s*await shown;/,
-    );
-  });
-
-  it("an image path waits for its placeholder, not for the first redraw", () => {
-    // Claude Code drops a Return that arrives while it is still reading an
-    // image, so the `\r` after one must wait for `[Image #N]` itself.
-    expect(TERMINAL_HOST).toMatch(/echoed\(s\.term, PROMPT_ECHO_QUIET_MS, PROMPT_IMAGE_CAP_MS, \(\) =>\s*pasteLanded\(/);
-  });
-
-  it("types a prompt a launch was handed only after claiming it back", () => {
-    // The agent's wrapper and the window race for one file; the window asks only
-    // once the agent is up, so its claim is the answer to "did the launch send
-    // it?" — and typing without it sends the message twice.
-    const deliver = /const deliver = async \(\) => \{[\s\S]*?\n {2}\};/.exec(TERMINAL_HOST)?.[0] ?? "";
-    expect(deliver).toMatch(/const mine = await owed\(\);\s*if \(mine === null\) return unsure\(\);\s*if \(!mine\) return;/);
-    expect(deliver.indexOf("await owed()")).toBeLessThan(deliver.indexOf("s.term.paste(paste)"));
-    // A pane that never opened an input is not "your prompt was not sent" when
-    // its launch may have sent it.
-    expect(TERMINAL_HOST).not.toMatch(/dropInitialPrompt\(s\.id\);\s*report\(\);/);
+  it("hands the prompt sequence the real claim and the real gate", () => {
+    // The same blind spot from the other side: a fake answers `claim` and the
+    // gate however a test likes, so a port wired to a constant passes every
+    // behaviour test. Typing without the daemon's claim sends the message twice
+    // when the wrapper already took it; a gate that ignores bracketed paste or
+    // the generation types into a shell, or into the next launch.
+    expect(TERMINAL_HOST).toContain("claim: () => api.ptyTakeLaunchPrompt(s.id),");
+    expect(TERMINAL_HOST).toContain("current: () => s.generation === generation,");
+    expect(TERMINAL_HOST).toContain("bracketedPaste: s.term.modes.bracketedPasteMode,");
   });
 
   it("offers the prompt to a fresh launch only, and only once", () => {

@@ -7,7 +7,7 @@
  * turns an image path into `[Image #1]`. The dialog only collects the files; the
  * pane that opens in the new checkout hands them over with the prompt — as
  * `@"path"` mentions in the launch argument when the agent takes one, typed in
- * after the prompt otherwise (`panes/terminalHost.ts`, `armInitialPrompt`).
+ * after the prompt otherwise (`panes/promptDelivery.ts`, `deliverQueuedPrompt`).
  *
  * Where the path comes from differs by shell, and that difference is the reason
  * an attachment carries its `File` and not only a path:

@@ -1731,8 +1731,8 @@ export function paneTakesPrompt(spec: {
  * What a queued prompt should do about this terminal, right now.
  *
  * **Pure, exported and tested, because it is the entire safety argument for
- * writing bytes into a pty from a browser.** Left inline in
- * [`armInitialPrompt`] the two invariants that matter — a plain terminal's
+ * writing bytes into a pty from a browser.** Left inline in the delivery
+ * sequence ([`deliverQueuedPrompt`]) the two invariants that matter — a plain terminal's
  * shell is never handed a prompt, and a prompt is never written into something
  * that is not a program waiting for input — were three `if`s a later reorder
  * could quietly break, in a module with no test file at all. As a predicate
@@ -1745,8 +1745,8 @@ export function paneTakesPrompt(spec: {
  * xterm's fit addon touches `self` at module scope.
  *
  * What it deliberately does *not* own: the once-only property. That is the
- * `INITIAL_PROMPTS` delete in `armInitialPrompt`, because it is a fact about a
- * shared map rather than about a terminal.
+ * `INITIAL_PROMPTS` delete behind [`deliverQueuedPrompt`]'s `dequeue`, because it
+ * is a fact about a shared map rather than about a terminal.
  *
  *  - `"no-pane"` — not a config-declared pane. A plain terminal *is* an
  *    interactive shell with bracketed paste on, so the gate below says nothing
@@ -1773,7 +1773,7 @@ export function promptStep(t: {
   registered: boolean;
   wsOpen: boolean;
   replaying: boolean;
-  /** DECSET 2004 — see the type doc, and [`armInitialPrompt`]. */
+  /** DECSET 2004 — see the type doc, and [`deliverQueuedPrompt`]. */
   bracketedPaste: boolean;
   /** Whether the command has exited or another window took the session over. */
   ended: boolean;
