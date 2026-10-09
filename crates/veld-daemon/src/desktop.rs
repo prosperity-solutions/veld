@@ -54,6 +54,13 @@ pub fn routes() -> Router {
             patch(patch_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
+        // What `veld worktree new` calls: a checkout an agent hands to a human,
+        // optionally with an agent pane waiting to start on a prompt. Its own
+        // path rather than a field on `POST /api/worktrees`, because it names the
+        // repository by where the caller *is* — a terminal session or a working
+        // directory — instead of by a root the caller would have to know.
+        .route("/api/handoffs", post(create_handoff))
+        .route("/api/worktrees/{id}/handoff", get(get_handoff))
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
         .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
@@ -2323,6 +2330,15 @@ struct RepoGitStatus {
     latest_commit: Option<i64>,
 }
 
+/// A pending agent pane, as the rail sees it — see [`WorktreeView::handoff`].
+#[derive(Serialize)]
+struct HandoffView {
+    /// The session id the pane will run under; the client's tab id for it.
+    session_id: String,
+    /// The declared pane to run, or `""` for the user's usual agent.
+    pane: String,
+}
+
 #[derive(Serialize)]
 struct WorktreeView {
     // **Never name a field here `carry_over`.** `CreatedWorktreeView` flattens
@@ -2342,6 +2358,14 @@ struct WorktreeView {
     /// worktree that has merely been *queued* for removal still reports
     /// `trashed_at` to let the user undo it.
     deleting: bool,
+    /// The agent pane a hand-off is waiting to start here (`veld worktree new
+    /// --prompt`), or absent when there is none.
+    ///
+    /// The prompt is deliberately not part of it: every rail poll carries this
+    /// view, and only the one window that starts the pane needs the text — it
+    /// reads it from `GET /api/worktrees/{id}/handoff`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff: Option<HandoffView>,
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
@@ -2901,6 +2925,13 @@ fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfig
     // `wt` is moved into the view below, so the guard read happens here — before
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
+    // Unreadable reads as "none": the rail then shows the worktree without the
+    // pane, which a later poll corrects, and a listing must not fail over it.
+    let handoff = db
+        .handoff_session(wt.id)
+        .ok()
+        .flatten()
+        .map(|(session_id, pane)| HandoffView { session_id, pane });
     // Read before `wt` is moved into the view below, the same reason `deleting` is.
     let git = git_signals_for(wt.id, &wt.path);
     let machine_vars = cfg.as_ref().map(|c| {
@@ -2913,6 +2944,7 @@ fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfig
     WorktreeView {
         worktree: wt,
         deleting,
+        handoff,
         has_veld_config,
         presets,
         nodes,
@@ -3063,6 +3095,7 @@ fn repo_view_blocking(
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
+        .filter(|wt| !handoff_in_flight(&wt.repo_root, &wt.branch))
         .map(|wt| worktree_view_with(db, wt, &mut declared))
         .collect();
     let news = select_news(&mut worktrees, db.news_source());
@@ -4043,6 +4076,12 @@ impl CreateWorktreeBody {
 async fn create_worktree(
     Json(body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    create_checkout(body).await.map(Json)
+}
+
+/// Create a checkout as `POST /api/worktrees` describes it — shared with
+/// [`create_handoff`], which arrives at the same request by another route.
+async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView, ApiError> {
     validate_branch(&body.branch)?;
     let source = body.create_from();
     // A remote ref is passed to git as a start point, so it gets the same
@@ -4564,10 +4603,303 @@ async fn create_worktree(
             );
         }
     }
+    Ok(CreatedWorktreeView {
+        worktree: view,
+        carry_over,
+    })
+}
+
+/// `POST /api/handoffs` — what `veld worktree new` sends.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffRequest {
+    /// The caller's terminal session (`$VELD_PTY_SESSION`), naming the checkout it
+    /// is handing off *from*. Tried first; `cwd` is the fallback.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// The caller's working directory, for a caller outside a Veld terminal.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// The branch to create.
+    branch: String,
+    /// Cut the branch from the calling checkout's `HEAD` instead of from where a
+    /// new branch normally starts (`git.createFrom`).
+    #[serde(default)]
+    from_here: bool,
+    /// The name the rail shows. Absent: `ide.worktreeName` names it from the
+    /// prompt when the project declares that, else the alias does.
+    #[serde(default)]
+    name: Option<String>,
+    /// A lane to file it under instead of the "From agents" section.
+    #[serde(default)]
+    lane: Option<String>,
+    /// The declared agent pane to start. Absent: the user's usual one.
+    #[serde(default)]
+    agent: Option<String>,
+    /// The agent's first message. Absent: a plain checkout, with no pane waiting
+    /// and filed like any other new worktree.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+/// `POST /api/handoffs` — create a checkout for a human to take over, and leave
+/// an agent pane waiting to start in it on a prompt.
+///
+/// The repository is the one the caller is in, resolved from its terminal session
+/// or working directory the way `veld ide open` resolves a worktree. The checkout
+/// is created exactly as `POST /api/worktrees` creates one; with a prompt it then
+/// gets a [`veld_core::db::Handoff`] and lands in the rail's "From agents"
+/// section, unless the caller named a lane. The pane itself is started by the
+/// first window that shows the worktree — no window may be open now, and a
+/// terminal belongs to the window that shows it.
+///
+/// **Everything that can be refused is refused before `git worktree add`**: the
+/// agent is checked against the calling checkout's own declared panes, so a typo
+/// costs nothing rather than leaving a checkout with no way to start its prompt.
+async fn create_handoff(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<HandoffRequest>,
+) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    use super::file_pane::{coded, require_local_host, worktree_containing};
+    require_local_host(&headers)?;
+
+    let prompt = body
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    if let Some(prompt) = prompt {
+        if prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES {
+            return Err(err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "the prompt is longer than {} KiB — put the detail in a file in the \
+                     repository and point the prompt at it",
+                    veld_core::agent::MAX_LAUNCH_PROMPT_BYTES / 1024
+                ),
+            ));
+        }
+        if prompt.contains('\0') {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "the prompt contains a NUL byte",
+            ));
+        }
+    } else if body.agent.is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "an agent needs a prompt to start on — pass one, or leave the agent out",
+        ));
+    }
+
+    let from_session = match body.session_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(session) => super::pty::session_worktree(session).await,
+        None => None,
+    };
+    let cwd = body.cwd.clone();
+    let source = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let id = from_session
+            .or_else(|| {
+                cwd.as_deref()
+                    .and_then(|c| worktree_containing(&db, FsPath::new(c)))
+            })
+            .ok_or_else(|| {
+                coded(
+                    StatusCode::NOT_FOUND,
+                    "not_in_worktree",
+                    "not inside a worktree Veld knows — run this from a checkout of a \
+                     project Veld has imported",
+                )
+            })?;
+        let wt = db
+            .get_worktree(id)
+            .map_err(db_err)?
+            .ok_or_else(|| coded(StatusCode::NOT_FOUND, "not_in_worktree", "no such worktree"))?;
+        // The calling checkout's declared panes: the config the agent was written
+        // against, and the one a fresh checkout of this branch will most likely
+        // carry. The window re-checks against the new checkout's own before it
+        // starts anything.
+        let panes = worktree_view(&db, wt.clone()).ide.panes;
+        Ok::<_, ApiError>((wt, panes))
+    })
+    .await?;
+    let (source, panes) = source;
+
+    if prompt.is_some() {
+        check_handoff_agent(&panes, body.agent.as_deref())?;
+    }
+
+    let source_path = source.path.clone();
+    let create = CreateWorktreeBody {
+        repo_root: source.repo_root.clone(),
+        branch: body.branch.clone(),
+        create_branch: true,
+        source: body.from_here.then_some(CreateFrom::Worktree {
+            from_path: source_path,
+            carry_over: false,
+        }),
+        alias: None,
+        display_name: body.name.clone(),
+        lane: body.lane.clone(),
+        path: None,
+        // Named from the prompt only when nobody named it, and only by a project
+        // that declares a naming command — which `spawn_worktree_naming` checks.
+        name_prompt: body
+            .name
+            .is_none()
+            .then(|| prompt.map(str::to_owned))
+            .flatten(),
+        emoji: None,
+        marker_color: None,
+    };
+    // Every hand-off, not only one bound for "From agents": one filed into a
+    // lane would otherwise sit ungrouped until the lane is written, too.
+    let _hidden = HandoffInFlight::start(&source.repo_root, &body.branch);
+    let created = create_checkout(create).await?;
+    let Some(prompt) = prompt else {
+        return Ok(Json(created));
+    };
+
+    let worktree_id = created.worktree.worktree.id;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let agent = body.agent.clone().unwrap_or_default();
+    let into_section = body.lane.as_deref().is_none_or(str::is_empty);
+    let prompt = prompt.to_owned();
+    let carry_over = created.carry_over;
+    let view = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let recorded = db
+            .put_handoff(worktree_id, &session_id, &agent, &prompt)
+            .and_then(|()| {
+                if into_section {
+                    db.file_into_handoffs(worktree_id)?;
+                }
+                Ok(())
+            });
+        if let Err(e) = recorded {
+            warn!("hand-off for worktree {worktree_id} not recorded: {e}");
+            return Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the worktree was created, but its agent pane could not be recorded — \
+                 open it in Veld and start the agent by hand",
+            ));
+        }
+        let wt = db
+            .get_worktree(worktree_id)
+            .map_err(db_err)?
+            .ok_or_else(|| db_err("worktree vanished after the hand-off was recorded"))?;
+        Ok::<_, ApiError>(worktree_view(&db, wt))
+    })
+    .await?;
     Ok(Json(CreatedWorktreeView {
         worktree: view,
         carry_over,
     }))
+}
+
+/// Refuse a hand-off whose prompt has no agent to start in: the project declares
+/// none that can take a prompt, or `agent` names one it does not declare. The same
+/// predicate the UI's `paneTakesPrompt` applies — an explicit `agent` answer, else
+/// whether the pane can resume — so the daemon never accepts a pane the window
+/// would then refuse to start.
+fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), ApiError> {
+    use super::file_pane::coded;
+    let agents: Vec<&str> = panes
+        .iter()
+        .filter(|p| p.available && p.agent.unwrap_or(p.can_resume))
+        .map(|p| p.id.as_str())
+        .collect();
+    if agents.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "no_agent",
+            "this project declares no agent pane to start the prompt in — add one to \
+             ide.panes (see `veld skills ide-panes`), or leave the prompt out",
+        ));
+    }
+    match agent {
+        Some(agent) if !agents.contains(&agent) => Err(coded(
+            StatusCode::BAD_REQUEST,
+            "unknown_agent",
+            format!(
+                "no agent pane called \"{agent}\" — this project has: {}",
+                agents.join(", ")
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Hand-offs being created right now, as `(repo root, branch)`.
+///
+/// `git worktree add` registers the checkout with git long before it finishes
+/// writing the files, and the rail's poll lists whatever `git worktree list`
+/// reports — so without this a handed-off worktree appeared *ungrouped* for the
+/// length of the checkout, then jumped into "From agents" once the hand-off was
+/// recorded. The listing leaves it out until it can appear where it belongs.
+/// Keyed on the branch rather than the path because the branch is known before
+/// anything is created, and a hand-off always creates its branch.
+static HANDOFFS_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn handoff_in_flight(repo_root: &str, branch: &str) -> bool {
+    HANDOFFS_IN_FLIGHT
+        .lock()
+        .expect("hand-offs in flight poisoned")
+        .contains(&(repo_root.to_owned(), branch.to_owned()))
+}
+
+/// Holds a hand-off out of the rail until dropped — on success and on every
+/// early return alike, so a failed create can never leave a checkout hidden.
+struct HandoffInFlight((String, String));
+
+impl HandoffInFlight {
+    fn start(repo_root: &str, branch: &str) -> Self {
+        let key = (repo_root.to_owned(), branch.to_owned());
+        HANDOFFS_IN_FLIGHT
+            .lock()
+            .expect("hand-offs in flight poisoned")
+            .insert(key.clone());
+        Self(key)
+    }
+}
+
+impl Drop for HandoffInFlight {
+    fn drop(&mut self) {
+        HANDOFFS_IN_FLIGHT
+            .lock()
+            .expect("hand-offs in flight poisoned")
+            .remove(&self.0);
+    }
+}
+
+/// `GET /api/worktrees/{id}/handoff` — the pending agent pane with its prompt, for
+/// the window about to start it. `404` when there is none.
+///
+/// Reading does not retire it; spawning the session does (`pty::finish_agent_handoff`),
+/// so a window that reads it and then reloads leaves it for the next one.
+/// Host-checked like every route that hands out text the user wrote: the prompt is
+/// whatever an agent chose to put in it.
+async fn get_handoff(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let handoff = crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
+        .await?
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                "no agent pane is waiting in this worktree",
+            )
+        })?;
+    Ok(Json(serde_json::json!({
+        "session_id": handoff.session_id,
+        "pane": handoff.pane,
+        "prompt": handoff.prompt,
+    })))
 }
 
 /// Name a just-created worktree with `ide.worktreeName`, in the background.
@@ -5356,6 +5688,7 @@ mod tests {
         WorktreeView {
             worktree: wt_record(id, is_main),
             deleting: false,
+            handoff: None,
             has_veld_config: true,
             presets: None,
             nodes: Vec::new(),
@@ -5478,6 +5811,71 @@ mod tests {
             veld_core::ide::MAX_NEWS_ITEMS,
             "unioning every worktree's news must not bypass the endpoint's own cap"
         );
+    }
+
+    // -- hand-offs -----------------------------------------------------------
+
+    fn pane_view(id: &str, agent: Option<bool>, can_resume: bool, available: bool) -> PaneView {
+        PaneView {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            description: None,
+            icon: None,
+            kind: "terminal",
+            available,
+            missing: Vec::new(),
+            can_resume,
+            has_sessions: false,
+            agent,
+            auto_resume: false,
+            close_on_exit: true,
+            fixed_label: false,
+        }
+    }
+
+    #[test]
+    fn a_handoff_agent_is_one_the_window_would_start() {
+        let panes = vec![
+            pane_view("claude", None, true, true),
+            pane_view("codex", Some(true), false, true),
+            pane_view("git-log", None, false, true),
+            pane_view("pi", Some(true), true, false),
+        ];
+        assert!(check_handoff_agent(&panes, None).is_ok());
+        assert!(check_handoff_agent(&panes, Some("claude")).is_ok());
+        assert!(check_handoff_agent(&panes, Some("codex")).is_ok());
+        for refused in ["git-log", "pi", "nope"] {
+            let (status, body) = check_handoff_agent(&panes, Some(refused)).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+            assert_eq!(body["code"], "unknown_agent", "{refused}");
+            assert!(
+                body["error"].as_str().unwrap().ends_with("claude, codex"),
+                "names what there is: {}",
+                body["error"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_is_hidden_from_the_rail_only_while_it_is_being_created() {
+        let root = "/repo/hidden-while-created";
+        assert!(!handoff_in_flight(root, "fix/x"));
+        {
+            let _hidden = HandoffInFlight::start(root, "fix/x");
+            assert!(handoff_in_flight(root, "fix/x"));
+            assert!(!handoff_in_flight(root, "fix/y"), "only that branch");
+            assert!(!handoff_in_flight("/repo/other", "fix/x"), "only that repo");
+        }
+        assert!(!handoff_in_flight(root, "fix/x"), "dropped on every return");
+    }
+
+    #[test]
+    fn a_project_with_no_agent_pane_cannot_take_a_prompt() {
+        let panes = vec![pane_view("git-log", None, false, true)];
+        let (_, body) = check_handoff_agent(&panes, None).unwrap_err();
+        assert_eq!(body["code"], "no_agent");
+        let (_, body) = check_handoff_agent(&[], Some("claude")).unwrap_err();
+        assert_eq!(body["code"], "no_agent");
     }
 
     // -- `worktree_view` extensions (`extensions.source`) --------------------

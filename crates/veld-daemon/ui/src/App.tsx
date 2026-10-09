@@ -107,7 +107,9 @@ import {
   DELETING_LANE,
   isDetached,
   isDiscovered,
+  isHandedOff,
   DISCOVERED_LANE,
+  HANDOFF_LANE,
   TRASH_LANE,
   UNGROUPED_LANE,
   TRASH_PREVIEW,
@@ -236,6 +238,8 @@ import {
   browserTab,
   closeTab,
   configPaneTab,
+  handoffAgent,
+  handoffPaneTab,
   defaultLayout,
   diagTab,
   dockOf,
@@ -4011,7 +4015,16 @@ function AppInner(props: {
     // discarded the pane silently, which is the whole class of bug this
     // hand-off keeps producing.
     const alreadyHere = layoutsRef.current[id] !== undefined;
-    if (alreadyHere && wanted === null) return;
+    // An agent pane `veld worktree new` left waiting here. The same hand-off as
+    // `wanted`, except that it was made by another process and outlives this
+    // window: it is the daemon's until the session it names has spawned, so a
+    // window that reloads before then reaches it again — and since the tab
+    // carries that session id, seeding it again is a no-op for the layout.
+    const handed =
+      wanted === null
+        ? allWorktreesRef.current.find((w) => w.id === id && w.handoff)
+        : undefined;
+    if (alreadyHere && wanted === null && handed === undefined) return;
     let cancelled = false;
     void (async () => {
       let stored: PaneLayout | null = null;
@@ -4036,6 +4049,36 @@ function AppInner(props: {
       // (`markPaneCreated`), and an updater React may call twice would spend
       // both twice.
       let agentTab: PaneTab | null = null;
+      if (handed?.handoff) {
+        let prompt: string | null = null;
+        try {
+          prompt = (await api.worktreeHandoff(id)).prompt;
+        } catch {
+          // Gone (another window started it a moment ago) or unreachable; either
+          // way there is nothing to start, and a later show will look again.
+        }
+        if (cancelled) return;
+        const spec =
+          prompt === null
+            ? null
+            : handoffAgent(
+                handed.ide.panes,
+                handed.handoff.pane,
+                recallLastAgent(window.localStorage, handed.repo_root),
+              );
+        if (prompt !== null && spec === null) {
+          notifyError(
+            `Could not start the agent in ${worktreeLabel(handed)}`,
+            new Error(
+              "this checkout declares no agent pane that can take a prompt — its prompt was: " +
+                prompt,
+            ),
+          );
+        } else if (prompt !== null && spec !== null) {
+          agentTab = handoffPaneTab(spec, handed.handoff.session_id);
+          queueInitialPrompt(agentTab.id, prompt, spec.label);
+        }
+      }
       if (wanted !== null && pendingAgentRef.current === wanted) {
         pendingAgentRef.current = null;
         agentTab = configPaneTab(wanted.spec);
@@ -5727,12 +5770,21 @@ function AppInner(props: {
     if (!repo) return;
     const root = repo.root;
     const moved = worktrees.find((w) => w.path === path);
-    // Dragging a discovered worktree into a section adopts it, so the move is
-    // computed over the rail as it will be once it has been.
+    // Dragging a discovered worktree into a section adopts it, and dragging one
+    // out of "From agents" files it, so the move is computed over the rail as it
+    // will be once that has happened — `moveWorktree` places only rows that are
+    // already in an orderable section. The lane written is still compared with
+    // the row as it is, so leaving "From agents" for the ungrouped section is a
+    // lane change and gets its PATCH.
     const adopting = moved !== undefined && isDiscovered(moved);
+    const filing = moved !== undefined && isHandedOff(moved);
     const adopt = (list: Worktree[]) =>
-      adopting
-        ? list.map((w) => (w.path === path ? { ...w, adopted: true } : w))
+      adopting || filing
+        ? list.map((w) =>
+            w.path !== path
+              ? w
+              : { ...w, ...(adopting ? { adopted: true } : {}), ...(filing ? { lane: "" } : {}) },
+          )
         : list;
     const move = moveWorktree(
       railGroups(adopt(worktrees), laneRows),
@@ -10541,12 +10593,13 @@ function Rail(props: {
                  row visibly snaps back to the top of its group, a drag that
                  appears to do nothing. It leads its lane instead, which is the
                  same rule it follows ungrouped. */
-              // The Discovered section is pinned but its rows are not stuck:
-              // dragging one into a section is how it is adopted there.
+              // The Discovered and From agents sections are pinned but their rows
+              // are not stuck: dragging one into a section is how it is adopted,
+              // or filed, there.
               const rowDraggable =
                 canDrag &&
                 !trashed &&
-                (!group.pinned || discoveredRow) &&
+                (!group.pinned || discoveredRow || group.key === HANDOFF_LANE) &&
                 !w.is_main;
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row

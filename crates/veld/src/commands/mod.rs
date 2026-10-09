@@ -32,6 +32,7 @@ pub mod uninstall;
 pub mod update;
 pub mod urls;
 pub mod version;
+pub mod worktree;
 
 use crate::output;
 

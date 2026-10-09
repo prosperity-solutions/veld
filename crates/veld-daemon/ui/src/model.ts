@@ -560,6 +560,29 @@ export const DELETING_LANE = "\u0000deleting";
  */
 export const DISCOVERED_LANE = "\u0000discovered";
 
+/**
+ * The `worktrees.lane` value — and the group key — of the "From agents" section:
+ * worktrees a coding agent handed off with `veld worktree new`, waiting for the
+ * user to file them.
+ *
+ * Unlike the other NUL-prefixed keys this one **is** a stored lane value, written
+ * by the daemon (`veld_core::db::HANDOFF_LANE`; the two must stay in step). That
+ * is what makes leaving the section need no special case: every move writes the
+ * lane, and every lane a user can write differs from this one — including `""`,
+ * so dropping a row into the ungrouped section is a real change rather than a
+ * no-op. Nothing can file a row *into* it but the daemon: the section is pinned,
+ * so it is not a drop target, and the daemon refuses the lane on a PATCH.
+ */
+export const HANDOFF_LANE = "\u0000handoff";
+
+/** Header of the [`HANDOFF_LANE`] section. */
+export const HANDOFF_LABEL = "From agents";
+
+/** Whether the rail lists this worktree in its "From agents" section. */
+export function isHandedOff(w: Worktree): boolean {
+  return w.lane === HANDOFF_LANE && !w.is_main && !w.trashed_at && !isDiscovered(w);
+}
+
 /** Whether the rail lists this worktree in its "Discovered" section. */
 export function isDiscovered(w: Worktree): boolean {
   return w.adopted === false && !w.is_main && !w.trashed_at;
@@ -668,8 +691,11 @@ export const UNGROUPED_LABEL = "Worktrees";
  * permanent clutter.
  */
 export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] {
-  const live = worktrees.filter((w) => !w.trashed_at && !isDiscovered(w));
+  const live = worktrees.filter(
+    (w) => !w.trashed_at && !isDiscovered(w) && !isHandedOff(w),
+  );
   const discovered = worktrees.filter(isDiscovered);
+  const handedOff = worktrees.filter(isHandedOff);
   // A worktree whose removal is actively running leaves the trash for the
   // terminal deleting lane: it is still a trashed row until the worker drops it,
   // but the two states are not the same thing and must not share a lane.
@@ -740,6 +766,22 @@ export function railGroups(worktrees: Worktree[], lanes: LaneRows): RailGroup[] 
       // One row, and that row is the repository. There is no set here.
       bulk: false,
       worktrees: main,
+    });
+  }
+  // Right under the repository, above everything the user arranged: these are
+  // waiting for a decision, and the section exists only while one is. Pinned, so
+  // it is never a drop target and never holds a place in the lane order — a row
+  // leaves by being moved anywhere else ([`HANDOFF_LANE`]).
+  if (handedOff.length > 0) {
+    groups.push({
+      key: HANDOFF_LANE,
+      lane: HANDOFF_LANE,
+      label: HANDOFF_LABEL,
+      pinned: true,
+      addable: false,
+      editable: false,
+      bulk: false,
+      worktrees: handedOff,
     });
   }
   const ungroupedSection: RailGroup = {

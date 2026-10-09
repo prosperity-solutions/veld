@@ -17,6 +17,7 @@
 
 pub mod backup;
 pub(crate) mod feedback;
+mod handoffs;
 mod import;
 mod kv;
 mod layouts;
@@ -29,6 +30,7 @@ mod stats;
 mod var_overrides;
 mod worktrees;
 
+pub use handoffs::{HANDOFF_LANE, Handoff};
 pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
@@ -1227,6 +1229,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-adopted",
         apply: migrate_v17_worktree_adopted,
     },
+    Migration {
+        version: 18,
+        name: "worktree-handoffs",
+        apply: migrate_v18_worktree_handoffs,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2003,6 +2010,41 @@ fn migrate_v17_worktree_adopted(conn: &Connection) -> rusqlite::Result<()> {
         );
         INSERT OR IGNORE INTO adopted_paths (path, repo_root)
             SELECT path, repo_root FROM worktrees;
+        "#,
+    )
+}
+
+/// v18: an agent pane waiting to be started in a worktree an agent handed off.
+///
+/// `veld worktree new --prompt` creates a checkout for a human to take over, and
+/// the agent that should start there does not exist yet: a terminal is spawned
+/// by the window that shows the worktree, and no window may be open at all. So
+/// the request is kept here until one is — the session id the pane will run
+/// under, chosen by the daemon at hand-off time; the declared pane to run (`''`
+/// for "the user's usual agent", which only a client knows); and the first
+/// message.
+///
+/// **One per worktree**, because the section a hand-off lands in is per
+/// worktree and a second prompt for the same checkout has nowhere distinct to
+/// go. **The row is the pending state**: it is deleted when the session it
+/// names is actually spawned (`Db::finish_handoff`), not when a window reads
+/// it, so a window that reloads or crashes between reading and spawning leaves
+/// it for the next one.
+///
+/// **`ON DELETE CASCADE`, for the reason v11 and v15 spell out**: `worktrees.id`
+/// is a reused rowid, and a hand-off that outlived its checkout would start an
+/// agent, with somebody else's prompt, in whichever worktree takes the number
+/// next.
+fn migrate_v18_worktree_handoffs(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE worktree_handoffs (
+            worktree_id INTEGER PRIMARY KEY REFERENCES worktrees(id) ON DELETE CASCADE,
+            session_id  TEXT NOT NULL,
+            pane        TEXT NOT NULL DEFAULT '',
+            prompt      TEXT NOT NULL,
+            created_at  TEXT NOT NULL
+        );
         "#,
     )
 }

@@ -161,6 +161,53 @@ human may already have open:
   untracked ones. This is the human's cheap review surface; it is why you do not
   need to open every file you edited.
 
+## Handing a task to the human in a new worktree (`veld worktree new`)
+
+When you come across work that is separate from the task at hand and deserves
+its own branch — a bug you noticed on the way, a refactor the change made
+obvious, the second half of a plan — do not quietly do it, do not leave it as a
+note or an issue for somebody to pick up later, and do not start a sub-agent in a
+checkout nobody can see. **Offer to hand it off**: say what the work is and that
+you can put it in a worktree of its own for them. Most people do not know Veld
+can do this, so the offer is worth making — once per piece of work, not on every
+turn. When they agree, or ask for it themselves:
+
+```sh
+veld worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
+veld worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
+veld worktree new --branch spike/cache --from-here --agent codex --prompt-file - < plan.md --json
+```
+
+Veld creates the worktree in the project this terminal belongs to and files it
+in the rail's **From agents** section. The first time the human opens it, an
+agent pane starts there with your prompt as its first message, and from then on
+it is theirs. **Nothing comes back to you** — no status, no result. Write the
+prompt for an agent that has none of your context: what to do, why, which files,
+how to tell it is done.
+
+- `--branch` is the new branch. It is cut where a new branch normally starts
+  (`git.createFrom`), or from this checkout's `HEAD` with `--from-here` — which
+  brings your commits, not your uncommitted changes.
+- `--prompt` or `--prompt-file` (`-` for stdin) is the agent's first message. A
+  long or structured one belongs in a file. Without a prompt you get a plain
+  worktree and no agent.
+- `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
+  human's usual agent for this project starts. An agent this project does not
+  declare is refused before anything is created.
+- `--name` is what the rail shows. Leave it out and the project's
+  `ide.worktreeName` names it from the prompt, if it declares one, else the
+  branch does.
+- `--lane` files it in one of the human's lanes instead of **From agents**.
+
+Exit status: `0` created, `1` failed (the branch exists, no daemon), `2` the
+prompt could not be read, `3` not inside a worktree Veld knows, `5` no such agent
+pane. `--json` prints `{"id", "path", "branch", "alias", "name", "waiting",
+"agent"}` on stdout.
+
+Hand off one task per worktree, and only when the human would want it as its own
+branch. Each one is a checkout on their disk and a row in their rail until they
+deal with it.
+
 ## Why you may already know this
 
 Veld tells Claude Code, Codex CLI and Pi about this command when they start in a
