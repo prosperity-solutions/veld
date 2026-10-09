@@ -10837,8 +10837,10 @@ function Rail(props: {
                       left it, and opening the row is what starts it. On the row
                       rather than the section, because a hand-off filed straight
                       into one of the user's groups (`--group`) is waiting too.
-                      Gone once the agent has started (the daemon retires it). */}
-                  {!trashed && w.handoff && (
+                      Gone once the agent has started (the daemon retires it).
+                      Wide-only: the collapsed row's grid has no slot for it, and
+                      its hover text carries the same note there. */}
+                  {props.wide && !trashed && w.handoff && (
                     <span className="wt-handoff" aria-hidden title={handoffNote(w)}>
                       <IconHourglassEmpty size={12} />
                     </span>
