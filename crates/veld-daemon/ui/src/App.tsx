@@ -9437,7 +9437,7 @@ function ProjectColumn(props: {
  */
 function handoffNote(w: Worktree): string {
   const named = w.handoff?.pane
-    ? w.ide.panes.find((p) => p.id === w.handoff?.pane)?.label
+    ? w.ide.panes.find((p) => p.id === w.handoff?.pane && paneTakesPrompt(p))?.label
     : undefined;
   return `waiting for you: opening it starts ${named ?? "your usual agent"} on the task an agent handed off`;
 }
@@ -10359,7 +10359,7 @@ function Rail(props: {
                   className="lane-name"
                   title={
                     group.key === HANDOFF_LANE
-                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one starts the agent it was handed with, on the task it was handed. Drag a row into a group to file it."
+                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one marked with an hourglass starts the agent it was handed with, on the task it was handed; the rest have started already. Drag a row into a group to file it."
                       : undefined
                   }
                 >

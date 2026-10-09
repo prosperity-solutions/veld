@@ -2476,7 +2476,10 @@ async fn mint_ticket(
         }
         _ => false,
     };
-    let recorded = db.handoff_session(body.worktree_id).ok().flatten();
+    let recorded = db.handoff_session(body.worktree_id).unwrap_or_else(|e| {
+        warn!("hand-off for worktree {} not read: {e}", body.worktree_id);
+        None
+    });
     let agent_handoff = match handoff_step(
         recorded.as_ref().map(|(session, _)| session.as_str()),
         &body.session_id,

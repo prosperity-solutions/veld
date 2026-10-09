@@ -2750,7 +2750,7 @@ fn extensions_view_for(declared_cfg: Option<&veld_core::config::VeldConfig>) -> 
 }
 
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
-    worktree_view_with(db, wt, &mut DeclaredConfigs::new())
+    worktree_view_with(db, wt, &mut DeclaredConfigs::new(), None)
 }
 
 /// Declaring roots' configs already looked up in this listing, by root path.
@@ -2763,7 +2763,14 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
 type DeclaredConfigs = std::collections::HashMap<String, Option<veld_core::config::VeldConfig>>;
 
 /// [`worktree_view`], sharing declaring-root configs across one listing.
-fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfigs) -> WorktreeView {
+/// `handoffs` is the listing's one read of its repo's pending hand-offs, by
+/// worktree id; `None` for a single view, which looks its own up.
+fn worktree_view_with(
+    db: &Db,
+    wt: WorktreeRecord,
+    declared: &mut DeclaredConfigs,
+    handoffs: Option<&std::collections::HashMap<i64, (String, String)>>,
+) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
     let cfg = config_path
@@ -2931,11 +2938,11 @@ fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfig
     let deleting = super::worktree_trash::now_deleting(wt.id);
     // Unreadable reads as "none": the rail then shows the worktree without the
     // pane, which a later poll corrects, and a listing must not fail over it.
-    let handoff = db
-        .handoff_session(wt.id)
-        .ok()
-        .flatten()
-        .map(|(session_id, pane)| HandoffView { session_id, pane });
+    let handoff = match handoffs {
+        Some(all) => all.get(&wt.id).cloned(),
+        None => db.handoff_session(wt.id).ok().flatten(),
+    }
+    .map(|(session_id, pane)| HandoffView { session_id, pane });
     // Read before `wt` is moved into the view below, the same reason `deleting` is.
     let git = git_signals_for(wt.id, &wt.path);
     let machine_vars = cfg.as_ref().map(|c| {
@@ -3095,12 +3102,17 @@ fn repo_view_blocking(
     git: Option<RepoGitStatus>,
 ) -> Result<RepoView, ApiError> {
     let mut declared = DeclaredConfigs::new();
+    // One read for the whole repo rather than one per row: this runs on every
+    // rail poll, and almost no row has a hand-off. Unreadable reads as none.
+    let handoffs = db
+        .handoff_sessions(FsPath::new(&repo.root))
+        .unwrap_or_default();
     let mut worktrees: Vec<WorktreeView> = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
         .filter(|wt| !handoff_in_flight(&wt.repo_root, &wt.branch))
-        .map(|wt| worktree_view_with(db, wt, &mut declared))
+        .map(|wt| worktree_view_with(db, wt, &mut declared, Some(&handoffs)))
         .collect();
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
@@ -4623,7 +4635,7 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
 #[serde(deny_unknown_fields)]
 struct HandoffRequest {
     /// The caller's terminal session (`$VELD_PTY_SESSION`), naming the checkout it
-    /// is handing off *from*. Tried first; `cwd` is the fallback.
+    /// is handing off *from*. Used only when no `cwd` is sent.
     #[serde(default)]
     session_id: Option<String>,
     /// The caller's working directory, for a caller outside a Veld terminal.
@@ -4663,9 +4675,10 @@ struct HandoffRequest {
 /// first window that shows the worktree — no window may be open now, and a
 /// terminal belongs to the window that shows it.
 ///
-/// **Everything that can be refused is refused before `git worktree add`**: the
-/// agent is checked against the calling checkout's own declared panes, so a typo
-/// costs nothing rather than leaving a checkout with no way to start its prompt.
+/// **The agent, the group and an existing branch are refused before anything is
+/// created or hidden**: the agent is checked against the calling checkout's own
+/// declared panes, so a typo costs nothing rather than leaving a checkout with no
+/// way to start its prompt.
 async fn create_handoff(
     headers: axum::http::HeaderMap,
     Json(body): Json<HandoffRequest>,
@@ -4695,12 +4708,14 @@ async fn create_handoff(
                 "the prompt contains a NUL byte",
             ));
         }
-    } else if body.agent.is_some() {
-        return Err(err(
-            StatusCode::BAD_REQUEST,
-            "an agent needs a prompt to start on — pass one, or leave the agent out",
-        ));
     }
+    // `""` is the stored spelling of "the user's usual agent", so it reads the same
+    // way here — and with no prompt there is no agent to start, named or not, so
+    // a script passing an empty `$PROMPT` with `--agent` gets a plain create.
+    let agent = body
+        .agent
+        .as_deref()
+        .filter(|a| !a.is_empty() && prompt.is_some());
 
     let source = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
     let source = crate::offload::blocking(move || {
@@ -4721,7 +4736,7 @@ async fn create_handoff(
     let (source, panes) = source;
 
     if prompt.is_some() {
-        check_handoff_agent(&panes, body.agent.as_deref())?;
+        check_handoff_agent(&panes, agent)?;
     }
     if let Some(group) = body.lane.as_deref().filter(|l| !l.is_empty()) {
         let root = source.repo_root.clone();
@@ -4790,7 +4805,7 @@ async fn create_handoff(
         emoji: None,
         marker_color: None,
     };
-    let agent = body.agent.clone().unwrap_or_default();
+    let agent = agent.unwrap_or_default().to_owned();
     let into_section = body.lane.as_deref().is_none_or(str::is_empty);
     let prompt = prompt.map(str::to_owned);
     // Every hand-off, not only one bound for "Waiting for you": one filed into a
@@ -4806,7 +4821,15 @@ async fn create_handoff(
         record_handoff(create, prompt, agent, into_section).await
     })
     .await
-    .map_err(|e| db_err(format!("hand-off task failed: {e}")))?
+    .map_err(|e| {
+        warn!("hand-off task failed: {e}");
+        coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "created_unrecorded",
+            "the hand-off failed partway — the worktree may exist without its agent; check \
+             the Veld rail before running this again",
+        )
+    })?
     .map(Json)
 }
 
@@ -4838,8 +4861,9 @@ async fn record_handoff(
             });
         if let Err(e) = recorded {
             warn!("hand-off for worktree {worktree_id} not recorded: {e}");
-            return Err(err(
+            return Err(super::file_pane::coded(
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "created_unrecorded",
                 "the worktree was created, but its agent pane could not be recorded — \
                  open it in Veld and start the agent by hand",
             ));
@@ -4941,8 +4965,8 @@ async fn handoff_groups(
 
 /// Refuse a hand-off whose prompt has no agent to start in: the project declares
 /// none that can take a prompt, or `agent` names one it does not declare. The same
-/// predicate the UI's `paneTakesPrompt` applies — an explicit `agent` answer, else
-/// whether the pane can resume. Checked against the *calling* checkout, before
+/// predicate the UI's `paneTakesPrompt` applies — a terminal pane that is
+/// available, with an explicit `agent` answer, else whether it can resume. Checked against the *calling* checkout, before
 /// anything exists; the new checkout can still differ (a branch cut from
 /// `origin` without a pane the caller's branch added), and the window says so
 /// when it has to start another agent instead (`handoffAgent` in the UI).
@@ -4950,7 +4974,7 @@ fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), Ap
     use super::file_pane::coded;
     let agents: Vec<&str> = panes
         .iter()
-        .filter(|p| p.available && p.agent.unwrap_or(p.can_resume))
+        .filter(|p| p.kind == "terminal" && p.available && p.agent.unwrap_or(p.can_resume))
         .map(|p| p.id.as_str())
         .collect();
     if agents.is_empty() {
