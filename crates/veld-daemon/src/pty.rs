@@ -1541,6 +1541,11 @@ struct Ticket {
     /// per-launch (`VELD_PANE_TOKEN`) and must win over anything the shim env
     /// carries.
     shim_env: BTreeMap<String, String>,
+    /// Whether spawning this session starts a handed-off worktree's agent pane —
+    /// a fresh launch under the session id `veld worktree new` recorded. Decided
+    /// at mint, where the database is already open, so the spawn path only acts
+    /// on it (see [`finish_agent_handoff`]).
+    agent_handoff: bool,
     expires_at: Instant,
 }
 
@@ -2473,6 +2478,16 @@ async fn mint_ticket(
     };
     // Its files are up by now — the client uploads before it mints — so the
     // window [`reserve_uploads`] opened has done its job.
+    // Only a *fresh* launch of a declared pane can be the agent a hand-off is
+    // waiting for — a reattach or a resume runs nothing new, and a plain shell
+    // beside it is not the pane the prompt was for.
+    let agent_handoff = !resumed
+        && pane.is_some()
+        && body.mode == Some(PaneMode::Fresh)
+        && matches!(
+            db.handoff_session(body.worktree_id),
+            Ok(Some((session, _))) if session == body.session_id
+        );
     UPLOAD_RESERVATIONS
         .lock()
         .expect("upload reservations poisoned")
@@ -2496,6 +2511,7 @@ async fn mint_ticket(
                 shell,
                 shell_flags,
                 shim_env,
+                agent_handoff,
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -4107,6 +4123,10 @@ async fn attach(
         }
     };
 
+    if ticket.agent_handoff && !resumed {
+        finish_agent_handoff(ticket.worktree_id, ticket.session_id.clone());
+    }
+
     // Terminal traffic is keystrokes and screen updates. The default ceiling is
     // tungstenite's 64 MiB, which the daemon would buffer per frame per socket;
     // a paste, even a large one, fits in a fraction of this.
@@ -4115,6 +4135,30 @@ async fn attach(
         .on_upgrade(move |socket| async move {
             serve_socket(socket, session, size, resumed).await;
         })
+}
+
+/// Retire a handed-off worktree's pending agent pane, now that its session has
+/// been spawned.
+///
+/// **On spawn, not when a window reads the hand-off**: a window that reloads or
+/// crashes between reading it and starting the pane leaves it pending, and the
+/// next window to show the worktree starts the same session with the same prompt.
+/// Off the attach path, because nothing may put a `Db::open()` on the
+/// session-spawn path; a failure only leaves the row for the next window to find
+/// its session already live, which reattaches instead of starting anything.
+fn finish_agent_handoff(worktree_id: i64, session_id: String) {
+    tokio::spawn(async move {
+        let done = crate::offload::blocking(move || {
+            let db = open_db().map_err(|_| "database unavailable".to_owned())?;
+            db.finish_handoff(worktree_id, &session_id)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        if let Err(e) = done {
+            warn!("hand-off for worktree {worktree_id} not retired: {e}");
+        }
+    });
 }
 
 enum SessionError {
@@ -6230,6 +6274,7 @@ mod tests {
                         ..shims::SessionOptions::all_on()
                     },
                 ),
+                agent_handoff: false,
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -6263,6 +6308,7 @@ mod tests {
                         ..shims::SessionOptions::all_on()
                     },
                 ),
+                agent_handoff: false,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -6640,6 +6686,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -6679,6 +6726,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -7159,6 +7207,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );

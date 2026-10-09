@@ -1728,6 +1728,43 @@ export function paneTakesPrompt(spec: {
 }
 
 /**
+ * The agent a handed-off worktree starts — `veld worktree new`'s choice, else the
+ * one this user last picked in this project, else the first the project
+ * declares. `null` when the checkout declares none that can take a prompt.
+ *
+ * Resolved against **the new checkout's own** panes, not the one the hand-off was
+ * made from: they are usually the same config, but only this one is what will
+ * actually run.
+ */
+export function handoffAgent<P extends Parameters<typeof paneTakesPrompt>[0] & { id: string }>(
+  panes: readonly P[],
+  wanted: string,
+  remembered: string,
+): P | null {
+  const agents = panes.filter(paneTakesPrompt);
+  return (
+    agents.find((p) => wanted !== "" && p.id === wanted) ??
+    agents.find((p) => remembered !== "" && p.id === remembered) ??
+    agents[0] ??
+    null
+  );
+}
+
+/**
+ * The tab for a handed-off worktree's agent pane, under the session id the
+ * daemon recorded for it.
+ *
+ * [`configPaneTab`] with the id given rather than minted: the daemon retires the
+ * hand-off when *that* session spawns, so the tab has to be the one it named —
+ * and a window that reloads before the pane started finds the same tab already
+ * in the layout and starts it again, rather than adding a second.
+ */
+export function handoffPaneTab(spec: { id: string; label: string }, sessionId: string): PaneTab {
+  markPaneCreated(sessionId);
+  return { id: sessionId, kind: "terminal", title: spec.label, spec: spec.id };
+}
+
+/**
  * What a queued prompt should do about this terminal, right now.
  *
  * **Pure, exported and tested, because it is the entire safety argument for

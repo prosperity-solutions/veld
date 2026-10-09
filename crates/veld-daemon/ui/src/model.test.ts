@@ -47,6 +47,7 @@ import {
   worstStatus,
   DELETING_LANE,
   DISCOVERED_LANE,
+  HANDOFF_LANE,
   TRASH_LANE,
   TRASH_PREVIEW,
   trashPreview,
@@ -906,6 +907,36 @@ describe("railGroups", () => {
     ]);
     // A trashed discovery is in the trash, not in both.
     expect(groups.at(-1)?.worktrees.map((w) => w.path)).toEqual(["/wts/old"]);
+  });
+
+  it("puts handed-off worktrees in a From agents section under main, only while there are any", () => {
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/wts/from-agent", { lane: HANDOFF_LANE }),
+        rw("/wts/binned", { lane: HANDOFF_LANE, trashed_at: "2026-01-02T00:00:00.000000Z" }),
+      ],
+      [lane("review", 0)],
+    );
+    expect(groups.map((g) => g.key)).toEqual([
+      MAIN_LANE,
+      HANDOFF_LANE,
+      "",
+      "review",
+      TRASH_LANE,
+    ]);
+    const section = groups.find((g) => g.key === HANDOFF_LANE);
+    expect(section).toMatchObject({ pinned: true, addable: false, editable: false });
+    expect(section?.worktrees.map((w) => w.path)).toEqual(["/wts/from-agent"]);
+    // Not counted as ungrouped as well, which an unknown lane otherwise would be.
+    expect(groups.find((g) => g.key === "")?.worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+    expect(railGroups([rw("/wts/a")]).some((g) => g.key === HANDOFF_LANE)).toBe(false);
+  });
+
+  it("refuses a drop into From agents, which only the daemon files into", () => {
+    const groups = railGroups([rw("/wts/a"), rw("/wts/b", { lane: HANDOFF_LANE })]);
+    expect(moveWorktree(groups, "/wts/a", HANDOFF_LANE, 0)).toBeNull();
   });
 
   it("draws no Discovered section when nothing is unadopted", () => {
