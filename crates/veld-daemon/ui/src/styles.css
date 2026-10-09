@@ -2214,6 +2214,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    families on ONE element — never both at once — so listing both here costs
    nothing and keeps whichever one wins correct. */
 .wt-row:not(.slim) > .run-count,
+.wt-row:not(.slim) > .wt-handoff,
 .wt-row:not(.slim) > .wt-alert,
 .wt-row:not(.slim) > .wt-git,
 .wt-row:not(.slim) > .wt-inbox,
@@ -2223,6 +2224,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   margin-left: auto;
 }
 .wt-row:not(.slim) > .run-count ~ *,
+.wt-row:not(.slim) > .wt-handoff ~ *,
 .wt-row:not(.slim) > .wt-alert ~ *,
 .wt-row:not(.slim) > .wt-git ~ *,
 .wt-row:not(.slim) > .wt-inbox ~ *,
