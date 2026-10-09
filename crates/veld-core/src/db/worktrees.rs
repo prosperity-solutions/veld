@@ -1029,7 +1029,7 @@ impl Db {
         // real group — which both leaves a phantom group in the bucket's slot and
         // snaps the bucket back to the top. Reported as "no such lane", because to
         // every user-facing caller that is exactly what it is.
-        if from == UNGROUPED_LANE {
+        if from == UNGROUPED_LANE || from == super::HANDOFF_LANE {
             return Ok(false);
         }
         let root = root_key(repo_root);
@@ -1074,7 +1074,9 @@ impl Db {
         // position row silently snaps the ungrouped section back to the top of the
         // rail. [`UNGROUPED_LANE`] claims it cannot be renamed or deleted, and this
         // is half of what makes that true rather than aspirational.
-        if name == UNGROUPED_LANE {
+        // The "From agents" section has no row either, but this statement's first
+        // half would still empty it into the ungrouped section.
+        if name == UNGROUPED_LANE || name == super::HANDOFF_LANE {
             return Ok(false);
         }
         let root = root_key(repo_root);

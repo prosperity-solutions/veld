@@ -2218,6 +2218,9 @@ export const api = {
    */
   worktreeHandoff: (worktreeId: number) =>
     request<WorktreeHandoff & { prompt: string }>(`/api/worktrees/${worktreeId}/handoff`),
+  /** Give up on a hand-off this window cannot start. */
+  deleteWorktreeHandoff: (worktreeId: number) =>
+    request<void>(`/api/worktrees/${worktreeId}/handoff`, { method: "DELETE" }),
   /**
    * Store a worktree's panes, if `version` is still the current one.
    *

@@ -60,7 +60,10 @@ pub fn routes() -> Router {
         // repository by where the caller *is* — a terminal session or a working
         // directory — instead of by a root the caller would have to know.
         .route("/api/handoffs", post(create_handoff))
-        .route("/api/worktrees/{id}/handoff", get(get_handoff))
+        .route(
+            "/api/worktrees/{id}/handoff",
+            get(get_handoff).delete(delete_handoff),
+        )
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
         .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
@@ -4692,6 +4695,10 @@ async fn create_handoff(
         ));
     }
 
+    // The working directory first, the terminal second: an agent that has `cd`'d
+    // into another project means *that* project, and its terminal still says
+    // where it started. The session is the fallback for a caller whose directory
+    // is not inside a checkout Veld knows.
     let from_session = match body.session_id.as_deref().filter(|s| !s.is_empty()) {
         Some(session) => super::pty::session_worktree(session).await,
         None => None,
@@ -4699,11 +4706,10 @@ async fn create_handoff(
     let cwd = body.cwd.clone();
     let source = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
-        let id = from_session
-            .or_else(|| {
-                cwd.as_deref()
-                    .and_then(|c| worktree_containing(&db, FsPath::new(c)))
-            })
+        let id = cwd
+            .as_deref()
+            .and_then(|c| worktree_containing(&db, FsPath::new(c)))
+            .or(from_session)
             .ok_or_else(|| {
                 coded(
                     StatusCode::NOT_FOUND,
@@ -4753,19 +4759,41 @@ async fn create_handoff(
         emoji: None,
         marker_color: None,
     };
+    let agent = body.agent.clone().unwrap_or_default();
+    let into_section = body.lane.as_deref().is_none_or(str::is_empty);
+    let prompt = prompt.map(str::to_owned);
     // Every hand-off, not only one bound for "From agents": one filed into a
     // lane would otherwise sit ungrouped until the lane is written, too.
-    let _hidden = HandoffInFlight::start(&source.repo_root, &body.branch);
+    let hidden = HandoffInFlight::start(&source.repo_root, &body.branch);
+    // **Detached from the request.** A large checkout can outlast the caller's
+    // patience, and a handler future is dropped when its client disconnects —
+    // which would stop between `git worktree add` and recording the hand-off,
+    // leaving an unfiled checkout with no agent and a branch the retry then
+    // collides with. Spawned, the create finishes whoever is still listening.
+    tokio::spawn(async move {
+        let _hidden = hidden;
+        record_handoff(create, prompt, agent, into_section).await
+    })
+    .await
+    .map_err(|e| db_err(format!("hand-off task failed: {e}")))?
+    .map(Json)
+}
+
+/// The rest of [`create_handoff`]: create the checkout, then record its pending
+/// agent pane and file it.
+async fn record_handoff(
+    create: CreateWorktreeBody,
+    prompt: Option<String>,
+    agent: String,
+    into_section: bool,
+) -> Result<CreatedWorktreeView, ApiError> {
     let created = create_checkout(create).await?;
     let Some(prompt) = prompt else {
-        return Ok(Json(created));
+        return Ok(created);
     };
 
     let worktree_id = created.worktree.worktree.id;
     let session_id = uuid::Uuid::new_v4().to_string();
-    let agent = body.agent.clone().unwrap_or_default();
-    let into_section = body.lane.as_deref().is_none_or(str::is_empty);
-    let prompt = prompt.to_owned();
     let carry_over = created.carry_over;
     let view = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
@@ -4792,17 +4820,19 @@ async fn create_handoff(
         Ok::<_, ApiError>(worktree_view(&db, wt))
     })
     .await?;
-    Ok(Json(CreatedWorktreeView {
+    Ok(CreatedWorktreeView {
         worktree: view,
         carry_over,
-    }))
+    })
 }
 
 /// Refuse a hand-off whose prompt has no agent to start in: the project declares
 /// none that can take a prompt, or `agent` names one it does not declare. The same
 /// predicate the UI's `paneTakesPrompt` applies — an explicit `agent` answer, else
-/// whether the pane can resume — so the daemon never accepts a pane the window
-/// would then refuse to start.
+/// whether the pane can resume. Checked against the *calling* checkout, before
+/// anything exists; the new checkout can still differ (a branch cut from
+/// `origin` without a pane the caller's branch added), and the window says so
+/// when it has to start another agent instead (`handoffAgent` in the UI).
 fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), ApiError> {
     use super::file_pane::coded;
     let agents: Vec<&str> = panes
@@ -4840,15 +4870,19 @@ fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), Ap
 /// recorded. The listing leaves it out until it can appear where it belongs.
 /// Keyed on the branch rather than the path because the branch is known before
 /// anything is created, and a hand-off always creates its branch.
+///
+/// A count rather than a set: a retried `veld worktree new` for the same branch
+/// fails fast while the first is still checking out, and its guard must not
+/// un-hide the one that is still running.
 static HANDOFFS_IN_FLIGHT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<(String, String)>>,
+    std::sync::Mutex<std::collections::HashMap<(String, String), usize>>,
 > = std::sync::LazyLock::new(Default::default);
 
 fn handoff_in_flight(repo_root: &str, branch: &str) -> bool {
     HANDOFFS_IN_FLIGHT
         .lock()
         .expect("hand-offs in flight poisoned")
-        .contains(&(repo_root.to_owned(), branch.to_owned()))
+        .contains_key(&(repo_root.to_owned(), branch.to_owned()))
 }
 
 /// Holds a hand-off out of the rail until dropped — on success and on every
@@ -4858,20 +4892,26 @@ struct HandoffInFlight((String, String));
 impl HandoffInFlight {
     fn start(repo_root: &str, branch: &str) -> Self {
         let key = (repo_root.to_owned(), branch.to_owned());
-        HANDOFFS_IN_FLIGHT
+        *HANDOFFS_IN_FLIGHT
             .lock()
             .expect("hand-offs in flight poisoned")
-            .insert(key.clone());
+            .entry(key.clone())
+            .or_default() += 1;
         Self(key)
     }
 }
 
 impl Drop for HandoffInFlight {
     fn drop(&mut self) {
-        HANDOFFS_IN_FLIGHT
+        let mut in_flight = HANDOFFS_IN_FLIGHT
             .lock()
-            .expect("hand-offs in flight poisoned")
-            .remove(&self.0);
+            .expect("hand-offs in flight poisoned");
+        if let Some(n) = in_flight.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                in_flight.remove(&self.0);
+            }
+        }
     }
 }
 
@@ -4879,7 +4919,10 @@ impl Drop for HandoffInFlight {
 /// the window about to start it. `404` when there is none.
 ///
 /// Reading does not retire it; spawning the session does (`pty::finish_agent_handoff`),
-/// so a window that reads it and then reloads leaves it for the next one.
+/// so a window that reads it and then reloads leaves it for the next one. A
+/// hand-off whose session is **already live** has been launched and only lost its
+/// retirement, so it is retired here and answered as gone — serving it would have
+/// the window type the prompt into the running agent a second time.
 /// Host-checked like every route that hands out text the user wrote: the prompt is
 /// whatever an agent chose to put in it.
 async fn get_handoff(
@@ -4887,19 +4930,39 @@ async fn get_handoff(
     Path(id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     super::file_pane::require_local_host(&headers)?;
+    let gone = || {
+        err(
+            StatusCode::NOT_FOUND,
+            "no agent pane is waiting in this worktree",
+        )
+    };
     let handoff = crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
         .await?
-        .ok_or_else(|| {
-            err(
-                StatusCode::NOT_FOUND,
-                "no agent pane is waiting in this worktree",
-            )
-        })?;
+        .ok_or_else(gone)?;
+    if super::pty::session_worktree(&handoff.session_id).await == Some(id) {
+        let session = handoff.session_id.clone();
+        crate::offload::blocking(move || {
+            open_desktop_db()?
+                .finish_handoff(id, &session)
+                .map_err(write_err)
+        })
+        .await?;
+        return Err(gone());
+    }
     Ok(Json(serde_json::json!({
         "session_id": handoff.session_id,
         "pane": handoff.pane,
         "prompt": handoff.prompt,
     })))
+}
+
+/// `DELETE /api/worktrees/{id}/handoff` — give up on a pending agent pane: the
+/// window could not start it (the checkout declares no agent that takes a prompt)
+/// and has shown the user the prompt instead. `204` either way.
+async fn delete_handoff(Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    crate::offload::blocking(move || open_desktop_db()?.drop_handoff(id).map_err(write_err))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Name a just-created worktree with `ide.worktreeName`, in the background.
@@ -5867,6 +5930,13 @@ mod tests {
             assert!(!handoff_in_flight("/repo/other", "fix/x"), "only that repo");
         }
         assert!(!handoff_in_flight(root, "fix/x"), "dropped on every return");
+
+        // A retry that fails fast must not un-hide the create still running.
+        let running = HandoffInFlight::start(root, "fix/x");
+        drop(HandoffInFlight::start(root, "fix/x"));
+        assert!(handoff_in_flight(root, "fix/x"));
+        drop(running);
+        assert!(!handoff_in_flight(root, "fix/x"));
     }
 
     #[test]

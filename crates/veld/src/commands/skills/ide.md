@@ -193,7 +193,12 @@ how to tell it is done.
   worktree and no agent.
 - `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
   human's usual agent for this project starts. An agent this project does not
-  declare is refused before anything is created.
+  declare is refused before anything is created; if the new checkout turns out
+  not to declare it (a branch cut from `origin` without it), the human's usual
+  agent starts instead and they are told.
+- The prompt is sent **as you wrote it**, the moment the human opens the
+  worktree. Write it the way you would want an instruction you did not review
+  to read.
 - `--name` is what the rail shows. Leave it out and the project's
   `ide.worktreeName` names it from the prompt, if it declares one, else the
   branch does.
