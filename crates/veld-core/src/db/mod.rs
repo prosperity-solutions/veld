@@ -52,7 +52,7 @@ pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
     DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, UNGROUPED_LANE,
     WORKTREE_COLORS, WORKTREE_EMOJI, WorktreePatch, WorktreeRecord, default_alias,
-    is_worktree_color, is_worktree_emoji,
+    is_reserved_lane, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};

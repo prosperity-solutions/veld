@@ -60,6 +60,7 @@ pub fn routes() -> Router {
         // repository by where the caller *is* — a terminal session or a working
         // directory — instead of by a root the caller would have to know.
         .route("/api/handoffs", post(create_handoff))
+        .route("/api/handoffs/groups", get(handoff_groups))
         .route(
             "/api/worktrees/{id}/handoff",
             get(get_handoff).delete(delete_handoff),
@@ -4084,6 +4085,11 @@ async fn create_worktree(
 
 /// Create a checkout as `POST /api/worktrees` describes it — shared with
 /// [`create_handoff`], which arrives at the same request by another route.
+///
+/// The checkout is listed by the rail's poll as soon as git registers it, which is
+/// well before this returns. A caller that files it somewhere afterwards (as
+/// [`create_handoff`] does) must hold a [`HandoffInFlight`] across the call, or the
+/// row shows up ungrouped for the length of the checkout first.
 async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView, ApiError> {
     validate_branch(&body.branch)?;
     let source = body.create_from();
@@ -4633,7 +4639,8 @@ struct HandoffRequest {
     /// prompt when the project declares that, else the alias does.
     #[serde(default)]
     name: Option<String>,
-    /// A lane to file it under instead of the "From agents" section.
+    /// One of the user's groups (a rail lane, by name) to file it under instead
+    /// of the "Waiting for you" section.
     #[serde(default)]
     lane: Option<String>,
     /// The declared agent pane to start. Absent: the user's usual one.
@@ -4651,7 +4658,7 @@ struct HandoffRequest {
 /// The repository is the one the caller is in, resolved from its terminal session
 /// or working directory the way `veld ide open` resolves a worktree. The checkout
 /// is created exactly as `POST /api/worktrees` creates one; with a prompt it then
-/// gets a [`veld_core::db::Handoff`] and lands in the rail's "From agents"
+/// gets a [`veld_core::db::Handoff`] and lands in the rail's "Waiting for you"
 /// section, unless the caller named a lane. The pane itself is started by the
 /// first window that shows the worktree — no window may be open now, and a
 /// terminal belongs to the window that shows it.
@@ -4663,7 +4670,7 @@ async fn create_handoff(
     headers: axum::http::HeaderMap,
     Json(body): Json<HandoffRequest>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
-    use super::file_pane::{coded, require_local_host, worktree_containing};
+    use super::file_pane::{coded, require_local_host};
     require_local_host(&headers)?;
 
     let prompt = body
@@ -4695,29 +4702,10 @@ async fn create_handoff(
         ));
     }
 
-    // The working directory first, the terminal second: an agent that has `cd`'d
-    // into another project means *that* project, and its terminal still says
-    // where it started. The session is the fallback for a caller whose directory
-    // is not inside a checkout Veld knows.
-    let from_session = match body.session_id.as_deref().filter(|s| !s.is_empty()) {
-        Some(session) => super::pty::session_worktree(session).await,
-        None => None,
-    };
-    let cwd = body.cwd.clone();
+    let source = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
     let source = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
-        let id = cwd
-            .as_deref()
-            .and_then(|c| worktree_containing(&db, FsPath::new(c)))
-            .or(from_session)
-            .ok_or_else(|| {
-                coded(
-                    StatusCode::NOT_FOUND,
-                    "not_in_worktree",
-                    "not inside a worktree Veld knows — run this from a checkout of a \
-                     project Veld has imported",
-                )
-            })?;
+        let id = source;
         let wt = db
             .get_worktree(id)
             .map_err(db_err)?
@@ -4734,6 +4722,49 @@ async fn create_handoff(
 
     if prompt.is_some() {
         check_handoff_agent(&panes, body.agent.as_deref())?;
+    }
+    if let Some(group) = body.lane.as_deref().filter(|l| !l.is_empty()) {
+        let root = source.repo_root.clone();
+        let groups = crate::offload::blocking(move || user_groups(&root)).await?;
+        if !groups.iter().any(|g| g == group) {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "unknown_group",
+                if groups.is_empty() {
+                    format!("no group called \"{group}\" — this project has none yet")
+                } else {
+                    format!(
+                        "no group called \"{group}\" — this project has: {}",
+                        groups.join(", ")
+                    )
+                },
+            ));
+        }
+    }
+    // Refused here, before anything is hidden or fetched: the create would fail
+    // on it anyway, but only after `git fetch`, and in the meantime the in-flight
+    // guard below would hide the checkout that already has this branch — `main`
+    // itself, for `--branch main`.
+    if git(
+        FsPath::new(&source.repo_root),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", body.branch),
+        ],
+    )
+    .await
+    .is_ok()
+    {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "branch_exists",
+            format!(
+                "a branch called \"{}\" already exists in this project — pick another name",
+                body.branch
+            ),
+        ));
     }
 
     let source_path = source.path.clone();
@@ -4762,7 +4793,7 @@ async fn create_handoff(
     let agent = body.agent.clone().unwrap_or_default();
     let into_section = body.lane.as_deref().is_none_or(str::is_empty);
     let prompt = prompt.map(str::to_owned);
-    // Every hand-off, not only one bound for "From agents": one filed into a
+    // Every hand-off, not only one bound for "Waiting for you": one filed into a
     // lane would otherwise sit ungrouped until the lane is written, too.
     let hidden = HandoffInFlight::start(&source.repo_root, &body.branch);
     // **Detached from the request.** A large checkout can outlast the caller's
@@ -4826,6 +4857,88 @@ async fn record_handoff(
     })
 }
 
+/// The worktree a hand-off request comes from: the one containing `cwd`, or —
+/// only when no directory was sent — the one `session` runs in.
+///
+/// **A directory that matches nothing is refused, not passed over.** An agent
+/// that has `cd`'d into a repository Veld has not imported means that one, and
+/// quietly falling back to the project its terminal started in would create the
+/// branch somewhere it did not ask for.
+async fn resolve_caller(session: Option<&str>, cwd: Option<&str>) -> Result<i64, ApiError> {
+    use super::file_pane::{coded, worktree_containing};
+    let refused = |msg: String| coded(StatusCode::NOT_FOUND, "not_in_worktree", msg);
+    match (
+        cwd.filter(|c| !c.is_empty()),
+        session.filter(|s| !s.is_empty()),
+    ) {
+        (Some(cwd), _) => {
+            let cwd = cwd.to_owned();
+            crate::offload::blocking(move || {
+                let db = open_desktop_db()?;
+                worktree_containing(&db, FsPath::new(&cwd)).ok_or_else(|| {
+                    refused(format!(
+                        "{cwd} is not inside a worktree Veld knows — run this from a \
+                         checkout of a project Veld has imported"
+                    ))
+                })
+            })
+            .await
+        }
+        (None, Some(session)) => super::pty::session_worktree(session)
+            .await
+            .ok_or_else(|| refused("that terminal session is not one Veld has".to_owned())),
+        (None, None) => Err(refused(
+            "name where this comes from: a working directory or a terminal session".to_owned(),
+        )),
+    }
+}
+
+/// The user's own groups (rail lanes) in a project, in rail order — the reserved
+/// position rows left out, since nothing can be filed into those by name.
+fn user_groups(repo_root: &str) -> Result<Vec<String>, ApiError> {
+    let db = open_desktop_db()?;
+    Ok(db
+        .list_lanes(FsPath::new(repo_root))
+        .map_err(db_err)?
+        .into_iter()
+        .filter(|l| !veld_core::db::is_reserved_lane(&l.name))
+        .map(|l| l.name)
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct GroupsQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// `GET /api/handoffs/groups?cwd=…` — the groups a hand-off from here can be filed
+/// into, for `veld worktree groups`. The project is resolved exactly as
+/// [`create_handoff`] resolves it, so the answer is about the project a create
+/// from the same place would land in.
+async fn handoff_groups(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<GroupsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let id = resolve_caller(q.session_id.as_deref(), q.cwd.as_deref()).await?;
+    let (project, groups) = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let wt = db
+            .get_worktree(id)
+            .map_err(db_err)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
+        let groups = user_groups(&wt.repo_root)?;
+        Ok::<_, ApiError>((wt.repo_root, groups))
+    })
+    .await?;
+    Ok(Json(
+        serde_json::json!({ "project": project, "groups": groups }),
+    ))
+}
+
 /// Refuse a hand-off whose prompt has no agent to start in: the project declares
 /// none that can take a prompt, or `agent` names one it does not declare. The same
 /// predicate the UI's `paneTakesPrompt` applies — an explicit `agent` answer, else
@@ -4866,7 +4979,7 @@ fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), Ap
 /// `git worktree add` registers the checkout with git long before it finishes
 /// writing the files, and the rail's poll lists whatever `git worktree list`
 /// reports — so without this a handed-off worktree appeared *ungrouped* for the
-/// length of the checkout, then jumped into "From agents" once the hand-off was
+/// length of the checkout, then jumped into "Waiting for you" once the hand-off was
 /// recorded. The listing leaves it out until it can appear where it belongs.
 /// Keyed on the branch rather than the path because the branch is known before
 /// anything is created, and a hand-off always creates its branch.

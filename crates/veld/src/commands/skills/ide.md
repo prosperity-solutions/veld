@@ -175,39 +175,52 @@ turn. When they agree, or ask for it themselves:
 ```sh
 veld worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
 veld worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
-veld worktree new --branch spike/cache --from-here --agent codex --prompt-file - < plan.md --json
+veld worktree groups                       # the groups you can file into
+veld worktree new --branch spike/cache --group Experiments --from-here --prompt-file - < plan.md --json
 ```
 
-Veld creates the worktree in the project this terminal belongs to and files it
-in the rail's **From agents** section. The first time the human opens it, an
-agent pane starts there with your prompt as its first message, and from then on
-it is theirs. **Nothing comes back to you** — no status, no result. Write the
-prompt for an agent that has none of your context: what to do, why, which files,
-how to tell it is done.
+Veld creates the worktree in **the project your working directory is in** — run
+it from the checkout you mean; a directory outside any project Veld knows is
+refused (exit `3`), not guessed at. With a prompt it lands in the rail's
+**Waiting for you** section, marked as not started yet. The first time the human
+opens it, an agent pane starts there with your prompt as its first message, and
+from then on it is theirs. **Nothing comes back to you** — no status, no result.
+Write the prompt for an agent that has none of your context: what to do, why,
+which files, how to tell it is done.
 
-- `--branch` is the new branch. It is cut where a new branch normally starts
-  (`git.createFrom`), or from this checkout's `HEAD` with `--from-here` — which
-  brings your commits, not your uncommitted changes.
+- `--branch` is the new branch, and must not exist yet (exit `1` if it does). It
+  is cut where a new branch normally starts (`git.createFrom`), or from this
+  checkout's `HEAD` with `--from-here` — which brings your commits, not your
+  uncommitted changes.
 - `--prompt` or `--prompt-file` (`-` for stdin) is the agent's first message. A
-  long or structured one belongs in a file. Without a prompt you get a plain
-  worktree and no agent.
-- `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
-  human's usual agent for this project starts. An agent this project does not
-  declare is refused before anything is created; if the new checkout turns out
-  not to declare it (a branch cut from `origin` without it), the human's usual
-  agent starts instead and they are told.
+  long or structured one belongs in a file; the limit is 64 KiB. Without a prompt
+  you get a plain worktree, filed with the user's other new worktrees, and no
+  agent.
 - The prompt is sent **as you wrote it**, the moment the human opens the
   worktree. Write it the way you would want an instruction you did not review
   to read.
+- `--group` files it into one of the human's existing groups instead of
+  **Waiting for you** (`--lane` is the same flag). `veld worktree groups` lists
+  them (`--json` for `{"project", "groups"}`); a name that is not one of them is
+  refused before anything is created (exit `4`). It still waits there, marked,
+  until they open it.
+- `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
+  human's usual agent for this project starts. An agent this project does not
+  declare is refused before anything is created (exit `5`); if the new checkout
+  turns out not to declare it (a branch cut from `origin` without it), the
+  human's usual agent starts instead and they are told.
 - `--name` is what the rail shows. Leave it out and the project's
   `ide.worktreeName` names it from the prompt, if it declares one, else the
   branch does.
-- `--lane` files it in one of the human's lanes instead of **From agents**.
 
-Exit status: `0` created, `1` failed (the branch exists, no daemon), `2` the
-prompt could not be read, `3` not inside a worktree Veld knows, `5` no such agent
-pane. `--json` prints `{"id", "path", "branch", "alias", "name", "waiting",
-"agent"}` on stdout.
+Exit status: `0` created; `1` failed and nothing was created; `2` bad flags or
+an unreadable prompt file; `3` not inside a worktree Veld knows; `4` no such
+group; `5` no such agent pane; **`6` no answer yet** — a large checkout can take
+longer than the command waits, and the worktree is most likely still being
+made, so check the rail and **do not run it again** (the retry would collide
+with its branch). `--json` prints `{"id", "path", "branch", "alias", "name",
+"waiting", "agent"}` on stdout, where `waiting` says an agent is waiting to start
+and `agent` is the pane you named or `null` for the human's usual one.
 
 Hand off one task per worktree, and only when the human would want it as its own
 branch. Each one is a checkout on their disk and a row in their rail until they

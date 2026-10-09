@@ -172,6 +172,7 @@ import {
   IconDotsVertical,
   IconFolderPlus,
   IconHistory,
+  IconHourglassEmpty,
   IconKeyboard,
   IconMoon,
   IconPlayerPlayFilled,
@@ -3033,7 +3034,7 @@ function AppInner(props: {
         key: "spin-off",
         title: "Spin off…",
         onClick: () =>
-          // Except out of "From agents", which nothing can be created into: a
+          // Except out of "Waiting for you", which nothing can be created into: a
           // spin-off of a handed-off row goes where any new worktree goes.
           setDialog({
             kind: "new-worktree",
@@ -5787,10 +5788,10 @@ function AppInner(props: {
     const root = repo.root;
     const moved = worktrees.find((w) => w.path === path);
     // Dragging a discovered worktree into a section adopts it, and dragging one
-    // out of "From agents" files it, so the move is computed over the rail as it
+    // out of "Waiting for you" files it, so the move is computed over the rail as it
     // will be once that has happened — `moveWorktree` places only rows that are
     // already in an orderable section. The lane written is still compared with
-    // the row as it is, so leaving "From agents" for the ungrouped section is a
+    // the row as it is, so leaving "Waiting for you" for the ungrouped section is a
     // lane change and gets its PATCH.
     const adopting = moved !== undefined && isDiscovered(moved);
     const filing = moved !== undefined && isHandedOff(moved);
@@ -9429,6 +9430,18 @@ function ProjectColumn(props: {
   );
 }
 
+/**
+ * What opening a row with a waiting hand-off does, for its hover text: the agent
+ * that will start, named by its label when the hand-off named one this checkout
+ * declares, else "your usual agent" (`handoffAgent` resolves it the same way).
+ */
+function handoffNote(w: Worktree): string {
+  const named = w.handoff?.pane
+    ? w.ide.panes.find((p) => p.id === w.handoff?.pane)?.label
+    : undefined;
+  return `waiting for you: opening it starts ${named ?? "your usual agent"} on the task an agent handed off`;
+}
+
 function Rail(props: {
   worktrees: Worktree[];
   /** The daemon's lane rows **as sent** — the repo's groups plus the reserved
@@ -10342,7 +10355,16 @@ function Rail(props: {
                     )}
                   </button>
                 </Tooltip>
-                <span className="lane-name">{group.label}</span>
+                <span
+                  className="lane-name"
+                  title={
+                    group.key === HANDOFF_LANE
+                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one starts the agent it was handed with, on the task it was handed. Drag a row into a group to file it."
+                      : undefined
+                  }
+                >
+                  {group.label}
+                </span>
                 {/* How many rows are behind the header, and only while there are
                     rows behind it. A count on an open section restated what the
                     rows immediately below it already say — which is why the header
@@ -10609,7 +10631,7 @@ function Rail(props: {
                  row visibly snaps back to the top of its group, a drag that
                  appears to do nothing. It leads its lane instead, which is the
                  same rule it follows ungrouped. */
-              // The Discovered and From agents sections are pinned but their rows
+              // The Discovered and Waiting for you sections are pinned but their rows
               // are not stuck: dragging one into a section is how it is adopted,
               // or filed, there.
               const rowDraggable =
@@ -10664,6 +10686,8 @@ function Rail(props: {
                         ? `${worktreeLabel(w)} — in the trash, still on disk`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
+                          : w.handoff
+                          ? `${worktreeLabel(w)} — ${w.branch} · ${handoffNote(w)}`
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
@@ -10802,6 +10826,16 @@ function Rail(props: {
                       to be seen while you are looking somewhere else. Trashed rows
                       are excluded — their panes are gone, and a state nobody can act
                       on is noise beside restore and delete. */}
+                  {/* An agent waiting to be started here — `veld worktree new`
+                      left it, and opening the row is what starts it. On the row
+                      rather than the section, because a hand-off filed straight
+                      into one of the user's groups (`--group`) is waiting too.
+                      Gone once the agent has started (the daemon retires it). */}
+                  {!trashed && w.handoff && (
+                    <span className="wt-handoff" aria-hidden title={handoffNote(w)}>
+                      <IconHourglassEmpty size={12} />
+                    </span>
+                  )}
                   {!trashed && (
                     <RowStateIcon
                       summary={inboxSummary}

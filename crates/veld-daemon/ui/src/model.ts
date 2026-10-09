@@ -561,7 +561,7 @@ export const DELETING_LANE = "\u0000deleting";
 export const DISCOVERED_LANE = "\u0000discovered";
 
 /**
- * The `worktrees.lane` value — and the group key — of the "From agents" section:
+ * The `worktrees.lane` value — and the group key — of the "Waiting for you" section:
  * worktrees a coding agent handed off with `veld worktree new`, waiting for the
  * user to file them.
  *
@@ -576,9 +576,9 @@ export const DISCOVERED_LANE = "\u0000discovered";
 export const HANDOFF_LANE = "\u0000handoff";
 
 /** Header of the [`HANDOFF_LANE`] section. */
-export const HANDOFF_LABEL = "From agents";
+export const HANDOFF_LABEL = "Waiting for you";
 
-/** Whether the rail lists this worktree in its "From agents" section. */
+/** Whether the rail lists this worktree in its "Waiting for you" section. */
 export function isHandedOff(w: Worktree): boolean {
   return w.lane === HANDOFF_LANE && !w.is_main && !w.trashed_at && !isDiscovered(w);
 }

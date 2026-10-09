@@ -155,7 +155,7 @@ requests at runtime — branding rule.
   deferred to a later increment.
 - **A hand-off is a lane value, and its agent is the daemon's until it spawns.**
   `veld worktree new` (`POST /api/handoffs`) files the checkout under
-  `worktrees.lane = "\0handoff"` — the pinned *From agents* section under main —
+  `worktrees.lane = "\0handoff"` — the pinned *Waiting for you* section under main —
   rather than behind a flag, because every way of moving a row writes `lane` and
   every lane a user can write differs from that one, `""` included: dragging out,
   *Move to lane* and batch moves all leave the section with no code that knows it
@@ -166,7 +166,9 @@ requests at runtime — branding rule.
   id (`handoffPaneTab`) and queues the prompt, and the row is deleted when *that*
   session spawns (`pty::finish_agent_handoff`), not when a window reads it — so a
   reload or crash between the two leaves it for the next window, and the tab
-  already in the layout is the same tab, not a second one.
+  already in the layout is the same tab, not a second one. The hourglass on a
+  row reads `worktree.handoff`, not the lane, because `--group` files a
+  hand-off straight into a user group where it is just as much waiting.
 - **Creating a worktree happens in a lane, not beside the rail.** There is one
   "＋" per rail section that can hold a checkout (the ungrouped section and each
   user lane), and the toolbar's global "+" is gone in the expanded rail. The old
