@@ -223,9 +223,21 @@ async fn create(request: &serde_json::Value) -> Result<serde_json::Value, Refusa
         .send()
         .await
         .map_err(|e| {
-            refusal(format!(
-                "could not reach the daemon ({e}) — is it running? Try `veld doctor`."
-            ))
+            // The daemon finishes a create whether or not anyone is still
+            // waiting, so a timeout is not a failure to report as one: the
+            // worktree is most likely on its way, and retrying would collide
+            // with its branch.
+            if e.is_timeout() {
+                refusal(
+                    "the worktree is taking long to create and is still being made — \
+                     check the Veld rail instead of running this again"
+                        .to_owned(),
+                )
+            } else {
+                refusal(format!(
+                    "could not reach the daemon ({e}) — is it running? Try `veld doctor`."
+                ))
+            }
         })?;
     let status = resp.status();
     let body: serde_json::Value = resp.json().await.unwrap_or_default();

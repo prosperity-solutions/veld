@@ -107,6 +107,17 @@ impl Db {
             .optional()?)
     }
 
+    /// Drop a worktree's pending hand-off, whatever session it names — for a
+    /// window that cannot start it (the checkout declares no agent pane), so the
+    /// refusal is reported once rather than on every show.
+    pub fn drop_handoff(&self, worktree_id: i64) -> Result<bool, DbError> {
+        let n = self.lock().execute(
+            "DELETE FROM worktree_handoffs WHERE worktree_id = ?1",
+            params![worktree_id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Retire a hand-off because its session has been spawned. Returns whether
     /// there was one for exactly that worktree and session.
     ///
@@ -172,6 +183,27 @@ mod tests {
         assert!(db.finish_handoff(wt, "sess-1").unwrap());
         assert_eq!(db.handoff(wt).unwrap(), None);
         assert!(!db.finish_handoff(wt, "sess-1").unwrap());
+    }
+
+    /// Declared twice, here and as `HANDOFF_LANE` in the UI's `model.ts`, with
+    /// nothing generating one from the other; a drift is silent (the rows fall into
+    /// the ungrouped section). `model.test.ts` holds the twin.
+    #[test]
+    fn the_handoff_lane_is_the_bytes_the_ui_reads() {
+        assert_eq!(HANDOFF_LANE.as_bytes(), b"\0handoff");
+    }
+
+    /// Neither lane operation may reach the section: rename would move its rows
+    /// into a real lane, delete would empty it into the ungrouped section.
+    #[test]
+    fn the_handoff_section_cannot_be_renamed_or_deleted() {
+        let (_dir, db) = test_db();
+        let wt = seed_worktree(&db, "/r", "/r/_wt/a");
+        db.file_into_handoffs(wt).unwrap();
+        let root = std::path::Path::new("/r");
+        assert!(!db.delete_lane(root, HANDOFF_LANE).unwrap());
+        assert!(!db.rename_lane(root, HANDOFF_LANE, "mine").unwrap());
+        assert_eq!(db.get_worktree(wt).unwrap().unwrap().lane, HANDOFF_LANE);
     }
 
     #[test]

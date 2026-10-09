@@ -1860,6 +1860,9 @@ describe("the reserved ungrouped name", () => {
     // uses, so editing the constant alone fails this, and `the_ungrouped_name_is_
     // the_bytes_the_ui_sends` is the twin that fails on the other side.
     expect(UNGROUPED_LANE).toBe(String.fromCharCode(0) + "ungrouped");
+    // Same arrangement for the "From agents" section's stored lane; the twin is
+    // `the_handoff_lane_is_the_bytes_the_ui_reads` in `db/handoffs.rs`.
+    expect(HANDOFF_LANE).toBe(String.fromCharCode(0) + "handoff");
     expect(UNGROUPED_LANE).toHaveLength(10);
     expect(UNGROUPED_LANE.charCodeAt(0)).toBe(0);
   });

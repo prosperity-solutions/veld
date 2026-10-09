@@ -3053,7 +3053,13 @@ function AppInner(props: {
         key: "spin-off",
         title: "Spin off…",
         onClick: () =>
-          setDialog({ kind: "new-worktree", lane: w.lane ?? "", spinOffFrom: w }),
+          // Except out of "From agents", which nothing can be created into: a
+          // spin-off of a handed-off row goes where any new worktree goes.
+          setDialog({
+            kind: "new-worktree",
+            lane: w.lane === HANDOFF_LANE ? "" : (w.lane ?? ""),
+            spinOffFrom: w,
+          }),
       },
       // Lane assignment as a submenu of the *existing* lanes, plus "New lane…".
       // A free-text field here would let two rows sit in "review" and "Review"
@@ -4087,6 +4093,9 @@ function AppInner(props: {
                 recallLastAgent(window.localStorage, handed.repo_root),
               );
         if (prompt !== null && spec === null) {
+          // Shown once, with the prompt, and then given up on: nothing here
+          // could ever start it, and leaving it pending would repeat this
+          // toast on every show of the worktree.
           notifyError(
             `Could not start the agent in ${worktreeLabel(handed)}`,
             new Error(
@@ -4094,7 +4103,14 @@ function AppInner(props: {
                 prompt,
             ),
           );
+          void api.deleteWorktreeHandoff(id).catch(() => {});
         } else if (prompt !== null && spec !== null) {
+          const wanted = handed.handoff.pane;
+          if (wanted !== "" && spec.id !== wanted) {
+            notifyRedirect(
+              `${worktreeLabel(handed)} does not declare the "${wanted}" pane the hand-off asked for — started ${spec.label} instead`,
+            );
+          }
           agentTab = handoffPaneTab(spec, handed.handoff.session_id);
           queueInitialPrompt(agentTab.id, prompt, spec.label);
         }

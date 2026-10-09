@@ -2476,18 +2476,27 @@ async fn mint_ticket(
         }
         _ => false,
     };
+    let recorded = db.handoff_session(body.worktree_id).ok().flatten();
+    let agent_handoff = match handoff_step(
+        recorded.as_ref().map(|(session, _)| session.as_str()),
+        &body.session_id,
+        resumed,
+        pane.is_some() && body.mode == Some(PaneMode::Fresh),
+    ) {
+        HandoffStep::None => false,
+        HandoffStep::RetireOnSpawn => true,
+        HandoffStep::RetireNow => {
+            if let Err(e) = db.finish_handoff(body.worktree_id, &body.session_id) {
+                warn!(
+                    "hand-off for worktree {} not retired: {e}",
+                    body.worktree_id
+                );
+            }
+            false
+        }
+    };
     // Its files are up by now — the client uploads before it mints — so the
     // window [`reserve_uploads`] opened has done its job.
-    // Only a *fresh* launch of a declared pane can be the agent a hand-off is
-    // waiting for — a reattach or a resume runs nothing new, and a plain shell
-    // beside it is not the pane the prompt was for.
-    let agent_handoff = !resumed
-        && pane.is_some()
-        && body.mode == Some(PaneMode::Fresh)
-        && matches!(
-            db.handoff_session(body.worktree_id),
-            Ok(Some((session, _))) if session == body.session_id
-        );
     UPLOAD_RESERVATIONS
         .lock()
         .expect("upload reservations poisoned")
@@ -4137,6 +4146,36 @@ async fn attach(
         })
 }
 
+/// What a ticket for `session` means for its worktree's pending hand-off, whose
+/// recorded session is `recorded`.
+#[derive(Debug, PartialEq, Eq)]
+enum HandoffStep {
+    /// Not the hand-off's session, or there is none.
+    None,
+    /// The hand-off's session is already live, so it was launched and only the
+    /// retirement was lost — an attach that spawned it and then failed to write,
+    /// or a daemon that exited in between. Retired here, or every later window
+    /// would queue the prompt again and type it into the running agent.
+    RetireNow,
+    /// A fresh launch of a declared pane under the hand-off's session: the agent
+    /// it is waiting for. Retired once the spawn succeeds ([`finish_agent_handoff`]).
+    /// A plain shell or a resume under that id runs nothing new and does neither.
+    RetireOnSpawn,
+}
+
+fn handoff_step(
+    recorded: Option<&str>,
+    session: &str,
+    resumed: bool,
+    fresh_pane: bool,
+) -> HandoffStep {
+    match recorded {
+        Some(r) if r == session && resumed => HandoffStep::RetireNow,
+        Some(r) if r == session && fresh_pane => HandoffStep::RetireOnSpawn,
+        _ => HandoffStep::None,
+    }
+}
+
 /// Retire a handed-off worktree's pending agent pane, now that its session has
 /// been spawned.
 ///
@@ -4144,8 +4183,9 @@ async fn attach(
 /// crashes between reading it and starting the pane leaves it pending, and the
 /// next window to show the worktree starts the same session with the same prompt.
 /// Off the attach path, because nothing may put a `Db::open()` on the
-/// session-spawn path; a failure only leaves the row for the next window to find
-/// its session already live, which reattaches instead of starting anything.
+/// session-spawn path. A failure leaves the row behind a live session, which the
+/// next mint for it retires ([`HandoffStep::RetireNow`]) and `GET
+/// /api/worktrees/{id}/handoff` stops serving.
 fn finish_agent_handoff(worktree_id: i64, session_id: String) {
     tokio::spawn(async move {
         let done = crate::offload::blocking(move || {
@@ -5362,6 +5402,44 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_the_handoffs_own_session_moves_it_on() {
+        use super::{HandoffStep, handoff_step};
+        let rec = Some("hand-off");
+        // The fresh agent launch it is waiting for.
+        assert_eq!(
+            handoff_step(rec, "hand-off", false, true),
+            HandoffStep::RetireOnSpawn
+        );
+        // Already live: launched, retirement lost — retire now, launch nothing.
+        assert_eq!(
+            handoff_step(rec, "hand-off", true, true),
+            HandoffStep::RetireNow
+        );
+        assert_eq!(
+            handoff_step(rec, "hand-off", true, false),
+            HandoffStep::RetireNow
+        );
+        // A shell under that id, or no pane at all, starts no agent.
+        assert_eq!(
+            handoff_step(rec, "hand-off", false, false),
+            HandoffStep::None
+        );
+        // Any other session in the worktree, fresh or not, leaves it alone.
+        assert_eq!(
+            handoff_step(rec, "a-shell-beside-it", false, true),
+            HandoffStep::None
+        );
+        assert_eq!(
+            handoff_step(rec, "a-shell-beside-it", true, true),
+            HandoffStep::None
+        );
+        assert_eq!(
+            handoff_step(None, "hand-off", false, true),
+            HandoffStep::None
+        );
+    }
+
     #[test]
     fn a_text_file_the_pane_would_refuse_stays_on_the_browser_route() {
         let root = tempfile::TempDir::new().unwrap();
