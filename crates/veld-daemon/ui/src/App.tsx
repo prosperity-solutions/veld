@@ -4074,22 +4074,29 @@ function AppInner(props: {
                 recallLastAgent(window.localStorage, handed.repo_root),
               );
         if (prompt !== null && spec === null) {
-          // Shown once, with the prompt, and then given up on: nothing here
-          // could ever start it, and leaving it pending would repeat this
-          // toast on every show of the worktree.
+          // Given up on only when the checkout declares no agent pane at all —
+          // then nothing could ever start it, and keeping it would repeat this
+          // toast on every show. One that is merely unavailable right now (a
+          // `requires_bin` missing, a config mid-edit) stays pending for the
+          // next show, and the toast still carries the prompt.
+          const declaresAgent = handed.ide.panes.some((p) =>
+            paneTakesPrompt({ ...p, available: true }),
+          );
           notifyError(
             `Could not start the agent in ${worktreeLabel(handed)}`,
             new Error(
-              "this checkout declares no agent pane that can take a prompt — its prompt was: " +
+              (declaresAgent
+                ? "no agent pane this checkout declares can start right now — it will be tried again next time you open it. The prompt is: "
+                : "this checkout declares no agent pane that can take a prompt — its prompt was: ") +
                 prompt,
             ),
           );
-          void api.deleteWorktreeHandoff(id).catch(() => {});
+          if (!declaresAgent) void api.deleteWorktreeHandoff(id).catch(() => {});
         } else if (prompt !== null && spec !== null) {
           const wanted = handed.handoff.pane;
           if (wanted !== "" && spec.id !== wanted) {
             notifyRedirect(
-              `${worktreeLabel(handed)} does not declare the "${wanted}" pane the hand-off asked for — started ${spec.label} instead`,
+              `The "${wanted}" pane the hand-off asked for can't start in ${worktreeLabel(handed)} — started ${spec.label} instead`,
             );
           }
           agentTab = handoffPaneTab(spec, handed.handoff.session_id);

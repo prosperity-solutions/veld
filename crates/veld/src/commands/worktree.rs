@@ -197,6 +197,12 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                     }
                     0
                 }
+                // A read: an answer that never came is just a failure, not the
+                // "it may still be on its way" a create means by it.
+                Err(refusal) if refusal.code.as_deref() == Some(NO_ANSWER) => {
+                    eprintln!("veld: no answer from the daemon — try again in a moment");
+                    1
+                }
                 Err(refusal) => {
                     eprintln!("veld: {}", refusal.message);
                     exit_for(refusal.code.as_deref())

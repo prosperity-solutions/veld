@@ -4756,6 +4756,7 @@ async fn create_handoff(
             ));
         }
     }
+    validate_branch(&body.branch)?;
     // Refused here, before anything is hidden or fetched: the create would fail
     // on it anyway, but only after `git fetch`, and in the meantime the in-flight
     // guard below would hide the checkout that already has this branch — `main`
@@ -4841,7 +4842,30 @@ async fn record_handoff(
     agent: String,
     into_section: bool,
 ) -> Result<CreatedWorktreeView, ApiError> {
-    let created = create_checkout(create).await?;
+    let (root, branch) = (create.repo_root.clone(), create.branch.clone());
+    let created = match create_checkout(create).await {
+        Ok(created) => created,
+        Err((status, mut body)) => {
+            // Some of `create_checkout`'s failures come after `git worktree add`,
+            // when the checkout already exists. Said so, because a caller told
+            // "refused" would retry into its own branch.
+            let exists = git(
+                FsPath::new(&root),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .await
+            .is_ok();
+            if exists && body.get("code").is_none() {
+                body["code"] = "created_unrecorded".into();
+            }
+            return Err((status, body));
+        }
+    };
     let Some(prompt) = prompt else {
         return Ok(created);
     };
@@ -4895,11 +4919,32 @@ async fn resolve_caller(session: Option<&str>, cwd: Option<&str>) -> Result<i64,
         cwd.filter(|c| !c.is_empty()),
         session.filter(|s| !s.is_empty()),
     ) {
-        (Some(cwd), _) => {
+        (Some(cwd), session) => {
+            // The terminal's own worktree, but only as another spelling of the same
+            // place: a project imported through a symlink is stored under the link,
+            // while a shell reports the physical directory, so neither spelling of
+            // the cwd finds it. Accepted only when that worktree, resolved, contains
+            // the cwd — never as a stand-in for a directory somewhere else.
+            let from_session = match session {
+                Some(s) => super::pty::session_worktree(s).await,
+                None => None,
+            };
             let cwd = cwd.to_owned();
             crate::offload::blocking(move || {
                 let db = open_desktop_db()?;
-                worktree_containing(&db, FsPath::new(&cwd)).ok_or_else(|| {
+                if let Some(id) = worktree_containing(&db, FsPath::new(&cwd)) {
+                    return Ok(id);
+                }
+                let contains = |id: i64| {
+                    let Ok(Some(wt)) = db.get_worktree(id) else {
+                        return false;
+                    };
+                    match (std::fs::canonicalize(&wt.path), std::fs::canonicalize(&cwd)) {
+                        (Ok(root), Ok(here)) => here.starts_with(root),
+                        _ => false,
+                    }
+                };
+                from_session.filter(|id| contains(*id)).ok_or_else(|| {
                     refused(format!(
                         "{cwd} is not inside a worktree Veld knows — run this from a \
                          checkout of a project Veld has imported"
