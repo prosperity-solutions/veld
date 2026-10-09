@@ -12,14 +12,15 @@
 //! # Exit status
 //!
 //! - `0` — the worktree exists (and, with a prompt, its agent pane is waiting).
-//! - `1` — the request failed and nothing was created: the branch exists, the
-//!   daemon is not running, the prompt is too long.
+//! - `1` — the request was refused, so nothing was created: the branch exists,
+//!   the daemon is not running, the prompt is too long.
 //! - `2` — usage: bad flags, or the prompt could not be read.
 //! - `3` — not inside a worktree Veld knows, so there is no project to branch.
 //! - `4` — no group by that name in this project.
 //! - `5` — the agent named is not one this project declares, or it declares none.
-//! - `6` — the answer did not arrive, but the worktree may well be on its way:
-//!   check the rail, do not run it again.
+//! - `6` — the worktree may exist without everything it was asked for: no answer
+//!   arrived in time, or the hand-off failed partway. Check the rail, do not run
+//!   it again.
 
 use std::io::Read as _;
 
@@ -36,9 +37,9 @@ pub enum WorktreeCommand {
     /// with the prompt as its first message; the human takes it from there.
     /// Nothing reports back to the caller.
     ///
-    /// Exit status: 0 created, 1 failed (nothing created), 2 usage, 3 not inside a
-    /// worktree Veld knows, 4 no such group, 5 no such agent pane, 6 no answer yet —
-    /// it may still be created, so check the rail rather than retrying.
+    /// Exit status: 0 created, 1 refused (nothing created), 2 usage, 3 not inside a
+    /// worktree Veld knows, 4 no such group, 5 no such agent pane, 6 it may exist
+    /// without everything asked for — check the rail rather than retrying.
     #[command(group(clap::ArgGroup::new("first").args(["prompt", "prompt_file"]).multiple(false)))]
     New {
         /// The branch to create.
@@ -68,8 +69,9 @@ pub enum WorktreeCommand {
         #[arg(long)]
         from_here: bool,
 
-        /// File it into this existing group instead of "Waiting for you". See
-        /// `veld worktree groups` for the names.
+        /// File it into this existing group instead of "Waiting for you" (or, with
+        /// no prompt, instead of the ungrouped section). See `veld worktree groups`
+        /// for the names.
         #[arg(long, visible_alias = "lane", value_name = "NAME")]
         group: Option<String>,
 
@@ -232,7 +234,7 @@ fn exit_for(code: Option<&str>) -> i32 {
         Some("not_in_worktree") => 3,
         Some("unknown_group") => 4,
         Some("no_agent" | "unknown_agent") => 5,
-        Some(NO_ANSWER) => 6,
+        Some(NO_ANSWER | "created_unrecorded") => 6,
         _ => 1,
     }
 }
@@ -413,6 +415,7 @@ mod tests {
         assert_eq!(exit_for(Some("unknown_agent")), 5);
         assert_eq!(exit_for(Some("unknown_group")), 4);
         assert_eq!(exit_for(Some(NO_ANSWER)), 6);
+        assert_eq!(exit_for(Some("created_unrecorded")), 6);
         assert_eq!(exit_for(Some("anything_else")), 1);
         assert_eq!(exit_for(None), 1);
     }

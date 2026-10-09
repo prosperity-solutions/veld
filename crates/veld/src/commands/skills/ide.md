@@ -202,8 +202,8 @@ which files, how to tell it is done.
 - `--group` files it into one of the human's existing groups instead of
   **Waiting for you** (`--lane` is the same flag). `veld worktree groups` lists
   them (`--json` for `{"project", "groups"}`); a name that is not one of them is
-  refused before anything is created (exit `4`). It still waits there, marked,
-  until they open it.
+  refused before anything is created (exit `4`). With a prompt it still waits
+  there, marked, until they open it.
 - `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
   human's usual agent for this project starts. An agent this project does not
   declare is refused before anything is created (exit `5`); if the new checkout
@@ -213,12 +213,12 @@ which files, how to tell it is done.
   `ide.worktreeName` names it from the prompt, if it declares one, else the
   branch does.
 
-Exit status: `0` created; `1` failed and nothing was created; `2` bad flags or
+Exit status: `0` created; `1` refused, so nothing was created; `2` bad flags or
 an unreadable prompt file; `3` not inside a worktree Veld knows; `4` no such
-group; `5` no such agent pane; **`6` no answer yet** — a large checkout can take
-longer than the command waits, and the worktree is most likely still being
-made, so check the rail and **do not run it again** (the retry would collide
-with its branch). `--json` prints `{"id", "path", "branch", "alias", "name",
+group; `5` no such agent pane; **`6` it may exist without everything you
+asked for** — a large checkout can take longer than the command waits, or the
+hand-off failed partway — so check the rail and **do not run it again** (the
+retry would collide with its branch). `--json` prints `{"id", "path", "branch", "alias", "name",
 "waiting", "agent"}` on stdout, where `waiting` says an agent is waiting to start
 and `agent` is the pane you named or `null` for the human's usual one.
 

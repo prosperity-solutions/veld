@@ -118,6 +118,23 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Every pending hand-off in a repo, by worktree id, as `(session_id, pane)` —
+    /// [`Self::handoff_session`] for a whole listing in one query.
+    pub fn handoff_sessions(
+        &self,
+        repo_root: &std::path::Path,
+    ) -> Result<std::collections::HashMap<i64, (String, String)>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(
+            "SELECT h.worktree_id, h.session_id, h.pane FROM worktree_handoffs h
+             JOIN worktrees w ON w.id = h.worktree_id WHERE w.repo_root = ?1",
+        )?;
+        let rows = stmt.query_map(params![repo_root.to_string_lossy()], |r| {
+            Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Retire a hand-off because its session has been spawned. Returns whether
     /// there was one for exactly that worktree and session.
     ///
@@ -183,6 +200,19 @@ mod tests {
         assert!(db.finish_handoff(wt, "sess-1").unwrap());
         assert_eq!(db.handoff(wt).unwrap(), None);
         assert!(!db.finish_handoff(wt, "sess-1").unwrap());
+    }
+
+    #[test]
+    fn a_listing_reads_its_repos_handoffs_in_one_go() {
+        let (_dir, db) = test_db();
+        let a = seed_worktree(&db, "/r", "/r/_wt/a");
+        let _quiet = seed_worktree(&db, "/r", "/r/_wt/b");
+        let other = seed_worktree(&db, "/s", "/s/_wt/c");
+        db.put_handoff(a, "sess-a", "claude", "p").unwrap();
+        db.put_handoff(other, "sess-c", "", "p").unwrap();
+        let got = db.handoff_sessions(std::path::Path::new("/r")).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[&a], ("sess-a".to_owned(), "claude".to_owned()));
     }
 
     /// Declared twice, here and as `HANDOFF_LANE` in the UI's `model.ts`, with
