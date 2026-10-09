@@ -3,7 +3,7 @@
 //!
 //! `veld worktree new --prompt` is how a coding agent branches a task off into a
 //! checkout of its own: the daemon creates the worktree, files it into the
-//! rail's "From agents" section ([`HANDOFF_LANE`]), and records a [`Handoff`]. The
+//! rail's "Waiting for you" section ([`HANDOFF_LANE`]), and records a [`Handoff`]. The
 //! first window to show that worktree starts the agent pane under the session id
 //! recorded here with the prompt as its first message, and from then on the
 //! human drives it. Nothing reports back to the agent that handed it off.
@@ -15,7 +15,7 @@ use rusqlite::{OptionalExtension as _, params};
 
 use super::{Db, DbError, now_str};
 
-/// The `worktrees.lane` value of the rail's "From agents" section.
+/// The `worktrees.lane` value of the rail's "Waiting for you" section.
 ///
 /// Not a lane: there is no row for it in `lanes`, so it cannot be renamed,
 /// deleted, reordered or dropped into — `patch_worktree` accepts only lanes that
@@ -131,7 +131,7 @@ impl Db {
         Ok(n > 0)
     }
 
-    /// File a worktree into the rail's "From agents" section.
+    /// File a worktree into the rail's "Waiting for you" section.
     ///
     /// Written directly rather than through `patch_worktree`, which accepts only
     /// lanes that exist in `lanes` — the property that keeps a user from filing a
