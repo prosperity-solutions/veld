@@ -1273,10 +1273,12 @@ pub fn agent_context(cli: &str) -> String {
         "You are running inside a Veld IDE terminal. To show the human a file (markdown, CSV, \
          code) or a web page next to this terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
-         not for every file you touch. When you come across work that is separate from \
-         the task at hand and deserves its own branch, offer to hand it off instead of doing \
-         it or noting it for later: once the human agrees, `{cli} worktree new` creates a \
-         worktree where an agent starts on a prompt you write, for them to take over. \
+         not for every file you touch. Veld can also hand work to the human as a new \
+         worktree: whenever you notice something outside the current task that deserves its \
+         own branch (a bug, an outdated doc, a follow-up) and would otherwise only mention \
+         it, end your reply by offering, in one short question, to hand it off as a new \
+         worktree. Only once they agree, run `{cli} worktree new` (see its \
+         `--help`): it creates a worktree where an agent starts on a prompt you write. \
          Details: `{cli} skills ide`."
     )
 }
