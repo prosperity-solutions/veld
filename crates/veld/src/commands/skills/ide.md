@@ -163,14 +163,16 @@ human may already have open:
 
 ## Handing a task to the human in a new worktree (`veld worktree new`)
 
-When you come across work that is separate from the task at hand and deserves
-its own branch — a bug you noticed on the way, a refactor the change made
-obvious, the second half of a plan — do not quietly do it, do not leave it as a
-note or an issue for somebody to pick up later, and do not start a sub-agent in a
-checkout nobody can see. **Offer to hand it off**: say what the work is and that
-you can put it in a worktree of its own for them. Most people do not know Veld
-can do this, so the offer is worth making — once per piece of work, not on every
-turn. When they agree, or ask for it themselves:
+When your reply points out something outside the current task that somebody
+would have to fix later — a bug you noticed on the way, an outdated or missing
+doc, a refactor the change made obvious, the second half of a plan — do not
+quietly do it, do not leave it as a note or an issue for somebody to pick up
+later, and do not start a sub-agent in a checkout nobody can see. **Finish that
+reply with one short question asking whether to hand it off** as a worktree of
+its own — even when they told you to leave it alone, because leaving it is their
+call. Most people do not know Veld can do this, so the offer is worth making —
+once per piece of work, not on every turn. When they agree, or ask for it
+themselves:
 
 ```sh
 veld worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
