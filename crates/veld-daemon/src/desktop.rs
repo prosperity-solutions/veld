@@ -1832,6 +1832,27 @@ struct CapturedWork {
 /// checkout. (That race is not merely awkward to test: a file being rewritten
 /// non-atomically makes `add` fail outright with `short read while indexing`,
 /// so a busy source can cost the create a 422 rather than a drift flag.)
+/// Copy a git index **with its modification time**.
+///
+/// Git trusts an entry's cached stat only while the entry is older than the
+/// index file itself; an entry written in the same timestamp tick as the index
+/// is "racily clean" and gets its content compared instead. A plain copy gives
+/// the index a fresh mtime, which makes every such entry look safely older — so
+/// a file edited to the same size within one tick of the last index write read
+/// as unchanged to `add -A`, and its old content was captured. **Linux only**:
+/// `std::fs::copy` keeps the mtime on macOS (`fcopyfile`) but not on Linux
+/// (`copy_file_range`), which is why it surfaced as the occasional Linux CI
+/// failure of
+/// `drift_is_detected_when_an_already_modified_file_changes_under_the_capture`.
+fn copy_index(from: &FsPath, to: &FsPath) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    let modified = std::fs::metadata(from)?.modified()?;
+    std::fs::File::options()
+        .write(true)
+        .open(to)?
+        .set_modified(modified)
+}
+
 async fn stage_everything(src: &FsPath, index: &FsPath) -> Result<String, String> {
     git_with_index(src, index, &["add", "-A", "--"]).await?;
     git_with_index(src, index, &["write-tree"]).await
@@ -1910,8 +1931,7 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     // rather than proceed against an empty index, whose `write-tree` is the
     // empty tree and whose `read-tree -u --reset` would empty the new checkout.
     for dest in [&staged_index, &full_index] {
-        std::fs::copy(&index, dest)
-            .map_err(|e| format!("failed to read {}: {e}", index.display()))?;
+        copy_index(&index, dest).map_err(|e| format!("failed to read {}: {e}", index.display()))?;
     }
 
     let staged_tree = git_with_index(src, &staged_index, &["write-tree"]).await?;
@@ -7275,6 +7295,61 @@ mod tests {
     /// would be flaky in both directions, and a non-atomic rewrite makes `git
     /// add` fail with `short read while indexing` instead of producing a
     /// different tree, so the race tests something other than the comparison.
+    /// The racy-clean case [`copy_index`] exists for, made deterministic: a file
+    /// rewritten to the same size with the same mtime as the index, with ctime
+    /// out of the comparison (`core.trustctime=false`, which some users set). A
+    /// plain `fs::copy` gives the scratch index a fresh mtime on Linux, git then
+    /// trusts the stale stat, and the capture keeps the committed content instead
+    /// of the edit. (On macOS the plain copy already keeps the mtime, so there this
+    /// passes either way; Linux CI is where it guards.)
+    #[tokio::test]
+    async fn a_same_size_edit_in_the_index_tick_is_captured() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        let scratch = tempfile::TempDir::new().unwrap();
+        let index = scratch.path().join("full.index");
+
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        run_git(root, &["config", "core.trustctime", "false"]).await;
+        let file = root.join("f.txt");
+        // Backdated before it is committed, so the commit's index records it as
+        // clean rather than smudging it for being written in the same tick —
+        // which would make git re-hash it anyway and hide what this pins.
+        let tick = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let pin = |path: &std::path::Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(tick)
+                .unwrap();
+        };
+        std::fs::write(&file, "one").unwrap();
+        pin(&file);
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Then the same-size edit, in the same tick as the index: racily clean.
+        std::fs::write(&file, "two").unwrap();
+        pin(&file);
+        let git_dir = PathBuf::from(
+            git(root, &["rev-parse", "--absolute-git-dir"])
+                .await
+                .unwrap(),
+        );
+        pin(&git_dir.join("index"));
+
+        copy_index(&git_dir.join("index"), &index).unwrap();
+        let tree = stage_everything(root, &index).await.unwrap();
+        let captured = git(root, &["rev-parse", &format!("{tree}:f.txt")])
+            .await
+            .unwrap();
+        let edited = git(root, &["hash-object", "f.txt"]).await.unwrap();
+        assert_eq!(captured, edited, "the edit, not the committed content");
+    }
+
     #[tokio::test]
     async fn drift_is_detected_when_an_already_modified_file_changes_under_the_capture() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -7300,7 +7375,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        std::fs::copy(git_dir.join("index"), &index).unwrap();
+        copy_index(&git_dir.join("index"), &index).unwrap();
         let index = FsPath::new(&index);
 
         let first = stage_everything(root, index).await.unwrap();
