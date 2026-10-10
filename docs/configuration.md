@@ -2214,7 +2214,9 @@ is what marks a worktree in the rail; `terminal.agentIntegration`
 (*…Notice when a coding agent is waiting for you*) wraps `claude`/`codex`/`pi` so
 their lifecycle hooks report the same way; and `terminal.agentContext` (*…Tell
 coding agents how to show you files*) has the same wrapper append a few static
-lines to the agent's system prompt saying that `veld ide open` exists. All three live under *Activity* alongside
+lines to the agent's system prompt saying that `veld ide open` exists and that
+separate work it comes across can be offered to you as a hand-off (`veld worktree
+new`). All three live under *Activity* alongside
 `activity.showWorking`, the four `activity.notify*` rows that decide which of
 those events raise a system notification, and the *Focus mode* block that can
 silence that notification (plus the terminal bell) on demand. **All of these switches are independent** —

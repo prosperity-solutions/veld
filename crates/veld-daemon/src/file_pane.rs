@@ -480,7 +480,7 @@ struct OpenRequest {
 
 /// An error with a machine-readable `code` beside the sentence, so the CLI can
 /// pick its exit status without parsing English.
-fn coded(status: StatusCode, code: &str, msg: impl Into<String>) -> ApiError {
+pub(super) fn coded(status: StatusCode, code: &str, msg: impl Into<String>) -> ApiError {
     (
         status,
         Json(serde_json::json!({ "error": msg.into(), "code": code })),
@@ -761,7 +761,7 @@ fn not_text(bytes: &[u8]) -> ApiError {
 /// Both spellings of the directory are tried — as given and canonical — because a
 /// worktree is stored as it was registered, and on macOS `/tmp` and
 /// `/private/tmp` are one directory with two names.
-fn worktree_containing(db: &Db, cwd: &Path) -> Option<i64> {
+pub(super) fn worktree_containing(db: &Db, cwd: &Path) -> Option<i64> {
     if !cwd.is_absolute() {
         return None;
     }

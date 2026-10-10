@@ -1233,7 +1233,9 @@ impl SettingKey {
                 "Tell coding agents how to show you files",
                 "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
                  in a Veld terminal: that `veld ide open` puts a file or a page next to that \
-                 terminal. Nothing of yours is edited, and the text is the same every time. \
+                 terminal, and that separate work they come across can be offered to you as a \
+                 new worktree (`veld worktree new`). Nothing of yours is edited, and the text \
+                 is the same every time. \
                  Independent of the row above. Takes effect for new agents.",
                 Activity,
                 NOTICING,

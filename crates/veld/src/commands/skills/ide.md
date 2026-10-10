@@ -161,6 +161,73 @@ human may already have open:
   untracked ones. This is the human's cheap review surface; it is why you do not
   need to open every file you edited.
 
+## Handing a task to the human in a new worktree (`veld worktree new`)
+
+When your reply points out something outside the current task that somebody
+would have to fix later — a bug you noticed on the way, an outdated or missing
+doc, a refactor the change made obvious, the second half of a plan — do not
+quietly do it, do not leave it as a note or an issue for somebody to pick up
+later, and do not start a sub-agent in a checkout nobody can see. **Finish that
+reply with one short question asking whether to hand it off** as a worktree of
+its own — even when they told you to leave it alone, because leaving it is their
+call. Most people do not know Veld can do this, so the offer is worth making —
+once per piece of work, not on every turn. When they agree, or ask for it
+themselves:
+
+```sh
+veld worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
+veld worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
+veld worktree groups                       # the groups you can file into
+veld worktree new --branch spike/cache --group Experiments --from-here --prompt-file - < plan.md --json
+```
+
+Veld creates the worktree in **the project your working directory is in** — run
+it from the checkout you mean; a directory outside any project Veld knows is
+refused (exit `3`), not guessed at. With a prompt it lands in the rail's
+**Waiting for you** section, marked as not started yet. The first time the human
+opens it, an agent pane starts there with your prompt as its first message, and
+from then on it is theirs. **Nothing comes back to you** — no status, no result.
+Write the prompt for an agent that has none of your context: what to do, why,
+which files, how to tell it is done.
+
+- `--branch` is the new branch, and must not exist yet (exit `1` if it does). It
+  is cut where a new branch normally starts (`git.createFrom`), or from this
+  checkout's `HEAD` with `--from-here` — which brings your commits, not your
+  uncommitted changes.
+- `--prompt` or `--prompt-file` (`-` for stdin) is the agent's first message. A
+  long or structured one belongs in a file; the limit is 64 KiB. Without a prompt
+  you get a plain worktree, filed with the user's other new worktrees, and no
+  agent.
+- The prompt is sent **as you wrote it**, the moment the human opens the
+  worktree. Write it the way you would want an instruction you did not review
+  to read.
+- `--group` files it into one of the human's existing groups instead of
+  **Waiting for you** (`--lane` is the same flag). `veld worktree groups` lists
+  them (`--json` for `{"project", "groups"}`); a name that is not one of them is
+  refused before anything is created (exit `4`). With a prompt it still waits
+  there, marked, until they open it.
+- `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
+  human's usual agent for this project starts. An agent this project does not
+  declare is refused before anything is created (exit `5`); if the new checkout
+  turns out not to declare it (a branch cut from `origin` without it), the
+  human's usual agent starts instead and they are told.
+- `--name` is what the rail shows. Leave it out and the project's
+  `ide.worktreeName` names it from the prompt, if it declares one, else the
+  branch does.
+
+Exit status: `0` created; `1` refused, so nothing was created; `2` bad flags or
+an unreadable prompt file; `3` not inside a worktree Veld knows; `4` no such
+group; `5` no such agent pane; **`6` it may exist without everything you
+asked for** — a large checkout can take longer than the command waits, or the
+hand-off failed partway — so check the rail and **do not run it again** (the
+retry would collide with its branch). `--json` prints `{"id", "path", "branch", "alias", "name",
+"waiting", "agent"}` on stdout, where `waiting` says an agent is waiting to start
+and `agent` is the pane you named or `null` for the human's usual one.
+
+Hand off one task per worktree, and only when the human would want it as its own
+branch. Each one is a checkout on their disk and a row in their rail until they
+deal with it.
+
 ## Why you may already know this
 
 Veld tells Claude Code, Codex CLI and Pi about this command when they start in a

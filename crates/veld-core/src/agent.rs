@@ -1273,7 +1273,13 @@ pub fn agent_context(cli: &str) -> String {
         "You are running inside a Veld IDE terminal. To show the human a file (markdown, CSV, \
          code) or a web page next to this terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
-         not for every file you touch. Details: `{cli} skills ide`."
+         not for every file you touch. Veld can also hand work to the human as a new \
+         worktree. Whenever your reply points out something outside the current task that \
+         someone would have to fix later (a bug, an outdated or missing doc, a follow-up), \
+         finish that reply with one short question asking whether to hand it off as a new \
+         worktree. Ask even when they told you to leave it alone; leaving it is their call. \
+         Only once they agree, run `{cli} worktree new` (see its `--help`): it creates a \
+         worktree where an agent starts on a prompt you write. Details: `{cli} skills ide`."
     )
 }
 
@@ -2064,6 +2070,7 @@ mod tests {
         assert!(text.contains(&format!("`{} ide open <path-or-url>", dev.display())));
         assert!(text.contains(&format!("`{} skills ide`", dev.display())));
         assert!(text.contains("--quiet") && text.contains("--notify"));
+        assert!(text.contains(&format!("`{} worktree new`", dev.display())));
         assert!(
             !text.contains("`veld "),
             "no bare word left for a dev instance: {text}"

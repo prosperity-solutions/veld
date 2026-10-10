@@ -54,6 +54,17 @@ pub fn routes() -> Router {
             patch(patch_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
+        // What `veld worktree new` calls: a checkout an agent hands to a human,
+        // optionally with an agent pane waiting to start on a prompt. Its own
+        // path rather than a field on `POST /api/worktrees`, because it names the
+        // repository by where the caller *is* — a terminal session or a working
+        // directory — instead of by a root the caller would have to know.
+        .route("/api/handoffs", post(create_handoff))
+        .route("/api/handoffs/groups", get(handoff_groups))
+        .route(
+            "/api/worktrees/{id}/handoff",
+            get(get_handoff).delete(delete_handoff),
+        )
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
         .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
         .route("/api/worktrees/{id}/status", get(worktree_status))
@@ -1821,6 +1832,27 @@ struct CapturedWork {
 /// checkout. (That race is not merely awkward to test: a file being rewritten
 /// non-atomically makes `add` fail outright with `short read while indexing`,
 /// so a busy source can cost the create a 422 rather than a drift flag.)
+/// Copy a git index **with its modification time**.
+///
+/// Git trusts an entry's cached stat only while the entry is older than the
+/// index file itself; an entry written in the same timestamp tick as the index
+/// is "racily clean" and gets its content compared instead. A plain copy gives
+/// the index a fresh mtime, which makes every such entry look safely older — so
+/// a file edited to the same size within one tick of the last index write read
+/// as unchanged to `add -A`, and its old content was captured. **Linux only**:
+/// `std::fs::copy` keeps the mtime on macOS (`fcopyfile`) but not on Linux
+/// (`copy_file_range`), which is why it surfaced as the occasional Linux CI
+/// failure of
+/// `drift_is_detected_when_an_already_modified_file_changes_under_the_capture`.
+fn copy_index(from: &FsPath, to: &FsPath) -> std::io::Result<()> {
+    std::fs::copy(from, to)?;
+    let modified = std::fs::metadata(from)?.modified()?;
+    std::fs::File::options()
+        .write(true)
+        .open(to)?
+        .set_modified(modified)
+}
+
 async fn stage_everything(src: &FsPath, index: &FsPath) -> Result<String, String> {
     git_with_index(src, index, &["add", "-A", "--"]).await?;
     git_with_index(src, index, &["write-tree"]).await
@@ -1899,8 +1931,7 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     // rather than proceed against an empty index, whose `write-tree` is the
     // empty tree and whose `read-tree -u --reset` would empty the new checkout.
     for dest in [&staged_index, &full_index] {
-        std::fs::copy(&index, dest)
-            .map_err(|e| format!("failed to read {}: {e}", index.display()))?;
+        copy_index(&index, dest).map_err(|e| format!("failed to read {}: {e}", index.display()))?;
     }
 
     let staged_tree = git_with_index(src, &staged_index, &["write-tree"]).await?;
@@ -2323,6 +2354,15 @@ struct RepoGitStatus {
     latest_commit: Option<i64>,
 }
 
+/// A pending agent pane, as the rail sees it — see [`WorktreeView::handoff`].
+#[derive(Serialize)]
+struct HandoffView {
+    /// The session id the pane will run under; the client's tab id for it.
+    session_id: String,
+    /// The declared pane to run, or `""` for the user's usual agent.
+    pane: String,
+}
+
 #[derive(Serialize)]
 struct WorktreeView {
     // **Never name a field here `carry_over`.** `CreatedWorktreeView` flattens
@@ -2342,6 +2382,14 @@ struct WorktreeView {
     /// worktree that has merely been *queued* for removal still reports
     /// `trashed_at` to let the user undo it.
     deleting: bool,
+    /// The agent pane a hand-off is waiting to start here (`veld worktree new
+    /// --prompt`), or absent when there is none.
+    ///
+    /// The prompt is deliberately not part of it: every rail poll carries this
+    /// view, and only the one window that starts the pane needs the text — it
+    /// reads it from `GET /api/worktrees/{id}/handoff`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff: Option<HandoffView>,
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
@@ -2722,7 +2770,7 @@ fn extensions_view_for(declared_cfg: Option<&veld_core::config::VeldConfig>) -> 
 }
 
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
-    worktree_view_with(db, wt, &mut DeclaredConfigs::new())
+    worktree_view_with(db, wt, &mut DeclaredConfigs::new(), None)
 }
 
 /// Declaring roots' configs already looked up in this listing, by root path.
@@ -2735,7 +2783,14 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
 type DeclaredConfigs = std::collections::HashMap<String, Option<veld_core::config::VeldConfig>>;
 
 /// [`worktree_view`], sharing declaring-root configs across one listing.
-fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfigs) -> WorktreeView {
+/// `handoffs` is the listing's one read of its repo's pending hand-offs, by
+/// worktree id; `None` for a single view, which looks its own up.
+fn worktree_view_with(
+    db: &Db,
+    wt: WorktreeRecord,
+    declared: &mut DeclaredConfigs,
+    handoffs: Option<&std::collections::HashMap<i64, (String, String)>>,
+) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
     let cfg = config_path
@@ -2901,6 +2956,13 @@ fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfig
     // `wt` is moved into the view below, so the guard read happens here — before
     // the move — rather than in the literal, where `wt.id` would not resolve.
     let deleting = super::worktree_trash::now_deleting(wt.id);
+    // Unreadable reads as "none": the rail then shows the worktree without the
+    // pane, which a later poll corrects, and a listing must not fail over it.
+    let handoff = match handoffs {
+        Some(all) => all.get(&wt.id).cloned(),
+        None => db.handoff_session(wt.id).ok().flatten(),
+    }
+    .map(|(session_id, pane)| HandoffView { session_id, pane });
     // Read before `wt` is moved into the view below, the same reason `deleting` is.
     let git = git_signals_for(wt.id, &wt.path);
     let machine_vars = cfg.as_ref().map(|c| {
@@ -2913,6 +2975,7 @@ fn worktree_view_with(db: &Db, wt: WorktreeRecord, declared: &mut DeclaredConfig
     WorktreeView {
         worktree: wt,
         deleting,
+        handoff,
         has_veld_config,
         presets,
         nodes,
@@ -3059,11 +3122,17 @@ fn repo_view_blocking(
     git: Option<RepoGitStatus>,
 ) -> Result<RepoView, ApiError> {
     let mut declared = DeclaredConfigs::new();
+    // One read for the whole repo rather than one per row: this runs on every
+    // rail poll, and almost no row has a hand-off. Unreadable reads as none.
+    let handoffs = db
+        .handoff_sessions(FsPath::new(&repo.root))
+        .unwrap_or_default();
     let mut worktrees: Vec<WorktreeView> = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
-        .map(|wt| worktree_view_with(db, wt, &mut declared))
+        .filter(|wt| !handoff_in_flight(&wt.repo_root, &wt.branch))
+        .map(|wt| worktree_view_with(db, wt, &mut declared, Some(&handoffs)))
         .collect();
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
@@ -4043,6 +4112,17 @@ impl CreateWorktreeBody {
 async fn create_worktree(
     Json(body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    create_checkout(body).await.map(Json)
+}
+
+/// Create a checkout as `POST /api/worktrees` describes it — shared with
+/// [`create_handoff`], which arrives at the same request by another route.
+///
+/// The checkout is listed by the rail's poll as soon as git registers it, which is
+/// well before this returns. A caller that files it somewhere afterwards (as
+/// [`create_handoff`] does) must hold a [`HandoffInFlight`] across the call, or the
+/// row shows up ungrouped for the length of the checkout first.
+async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView, ApiError> {
     validate_branch(&body.branch)?;
     let source = body.create_from();
     // A remote ref is passed to git as a start point, so it gets the same
@@ -4564,10 +4644,527 @@ async fn create_worktree(
             );
         }
     }
-    Ok(Json(CreatedWorktreeView {
+    Ok(CreatedWorktreeView {
         worktree: view,
         carry_over,
-    }))
+    })
+}
+
+/// `POST /api/handoffs` — what `veld worktree new` sends.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffRequest {
+    /// The caller's terminal session (`$VELD_PTY_SESSION`), naming the checkout it
+    /// is handing off *from*. Used only when no `cwd` is sent.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// The caller's working directory, for a caller outside a Veld terminal.
+    #[serde(default)]
+    cwd: Option<String>,
+    /// The branch to create.
+    branch: String,
+    /// Cut the branch from the calling checkout's `HEAD` instead of from where a
+    /// new branch normally starts (`git.createFrom`).
+    #[serde(default)]
+    from_here: bool,
+    /// The name the rail shows. Absent: `ide.worktreeName` names it from the
+    /// prompt when the project declares that, else the alias does.
+    #[serde(default)]
+    name: Option<String>,
+    /// One of the user's groups (a rail lane, by name) to file it under instead
+    /// of the "Waiting for you" section.
+    #[serde(default)]
+    lane: Option<String>,
+    /// The declared agent pane to start. Absent: the user's usual one.
+    #[serde(default)]
+    agent: Option<String>,
+    /// The agent's first message. Absent: a plain checkout, with no pane waiting
+    /// and filed like any other new worktree.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+/// `POST /api/handoffs` — create a checkout for a human to take over, and leave
+/// an agent pane waiting to start in it on a prompt.
+///
+/// The repository is the one the caller is in, resolved from its terminal session
+/// or working directory the way `veld ide open` resolves a worktree. The checkout
+/// is created exactly as `POST /api/worktrees` creates one; with a prompt it then
+/// gets a [`veld_core::db::Handoff`] and lands in the rail's "Waiting for you"
+/// section, unless the caller named a lane. The pane itself is started by the
+/// first window that shows the worktree — no window may be open now, and a
+/// terminal belongs to the window that shows it.
+///
+/// **The agent, the group and an existing branch are refused before anything is
+/// created or hidden**: the agent is checked against the calling checkout's own
+/// declared panes, so a typo costs nothing rather than leaving a checkout with no
+/// way to start its prompt.
+async fn create_handoff(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<HandoffRequest>,
+) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    use super::file_pane::{coded, require_local_host};
+    require_local_host(&headers)?;
+
+    let prompt = body
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty());
+    if let Some(prompt) = prompt {
+        if prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES {
+            return Err(err(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!(
+                    "the prompt is longer than {} KiB — put the detail in a file in the \
+                     repository and point the prompt at it",
+                    veld_core::agent::MAX_LAUNCH_PROMPT_BYTES / 1024
+                ),
+            ));
+        }
+        if prompt.contains('\0') {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "the prompt contains a NUL byte",
+            ));
+        }
+    }
+    // `""` is the stored spelling of "the user's usual agent", so it reads the same
+    // way here — and with no prompt there is no agent to start, named or not, so
+    // a script passing an empty `$PROMPT` with `--agent` gets a plain create.
+    let agent = body
+        .agent
+        .as_deref()
+        .filter(|a| !a.is_empty() && prompt.is_some());
+
+    let source = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
+    let source = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let id = source;
+        let wt = db
+            .get_worktree(id)
+            .map_err(db_err)?
+            .ok_or_else(|| coded(StatusCode::NOT_FOUND, "not_in_worktree", "no such worktree"))?;
+        // The calling checkout's declared panes: the config the agent was written
+        // against, and the one a fresh checkout of this branch will most likely
+        // carry. The window re-checks against the new checkout's own before it
+        // starts anything.
+        let panes = worktree_view(&db, wt.clone()).ide.panes;
+        Ok::<_, ApiError>((wt, panes))
+    })
+    .await?;
+    let (source, panes) = source;
+
+    if prompt.is_some() {
+        check_handoff_agent(&panes, agent)?;
+    }
+    if let Some(group) = body.lane.as_deref().filter(|l| !l.is_empty()) {
+        let root = source.repo_root.clone();
+        let groups = crate::offload::blocking(move || user_groups(&root)).await?;
+        if !groups.iter().any(|g| g == group) {
+            return Err(coded(
+                StatusCode::BAD_REQUEST,
+                "unknown_group",
+                if groups.is_empty() {
+                    format!("no group called \"{group}\" — this project has none yet")
+                } else {
+                    format!(
+                        "no group called \"{group}\" — this project has: {}",
+                        groups.join(", ")
+                    )
+                },
+            ));
+        }
+    }
+    validate_branch(&body.branch)?;
+    // Refused here, before anything is hidden or fetched: the create would fail
+    // on it anyway, but only after `git fetch`, and in the meantime the in-flight
+    // guard below would hide the checkout that already has this branch — `main`
+    // itself, for `--branch main`.
+    if git(
+        FsPath::new(&source.repo_root),
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{}", body.branch),
+        ],
+    )
+    .await
+    .is_ok()
+    {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "branch_exists",
+            format!(
+                "a branch called \"{}\" already exists in this project — pick another name",
+                body.branch
+            ),
+        ));
+    }
+
+    let source_path = source.path.clone();
+    let create = CreateWorktreeBody {
+        repo_root: source.repo_root.clone(),
+        branch: body.branch.clone(),
+        create_branch: true,
+        source: body.from_here.then_some(CreateFrom::Worktree {
+            from_path: source_path,
+            carry_over: false,
+        }),
+        alias: None,
+        display_name: body.name.clone(),
+        lane: body.lane.clone(),
+        path: None,
+        // Named from the prompt only when nobody named it, and only by a project
+        // that declares a naming command — which `spawn_worktree_naming` checks.
+        name_prompt: body
+            .name
+            .is_none()
+            .then(|| prompt.map(str::to_owned))
+            .flatten(),
+        emoji: None,
+        marker_color: None,
+    };
+    let agent = agent.unwrap_or_default().to_owned();
+    let into_section = body.lane.as_deref().is_none_or(str::is_empty);
+    let prompt = prompt.map(str::to_owned);
+    // Every hand-off, not only one bound for "Waiting for you": one filed into a
+    // lane would otherwise sit ungrouped until the lane is written, too.
+    let hidden = HandoffInFlight::start(&source.repo_root, &body.branch);
+    // **Detached from the request.** A large checkout can outlast the caller's
+    // patience, and a handler future is dropped when its client disconnects —
+    // which would stop between `git worktree add` and recording the hand-off,
+    // leaving an unfiled checkout with no agent and a branch the retry then
+    // collides with. Spawned, the create finishes whoever is still listening.
+    tokio::spawn(async move {
+        let _hidden = hidden;
+        record_handoff(create, prompt, agent, into_section).await
+    })
+    .await
+    .map_err(|e| {
+        warn!("hand-off task failed: {e}");
+        coded(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "created_unrecorded",
+            "the hand-off failed partway — the worktree may exist without its agent; check \
+             the Veld rail before running this again",
+        )
+    })?
+    .map(Json)
+}
+
+/// The rest of [`create_handoff`]: create the checkout, then record its pending
+/// agent pane and file it.
+async fn record_handoff(
+    create: CreateWorktreeBody,
+    prompt: Option<String>,
+    agent: String,
+    into_section: bool,
+) -> Result<CreatedWorktreeView, ApiError> {
+    let (root, branch) = (create.repo_root.clone(), create.branch.clone());
+    let created = match create_checkout(create).await {
+        Ok(created) => created,
+        Err((status, mut body)) => {
+            // Some of `create_checkout`'s failures come after `git worktree add`,
+            // when the checkout already exists. Said so, because a caller told
+            // "refused" would retry into its own branch.
+            let exists = git(
+                FsPath::new(&root),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )
+            .await
+            .is_ok();
+            if exists && body.get("code").is_none() {
+                body["code"] = "created_unrecorded".into();
+            }
+            return Err((status, body));
+        }
+    };
+    let Some(prompt) = prompt else {
+        return Ok(created);
+    };
+
+    let worktree_id = created.worktree.worktree.id;
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let carry_over = created.carry_over;
+    let view = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let recorded = db
+            .put_handoff(worktree_id, &session_id, &agent, &prompt)
+            .and_then(|()| {
+                if into_section {
+                    db.file_into_handoffs(worktree_id)?;
+                }
+                Ok(())
+            });
+        if let Err(e) = recorded {
+            warn!("hand-off for worktree {worktree_id} not recorded: {e}");
+            return Err(super::file_pane::coded(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "created_unrecorded",
+                "the worktree was created, but its agent pane could not be recorded — \
+                 open it in Veld and start the agent by hand",
+            ));
+        }
+        let wt = db
+            .get_worktree(worktree_id)
+            .map_err(db_err)?
+            .ok_or_else(|| db_err("worktree vanished after the hand-off was recorded"))?;
+        Ok::<_, ApiError>(worktree_view(&db, wt))
+    })
+    .await?;
+    Ok(CreatedWorktreeView {
+        worktree: view,
+        carry_over,
+    })
+}
+
+/// The worktree a hand-off request comes from: the one containing `cwd`, or —
+/// only when no directory was sent — the one `session` runs in.
+///
+/// **A directory that matches nothing is refused, not passed over.** An agent
+/// that has `cd`'d into a repository Veld has not imported means that one, and
+/// quietly falling back to the project its terminal started in would create the
+/// branch somewhere it did not ask for.
+async fn resolve_caller(session: Option<&str>, cwd: Option<&str>) -> Result<i64, ApiError> {
+    use super::file_pane::{coded, worktree_containing};
+    let refused = |msg: String| coded(StatusCode::NOT_FOUND, "not_in_worktree", msg);
+    match (
+        cwd.filter(|c| !c.is_empty()),
+        session.filter(|s| !s.is_empty()),
+    ) {
+        (Some(cwd), session) => {
+            // The terminal's own worktree, but only as another spelling of the same
+            // place: a project imported through a symlink is stored under the link,
+            // while a shell reports the physical directory, so neither spelling of
+            // the cwd finds it. Accepted only when that worktree, resolved, contains
+            // the cwd — never as a stand-in for a directory somewhere else.
+            let from_session = match session {
+                Some(s) => super::pty::session_worktree(s).await,
+                None => None,
+            };
+            let cwd = cwd.to_owned();
+            crate::offload::blocking(move || {
+                let db = open_desktop_db()?;
+                if let Some(id) = worktree_containing(&db, FsPath::new(&cwd)) {
+                    return Ok(id);
+                }
+                let contains = |id: i64| {
+                    let Ok(Some(wt)) = db.get_worktree(id) else {
+                        return false;
+                    };
+                    match (std::fs::canonicalize(&wt.path), std::fs::canonicalize(&cwd)) {
+                        (Ok(root), Ok(here)) => here.starts_with(root),
+                        _ => false,
+                    }
+                };
+                from_session.filter(|id| contains(*id)).ok_or_else(|| {
+                    refused(format!(
+                        "{cwd} is not inside a worktree Veld knows — run this from a \
+                         checkout of a project Veld has imported"
+                    ))
+                })
+            })
+            .await
+        }
+        (None, Some(session)) => super::pty::session_worktree(session)
+            .await
+            .ok_or_else(|| refused("that terminal session is not one Veld has".to_owned())),
+        (None, None) => Err(refused(
+            "name where this comes from: a working directory or a terminal session".to_owned(),
+        )),
+    }
+}
+
+/// The user's own groups (rail lanes) in a project, in rail order — the reserved
+/// position rows left out, since nothing can be filed into those by name.
+fn user_groups(repo_root: &str) -> Result<Vec<String>, ApiError> {
+    let db = open_desktop_db()?;
+    Ok(db
+        .list_lanes(FsPath::new(repo_root))
+        .map_err(db_err)?
+        .into_iter()
+        .filter(|l| !veld_core::db::is_reserved_lane(&l.name))
+        .map(|l| l.name)
+        .collect())
+}
+
+#[derive(Deserialize)]
+struct GroupsQuery {
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+/// `GET /api/handoffs/groups?cwd=…` — the groups a hand-off from here can be filed
+/// into, for `veld worktree groups`. The project is resolved exactly as
+/// [`create_handoff`] resolves it, so the answer is about the project a create
+/// from the same place would land in.
+async fn handoff_groups(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<GroupsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let id = resolve_caller(q.session_id.as_deref(), q.cwd.as_deref()).await?;
+    let (project, groups) = crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let wt = db
+            .get_worktree(id)
+            .map_err(db_err)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
+        let groups = user_groups(&wt.repo_root)?;
+        Ok::<_, ApiError>((wt.repo_root, groups))
+    })
+    .await?;
+    Ok(Json(
+        serde_json::json!({ "project": project, "groups": groups }),
+    ))
+}
+
+/// Refuse a hand-off whose prompt has no agent to start in: the project declares
+/// none that can take a prompt, or `agent` names one it does not declare. The same
+/// predicate the UI's `paneTakesPrompt` applies — a terminal pane that is
+/// available, with an explicit `agent` answer, else whether it can resume. Checked against the *calling* checkout, before
+/// anything exists; the new checkout can still differ (a branch cut from
+/// `origin` without a pane the caller's branch added), and the window says so
+/// when it has to start another agent instead (`handoffAgent` in the UI).
+fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), ApiError> {
+    use super::file_pane::coded;
+    let agents: Vec<&str> = panes
+        .iter()
+        .filter(|p| p.kind == "terminal" && p.available && p.agent.unwrap_or(p.can_resume))
+        .map(|p| p.id.as_str())
+        .collect();
+    if agents.is_empty() {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "no_agent",
+            "this project declares no agent pane to start the prompt in — add one to \
+             ide.panes (see `veld skills ide-panes`), or leave the prompt out",
+        ));
+    }
+    match agent {
+        Some(agent) if !agents.contains(&agent) => Err(coded(
+            StatusCode::BAD_REQUEST,
+            "unknown_agent",
+            format!(
+                "no agent pane called \"{agent}\" — this project has: {}",
+                agents.join(", ")
+            ),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Hand-offs being created right now, as `(repo root, branch)`.
+///
+/// `git worktree add` registers the checkout with git long before it finishes
+/// writing the files, and the rail's poll lists whatever `git worktree list`
+/// reports — so without this a handed-off worktree appeared *ungrouped* for the
+/// length of the checkout, then jumped into "Waiting for you" once the hand-off was
+/// recorded. The listing leaves it out until it can appear where it belongs.
+/// Keyed on the branch rather than the path because the branch is known before
+/// anything is created, and a hand-off always creates its branch.
+///
+/// A count rather than a set: a retried `veld worktree new` for the same branch
+/// fails fast while the first is still checking out, and its guard must not
+/// un-hide the one that is still running.
+static HANDOFFS_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<(String, String), usize>>,
+> = std::sync::LazyLock::new(Default::default);
+
+fn handoff_in_flight(repo_root: &str, branch: &str) -> bool {
+    HANDOFFS_IN_FLIGHT
+        .lock()
+        .expect("hand-offs in flight poisoned")
+        .contains_key(&(repo_root.to_owned(), branch.to_owned()))
+}
+
+/// Holds a hand-off out of the rail until dropped — on success and on every
+/// early return alike, so a failed create can never leave a checkout hidden.
+struct HandoffInFlight((String, String));
+
+impl HandoffInFlight {
+    fn start(repo_root: &str, branch: &str) -> Self {
+        let key = (repo_root.to_owned(), branch.to_owned());
+        *HANDOFFS_IN_FLIGHT
+            .lock()
+            .expect("hand-offs in flight poisoned")
+            .entry(key.clone())
+            .or_default() += 1;
+        Self(key)
+    }
+}
+
+impl Drop for HandoffInFlight {
+    fn drop(&mut self) {
+        let mut in_flight = HANDOFFS_IN_FLIGHT
+            .lock()
+            .expect("hand-offs in flight poisoned");
+        if let Some(n) = in_flight.get_mut(&self.0) {
+            *n -= 1;
+            if *n == 0 {
+                in_flight.remove(&self.0);
+            }
+        }
+    }
+}
+
+/// `GET /api/worktrees/{id}/handoff` — the pending agent pane with its prompt, for
+/// the window about to start it. `404` when there is none.
+///
+/// Reading does not retire it; spawning the session does (`pty::finish_agent_handoff`),
+/// so a window that reads it and then reloads leaves it for the next one. A
+/// hand-off whose session is **already live** has been launched and only lost its
+/// retirement, so it is retired here and answered as gone — serving it would have
+/// the window type the prompt into the running agent a second time.
+/// Host-checked like every route that hands out text the user wrote: the prompt is
+/// whatever an agent chose to put in it.
+async fn get_handoff(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<i64>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let gone = || {
+        err(
+            StatusCode::NOT_FOUND,
+            "no agent pane is waiting in this worktree",
+        )
+    };
+    let handoff = crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
+        .await?
+        .ok_or_else(gone)?;
+    if super::pty::session_worktree(&handoff.session_id).await == Some(id) {
+        let session = handoff.session_id.clone();
+        crate::offload::blocking(move || {
+            open_desktop_db()?
+                .finish_handoff(id, &session)
+                .map_err(write_err)
+        })
+        .await?;
+        return Err(gone());
+    }
+    Ok(Json(serde_json::json!({
+        "session_id": handoff.session_id,
+        "pane": handoff.pane,
+        "prompt": handoff.prompt,
+    })))
+}
+
+/// `DELETE /api/worktrees/{id}/handoff` — give up on a pending agent pane: the
+/// window could not start it (the checkout declares no agent that takes a prompt)
+/// and has shown the user the prompt instead. `204` either way.
+async fn delete_handoff(Path(id): Path<i64>) -> Result<StatusCode, ApiError> {
+    crate::offload::blocking(move || open_desktop_db()?.drop_handoff(id).map_err(write_err))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Name a just-created worktree with `ide.worktreeName`, in the background.
@@ -5356,6 +5953,7 @@ mod tests {
         WorktreeView {
             worktree: wt_record(id, is_main),
             deleting: false,
+            handoff: None,
             has_veld_config: true,
             presets: None,
             nodes: Vec::new(),
@@ -5478,6 +6076,78 @@ mod tests {
             veld_core::ide::MAX_NEWS_ITEMS,
             "unioning every worktree's news must not bypass the endpoint's own cap"
         );
+    }
+
+    // -- hand-offs -----------------------------------------------------------
+
+    fn pane_view(id: &str, agent: Option<bool>, can_resume: bool, available: bool) -> PaneView {
+        PaneView {
+            id: id.to_owned(),
+            label: id.to_owned(),
+            description: None,
+            icon: None,
+            kind: "terminal",
+            available,
+            missing: Vec::new(),
+            can_resume,
+            has_sessions: false,
+            agent,
+            auto_resume: false,
+            close_on_exit: true,
+            fixed_label: false,
+        }
+    }
+
+    #[test]
+    fn a_handoff_agent_is_one_the_window_would_start() {
+        let panes = vec![
+            pane_view("claude", None, true, true),
+            pane_view("codex", Some(true), false, true),
+            pane_view("git-log", None, false, true),
+            pane_view("pi", Some(true), true, false),
+        ];
+        assert!(check_handoff_agent(&panes, None).is_ok());
+        assert!(check_handoff_agent(&panes, Some("claude")).is_ok());
+        assert!(check_handoff_agent(&panes, Some("codex")).is_ok());
+        for refused in ["git-log", "pi", "nope"] {
+            let (status, body) = check_handoff_agent(&panes, Some(refused)).unwrap_err();
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+            assert_eq!(body["code"], "unknown_agent", "{refused}");
+            assert!(
+                body["error"].as_str().unwrap().ends_with("claude, codex"),
+                "names what there is: {}",
+                body["error"]
+            );
+        }
+    }
+
+    #[test]
+    fn a_handoff_is_hidden_from_the_rail_only_while_it_is_being_created() {
+        let root = "/repo/hidden-while-created";
+        assert!(!handoff_in_flight(root, "fix/x"));
+        {
+            let _hidden = HandoffInFlight::start(root, "fix/x");
+            assert!(handoff_in_flight(root, "fix/x"));
+            assert!(!handoff_in_flight(root, "fix/y"), "only that branch");
+            assert!(!handoff_in_flight("/repo/other", "fix/x"), "only that repo");
+        }
+        assert!(!handoff_in_flight(root, "fix/x"), "dropped on every return");
+
+        // A retry that fails fast must not un-hide the create still running.
+        let running = HandoffInFlight::start(root, "fix/x");
+        drop(HandoffInFlight::start(root, "fix/x"));
+        assert!(handoff_in_flight(root, "fix/x"));
+        drop(running);
+        assert!(!handoff_in_flight(root, "fix/x"));
+    }
+
+    #[test]
+    fn a_project_with_no_agent_pane_cannot_take_a_prompt() {
+        let panes = vec![pane_view("git-log", None, false, true)];
+        let (_, body) = check_handoff_agent(&panes, None).unwrap_err();
+        assert_eq!(body["code"], "no_agent");
+        let (_, body) = check_handoff_agent(&[], Some("claude")).unwrap_err();
+        assert_eq!(body["code"], "no_agent");
     }
 
     // -- `worktree_view` extensions (`extensions.source`) --------------------
@@ -6625,6 +7295,61 @@ mod tests {
     /// would be flaky in both directions, and a non-atomic rewrite makes `git
     /// add` fail with `short read while indexing` instead of producing a
     /// different tree, so the race tests something other than the comparison.
+    /// The racy-clean case [`copy_index`] exists for, made deterministic: a file
+    /// rewritten to the same size with the same mtime as the index, with ctime
+    /// out of the comparison (`core.trustctime=false`, which some users set). A
+    /// plain `fs::copy` gives the scratch index a fresh mtime on Linux, git then
+    /// trusts the stale stat, and the capture keeps the committed content instead
+    /// of the edit. (On macOS the plain copy already keeps the mtime, so there this
+    /// passes either way; Linux CI is where it guards.)
+    #[tokio::test]
+    async fn a_same_size_edit_in_the_index_tick_is_captured() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = FsPath::new(dir.path());
+        let scratch = tempfile::TempDir::new().unwrap();
+        let index = scratch.path().join("full.index");
+
+        run_git(root, &["init", "-q"]).await;
+        run_git(root, &["config", "user.email", "t@t"]).await;
+        run_git(root, &["config", "user.name", "t"]).await;
+        run_git(root, &["config", "core.trustctime", "false"]).await;
+        let file = root.join("f.txt");
+        // Backdated before it is committed, so the commit's index records it as
+        // clean rather than smudging it for being written in the same tick —
+        // which would make git re-hash it anyway and hide what this pins.
+        let tick = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let pin = |path: &std::path::Path| {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(tick)
+                .unwrap();
+        };
+        std::fs::write(&file, "one").unwrap();
+        pin(&file);
+        run_git(root, &["add", "-A"]).await;
+        run_git(root, &["commit", "-qm", "init"]).await;
+
+        // Then the same-size edit, in the same tick as the index: racily clean.
+        std::fs::write(&file, "two").unwrap();
+        pin(&file);
+        let git_dir = PathBuf::from(
+            git(root, &["rev-parse", "--absolute-git-dir"])
+                .await
+                .unwrap(),
+        );
+        pin(&git_dir.join("index"));
+
+        copy_index(&git_dir.join("index"), &index).unwrap();
+        let tree = stage_everything(root, &index).await.unwrap();
+        let captured = git(root, &["rev-parse", &format!("{tree}:f.txt")])
+            .await
+            .unwrap();
+        let edited = git(root, &["hash-object", "f.txt"]).await.unwrap();
+        assert_eq!(captured, edited, "the edit, not the committed content");
+    }
+
     #[tokio::test]
     async fn drift_is_detected_when_an_already_modified_file_changes_under_the_capture() {
         let dir = tempfile::TempDir::new().unwrap();
@@ -6650,7 +7375,7 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        std::fs::copy(git_dir.join("index"), &index).unwrap();
+        copy_index(&git_dir.join("index"), &index).unwrap();
         let index = FsPath::new(&index);
 
         let first = stage_everything(root, index).await.unwrap();

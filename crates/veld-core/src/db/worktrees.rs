@@ -169,6 +169,15 @@ pub const MAX_LANES_PER_REPO: usize = 32;
 /// actually names it, which is the first time the user has expressed an opinion.
 pub const UNGROUPED_LANE: &str = "\u{0}ungrouped";
 
+/// Whether `name` is one of the lane values Veld reserves — [`UNGROUPED_LANE`]
+/// and [`super::HANDOFF_LANE`] — which no lane operation may rename or delete and
+/// no caller may file into by name. One predicate, so a third reserved value is
+/// added here rather than at every guard that has to know about it.
+#[must_use]
+pub fn is_reserved_lane(name: &str) -> bool {
+    name == UNGROUPED_LANE || name == super::HANDOFF_LANE
+}
+
 /// Longest accepted reorder payload, for worktrees or lanes.
 ///
 /// Generous against any real repo (a rail with a thousand checkouts is not a rail)
@@ -1029,7 +1038,7 @@ impl Db {
         // real group — which both leaves a phantom group in the bucket's slot and
         // snaps the bucket back to the top. Reported as "no such lane", because to
         // every user-facing caller that is exactly what it is.
-        if from == UNGROUPED_LANE {
+        if is_reserved_lane(from) {
             return Ok(false);
         }
         let root = root_key(repo_root);
@@ -1074,7 +1083,9 @@ impl Db {
         // position row silently snaps the ungrouped section back to the top of the
         // rail. [`UNGROUPED_LANE`] claims it cannot be renamed or deleted, and this
         // is half of what makes that true rather than aspirational.
-        if name == UNGROUPED_LANE {
+        // The "Waiting for you" section has no row either, but this statement's first
+        // half would still empty it into the ungrouped section.
+        if is_reserved_lane(name) {
             return Ok(false);
         }
         let root = root_key(repo_root);

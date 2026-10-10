@@ -1541,6 +1541,11 @@ struct Ticket {
     /// per-launch (`VELD_PANE_TOKEN`) and must win over anything the shim env
     /// carries.
     shim_env: BTreeMap<String, String>,
+    /// Whether spawning this session starts a handed-off worktree's agent pane —
+    /// a fresh launch under the session id `veld worktree new` recorded. Decided
+    /// at mint, where the database is already open, so the spawn path only acts
+    /// on it (see [`finish_agent_handoff`]).
+    agent_handoff: bool,
     expires_at: Instant,
 }
 
@@ -2471,6 +2476,28 @@ async fn mint_ticket(
         }
         _ => false,
     };
+    let recorded = db.handoff_session(body.worktree_id).unwrap_or_else(|e| {
+        warn!("hand-off for worktree {} not read: {e}", body.worktree_id);
+        None
+    });
+    let agent_handoff = match handoff_step(
+        recorded.as_ref().map(|(session, _)| session.as_str()),
+        &body.session_id,
+        resumed,
+        pane.is_some() && body.mode == Some(PaneMode::Fresh),
+    ) {
+        HandoffStep::None => false,
+        HandoffStep::RetireOnSpawn => true,
+        HandoffStep::RetireNow => {
+            if let Err(e) = db.finish_handoff(body.worktree_id, &body.session_id) {
+                warn!(
+                    "hand-off for worktree {} not retired: {e}",
+                    body.worktree_id
+                );
+            }
+            false
+        }
+    };
     // Its files are up by now — the client uploads before it mints — so the
     // window [`reserve_uploads`] opened has done its job.
     UPLOAD_RESERVATIONS
@@ -2496,6 +2523,7 @@ async fn mint_ticket(
                 shell,
                 shell_flags,
                 shim_env,
+                agent_handoff,
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -4107,6 +4135,10 @@ async fn attach(
         }
     };
 
+    if ticket.agent_handoff && !resumed {
+        finish_agent_handoff(ticket.worktree_id, ticket.session_id.clone());
+    }
+
     // Terminal traffic is keystrokes and screen updates. The default ceiling is
     // tungstenite's 64 MiB, which the daemon would buffer per frame per socket;
     // a paste, even a large one, fits in a fraction of this.
@@ -4115,6 +4147,61 @@ async fn attach(
         .on_upgrade(move |socket| async move {
             serve_socket(socket, session, size, resumed).await;
         })
+}
+
+/// What a ticket for `session` means for its worktree's pending hand-off, whose
+/// recorded session is `recorded`.
+#[derive(Debug, PartialEq, Eq)]
+enum HandoffStep {
+    /// Not the hand-off's session, or there is none.
+    None,
+    /// The hand-off's session is already live, so it was launched and only the
+    /// retirement was lost — an attach that spawned it and then failed to write,
+    /// or a daemon that exited in between. Retired here, or every later window
+    /// would queue the prompt again and type it into the running agent.
+    RetireNow,
+    /// A fresh launch of a declared pane under the hand-off's session: the agent
+    /// it is waiting for. Retired once the spawn succeeds ([`finish_agent_handoff`]).
+    /// A plain shell or a resume under that id runs nothing new and does neither.
+    RetireOnSpawn,
+}
+
+fn handoff_step(
+    recorded: Option<&str>,
+    session: &str,
+    resumed: bool,
+    fresh_pane: bool,
+) -> HandoffStep {
+    match recorded {
+        Some(r) if r == session && resumed => HandoffStep::RetireNow,
+        Some(r) if r == session && fresh_pane => HandoffStep::RetireOnSpawn,
+        _ => HandoffStep::None,
+    }
+}
+
+/// Retire a handed-off worktree's pending agent pane, now that its session has
+/// been spawned.
+///
+/// **On spawn, not when a window reads the hand-off**: a window that reloads or
+/// crashes between reading it and starting the pane leaves it pending, and the
+/// next window to show the worktree starts the same session with the same prompt.
+/// Off the attach path, because nothing may put a `Db::open()` on the
+/// session-spawn path. A failure leaves the row behind a live session, which the
+/// next mint for it retires ([`HandoffStep::RetireNow`]) and `GET
+/// /api/worktrees/{id}/handoff` stops serving.
+fn finish_agent_handoff(worktree_id: i64, session_id: String) {
+    tokio::spawn(async move {
+        let done = crate::offload::blocking(move || {
+            let db = open_db().map_err(|_| "database unavailable".to_owned())?;
+            db.finish_handoff(worktree_id, &session_id)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        })
+        .await;
+        if let Err(e) = done {
+            warn!("hand-off for worktree {worktree_id} not retired: {e}");
+        }
+    });
 }
 
 enum SessionError {
@@ -5319,6 +5406,44 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn only_the_handoffs_own_session_moves_it_on() {
+        use super::{HandoffStep, handoff_step};
+        let rec = Some("hand-off");
+        // The fresh agent launch it is waiting for.
+        assert_eq!(
+            handoff_step(rec, "hand-off", false, true),
+            HandoffStep::RetireOnSpawn
+        );
+        // Already live: launched, retirement lost — retire now, launch nothing.
+        assert_eq!(
+            handoff_step(rec, "hand-off", true, true),
+            HandoffStep::RetireNow
+        );
+        assert_eq!(
+            handoff_step(rec, "hand-off", true, false),
+            HandoffStep::RetireNow
+        );
+        // A shell under that id, or no pane at all, starts no agent.
+        assert_eq!(
+            handoff_step(rec, "hand-off", false, false),
+            HandoffStep::None
+        );
+        // Any other session in the worktree, fresh or not, leaves it alone.
+        assert_eq!(
+            handoff_step(rec, "a-shell-beside-it", false, true),
+            HandoffStep::None
+        );
+        assert_eq!(
+            handoff_step(rec, "a-shell-beside-it", true, true),
+            HandoffStep::None
+        );
+        assert_eq!(
+            handoff_step(None, "hand-off", false, true),
+            HandoffStep::None
+        );
+    }
+
+    #[test]
     fn a_text_file_the_pane_would_refuse_stays_on_the_browser_route() {
         let root = tempfile::TempDir::new().unwrap();
         let r = root.path().to_str().unwrap();
@@ -6230,6 +6355,7 @@ mod tests {
                         ..shims::SessionOptions::all_on()
                     },
                 ),
+                agent_handoff: false,
                 expires_at: Instant::now() + ttl,
             },
         );
@@ -6263,6 +6389,7 @@ mod tests {
                         ..shims::SessionOptions::all_on()
                     },
                 ),
+                agent_handoff: false,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
@@ -6640,6 +6767,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -6679,6 +6807,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
             );
@@ -7159,6 +7288,7 @@ mod tests {
                             ..shims::SessionOptions::all_on()
                         },
                     ),
+                    agent_handoff: false,
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );

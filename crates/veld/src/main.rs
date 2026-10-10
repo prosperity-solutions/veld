@@ -201,6 +201,12 @@ enum Command {
         command: commands::ide::IdeCommand,
     },
 
+    /// Hand a task off to a new worktree for the human: `veld worktree new`.
+    Worktree {
+        #[command(subcommand)]
+        command: commands::worktree::WorktreeCommand,
+    },
+
     /// Open a web page in the Veld window that owns this terminal.
     ///
     /// Falls back to the system browser whenever Veld is not the right place:
@@ -1174,6 +1180,8 @@ async fn main() {
         } => commands::open_url::run(tool, session, args).await,
 
         Command::Ide { command } => commands::ide::run(command).await,
+
+        Command::Worktree { command } => commands::worktree::run(command).await,
 
         Command::AgentSettings { tool, session } => commands::agent::settings(tool, session),
 

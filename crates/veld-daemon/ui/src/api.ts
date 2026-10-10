@@ -326,6 +326,12 @@ export type CreateWorktreeSource =
    */
   | { kind: "worktree"; from_path: string; carry_over?: boolean };
 
+/** A pending agent pane, as a worktree row carries it. See [`Worktree.handoff`]. */
+export interface WorktreeHandoff {
+  session_id: string;
+  pane: string;
+}
+
 export interface Worktree {
   id: number;
   repo_root: string;
@@ -412,6 +418,14 @@ export interface Worktree {
    * "everything adopted", which is what it would have shown.
    */
   adopted?: boolean;
+  /**
+   * The agent pane a hand-off is waiting to start here — `veld worktree new
+   * --prompt` — or absent when there is none. `session_id` is the tab id the pane
+   * runs under; `pane` the declared agent, or `""` for this project's usual one.
+   * The prompt is read separately ([`api.worktreeHandoff`]) by the window that
+   * starts it, so a rail poll does not carry it.
+   */
+  handoff?: WorktreeHandoff;
   /**
    * Whether this checkout's removal is past the point of no return — it is not
    * in the trash any more, it is actively being deleted and cannot be restored.
@@ -2197,6 +2211,16 @@ export const api = {
    */
   paneLayout: (worktreeId: number) =>
     request<PaneLayoutDoc>(`/api/worktrees/${worktreeId}/layout`),
+  /**
+   * A handed-off worktree's waiting agent pane, prompt included. Reading it does
+   * not use it up — spawning the session does — so a window that reloads before
+   * starting the pane leaves it for the next.
+   */
+  worktreeHandoff: (worktreeId: number) =>
+    request<WorktreeHandoff & { prompt: string }>(`/api/worktrees/${worktreeId}/handoff`),
+  /** Give up on a hand-off this window cannot start. */
+  deleteWorktreeHandoff: (worktreeId: number) =>
+    request<void>(`/api/worktrees/${worktreeId}/handoff`, { method: "DELETE" }),
   /**
    * Store a worktree's panes, if `version` is still the current one.
    *
