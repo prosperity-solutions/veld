@@ -259,6 +259,12 @@ export interface RemoteBranch {
 export interface RepoBranches {
   local: LocalBranch[];
   remote: RemoteBranch[];
+  /**
+   * What a default create cuts from: `origin/HEAD`'s branch, else `main`, else
+   * `master` — never the main checkout's current branch. `null` when the repo
+   * has none of those. Optional for a daemon that predates it.
+   */
+  default_branch?: string | null;
 }
 
 /**
@@ -306,8 +312,13 @@ export interface CreatedWorktree extends Worktree {
  * carry-over with no worktree to carry from — cannot be built by mistake.
  */
 export type CreateWorktreeSource =
-  /** Cut the branch fresh, per the `git.createFrom` setting. The default. */
-  | { kind: "new_branch" }
+  /**
+   * Cut the branch fresh, per the `git.createFrom` setting. The default.
+   *
+   * `start_point` cuts it from that ref instead — a local branch or a
+   * remote-tracking ref — used as given, with no fetch.
+   */
+  | { kind: "new_branch"; start_point?: string }
   /** Check out the existing local branch named by `branch`. */
   | { kind: "local_branch" }
   /** Create `branch` from a remote-tracking ref, tracking it. */

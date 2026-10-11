@@ -552,13 +552,19 @@ export function branchForMode(input: {
  */
 export function sourceForMode(input: {
   mode: SourceMode;
+  /** The base a new branch is cut from, or `""` for the default. */
+  startPoint: string;
   remoteRef: string;
   fromPath: string | null;
   carryOver: boolean;
 }): CreateWorktreeSource {
   switch (input.mode) {
     case "new_branch":
-      return { kind: "new_branch" };
+      // Omitted rather than `""` for the default: absent is what the daemon
+      // reads as "fetch and cut from origin/<default>".
+      return input.startPoint === ""
+        ? { kind: "new_branch" }
+        : { kind: "new_branch", start_point: input.startPoint };
     case "local_branch":
       return { kind: "local_branch" };
     case "remote_branch":
@@ -598,6 +604,73 @@ export function spinOffSource<T extends { id: number; path: string }>(
 ): T | null {
   if (fromPath === "") return null;
   return sources.find((w) => w.path === fromPath) ?? null;
+}
+
+/** The base picker's value for the default base. A colon cannot appear in a
+ *  git ref, so this cannot collide with a branch of the same spelling. */
+export const DEFAULT_BASE = ":default";
+/** The base picker's value for a source chosen some other way — "Spin off…",
+ *  or a manual-mode pick of an existing or remote branch. */
+export const CURRENT_SOURCE = ":current";
+
+/** The default base as git would name it: `origin/main` when it is fetched
+ *  from origin, `main` when it is the main checkout's own. */
+export function defaultBaseLabel(defaultBranch: string, createFrom: GitCreateFrom): string {
+  return createFrom === "origin" ? `origin/${defaultBranch}` : defaultBranch;
+}
+
+/**
+ * The "Starts from" picker's options: the default base first, then every local
+ * branch, then every remote-tracking one.
+ *
+ * **The default is first and always present**, including while the branch list
+ * is still loading or failed to load: it is the base almost every create wants,
+ * and the one somebody who started from the wrong place is looking for.
+ *
+ * A remote ref spelled exactly like a local branch is dropped — the picker
+ * cannot hold two options with one value, and git would resolve that name to
+ * the local branch anyway.
+ */
+export function baseBranchOptions(input: {
+  defaultBranch: string;
+  createFrom: GitCreateFrom;
+  branches: RepoBranches | null;
+  /** The branch the dialog is on when it is not a new branch — shown as its
+   *  own first group, so the picker can say where that is. */
+  current: string | null;
+}): { group: string; items: { value: string; label: string }[] }[] {
+  const groups: { group: string; items: { value: string; label: string }[] }[] = [];
+  if (input.current !== null) {
+    groups.push({ group: "Current", items: [{ value: CURRENT_SOURCE, label: input.current }] });
+  }
+  groups.push({
+    group: "Default",
+    items: [
+      {
+        value: DEFAULT_BASE,
+        label: defaultBaseLabel(input.defaultBranch, input.createFrom),
+      },
+    ],
+  });
+  const local = input.branches?.local ?? [];
+  if (local.length > 0) {
+    groups.push({
+      group: "Local branches",
+      items: local.map((b) => ({ value: b.name, label: b.name })),
+    });
+  }
+  // The default *is* `origin/<default>`, fetched, so the stale copy of it is
+  // not offered beside it under the same name.
+  const taken = new Set(local.map((b) => b.name));
+  if (input.createFrom === "origin") taken.add(defaultBaseLabel(input.defaultBranch, "origin"));
+  const remote = (input.branches?.remote ?? []).filter((r) => !taken.has(r.name));
+  if (remote.length > 0) {
+    groups.push({
+      group: "Remote branches",
+      items: remote.map((r) => ({ value: r.name, label: r.name })),
+    });
+  }
+  return groups;
 }
 
 /**
@@ -979,6 +1052,8 @@ export function NewWorktreeDialog(props: {
   const [localBranch, setLocalBranch] = useState("");
   /** The chosen remote-tracking ref (`remote_branch`), e.g. `origin/feat/x`. */
   const [remoteRef, setRemoteRef] = useState("");
+  /** The ref a `new_branch` is cut from, or `""` for the default base. */
+  const [startPoint, setStartPoint] = useState("");
   /**
    * The chosen spin-off source's **path**, which is also what goes on the wire.
    *
@@ -1130,6 +1205,7 @@ export function NewWorktreeDialog(props: {
   /** See [`sourceForMode`]. */
   const source = sourceForMode({
     mode,
+    startPoint,
     remoteRef,
     fromPath: from?.path ?? null,
     carryOver,
@@ -1227,6 +1303,103 @@ export function NewWorktreeDialog(props: {
         throw e;
       });
   });
+
+  /** The branch the daemon's default create starts from, as it resolves it —
+   *  not the main checkout's, which may be on anything. */
+  const defaultBranch = branches?.default_branch ?? "the default branch";
+  /** What the dialog starts from when it is not a new branch, in words — only
+   *  in prompt mode, which has no source picker of its own to say it. */
+  const currentSource =
+    shownMode !== "prompt"
+      ? null
+      : mode === "worktree"
+        ? from && from.branch
+        : mode === "local_branch"
+          ? localBranch
+          : mode === "remote_branch"
+            ? remoteRef
+            : null;
+  const baseIsDefault = mode === "new_branch" && startPoint === "";
+  /**
+   * The one-line note under "Starts from", written to finish the sentence the
+   * label and the pick begin: "Starts from · origin/main · fetched first, so the
+   * latest." Short enough for one line in the half-width column.
+   */
+  const baseNote = baseIsDefault
+    ? props.createFrom === "origin"
+      ? "fetched first, so the latest."
+      : "the main checkout's HEAD."
+    : mode === "new_branch"
+      ? startPoint === defaultBranch
+        ? "not fetched, may be behind."
+        : branches?.remote.some((r) => r.name === startPoint)
+          ? "as of the last fetch."
+          : "as it is locally."
+      : mode === "worktree"
+        ? carryOver
+          ? "plus its uncommitted changes."
+          : "its last commit."
+        : mode === "local_branch"
+          ? "checked out as it is."
+          : "tracking it.";
+  /**
+   * Where the checkout starts, as a searchable list of every branch with the
+   * default first.
+   *
+   * **Shown in both modes and tinted whenever it is not the default.** A
+   * checkout started from the wrong base is only noticed once the work is on
+   * top of it, so the base is stated where the create happens, and the way back
+   * to the default is the first option rather than a trip to the other mode.
+   */
+  const baseSelect = (
+    <Select
+      label="Starts from"
+      searchable
+      allowDeselect={false}
+      nothingFoundMessage="No branch of that name"
+      // Rendered-count cap, as for the other branch pickers.
+      limit={200}
+      data={baseBranchOptions({
+        defaultBranch,
+        createFrom: props.createFrom,
+        branches,
+        current: currentSource || null,
+      })}
+      value={
+        mode === "new_branch"
+          ? startPoint === ""
+            ? DEFAULT_BASE
+            : startPoint
+          : currentSource
+            ? CURRENT_SOURCE
+            : null
+      }
+      onChange={(v) => {
+        if (!v || v === CURRENT_SOURCE) return;
+        setMode("new_branch");
+        setStartPoint(v === DEFAULT_BASE ? "" : v);
+        setBranchEdit(null);
+      }}
+      // Under the field and held to one line, so nothing moves when the pick
+      // changes the note — the field sits beside the agent picker, and a note
+      // that grew a line pushed the select down mid-choice.
+      inputWrapperOrder={["label", "input", "description", "error"]}
+      styles={{
+        input: {
+          fontFamily: "var(--mantine-font-family-monospace)",
+          ...(baseIsDefault ? {} : { borderColor: "var(--mantine-color-orange-6)" }),
+        },
+        description: {
+          marginTop: 4,
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+          ...(baseIsDefault ? {} : { color: "var(--mantine-color-orange-6)" }),
+        },
+      }}
+      description={<span title={baseNote}>{baseNote}</span>}
+    />
+  );
 
   /**
    * Everything the dialog used to ask for, as one block.
@@ -1416,22 +1589,7 @@ export function NewWorktreeDialog(props: {
       {/* The receipt for what the chosen source actually does. Each of the
           four starts the checkout somewhere different, and a picker whose
           consequences are not written down is a picker you guess at. */}
-      {mode === "new_branch" && (
-        <Text size="xs" c="dimmed">
-          {props.createFrom === "origin" ? (
-            <>
-              Fetched from the remote first, so the branch starts at the
-              latest{" "}
-              <Text span ff="monospace">
-                origin/main
-              </Text>{" "}
-              — change this in Settings → Git.
-            </>
-          ) : (
-            "Cut from the repo's current HEAD — change this in Settings → Git."
-          )}
-        </Text>
-      )}
+      {mode === "new_branch" && baseSelect}
       {mode === "local_branch" && (
         <Text size="xs" c="dimmed">
           Checked out as it is. No branch is created, and a branch already
@@ -1791,14 +1949,28 @@ export function NewWorktreeDialog(props: {
                   with a single pane: what is about to run is worth stating, and
                   a disabled-looking field with one option reads as a choice
                   already made rather than as an absence. */}
-              <Select
-                label="Agent"
-                description="Terminal panes this project declares (ide.panes)."
-                data={props.agents.map((a) => ({ value: a.id, label: a.label }))}
-                value={agentId}
-                allowDeselect={false}
-                onChange={(v) => setAgent(v)}
-              />
+              <SimpleGrid cols={2} spacing="sm">
+                <Select
+                  label="Agent"
+                  description="Terminal panes this project declares (ide.panes)."
+                  // Same layout as "Starts from" beside it, so the two inputs
+                  // sit on one line.
+                  inputWrapperOrder={["label", "input", "description", "error"]}
+                  styles={{
+                    description: {
+                      marginTop: 4,
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    },
+                  }}
+                  data={props.agents.map((a) => ({ value: a.id, label: a.label }))}
+                  value={agentId}
+                  allowDeselect={false}
+                  onChange={(v) => setAgent(v)}
+                />
+                {baseSelect}
+              </SimpleGrid>
               {/* **The field this dialog is now for.** A `Textarea`, not a
                   `TextInput`: prompts are sentences and often several, and a
                   one-line box that scrolls sideways makes re-reading what you
@@ -1935,40 +2107,33 @@ export function NewWorktreeDialog(props: {
                   or drop them anywhere on this dialog, or paste a screenshot.
                 </Text>
               </Group>
-              <Text size="xs" c="dimmed">
-                {launch === null
-                  ? "Optional. Left empty, the checkout just opens — nothing is started."
-                  : launch.attachments.length === 0
-                    ? `Opens ${agentLabel} in the new checkout with this as its first message.`
-                    : launch.prompt === ""
-                      ? `Opens ${agentLabel} in the new checkout with the files as its first message.`
-                      : `Opens ${agentLabel} in the new checkout with this and the files as its first message.`}
-              </Text>
-              {/* Text appearing in a field nobody just typed into needs a
-                  provenance, or it reads as a bug. Said once, on the open that
-                  restored it — not while they are editing it. */}
-              {restoredDraft && prompt === openedWith && (
-                <Text size="xs" c="dimmed">
-                  Kept from the last time this dialog was open. Clear the field
-                  to forget it.
-                </Text>
-              )}
-              {/* What this mode decided on the user's behalf, said out loud
-                  rather than left to be discovered on the rail. The name is the
-                  one worth stating: it is the thing they did not type. */}
-              <Text size="xs" c="dimmed">
-                {props.generatesNames && launch?.prompt
-                  ? "Named for you once the checkout is open — this project has a naming command."
-                  : `Named ${displayName}. Switch to “Start with a name” to choose the name, source or marker.`}
-              </Text>
-              {/* The ⋯ menu's "Spin off…" already chose the source, so this mode
-                  states it instead of offering a picker it has no room for. */}
-              {props.spinOffFrom !== undefined && (
-                <Text size="xs" c="dimmed">
-                  Branching off <b>{worktreeLabel(props.spinOffFrom)}</b>
-                  {carryOver ? ", uncommitted changes included." : "."}
-                </Text>
-              )}
+              {/* What this create will do, as one line: the name it decided on
+                  the user's behalf (the thing they did not type), what the agent
+                  is handed, and where text nobody just typed came from. One line
+                  so the column ends on a sentence rather than a stack of notes;
+                  the full text is on hover if a narrow window clamps it. */}
+              {(() => {
+                const line = [
+                  props.generatesNames && launch?.prompt
+                    ? "Named by the project's naming command."
+                    : `Named '${displayName}'.`,
+                  launch === null
+                    ? null
+                    : launch.attachments.length === 0
+                      ? `Opens ${agentLabel} with this prompt.`
+                      : launch.prompt === ""
+                        ? `Opens ${agentLabel} with the files.`
+                        : `Opens ${agentLabel} with this prompt and the files.`,
+                  restoredDraft && prompt === openedWith ? "Prompt kept from last time." : null,
+                ]
+                  .filter((part) => part !== null)
+                  .join(" ");
+                return (
+                  <Text size="xs" c="dimmed" lineClamp={1} title={line}>
+                    {line}
+                  </Text>
+                );
+              })()}
             </Stack>
           )}
           {shownMode === "manual" && (

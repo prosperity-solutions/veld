@@ -1633,6 +1633,51 @@ struct RemoteBranchView {
 struct BranchesView {
     local: Vec<LocalBranchView>,
     remote: Vec<RemoteBranchView>,
+    /// What a default create cuts from — see [`default_branch`]. `None` for a
+    /// repo with no `origin/HEAD`, `main` or `master`.
+    default_branch: Option<String>,
+}
+
+/// Whether `refname` resolves. `--quiet` keeps the probe off stderr, which the
+/// [`git`] helper would otherwise surface as the error.
+async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
+    git(repo_root, &["rev-parse", "--verify", "--quiet", refname])
+        .await
+        .is_ok()
+}
+
+/// The repo's default branch: what `origin/HEAD` points at, else `main`, else
+/// `master`, whichever exists on origin or locally.
+///
+/// **Not the main checkout's current branch**, which is what this used to be.
+/// The main checkout is somebody's working copy and is often on a feature
+/// branch, and reading its branch as "the default" made every default create in
+/// that repo cut from that feature branch — the checkout the user happened to
+/// be working in, rather than the base the `git.createFrom` setting promises.
+async fn default_branch(repo_root: &FsPath) -> Option<String> {
+    if let Ok(head) = git(
+        repo_root,
+        &[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )
+    .await
+    {
+        if let Some(b) = head.strip_prefix("origin/").filter(|b| !b.is_empty()) {
+            return Some(b.to_string());
+        }
+    }
+    for cand in ["main", "master"] {
+        if ref_exists(repo_root, &format!("refs/remotes/origin/{cand}")).await
+            || ref_exists(repo_root, &format!("refs/heads/{cand}")).await
+        {
+            return Some(cand.to_string());
+        }
+    }
+    None
 }
 
 /// Parse `git for-each-ref refs/heads` in the format
@@ -1747,7 +1792,12 @@ async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>,
     .await
     .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let remote = parse_remote_branches(&remotes, &local);
-    Ok(Json(BranchesView { local, remote }))
+    let default_branch = default_branch(&repo_root).await;
+    Ok(Json(BranchesView {
+        local,
+        remote,
+        default_branch,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3931,7 +3981,15 @@ enum CreateFrom {
     /// Cut `branch` fresh — from `origin/<default>` or the repo's local `HEAD`
     /// per the `git.createFrom` setting. **The default**, and what a client
     /// that predates this field asks for by sending `create_branch: true`.
-    NewBranch,
+    ///
+    /// `start_point` names any other ref to cut from instead — a local branch,
+    /// a remote-tracking ref, a tag. Absent is the default above; present, it
+    /// is used as given, with no fetch and no fallback, because a base the user
+    /// picked by name is not one to silently swap for another.
+    NewBranch {
+        #[serde(default)]
+        start_point: Option<String>,
+    },
     /// Check out the existing local branch named by `branch`. What
     /// `create_branch: false` means.
     LocalBranch,
@@ -4034,7 +4092,7 @@ impl CreateWorktreeBody {
     fn create_from(&self) -> &CreateFrom {
         match &self.source {
             Some(s) => s,
-            None if self.create_branch => &CreateFrom::NewBranch,
+            None if self.create_branch => &CreateFrom::NewBranch { start_point: None },
             None => &CreateFrom::LocalBranch,
         }
     }
@@ -4049,6 +4107,12 @@ async fn create_worktree(
     // shape check the branch does.
     if let CreateFrom::RemoteBranch { remote_ref } = source {
         validate_branch(remote_ref)?;
+    }
+    if let CreateFrom::NewBranch {
+        start_point: Some(sp),
+    } = source
+    {
+        validate_branch(sp)?;
     }
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
@@ -4241,7 +4305,40 @@ async fn create_worktree(
     // sparse) is refused with nothing on disk to clean up.
     let mut captured: Option<CapturedWork> = None;
     let git_args: Vec<String> = match source {
-        CreateFrom::NewBranch => {
+        CreateFrom::NewBranch {
+            start_point: Some(sp),
+        } => {
+            // Checked before anything is created, so a ref that has gone since
+            // the dialog listed it fails the create with nothing to clean up.
+            // `^{commit}` also refuses a tree or blob a branch cannot start at.
+            if git(
+                &repo_root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{sp}^{{commit}}"),
+                ],
+            )
+            .await
+            .is_err()
+            {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("this repo has no branch or commit named {sp}"),
+                ));
+            }
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                body.branch.clone(),
+                "--".into(),
+                path_str.clone(),
+                sp.clone(),
+            ]
+        }
+        CreateFrom::NewBranch { start_point: None } => {
             // Born-current create (`git.createFrom = "origin"`, the default):
             // fetch the remote and cut the new branch from `origin/<default>`
             // rather than the local HEAD, so a worktree is never *born* behind
@@ -4250,43 +4347,24 @@ async fn create_worktree(
             // goes back to update `main`, so each new worktree used to be as
             // stale as the last fetch of main.
             //
-            // Falls back to local HEAD (the previous behaviour) when the fetch
-            // or the origin ref fails — offline, a repo with no remote, or the
-            // main checkout on a branch with no origin counterpart — never
+            // **The default branch is the repo's, never the main checkout's
+            // current one** — see [`default_branch`]. When the fetch or the
+            // origin ref fails (offline, a repo with no remote), it falls back to
+            // the *local* default branch, and only then to local HEAD — never
             // silently, but never blocking the create either.
             let mut start_point: Option<String> = None;
             if db.git_create_from() == GitCreateSource::Origin {
-                // The default branch is the main checkout's branch — the same
-                // thing the "update main" control fast-forwards.
-                let default_branch = db
-                    .list_worktrees(&repo_root)
-                    .map_err(db_err)?
-                    .into_iter()
-                    .find(|w| w.is_main)
-                    .map(|w| w.branch);
-                if let Some(dbranch) = default_branch {
+                if let Some(dbranch) = default_branch(&repo_root).await {
                     // Base on origin only if the remote actually has that
-                    // branch. The fetch succeeding is not enough: a repo whose
-                    // main checkout sits on a local-only branch (never pushed)
-                    // would otherwise fail the create against a
-                    // `refs/remotes/origin/<branch>` that does not exist,
-                    // instead of falling back to local HEAD as the comment
-                    // promises. `--quiet` keeps the probe off stderr (the `git`
-                    // helper surfaces stderr on failure).
+                    // branch. The fetch succeeding is not enough: a default
+                    // found only locally would otherwise fail the create against
+                    // a `refs/remotes/origin/<branch>` that does not exist.
                     if git(&repo_root, &["fetch", "origin"]).await.is_ok()
-                        && git(
-                            &repo_root,
-                            &[
-                                "rev-parse",
-                                "--verify",
-                                "--quiet",
-                                &format!("refs/remotes/origin/{dbranch}"),
-                            ],
-                        )
-                        .await
-                        .is_ok()
+                        && ref_exists(&repo_root, &format!("refs/remotes/origin/{dbranch}")).await
                     {
                         start_point = Some(format!("origin/{dbranch}"));
+                    } else if ref_exists(&repo_root, &format!("refs/heads/{dbranch}")).await {
+                        start_point = Some(dbranch);
                     }
                 }
             }
@@ -7309,7 +7387,7 @@ mod tests {
             assert!(
                 matches!(
                     body(r#"{"repo_root":"/r","branch":"b","create_branch":true}"#).create_from(),
-                    CreateFrom::NewBranch
+                    CreateFrom::NewBranch { start_point: None }
                 ),
                 "create_branch: true with no source must still cut a new branch"
             );
@@ -7341,6 +7419,27 @@ mod tests {
                     CreateFrom::LocalBranch
                 ),
                 "an explicit source must win over create_branch"
+            );
+            // A start point is optional on the wire: the bare kind every
+            // existing client sends is still the default create.
+            assert!(
+                matches!(
+                    body(r#"{"repo_root":"/r","branch":"b","source":{"kind":"new_branch"}}"#)
+                        .create_from(),
+                    CreateFrom::NewBranch { start_point: None }
+                ),
+                "new_branch without a start point must stay the default create"
+            );
+            assert!(
+                matches!(
+                    body(
+                        r#"{"repo_root":"/r","branch":"b",
+                            "source":{"kind":"new_branch","start_point":"feat/x"}}"#
+                    )
+                    .create_from(),
+                    CreateFrom::NewBranch { start_point: Some(sp) } if sp == "feat/x"
+                ),
+                "a start point must reach the create"
             );
         }
 
@@ -8003,6 +8102,68 @@ mod tests {
         // from `Some(false)`, which would claim the checkout is clean.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(git_is_dirty(FsPath::new(empty.path())).await, None);
+    }
+
+    /// The default a create cuts from is the repo's default branch, **not** the
+    /// branch the main checkout happens to be on. The bug this pins: a main
+    /// checkout left on a feature branch made every "＋" in that repo start from
+    /// that feature branch.
+    #[tokio::test]
+    async fn default_branch_ignores_the_main_checkouts_current_branch() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "trunk"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "--allow-empty", "-m", "A"]);
+
+        // No remote yet: a repo whose only branch is neither main nor master
+        // has no default to offer.
+        assert_eq!(default_branch(&work).await, None);
+
+        // `trunk` on origin, with `origin/HEAD` pointing at it — the answer
+        // even though it is spelled like neither fallback.
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-u", "origin", "trunk"]);
+        git(&work, &["remote", "set-head", "origin", "trunk"]);
+
+        // The main checkout moves to a feature branch, pushed too, as people's do.
+        git(&work, &["checkout", "-b", "feat/wip"]);
+        git(&work, &["push", "-u", "origin", "feat/wip"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("trunk"));
+
+        // Without `origin/HEAD` it falls back to `main`, found locally.
+        git(&work, &["remote", "set-head", "origin", "--delete"]);
+        git(&work, &["branch", "main", "trunk"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
     }
 
     /// The staleness computation, against a real git repo: the direction of

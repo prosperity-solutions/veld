@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  baseBranchOptions,
   branchForMode,
+  CURRENT_SOURCE,
+  DEFAULT_BASE,
   chooseAgent,
   effectiveMode,
   effectiveName,
@@ -99,6 +102,7 @@ describe("branchForMode", () => {
 
 describe("sourceForMode", () => {
   const args = {
+    startPoint: "",
     remoteRef: "origin/feat/new",
     fromPath: "/repo/../wt/source",
     carryOver: true,
@@ -120,6 +124,16 @@ describe("sourceForMode", () => {
       from_path: "/repo/../wt/source",
       carry_over: true,
     });
+  });
+
+  it("sends a start point only when the base is not the default", () => {
+    expect(
+      sourceForMode({ ...args, mode: "new_branch", startPoint: "feat/base" }),
+    ).toEqual({ kind: "new_branch", start_point: "feat/base" });
+    // Only `new_branch` takes a base; the other modes name their own.
+    expect(
+      sourceForMode({ ...args, mode: "local_branch", startPoint: "feat/base" }),
+    ).toEqual({ kind: "local_branch" });
   });
 
   it("sends carry_over explicitly, because the wire default is the opposite", () => {
@@ -413,5 +427,68 @@ describe("effectiveMode", () => {
     expect(effectiveMode({ chosen: "prompt", hasAgents: false })).toBe("manual");
     // `manual` never needs an agent, so it is never redirected.
     expect(effectiveMode({ chosen: "manual", hasAgents: false })).toBe("manual");
+  });
+});
+
+describe("baseBranchOptions", () => {
+  const branches: RepoBranches = {
+    local: [
+      { name: "main", checked_out_in: "/repo", upstream: "origin/main" },
+      { name: "feat/x", checked_out_in: "/wt/x", upstream: null },
+      { name: "origin/odd", checked_out_in: null, upstream: null },
+    ],
+    remote: [
+      { name: "origin/main", local_name: "main", has_local: true },
+      { name: "origin/odd", local_name: "odd", has_local: false },
+      { name: "origin/feat/y", local_name: "feat/y", has_local: false },
+    ],
+  };
+  const args = {
+    defaultBranch: "main",
+    createFrom: "origin" as const,
+    branches,
+    current: null,
+  };
+
+  it("puts the default first, then local, then remote branches", () => {
+    const groups = baseBranchOptions(args);
+    expect(groups.map((g) => g.group)).toEqual([
+      "Default",
+      "Local branches",
+      "Remote branches",
+    ]);
+    expect(groups[0].items).toEqual([
+      { value: DEFAULT_BASE, label: "origin/main" },
+    ]);
+    expect(groups[1].items[1]).toEqual({ value: "feat/x", label: "feat/x" });
+  });
+
+  it("drops a remote ref spelled like a local branch, so no value repeats", () => {
+    const values = baseBranchOptions(args).flatMap((g) => g.items.map((i) => i.value));
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  it("offers origin/<default> once, as the default, not again as a stale remote", () => {
+    const labels = baseBranchOptions(args).flatMap((g) => g.items.map((i) => i.label));
+    expect(labels.filter((l) => l === "origin/main")).toHaveLength(1);
+    // With the main checkout as the default, the remote ref is a distinct base.
+    const local = baseBranchOptions({ ...args, createFrom: "local" });
+    expect(local[0].items[0].label).toBe("main");
+    expect(local.flatMap((g) => g.items.map((i) => i.value))).toContain("origin/main");
+  });
+
+  it("still offers the default while the branch list is unknown", () => {
+    expect(baseBranchOptions({ ...args, branches: null })).toEqual([
+      { group: "Default", items: [{ value: DEFAULT_BASE, label: "origin/main" }] },
+    ]);
+  });
+
+  it("names a non-branch source in a group of its own, above the default", () => {
+    const groups = baseBranchOptions({ ...args, branches: null, current: "feat/x" });
+    expect(groups[0]).toEqual({
+      group: "Current",
+      items: [{ value: CURRENT_SOURCE, label: "feat/x" }],
+    });
+    expect(groups[1].group).toBe("Default");
   });
 });
