@@ -613,10 +613,32 @@ export const DEFAULT_BASE = ":default";
  *  or a manual-mode pick of an existing or remote branch. */
 export const CURRENT_SOURCE = ":current";
 
-/** The default base as git would name it: `origin/main` when it is fetched
- *  from origin, `main` when it is the main checkout's own. */
-export function defaultBaseLabel(defaultBranch: string, createFrom: GitCreateFrom): string {
-  return createFrom === "origin" ? `origin/${defaultBranch}` : defaultBranch;
+/**
+ * What a default create starts from, named the way the daemon will resolve it.
+ *
+ * - `origin` mode with a default branch → `origin/<default>`, fetched first.
+ * - `local` mode → the main checkout's HEAD, named by the branch it is on
+ *   (`HEAD` when detached). Named by *that* branch rather than the default,
+ *   because that is where the create really lands: a main checkout parked on
+ *   a feature branch must read as that feature branch here.
+ * - `origin` mode with **no** default branch (no `origin/HEAD`, `main` or
+ *   `master`) → the same main-checkout HEAD, which is the daemon's last
+ *   fallback — flagged as `fallback`, because it is not what the setting asked
+ *   for and the dialog says so.
+ *
+ * `null` branches means the list (which carries the default) has not arrived.
+ */
+export function defaultBase(input: {
+  createFrom: GitCreateFrom;
+  branches: RepoBranches | null;
+  /** The main checkout's branch, `""` when detached, `null` when unknown. */
+  mainBranch: string | null;
+}): { label: string; fallback: boolean; loading: boolean } {
+  const head = input.mainBranch || "HEAD";
+  if (input.createFrom === "local") return { label: head, fallback: false, loading: false };
+  if (input.branches === null) return { label: "Loading…", fallback: false, loading: true };
+  const d = input.branches.default_branch;
+  return d ? { label: `origin/${d}`, fallback: false, loading: false } : { label: head, fallback: true, loading: false };
 }
 
 /**
@@ -632,8 +654,8 @@ export function defaultBaseLabel(defaultBranch: string, createFrom: GitCreateFro
  * the local branch anyway.
  */
 export function baseBranchOptions(input: {
-  defaultBranch: string;
-  createFrom: GitCreateFrom;
+  /** The default option's label — see [`defaultBase`]. */
+  defaultLabel: string;
   branches: RepoBranches | null;
   /** The branch the dialog is on when it is not a new branch — shown as its
    *  own first group, so the picker can say where that is. */
@@ -648,7 +670,7 @@ export function baseBranchOptions(input: {
     items: [
       {
         value: DEFAULT_BASE,
-        label: defaultBaseLabel(input.defaultBranch, input.createFrom),
+        label: input.defaultLabel,
       },
     ],
   });
@@ -659,10 +681,9 @@ export function baseBranchOptions(input: {
       items: local.map((b) => ({ value: b.name, label: b.name })),
     });
   }
-  // The default *is* `origin/<default>`, fetched, so the stale copy of it is
+  // When the default *is* `origin/<default>`, fetched, the stale copy of it is
   // not offered beside it under the same name.
-  const taken = new Set(local.map((b) => b.name));
-  if (input.createFrom === "origin") taken.add(defaultBaseLabel(input.defaultBranch, "origin"));
+  const taken = new Set([...local.map((b) => b.name), input.defaultLabel]);
   const remote = (input.branches?.remote ?? []).filter((r) => !taken.has(r.name));
   if (remote.length > 0) {
     groups.push({
@@ -1304,19 +1325,28 @@ export function NewWorktreeDialog(props: {
       });
   });
 
-  /** The branch the daemon's default create starts from, as it resolves it —
-   *  not the main checkout's, which may be on anything. */
-  const defaultBranch = branches?.default_branch ?? "the default branch";
-  /** What the dialog starts from when it is not a new branch, in words — only
-   *  in prompt mode, which has no source picker of its own to say it. */
+  /** See [`defaultBase`]. */
+  const base = defaultBase({
+    createFrom: props.createFrom,
+    branches,
+    mainBranch: props.sources.find((w) => w.is_main)?.branch ?? null,
+  });
+  /** The source the base picker last replaced, so a misclick can be undone: the
+   *  ⋯ menu's "Spin off…" carries a choice (and its carry-over) that the picker
+   *  otherwise has no way back to. Cleared by the manual-mode source picker. */
+  const [pickedOver, setPickedOver] = useState<SourceMode | null>(null);
+  const sourceShown = mode !== "new_branch" ? mode : pickedOver;
+  /** What the dialog starts from when it is not a new branch, as a branch name —
+   *  only in prompt mode, which has no source picker of its own to say it. A
+   *  detached spin-off source has no branch, so it goes by its rail name. */
   const currentSource =
     shownMode !== "prompt"
       ? null
-      : mode === "worktree"
-        ? from && from.branch
-        : mode === "local_branch"
+      : sourceShown === "worktree"
+        ? from && (from.branch || worktreeLabel(from))
+        : sourceShown === "local_branch"
           ? localBranch
-          : mode === "remote_branch"
+          : sourceShown === "remote_branch"
             ? remoteRef
             : null;
   const baseIsDefault = mode === "new_branch" && startPoint === "";
@@ -1326,11 +1356,13 @@ export function NewWorktreeDialog(props: {
    * latest." Short enough for one line in the half-width column.
    */
   const baseNote = baseIsDefault
-    ? props.createFrom === "origin"
-      ? "fetched first, so the latest."
-      : "the main checkout's HEAD."
+    ? base.fallback
+      ? "no default branch found."
+      : props.createFrom === "origin"
+        ? "fetched first, so the latest."
+        : "the main checkout's HEAD."
     : mode === "new_branch"
-      ? startPoint === defaultBranch
+      ? props.createFrom === "origin" && startPoint === branches?.default_branch
         ? "not fetched, may be behind."
         : branches?.remote.some((r) => r.name === startPoint)
           ? "as of the last fetch."
@@ -1360,8 +1392,7 @@ export function NewWorktreeDialog(props: {
       // Rendered-count cap, as for the other branch pickers.
       limit={200}
       data={baseBranchOptions({
-        defaultBranch,
-        createFrom: props.createFrom,
+        defaultLabel: base.label,
         branches,
         current: currentSource || null,
       })}
@@ -1375,7 +1406,16 @@ export function NewWorktreeDialog(props: {
             : null
       }
       onChange={(v) => {
-        if (!v || v === CURRENT_SOURCE) return;
+        if (!v) return;
+        if (v === CURRENT_SOURCE) {
+          if (pickedOver !== null) {
+            setMode(pickedOver);
+            setPickedOver(null);
+            setBranchEdit(null);
+          }
+          return;
+        }
+        if (mode !== "new_branch") setPickedOver(mode);
         setMode("new_branch");
         setStartPoint(v === DEFAULT_BASE ? "" : v);
         setBranchEdit(null);
@@ -1387,14 +1427,14 @@ export function NewWorktreeDialog(props: {
       styles={{
         input: {
           fontFamily: "var(--mantine-font-family-monospace)",
-          ...(baseIsDefault ? {} : { borderColor: "var(--mantine-color-orange-6)" }),
+          ...(baseIsDefault && !base.fallback ? {} : { borderColor: "var(--mantine-color-orange-6)" }),
         },
         description: {
           marginTop: 4,
           whiteSpace: "nowrap",
           overflow: "hidden",
           textOverflow: "ellipsis",
-          ...(baseIsDefault ? {} : { color: "var(--mantine-color-orange-6)" }),
+          ...(baseIsDefault && !base.fallback ? {} : { color: "var(--mantine-color-orange-6)" }),
         },
       }}
       description={<span title={baseNote}>{baseNote}</span>}
@@ -1579,6 +1619,7 @@ export function NewWorktreeDialog(props: {
         onChange={(v) => {
           if (!v) return;
           setMode(v as SourceMode);
+          setPickedOver(null);
           // The branch override was a guess against the *previous* mode's
           // rules — a derived new-ref name means nothing once the branch
           // comes from a picker, and vice versa. Hand it back to the mode's

@@ -374,4 +374,36 @@ describe("NewWorktreeDialog base branch", () => {
     });
     expect(onCreate.mock.calls[0][0].source).toEqual({ kind: "new_branch" });
   });
+
+  test("a spin-off replaced by a misclick can be picked back", async () => {
+    const { onCreate } = open(undefined, { sources: [main, feat], spinOffFrom: feat });
+    const field = startsFrom();
+    const pick = async (search: string, label: string) => {
+      fireEvent.click(field);
+      fireEvent.change(field, { target: { value: search } });
+      const option = await waitFor(() => {
+        const found = [...document.querySelectorAll("[data-combobox-option]")].find(
+          (o) => o.textContent === label,
+        );
+        if (!found) throw new Error(`${label} is not offered`);
+        return found;
+      });
+      fireEvent.click(option);
+    };
+    await pick("trunk", "origin/trunk");
+    expect(field.value).toBe("origin/trunk");
+    await pick("feat", "feat/x");
+    expect(field.value).toBe("feat/x");
+
+    const create = screen.getByRole("button", { name: "Create worktree" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(create);
+    });
+    expect(onCreate.mock.calls[0][0].source).toEqual({
+      kind: "worktree",
+      from_path: "/wt/feat",
+      carry_over: true,
+    });
+  });
 });

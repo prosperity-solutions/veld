@@ -1647,7 +1647,9 @@ async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
 }
 
 /// The repo's default branch: what `origin/HEAD` points at, else `main`, else
-/// `master`, whichever exists on origin or locally.
+/// `master`, whichever exists on origin or locally. `main`/`master` is a
+/// heuristic for a repo with no `origin/HEAD`; git 2.48+ writes that ref on any
+/// fetch, so it is read after one where it can be.
 ///
 /// **Not the main checkout's current branch**, which is what this used to be.
 /// The main checkout is somebody's working copy and is often on a feature
@@ -1666,8 +1668,15 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
     )
     .await
     {
+        // Only while the branch it names still exists: a remote that renamed
+        // its default leaves `origin/HEAD` dangling at the old name after a
+        // pruning fetch, and git does not repair it.
         if let Some(b) = head.strip_prefix("origin/").filter(|b| !b.is_empty()) {
-            return Some(b.to_string());
+            if ref_exists(repo_root, &format!("refs/remotes/origin/{b}")).await
+                || ref_exists(repo_root, &format!("refs/heads/{b}")).await
+            {
+                return Some(b.to_string());
+            }
         }
     }
     for cand in ["main", "master"] {
@@ -1678,6 +1687,26 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
         }
     }
     None
+}
+
+/// Where a default `new_branch` create starts in `git.createFrom = "origin"`
+/// mode, or `None` for the main checkout's HEAD.
+///
+/// Fetches first, then resolves [`default_branch`] — after the fetch, because
+/// that is what creates `origin/HEAD` on git 2.48+. `origin/<default>` only if
+/// the remote actually has it, else the local `<default>`, else `None`.
+///
+/// The local fallback is spelled `refs/heads/<default>`: `worktree add` hands
+/// its start point to `git branch` as a bare argument, past the `--`, so a
+/// name beginning with `-` would be read as an option. `origin/…` never does.
+async fn default_start_point(repo_root: &FsPath) -> Option<String> {
+    let fetched = git(repo_root, &["fetch", "origin"]).await.is_ok();
+    let dbranch = default_branch(repo_root).await?;
+    if fetched && ref_exists(repo_root, &format!("refs/remotes/origin/{dbranch}")).await {
+        return Some(format!("origin/{dbranch}"));
+    }
+    let local = format!("refs/heads/{dbranch}");
+    ref_exists(repo_root, &local).await.then_some(local)
 }
 
 /// Parse `git for-each-ref refs/heads` in the format
@@ -4112,7 +4141,9 @@ async fn create_worktree(
         start_point: Some(sp),
     } = source
     {
-        validate_branch(sp)?;
+        // Same shape rule as a branch — ref names and SHAs, no `~`/`^`
+        // expressions — but named for the field that failed it.
+        validate_branch(sp).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid start point"))?;
     }
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
@@ -4352,22 +4383,11 @@ async fn create_worktree(
             // origin ref fails (offline, a repo with no remote), it falls back to
             // the *local* default branch, and only then to local HEAD — never
             // silently, but never blocking the create either.
-            let mut start_point: Option<String> = None;
-            if db.git_create_from() == GitCreateSource::Origin {
-                if let Some(dbranch) = default_branch(&repo_root).await {
-                    // Base on origin only if the remote actually has that
-                    // branch. The fetch succeeding is not enough: a default
-                    // found only locally would otherwise fail the create against
-                    // a `refs/remotes/origin/<branch>` that does not exist.
-                    if git(&repo_root, &["fetch", "origin"]).await.is_ok()
-                        && ref_exists(&repo_root, &format!("refs/remotes/origin/{dbranch}")).await
-                    {
-                        start_point = Some(format!("origin/{dbranch}"));
-                    } else if ref_exists(&repo_root, &format!("refs/heads/{dbranch}")).await {
-                        start_point = Some(dbranch);
-                    }
-                }
-            }
+            let start_point = if db.git_create_from() == GitCreateSource::Origin {
+                default_start_point(&repo_root).await
+            } else {
+                None
+            };
             let mut a = vec![
                 "worktree".into(),
                 "add".into(),
@@ -8164,6 +8184,57 @@ mod tests {
         git(&work, &["remote", "set-head", "origin", "--delete"]);
         git(&work, &["branch", "main", "trunk"]);
         assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
+
+        // A dangling `origin/HEAD` — what a remote renaming its default leaves
+        // behind after a pruning fetch — is not trusted.
+        git(
+            &work,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/gone",
+            ],
+        );
+        assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
+    }
+
+    /// Offline (here: no reachable remote at all), a default create starts at
+    /// the *local* default branch — not at the main checkout's HEAD, which is
+    /// parked on a feature branch — and spells it so it cannot read as an option.
+    #[tokio::test]
+    async fn default_start_point_falls_back_to_the_local_default_not_head() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "--allow-empty", "-m", "A"]);
+        git(&work, &["checkout", "-b", "feat/parked"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/heads/main")
+        );
+
+        // No default branch at all: the main checkout's HEAD, as before.
+        git(&work, &["branch", "-D", "main"]);
+        assert_eq!(default_start_point(&work).await, None);
     }
 
     /// The staleness computation, against a real git repo: the direction of
