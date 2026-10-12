@@ -1557,8 +1557,25 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// [`claude_state`]'s "a subagent's turn is not the session's turn". Unlike the wrapper,
 /// an interrupted turn ends its spinner at once rather than at Claude's `idle_prompt`
 /// reminder, and an approved tool call clears "waiting" without waiting for the turn
-/// to end. What it cannot see is an MCP elicitation dialog, which the wrapper reads
-/// from a `Notification` the mod is not shown.
+/// to end.
+///
+/// One `classic.*` event is hooked anyway: `classic.Notification`, for the dialogs no
+/// native event shows. It reaches the mod only where the policy mod is not seated —
+/// an organization whose managed `prependPlugins` leaves out `sec-default@builtin`,
+/// or a machine with no managed settings on a personal plan — and where it is, the hook
+/// never runs and the table above is all there is. Measured on Claude Code 2.1.296 with
+/// a stdio MCP server that elicits: `elicitation_dialog` arrives about six seconds after
+/// the request and `elicitation_response` the moment it is answered.
+///
+/// | `Notification` type | State |
+/// |---|---|
+/// | `elicitation_dialog`, `elicitation_url_dialog` — an MCP server asking | [`State::Blocked`], held |
+/// | `elicitation_response`, `elicitation_complete`, after one of those | [`State::Working`] |
+/// | `agent_needs_input` — a subagent asking | [`State::Blocked`] |
+///
+/// The approval dialog's `permission_prompt` is left to `tool.check`, which reports it
+/// first, and a subagent's question is not held: answering it raises nothing in this
+/// session, so held it would stay "waiting" until the session's own next state.
 ///
 /// # The context rides the first prompt, not the system prompt
 ///

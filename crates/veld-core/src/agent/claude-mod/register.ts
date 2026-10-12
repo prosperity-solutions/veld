@@ -97,6 +97,37 @@ export const register: Register = (on) => {
     return next(e)
   }).catch(passThrough)
 
+  // Claude's own `Notification` hook event, the one dialog the mod events do not show:
+  // an MCP server asking through Claude, and a subagent asking for input. It reaches a
+  // mod only where no organization guard sits in front of it, and where one does this
+  // never runs. The approval dialog is a `Notification` too, and `tool.check` already
+  // reported it.
+  on('classic.Notification', async ($, e, next) => {
+    const result = await next(e)
+    if (!hooks) return result
+    switch (e.notification_type) {
+      case 'elicitation_dialog':
+      case 'elicitation_url_dialog':
+        blocked = true
+        await report($, 'blocked', true)
+        break
+      case 'elicitation_response':
+      case 'elicitation_complete':
+        if (blocked) {
+          blocked = false
+          await report($, 'working')
+        }
+        break
+      // Answered in the subagent, which tells this session nothing when it is: held,
+      // it would stay "waiting" until the session's own next state.
+      case 'agent_needs_input':
+        blocked = true
+        await report($, 'blocked')
+        break
+    }
+    return result
+  }).catch(passThrough)
+
   on('session.end', async ($, e, next) => {
     const result = await next(e)
     if (e.reason === 'clear') {
