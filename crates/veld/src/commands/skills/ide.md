@@ -198,9 +198,11 @@ which files, how to tell it is done.
   long or structured one belongs in a file; the limit is 64 KiB. Without a prompt
   you get a plain worktree, filed with the user's other new worktrees, and no
   agent.
-- The prompt is sent **as you wrote it**, the moment the human opens the
-  worktree. Write it the way you would want an instruction you did not review
-  to read.
+- By default the human sees your prompt before anything runs, and can edit,
+  start or discard it; if they have turned that review off
+  (`worktree.reviewHandoffs`), it is sent **as you wrote it** the moment they
+  open the worktree. Write it for both: an instruction a person can judge at a
+  glance, and one that is safe to run unread.
 - `--group` files it into one of the human's existing groups instead of
   **Waiting for you** (`--lane` is the same flag). `veld worktree groups` lists
   them (`--json` for `{"project", "groups"}`); a name that is not one of them is

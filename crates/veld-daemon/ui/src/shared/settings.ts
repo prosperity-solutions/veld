@@ -109,6 +109,7 @@ const FALLBACK = {
   // lit watch button must actually be watching, so a daemon too old to know the key
   // has to agree with the shipped default rather than with the release before it.
   filesWatchByDefault: true,
+  worktreeReviewHandoffs: true,
   filesWrapLines: true,
   filesShowDeletions: false,
   filesSplitDiff: false,
@@ -440,6 +441,15 @@ export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
  */
 export function filesWatchByDefault(doc: SettingsDoc): boolean {
   return bool(doc, "files.watchByDefault", FALLBACK.filesWatchByDefault);
+}
+
+/**
+ * Whether opening a handed-off worktree shows the agent's prompt for review
+ * before its agent starts (`worktree.reviewHandoffs`). **Defaults on**: the
+ * prompt was written by an agent, not by the person about to run it.
+ */
+export function worktreeReviewHandoffs(doc: SettingsDoc): boolean {
+  return bool(doc, "worktree.reviewHandoffs", FALLBACK.worktreeReviewHandoffs);
 }
 
 /**

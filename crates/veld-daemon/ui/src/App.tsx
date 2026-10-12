@@ -44,6 +44,7 @@ import {
   FOCUS_SUPPRESS_BELL,
   FOCUS_SUPPRESS_TOASTS,
   FOCUS_SUPPRESS_OS_NOTIFICATIONS,
+  worktreeReviewHandoffs,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
@@ -375,6 +376,7 @@ import {
   TrashLaneWorktreesDialog,
   TrashWorktreeDialog,
   UpdateMainDirtyDialog,
+  HandoffReviewDialog,
 } from "./components/dialogs";
 
 import {
@@ -993,6 +995,16 @@ type DialogState =
    * cancel) instead of the daemon's refusal landing as a bare toast.
    */
   | { kind: "update-main-dirty"; root: string; status: WorktreeGitStatus }
+  /** A handed-off worktree's prompt, held for review before its agent starts. */
+  | {
+      kind: "handoff-review";
+      worktreeId: number;
+      worktree: string;
+      sessionId: string;
+      spec: PaneSpec;
+      prompt: string;
+      substitutedFor?: string;
+    }
   | { kind: "marker"; worktree: Worktree }
   /** `worktree` set means "create it, then move this one into it". */
   | { kind: "new-lane"; worktree?: Worktree }
@@ -4012,6 +4024,24 @@ function AppInner(props: {
    * over their shells. On boot with a second client up, that is the common case
    * rather than a race.
    */
+  /**
+   * Start a handed-off worktree's agent pane: the tab under the session id the
+   * daemon recorded, the prompt queued for its first launch, the tab seeded into
+   * that worktree's layout. Idempotent through `hasTab` — the same session id is
+   * the same tab, which is what a reload before the agent started relies on.
+   */
+  const startHandoff = (worktreeId: number, spec: PaneSpec, sessionId: string, prompt: string) => {
+    const tab = handoffPaneTab(spec, sessionId);
+    queueInitialPrompt(tab.id, prompt, spec.label);
+    setLayouts((prev) => {
+      const base =
+        prev[worktreeId] ?? defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO);
+      return hasTab(base, tab.id) ? prev : { ...prev, [worktreeId]: seedPane(base, tab) };
+    });
+  };
+  const startHandoffRef = useRef(startHandoff);
+  startHandoffRef.current = startHandoff;
+
   useEffect(() => {
     const id = shownId;
     if (id === null) return;
@@ -4114,13 +4144,33 @@ function AppInner(props: {
           if (!declaresAgent) void api.deleteWorktreeHandoff(id).catch(() => {});
         } else if (prompt !== null && spec !== null) {
           const wanted = handed.handoff.pane;
-          if (wanted !== "" && spec.id !== wanted) {
-            notifyRedirect(
-              `The "${wanted}" pane the hand-off asked for can't start in ${worktreeLabel(handed)} — started ${spec.label} instead`,
-            );
+          const substituted = wanted !== "" && spec.id !== wanted;
+          const sessionId = handed.handoff.session_id;
+          // Already in the layout means it was already approved here — a reload
+          // between Start and the agent spawning — so it is not asked again.
+          const approved = hasTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
+          if (!approved && worktreeReviewHandoffs(settingsRef.current ?? {})) {
+            // Held for review instead of started. Never over another dialog:
+            // the next open of this worktree asks again.
+            const review: DialogState = {
+              kind: "handoff-review",
+              worktreeId: id,
+              worktree: worktreeLabel(handed),
+              sessionId,
+              spec,
+              prompt,
+              substitutedFor: substituted ? wanted : undefined,
+            };
+            setDialog((d) => (d.kind === DIALOG_NONE ? review : d));
+          } else {
+            if (substituted) {
+              notifyRedirect(
+                `The "${wanted}" pane the hand-off asked for can't start in ${worktreeLabel(handed)} — started ${spec.label} instead`,
+              );
+            }
+            agentTab = handoffPaneTab(spec, sessionId);
+            queueInitialPrompt(agentTab.id, prompt, spec.label);
           }
-          agentTab = handoffPaneTab(spec, handed.handoff.session_id);
-          queueInitialPrompt(agentTab.id, prompt, spec.label);
         }
       }
       if (wanted !== null && pendingAgentRef.current === wanted) {
@@ -8145,6 +8195,26 @@ function AppInner(props: {
             await api.revertWorktree(dialog.worktree.id);
             await enqueueDelete(dialog.worktree);
             closeDialog();
+          }}
+        />
+      )}
+      {dialog.kind === "handoff-review" && (
+        <HandoffReviewDialog
+          key={dialog.sessionId}
+          worktree={dialog.worktree}
+          agent={dialog.spec.label}
+          substitutedFor={dialog.substitutedFor}
+          prompt={dialog.prompt}
+          onClose={closeDialog}
+          onStart={(prompt, always) => {
+            if (always) void saveSettingsRef.current({ "worktree.reviewHandoffs": false });
+            startHandoffRef.current(dialog.worktreeId, dialog.spec, dialog.sessionId, prompt);
+            closeDialog();
+          }}
+          onDiscard={async () => {
+            await api.deleteWorktreeHandoff(dialog.worktreeId);
+            closeDialog();
+            await refresh();
           }}
         />
       )}

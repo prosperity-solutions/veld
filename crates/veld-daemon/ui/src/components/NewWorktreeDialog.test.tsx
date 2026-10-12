@@ -98,15 +98,6 @@ const json = () => new File(['{"a":1}'], "data.json", { type: "application/json"
 /** The `DataTransfer` a file drag carries, as far as the handlers read it. */
 const fileDrag = (files: File[]) => ({ dataTransfer: { types: ["Files"], files, dropEffect: "none" } });
 
-// jsdom has no `document.fonts`, and the prompt's autosizing `Textarea` listens
-// on it for webfonts finishing loading. Local to this file: it is the first
-// test to render that field.
-if (!("fonts" in document)) {
-  Object.defineProperty(document, "fonts", {
-    value: { addEventListener() {}, removeEventListener() {} },
-  });
-}
-
 beforeEach(() => {
   // jsdom has no layout, so no `scrollIntoView`; an open combobox calls it.
   Element.prototype.scrollIntoView = vi.fn();

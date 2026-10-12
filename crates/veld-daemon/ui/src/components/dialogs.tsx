@@ -3130,6 +3130,90 @@ export function UpdateMainDirtyDialog(props: {
 }
 
 /**
+ * Review the prompt an agent handed off (`veld worktree new`) before its agent
+ * starts — shown when the user opens such a worktree and
+ * `worktree.reviewHandoffs` is on.
+ *
+ * The prompt is editable, because the most likely reason to stop here is that it
+ * is nearly right. **Not now** leaves the hand-off waiting (the next open asks
+ * again); **Discard** drops it, leaving an ordinary worktree. The checkbox turns
+ * the review off for every later hand-off — the "I trust my agents" answer —
+ * and is applied only together with **Start**, so ticking it cannot by itself
+ * do anything to this one.
+ */
+export function HandoffReviewDialog(props: {
+  worktree: string;
+  /** The label of the agent pane that will start. */
+  agent: string;
+  /** Set when the hand-off asked for a pane this checkout cannot start. */
+  substitutedFor?: string;
+  prompt: string;
+  onStart: (prompt: string, always: boolean) => void;
+  onDiscard: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [text, setText] = useState(props.prompt);
+  const [always, setAlways] = useState(false);
+  const discard = useSubmit(props.onDiscard);
+  const empty = text.trim() === "";
+  return (
+    <Modal title={`Start ${props.agent} in ${props.worktree}?`} onClose={props.onClose} size="lg">
+      <Stack gap="sm">
+        <Text size="sm" c="dimmed">
+          An agent handed this worktree to you with the prompt below. Starting sends it
+          to {props.agent} as written here — edit it first if it is not quite right.
+        </Text>
+        {props.substitutedFor !== undefined && (
+          <Alert color="yellow" variant="light" p="xs">
+            <Text size="xs">
+              The hand-off asked for the "{props.substitutedFor}" pane, which this checkout
+              cannot start — {props.agent} will start instead.
+            </Text>
+          </Alert>
+        )}
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.currentTarget.value)}
+          autosize
+          minRows={4}
+          maxRows={16}
+          aria-label="Prompt"
+          data-autofocus
+        />
+        <Checkbox
+          checked={always}
+          onChange={(e) => setAlways(e.currentTarget.checked)}
+          label="Start prompts from agents without asking"
+          description="Turns this review off for every later hand-off. You can turn it back on in Settings › Git."
+        />
+        <Group justify="space-between">
+          <Group gap="xs">
+            <Button disabled={empty} onClick={() => props.onStart(text, always)}>
+              Start {props.agent}
+            </Button>
+            <Button variant="default" onClick={props.onClose}>
+              Not now
+            </Button>
+          </Group>
+          <Button
+            color="red"
+            variant="subtle"
+            loading={discard.busy}
+            onClick={(e) => {
+              e.preventDefault();
+              void discard.submit(e);
+            }}
+          >
+            Discard
+          </Button>
+        </Group>
+        <ErrorText error={discard.error} />
+      </Stack>
+    </Modal>
+  );
+}
+
+/**
  * Edit a worktree's name and alias. Purely editing — trashing/deletion has its
  * own dialog ([`TrashWorktreeDialog`]), so a rename action can never
  * accidentally read as a delete, and the trash flow is never buried under a

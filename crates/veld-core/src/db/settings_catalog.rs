@@ -924,6 +924,13 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            Self::WorktreeReviewHandoffs => toggle(
+                "Review prompts handed off by agents",
+                "When a coding agent hands you a task as a new worktree (`veld worktree new`), \
+                 opening it shows the agent's prompt first, to edit, start, or discard. Off: \
+                 opening it starts the agent with the prompt as the agent wrote it.",
+                Git,
+            ),
             Self::GitCreateFrom => Spec {
                 title: "Create worktrees from",
                 help: "Origin (recommended): fetching the remote and cutting the new branch from \

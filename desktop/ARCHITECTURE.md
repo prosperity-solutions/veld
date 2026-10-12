@@ -166,7 +166,11 @@ requests at runtime — branding rule.
   id (`handoffPaneTab`) and queues the prompt, and the row is deleted when *that*
   session spawns (`pty::finish_agent_handoff`), not when a window reads it — so a
   reload or crash between the two leaves it for the next window, and the tab
-  already in the layout is the same tab, not a second one. The hourglass on a
+  already in the layout is the same tab, not a second one. With
+  `worktree.reviewHandoffs` on (the default) the seed effect opens a
+  `handoff-review` dialog instead of seeding, and **Start** seeds through the
+  same `startHandoff`; a tab already in the layout under that session id means
+  it was approved before a reload, so it is not asked again. The hourglass on a
   row reads `worktree.handoff`, not the lane, because `--group` files a
   hand-off straight into a user group where it is just as much waiting.
 - **Creating a worktree happens in a lane, not beside the rail.** There is one
