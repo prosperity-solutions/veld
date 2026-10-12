@@ -195,16 +195,11 @@ enum Command {
     /// Show detailed CPU/memory stats, per subprocess and over time.
     Stats(commands::stats::StatsArgs),
 
-    /// Work with the Veld IDE window from a terminal: `veld ide open`.
+    /// Work with the Veld IDE window from a terminal: `veld ide open`, and hand a
+    /// task to the human as a new worktree with `veld ide worktree new`.
     Ide {
         #[command(subcommand)]
         command: commands::ide::IdeCommand,
-    },
-
-    /// Hand a task off to a new worktree for the human: `veld worktree new`.
-    Worktree {
-        #[command(subcommand)]
-        command: commands::worktree::WorktreeCommand,
     },
 
     /// Open a web page in the Veld window that owns this terminal.
@@ -1180,8 +1175,6 @@ async fn main() {
         } => commands::open_url::run(tool, session, args).await,
 
         Command::Ide { command } => commands::ide::run(command).await,
-
-        Command::Worktree { command } => commands::worktree::run(command).await,
 
         Command::AgentSettings { tool, session } => commands::agent::settings(tool, session),
 

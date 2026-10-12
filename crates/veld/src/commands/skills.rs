@@ -153,7 +153,7 @@ const TOPICS: &[Topic] = &[
         name: "ide",
         summary: "Show the human a file or a page beside your terminal (`veld ide open`), \
                   read the references they copy back, and hand a task off to a new worktree \
-                  (`veld worktree new`).",
+                  (`veld ide worktree new`).",
         body: include_str!("skills/ide.md"),
     },
     Topic {

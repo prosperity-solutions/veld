@@ -54,7 +54,7 @@ pub fn routes() -> Router {
             patch(patch_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
-        // What `veld worktree new` calls: a checkout an agent hands to a human,
+        // What `veld ide worktree new` calls: a checkout an agent hands to a human,
         // optionally with an agent pane waiting to start on a prompt. Its own
         // path rather than a field on `POST /api/worktrees`, because it names the
         // repository by where the caller *is* — a terminal session or a working
@@ -2629,7 +2629,7 @@ struct WorktreeView {
     /// worktree that has merely been *queued* for removal still reports
     /// `trashed_at` to let the user undo it.
     deleting: bool,
-    /// The agent pane a hand-off is waiting to start here (`veld worktree new
+    /// The agent pane a hand-off is waiting to start here (`veld ide worktree new
     /// --prompt`), or absent when there is none.
     ///
     /// The prompt is deliberately not part of it: every rail poll carries this
@@ -4916,7 +4916,7 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
     })
 }
 
-/// `POST /api/handoffs` — what `veld worktree new` sends.
+/// `POST /api/handoffs` — what `veld ide worktree new` sends.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HandoffRequest {
@@ -5270,7 +5270,7 @@ struct GroupsQuery {
 }
 
 /// `GET /api/handoffs/groups?cwd=…` — the groups a hand-off from here can be filed
-/// into, for `veld worktree groups`. The project is resolved exactly as
+/// into, for `veld ide worktree groups`. The project is resolved exactly as
 /// [`create_handoff`] resolves it, so the answer is about the project a create
 /// from the same place would land in.
 async fn handoff_groups(
@@ -5339,7 +5339,7 @@ fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), Ap
 /// Keyed on the branch rather than the path because the branch is known before
 /// anything is created, and a hand-off always creates its branch.
 ///
-/// A count rather than a set: a retried `veld worktree new` for the same branch
+/// A count rather than a set: a retried `veld ide worktree new` for the same branch
 /// fails fast while the first is still checking out, and its guard must not
 /// un-hide the one that is still running.
 static HANDOFFS_IN_FLIGHT: std::sync::LazyLock<

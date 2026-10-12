@@ -1,7 +1,7 @@
 //! Worktrees an agent handed off to a human, and the agent pane each one is
 //! waiting to start.
 //!
-//! `veld worktree new --prompt` is how a coding agent branches a task off into a
+//! `veld ide worktree new --prompt` is how a coding agent branches a task off into a
 //! checkout of its own: the daemon creates the worktree, files it into the
 //! rail's "Waiting for you" section ([`HANDOFF_LANE`]), and records a [`Handoff`]. The
 //! first window to show that worktree starts the agent pane under the session id

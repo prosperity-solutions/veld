@@ -719,7 +719,7 @@ pub enum SettingKey {
     WorktreeMarkerStyle,
     /// Which half of the New worktree dialog opens: `ask`, `prompt` or `manual`.
     WorktreeNewMode,
-    /// Whether a prompt handed off by an agent (`veld worktree new`) is shown for
+    /// Whether a prompt handed off by an agent (`veld ide worktree new`) is shown for
     /// review before its agent starts.
     WorktreeReviewHandoffs,
     WorktreeTrashRetention,

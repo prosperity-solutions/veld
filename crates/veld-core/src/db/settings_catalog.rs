@@ -926,7 +926,7 @@ impl SettingKey {
             },
             Self::WorktreeReviewHandoffs => toggle(
                 "Review prompts handed off by agents",
-                "When a coding agent hands you a task as a new worktree (`veld worktree new`), \
+                "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
                  opening it shows the agent's prompt first, to edit, start, or discard. Off: \
                  opening it starts the agent with the prompt as the agent wrote it.",
                 Git,
@@ -1241,7 +1241,7 @@ impl SettingKey {
                 "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
                  in a Veld terminal: that `veld ide open` puts a file or a page next to that \
                  terminal, and that separate work they come across can be offered to you as a \
-                 new worktree (`veld worktree new`). Nothing of yours is edited, and the text \
+                 new worktree (`veld ide worktree new`). Nothing of yours is edited, and the text \
                  is the same every time. \
                  Independent of the row above. Takes effect for new agents.",
                 Activity,

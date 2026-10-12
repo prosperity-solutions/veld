@@ -2016,7 +2016,7 @@ fn migrate_v17_worktree_adopted(conn: &Connection) -> rusqlite::Result<()> {
 
 /// v18: an agent pane waiting to be started in a worktree an agent handed off.
 ///
-/// `veld worktree new --prompt` creates a checkout for a human to take over, and
+/// `veld ide worktree new --prompt` creates a checkout for a human to take over, and
 /// the agent that should start there does not exist yet: a terminal is spawned
 /// by the window that shows the worktree, and no window may be open at all. So
 /// the request is kept here until one is — the session id the pane will run

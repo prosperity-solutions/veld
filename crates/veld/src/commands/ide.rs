@@ -59,6 +59,14 @@ pub enum IdeCommand {
         #[arg(long, hide = true)]
         session: Option<String>,
     },
+
+    /// Hand a task to the human as a new worktree of this project, with an agent
+    /// waiting to start in it on a prompt (`new`), and list the groups it can be
+    /// filed into (`groups`).
+    Worktree {
+        #[command(subcommand)]
+        command: super::worktree::WorktreeCommand,
+    },
 }
 
 /// The sentence for a missing mode. Its own constant so the test can pin it — an
@@ -74,6 +82,7 @@ pub async fn run(command: IdeCommand) -> i32 {
             json,
             session,
         } => open(&target, notify, quiet, json, session).await,
+        IdeCommand::Worktree { command } => super::worktree::run(command).await,
     }
 }
 

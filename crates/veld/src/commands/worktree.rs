@@ -1,4 +1,4 @@
-//! `veld worktree new` — hand a task off to a new worktree for a human to take
+//! `veld ide worktree new` — hand a task off to a new worktree for a human to take
 //! over.
 //!
 //! The way a coding agent branches work off without filing an issue somebody has
@@ -7,7 +7,7 @@
 //! the first window that shows it starts an agent pane there with the prompt
 //! already sent. From then on the human drives it; nothing reports back here.
 //!
-//! `veld worktree groups` lists the groups a hand-off can be filed into instead.
+//! `veld ide worktree groups` lists the groups a hand-off can be filed into instead.
 //!
 //! # Exit status
 //!
@@ -70,7 +70,7 @@ pub enum WorktreeCommand {
         from_here: bool,
 
         /// File it into this existing group instead of "Waiting for you" (or, with
-        /// no prompt, instead of the ungrouped section). See `veld worktree groups`
+        /// no prompt, instead of the ungrouped section). See `veld ide worktree groups`
         /// for the names.
         #[arg(long, visible_alias = "lane", value_name = "NAME")]
         group: Option<String>,
@@ -87,7 +87,7 @@ pub enum WorktreeCommand {
         session: Option<String>,
     },
 
-    /// List the groups of this project's rail that `veld worktree new --group` can
+    /// List the groups of this project's rail that `veld ide worktree new --group` can
     /// file into.
     ///
     /// Exit status: 0 listed, 1 failed, 3 not inside a worktree Veld knows.

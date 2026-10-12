@@ -3130,7 +3130,7 @@ export function UpdateMainDirtyDialog(props: {
 }
 
 /**
- * Review the prompt an agent handed off (`veld worktree new`) before its agent
+ * Review the prompt an agent handed off (`veld ide worktree new`) before its agent
  * starts — shown when the user opens such a worktree and
  * `worktree.reviewHandoffs` is on.
  *

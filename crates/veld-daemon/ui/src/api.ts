@@ -437,7 +437,7 @@ export interface Worktree {
    */
   adopted?: boolean;
   /**
-   * The agent pane a hand-off is waiting to start here — `veld worktree new
+   * The agent pane a hand-off is waiting to start here — `veld ide worktree new
    * --prompt` — or absent when there is none. `session_id` is the tab id the pane
    * runs under; `pane` the declared agent, or `""` for this project's usual one.
    * The prompt is read separately ([`api.worktreeHandoff`]) by the window that

@@ -161,7 +161,7 @@ human may already have open:
   untracked ones. This is the human's cheap review surface; it is why you do not
   need to open every file you edited.
 
-## Handing a task to the human in a new worktree (`veld worktree new`)
+## Handing a task to the human in a new worktree (`veld ide worktree new`)
 
 When your reply points out something outside the current task that somebody
 would have to fix later — a bug you noticed on the way, an outdated or missing
@@ -175,10 +175,10 @@ once per piece of work, not on every turn. When they agree, or ask for it
 themselves:
 
 ```sh
-veld worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
-veld worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
-veld worktree groups                       # the groups you can file into
-veld worktree new --branch spike/cache --group Experiments --from-here --prompt-file - < plan.md --json
+veld ide worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
+veld ide worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
+veld ide worktree groups                       # the groups you can file into
+veld ide worktree new --branch spike/cache --group Experiments --from-here --prompt-file - < plan.md --json
 ```
 
 Veld creates the worktree in **the project your working directory is in** — run
@@ -204,7 +204,7 @@ which files, how to tell it is done.
   open the worktree. Write it for both: an instruction a person can judge at a
   glance, and one that is safe to run unread.
 - `--group` files it into one of the human's existing groups instead of
-  **Waiting for you** (`--lane` is the same flag). `veld worktree groups` lists
+  **Waiting for you** (`--lane` is the same flag). `veld ide worktree groups` lists
   them (`--json` for `{"project", "groups"}`); a name that is not one of them is
   refused before anything is created (exit `4`). With a prompt it still waits
   there, marked, until they open it.

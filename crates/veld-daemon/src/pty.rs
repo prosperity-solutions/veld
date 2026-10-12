@@ -1542,7 +1542,7 @@ struct Ticket {
     /// carries.
     shim_env: BTreeMap<String, String>,
     /// Whether spawning this session starts a handed-off worktree's agent pane —
-    /// a fresh launch under the session id `veld worktree new` recorded. Decided
+    /// a fresh launch under the session id `veld ide worktree new` recorded. Decided
     /// at mint, where the database is already open, so the spawn path only acts
     /// on it (see [`finish_agent_handoff`]).
     agent_handoff: bool,

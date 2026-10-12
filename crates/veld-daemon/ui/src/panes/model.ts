@@ -1728,7 +1728,7 @@ export function paneTakesPrompt(spec: {
 }
 
 /**
- * The agent a handed-off worktree starts — `veld worktree new`'s choice, else the
+ * The agent a handed-off worktree starts — `veld ide worktree new`'s choice, else the
  * one this user last picked in this project, else the first the project
  * declares. `null` when the checkout declares none that can take a prompt.
  *

@@ -562,7 +562,7 @@ export const DISCOVERED_LANE = "\u0000discovered";
 
 /**
  * The `worktrees.lane` value — and the group key — of the "Waiting for you" section:
- * worktrees a coding agent handed off with `veld worktree new`, waiting for the
+ * worktrees a coding agent handed off with `veld ide worktree new`, waiting for the
  * user to file them.
  *
  * Unlike the other NUL-prefixed keys this one **is** a stored lane value, written

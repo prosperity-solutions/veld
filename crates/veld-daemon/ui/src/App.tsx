@@ -4075,7 +4075,7 @@ function AppInner(props: {
     // discarded the pane silently, which is the whole class of bug this
     // hand-off keeps producing.
     const alreadyHere = layoutsRef.current[id] !== undefined;
-    // An agent pane `veld worktree new` left waiting here. The same hand-off as
+    // An agent pane `veld ide worktree new` left waiting here. The same hand-off as
     // `wanted`, except that it was made by another process and outlives this
     // window: it is the daemon's until the session it names has spawned, so a
     // window that reloads before then reaches it again — and since the tab
@@ -10479,7 +10479,7 @@ function Rail(props: {
                   className="lane-name"
                   title={
                     group.key === HANDOFF_LANE
-                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one marked with an hourglass shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
+                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. Opening one marked with an hourglass shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
                       : undefined
                   }
                 >
@@ -10946,7 +10946,7 @@ function Rail(props: {
                       to be seen while you are looking somewhere else. Trashed rows
                       are excluded — their panes are gone, and a state nobody can act
                       on is noise beside restore and delete. */}
-                  {/* An agent waiting to be started here — `veld worktree new`
+                  {/* An agent waiting to be started here — `veld ide worktree new`
                       left it, and opening the row is what starts it. On the row
                       rather than the section, because a hand-off filed straight
                       into one of the user's groups (`--group`) is waiting too.

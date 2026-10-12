@@ -154,7 +154,7 @@ requests at runtime — branding rule.
   honest shape is `role="listbox"` on the rail with `role="option"` rows,
   deferred to a later increment.
 - **A hand-off is a lane value, and its agent is the daemon's until it spawns.**
-  `veld worktree new` (`POST /api/handoffs`) files the checkout under
+  `veld ide worktree new` (`POST /api/handoffs`) files the checkout under
   `worktrees.lane = "\0handoff"` — the pinned *Waiting for you* section under main —
   rather than behind a flag, because every way of moving a row writes `lane` and
   every lane a user can write differs from that one, `""` included: dragging out,
