@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { PaneSpec } from "../api";
+import type { PaneSpec, Worktree } from "../api";
 import { render } from "../shared/testRender";
 import { NewWorktreeDialog } from "./dialogs";
 
@@ -24,7 +24,12 @@ vi.mock("../api", async (importOriginal) => {
   return {
     ...real,
     api: {
-      repoBranches: () => Promise.resolve({ local: [], remote: [] }),
+      repoBranches: () =>
+        Promise.resolve({
+          local: [],
+          remote: [{ name: "origin/trunk", refname: "refs/remotes/origin/trunk", local_name: "trunk", has_local: false }],
+          default_branch: "trunk",
+        }),
       worktreeEmoji: () => new Promise(() => {}),
       worktreeColors: () => new Promise(() => {}),
     },
@@ -46,13 +51,17 @@ const claude = {
 
 type Body = Parameters<Parameters<typeof NewWorktreeDialog>[0]["onCreate"]>[0];
 
-function open(pathOf: (file: File) => string | null = () => null) {
+function open(
+  pathOf: (file: File) => string | null = () => null,
+  extra: { sources?: Worktree[]; spinOffFrom?: Worktree } = {},
+) {
   const onCreate = vi.fn<(body: Body) => Promise<void>>(() => Promise.resolve());
   render(
     <NewWorktreeDialog
       onCreate={onCreate}
       repoRoot="/repo"
-      sources={[]}
+      sources={extra.sources ?? []}
+      spinOffFrom={extra.spinOffFrom}
       takenAliases={[]}
       agents={[claude]}
       newMode="prompt"
@@ -99,6 +108,8 @@ if (!("fonts" in document)) {
 }
 
 beforeEach(() => {
+  // jsdom has no layout, so no `scrollIntoView`; an open combobox calls it.
+  Element.prototype.scrollIntoView = vi.fn();
   // jsdom has no object URLs; the thumbnail only needs *a* URL to render.
   URL.createObjectURL = vi.fn(() => "blob:test");
   URL.revokeObjectURL = vi.fn();
@@ -288,7 +299,7 @@ describe("NewWorktreeDialog attachments", () => {
     const { onCreate } = open((f) => `/Users/me/${f.name}`);
     fireEvent.drop(surface(), fileDrag([png()]));
     expect(
-      screen.getByText("Opens Claude in the new checkout with the files as its first message."),
+      screen.getByText(/Opens Claude with the files\./),
     ).toBeTruthy();
 
     const create = screen.getByRole("button", { name: "Create worktree" });
@@ -316,5 +327,88 @@ describe("NewWorktreeDialog attachments", () => {
     const body = onCreate.mock.calls[0][0];
     expect(body.agent).toBeUndefined();
     expect(body.attachments).toBeUndefined();
+  });
+});
+
+describe("NewWorktreeDialog base branch", () => {
+  /** The picker's visible input — Mantine also labels its listbox. */
+  const startsFrom = () =>
+    screen
+      .getAllByLabelText("Starts from")
+      .find((el): el is HTMLInputElement => el instanceof HTMLInputElement && el.type !== "hidden") ??
+    (() => {
+      throw new Error("no Starts from field");
+    })();
+  // The main checkout sits on a feature branch, which must not become the default.
+  const main = { id: 1, path: "/repo", branch: "feat/wip", alias: "repo", is_main: true } as Worktree;
+  const feat = { id: 2, path: "/wt/feat", branch: "feat/x", alias: "feat", is_main: false } as Worktree;
+
+  test("says where a default create starts, naming the repo's own default branch", async () => {
+    open(undefined, { sources: [main, feat] });
+    const field = startsFrom();
+    await waitFor(() => expect(field.value).toBe("origin/trunk"));
+    expect(screen.getByText("fetched first when online.")).toBeTruthy();
+  });
+
+  test("a spin-off is flagged, and the default is one pick away", async () => {
+    const { onCreate } = open(undefined, { sources: [main, feat], spinOffFrom: feat });
+    const field = startsFrom();
+    expect(field.value).toBe("feat/x");
+    expect(await screen.findByText(/^plus its uncommitted changes\./)).toBeTruthy();
+
+    // Searched for, the way a picker of every branch is used.
+    fireEvent.click(field);
+    fireEvent.change(field, { target: { value: "trunk" } });
+    // Queried by attribute rather than role: the dropdown is still in its
+    // opening transition, which keeps it out of the accessibility tree.
+    const option = await waitFor(() => {
+      const found = [...document.querySelectorAll("[data-combobox-option]")].find(
+        (o) => o.textContent === "origin/trunk",
+      );
+      if (!found) throw new Error("the default is not offered");
+      return found;
+    });
+    fireEvent.click(option);
+    expect(field.value).toBe("origin/trunk");
+    expect(screen.queryByText(/uncommitted changes/)).toBeNull();
+
+    const create = screen.getByRole("button", { name: "Create worktree" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(create);
+    });
+    expect(onCreate.mock.calls[0][0].source).toEqual({ kind: "new_branch" });
+  });
+
+  test("a spin-off replaced by a misclick can be picked back", async () => {
+    const { onCreate } = open(undefined, { sources: [main, feat], spinOffFrom: feat });
+    const field = startsFrom();
+    const pick = async (search: string, label: string) => {
+      fireEvent.click(field);
+      fireEvent.change(field, { target: { value: search } });
+      const option = await waitFor(() => {
+        const found = [...document.querySelectorAll("[data-combobox-option]")].find(
+          (o) => o.textContent === label,
+        );
+        if (!found) throw new Error(`${label} is not offered`);
+        return found;
+      });
+      fireEvent.click(option);
+    };
+    await pick("trunk", "origin/trunk");
+    expect(field.value).toBe("origin/trunk");
+    await pick("feat", "feat/x");
+    expect(field.value).toBe("feat/x");
+
+    const create = screen.getByRole("button", { name: "Create worktree" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(create);
+    });
+    expect(onCreate.mock.calls[0][0].source).toEqual({
+      kind: "worktree",
+      from_path: "/wt/feat",
+      carry_over: true,
+    });
   });
 });

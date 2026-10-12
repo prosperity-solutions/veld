@@ -1607,6 +1607,10 @@ struct LocalBranchView {
     /// Short name (`feat/x`), exactly as git has it — never slugged, since it
     /// is passed straight back as a ref.
     name: String,
+    /// `refs/heads/feat/x`. Not derivable from `name`: git disambiguates a short
+    /// name that a tag or a remote ref shares (`heads/main`), and a start point
+    /// has to name exactly one ref.
+    refname: String,
     /// The checkout that currently holds it, or `None` when the branch is free.
     checked_out_in: Option<String>,
     /// `origin/feat/x`, or `None` for a branch that tracks nothing.
@@ -1616,8 +1620,12 @@ struct LocalBranchView {
 /// One remote-tracking branch, as the create dialog's source picker needs it.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct RemoteBranchView {
-    /// `origin/feat/x` — what a `git worktree add` start-point argument names.
+    /// `origin/feat/x` — what a `git worktree add` start-point argument names,
+    /// except where git has disambiguated it (`remotes/origin/x`, when a local
+    /// branch `origin/x` exists); [`Self::refname`] is always exact.
     name: String,
+    /// `refs/remotes/origin/feat/x` — see [`LocalBranchView::refname`].
+    refname: String,
     /// `feat/x` — the local branch name the dialog offers by default. The
     /// remote's own name is stripped, because a local branch called
     /// `origin/feat/x` is legal, confusing, and never what was meant.
@@ -1633,17 +1641,172 @@ struct RemoteBranchView {
 struct BranchesView {
     local: Vec<LocalBranchView>,
     remote: Vec<RemoteBranchView>,
+    /// What a default create cuts from in `git.createFrom = "origin"` mode — see
+    /// [`default_branch`]. `None` for a repo with no `origin/HEAD`, `main` or
+    /// `master`.
+    default_branch: Option<String>,
 }
 
+/// Whether `refname` resolves. `--quiet` keeps the probe off stderr, which the
+/// [`git`] helper would otherwise surface as the error.
+async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
+    git(repo_root, &["rev-parse", "--verify", "--quiet", refname])
+        .await
+        .is_ok()
+}
+
+/// The repo's default branch: what `origin/HEAD` points at, else `main`, else
+/// `master`, whichever exists on origin or locally — the first of
+/// [`default_branch_candidates`]. `main`/`master` is a heuristic for a repo
+/// with no `origin/HEAD`; git 2.48+ writes that ref on fetch, so it is read
+/// after one where it can be.
+///
+/// **Not the main checkout's current branch.** The main checkout is somebody's
+/// working copy and is often on a feature branch, which is not the base the
+/// `git.createFrom` setting promises.
+async fn default_branch(repo_root: &FsPath) -> Option<String> {
+    default_branch_candidates(repo_root)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Every branch that could be the default, best first: `origin/HEAD`'s target,
+/// then `main`, then `master` — each only if it exists on origin or locally,
+/// and none twice.
+///
+/// `origin/HEAD` only while the branch it names still exists: a remote that
+/// renamed its default leaves it dangling at the old name after a pruning
+/// fetch, and git does not repair it. Without a pruning fetch the old branch
+/// stays too, frozen — which only the remote can tell; see
+/// [`default_start_point`].
+async fn default_branch_candidates(repo_root: &FsPath) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(head) = git(
+        repo_root,
+        // Full name, not `--short`: git shortens to `remotes/origin/<b>` when
+        // a local branch `origin/<b>` makes `origin/<b>` ambiguous.
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+    )
+    .await
+    {
+        if let Some(b) = head
+            .strip_prefix("refs/remotes/origin/")
+            .filter(|b| !b.is_empty())
+        {
+            names.push(b.to_string());
+        }
+    }
+    for cand in ["main", "master"] {
+        if !names.iter().any(|n| n == cand) {
+            names.push(cand.to_string());
+        }
+    }
+    let mut found = Vec::new();
+    for name in names {
+        if ref_exists(repo_root, &format!("refs/remotes/origin/{name}")).await
+            || ref_exists(repo_root, &format!("refs/heads/{name}")).await
+        {
+            found.push(name);
+        }
+    }
+    found
+}
+
+/// Where a default `new_branch` create starts in `git.createFrom = "origin"`
+/// mode, or `None` for the main checkout's HEAD.
+///
+/// Fetches first, then walks [`default_branch_candidates`] — after the fetch,
+/// because that is what creates `origin/HEAD` on git 2.48+. For the first
+/// candidate: `origin/<default>` whenever the repo has it — freshly fetched, or
+/// as of the last fetch when this one failed, which is still newer than a local
+/// `<default>` nobody fast-forwards, and gives the new branch an upstream —
+/// else the local `<default>`. `None` when there is no candidate.
+///
+/// **A remote-tracking default the remote no longer has is skipped**, when the
+/// fetch reached the remote. That is a renamed default: a non-pruning fetch
+/// keeps both `origin/HEAD` and the old branch, frozen, and git only ever
+/// *creates* `origin/HEAD`. Asked with `ls-remote`, which changes nothing — so
+/// an `origin/HEAD` somebody set on purpose, to a branch the remote has, stands.
+///
+/// Both are spelled as full refnames. A short name is ambiguous once a tag or a
+/// local branch shares it (`origin/main` as a local branch), and `worktree add`
+/// refuses an ambiguous start point outright; it also hands the start point to
+/// `git branch` past the `--`, where a name beginning with `-` reads as an
+/// option.
+async fn default_start_point(repo_root: &FsPath) -> Option<String> {
+    let fetched = git(repo_root, &["fetch", "origin"]).await.is_ok();
+    let mut skipped = false;
+    for name in default_branch_candidates(repo_root).await {
+        let remote = format!("refs/remotes/origin/{name}");
+        if ref_exists(repo_root, &remote).await {
+            if fetched && !on_origin(repo_root, &name).await {
+                skipped = true;
+                continue;
+            }
+            return Some(remote);
+        }
+        let local = format!("refs/heads/{name}");
+        if ref_exists(repo_root, &local).await {
+            return Some(local);
+        }
+    }
+    // A default renamed to something other than `main`/`master`: no candidate
+    // names it, so ask the remote which branch its HEAD is now.
+    if skipped {
+        let head = origin_head(repo_root).await?;
+        let remote = format!("refs/remotes/origin/{head}");
+        return ref_exists(repo_root, &remote).await.then_some(remote);
+    }
+    None
+}
+
+/// The branch origin's HEAD points at, asked of the remote (`ls-remote
+/// --symref`, read-only) rather than read from `origin/HEAD`, which git leaves
+/// where it was when the remote's default moves.
+async fn origin_head(repo_root: &FsPath) -> Option<String> {
+    let out = git(repo_root, &["ls-remote", "--symref", "origin", "HEAD"])
+        .await
+        .ok()?;
+    out.lines().find_map(|line| {
+        let target = line.strip_prefix("ref: refs/heads/")?;
+        let (branch, rest) = target.split_once('\t')?;
+        (rest == "HEAD" && !branch.is_empty()).then(|| branch.to_string())
+    })
+}
+
+/// Whether origin still has `branch`. `true` when it cannot tell — a failed
+/// `ls-remote` is no reason to skip a branch.
+async fn on_origin(repo_root: &FsPath, branch: &str) -> bool {
+    git(
+        repo_root,
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await
+    .map_or(true, |out| !out.is_empty())
+}
+
+/// [`parse_local_branches`]' input: the path last, so a directory with a tab in
+/// its name cannot shift the fields.
+const LOCAL_BRANCH_FORMAT: &str =
+    "--format=%(refname:short)\t%(upstream:short)\t%(refname)\t%(worktreepath)%00";
+/// [`parse_remote_branches`]' input.
+const REMOTE_BRANCH_FORMAT: &str = "--format=%(refname:short)\t%(symref)\t%(refname)%00";
+
 /// Parse `git for-each-ref refs/heads` in the format
-/// `<short>\t<upstream:short>\t<worktreepath>`.
+/// `<short>\t<upstream:short>\t<refname>\t<worktreepath>` ([`LOCAL_BRANCH_FORMAT`]).
 ///
 /// **Records are NUL-terminated and fields are tab-separated, and both halves
 /// are about the worktree path.** A refname cannot contain a tab or a newline
 /// (`git check-ref-format` rejects every ASCII control character) but a
 /// *filesystem path* can hold either — so the record separator is `%00` rather
 /// than the newline `for-each-ref` would otherwise end each record with, and
-/// the path is the last field so `splitn(3, …)` leaves whatever it holds
+/// the path is the last field so `splitn(4, …)` leaves whatever it holds
 /// intact. Splitting records on lines was the first version, and a worktree at
 /// a path containing a newline produced a phantom branch row named after the
 /// path's second half, plus a real branch reported as checked out at the
@@ -1657,15 +1820,17 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
         .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
+            let mut fields = line.splitn(4, '\t');
             let name = fields.next()?;
             if name.is_empty() {
                 return None;
             }
             let upstream = fields.next().unwrap_or("");
+            let refname = fields.next().unwrap_or("");
             let worktree = fields.next().unwrap_or("");
             Some(LocalBranchView {
                 name: name.to_string(),
+                refname: refname.to_string(),
                 checked_out_in: (!worktree.is_empty()).then(|| worktree.to_string()),
                 upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
             })
@@ -1674,7 +1839,7 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
 }
 
 /// Parse `git for-each-ref refs/remotes` in the format
-/// `<short>\t<symref>`, NUL-terminated per record (see
+/// `<short>\t<symref>\t<refname>`, NUL-terminated per record (see
 /// [`parse_local_branches`] for why).
 ///
 /// **Symbolic refs are skipped.** `refs/remotes/origin/HEAD` is a symref to the
@@ -1687,21 +1852,28 @@ fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBran
         .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
-            let (name, symref) = line.split_once('\t').unwrap_or((line, ""));
+            let mut fields = line.splitn(3, '\t');
+            let name = fields.next().unwrap_or("");
+            let symref = fields.next().unwrap_or("");
+            let refname = fields.next().unwrap_or("");
             if name.is_empty() || !symref.is_empty() {
                 return None;
             }
-            // `origin/feat/x` → `feat/x`. Only the first component is the
-            // remote, so `split_once` and not `rsplit_once`: a branch called
-            // `feat/x` under `origin` must not become `x`.
-            let (_remote, local_name) = name.split_once('/')?;
+            // `refs/remotes/origin/feat/x` → `feat/x`. From the refname, not
+            // the short name, which git disambiguates (`remotes/origin/x`) when
+            // a local branch shares it. Only the first component is the remote,
+            // so `split_once` and not `rsplit_once`: a branch called `feat/x`
+            // under `origin` must not become `x`.
+            let (_remote, local_name) = refname.strip_prefix("refs/remotes/")?.split_once('/')?;
             if local_name.is_empty() {
                 return None;
             }
+            let local_ref = format!("refs/heads/{local_name}");
             Some(RemoteBranchView {
                 name: name.to_string(),
+                refname: refname.to_string(),
                 local_name: local_name.to_string(),
-                has_local: local.iter().any(|b| b.name == local_name),
+                has_local: local.iter().any(|b| b.refname == local_ref),
             })
         })
         .collect()
@@ -1727,27 +1899,24 @@ async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>,
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
     let heads = git(
         &repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
-            "refs/heads",
-        ],
+        &["for-each-ref", LOCAL_BRANCH_FORMAT, "refs/heads"],
     )
     .await
     .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let local = parse_local_branches(&heads);
     let remotes = git(
         &repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(symref)%00",
-            "refs/remotes",
-        ],
+        &["for-each-ref", REMOTE_BRANCH_FORMAT, "refs/remotes"],
     )
     .await
     .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let remote = parse_remote_branches(&remotes, &local);
-    Ok(Json(BranchesView { local, remote }))
+    let default_branch = default_branch(&repo_root).await;
+    Ok(Json(BranchesView {
+        local,
+        remote,
+        default_branch,
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -3928,10 +4097,19 @@ async fn remove_repo(Json(body): Json<RemoveRepoBody>) -> Result<StatusCode, Api
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum CreateFrom {
-    /// Cut `branch` fresh — from `origin/<default>` or the repo's local `HEAD`
-    /// per the `git.createFrom` setting. **The default**, and what a client
+    /// Cut `branch` fresh — from the repo's default branch (see
+    /// [`default_start_point`]) or the main checkout's `HEAD`, per the
+    /// `git.createFrom` setting. **The default**, and what a client
     /// that predates this field asks for by sending `create_branch: true`.
-    NewBranch,
+    ///
+    /// `start_point` names any other ref to cut from instead — a local branch,
+    /// a remote-tracking ref, a tag. Absent is the default above; present, it
+    /// is used as given, with no fetch and no fallback, because a base the user
+    /// picked by name is not one to silently swap for another.
+    NewBranch {
+        #[serde(default)]
+        start_point: Option<String>,
+    },
     /// Check out the existing local branch named by `branch`. What
     /// `create_branch: false` means.
     LocalBranch,
@@ -4034,7 +4212,7 @@ impl CreateWorktreeBody {
     fn create_from(&self) -> &CreateFrom {
         match &self.source {
             Some(s) => s,
-            None if self.create_branch => &CreateFrom::NewBranch,
+            None if self.create_branch => &CreateFrom::NewBranch { start_point: None },
             None => &CreateFrom::LocalBranch,
         }
     }
@@ -4049,6 +4227,14 @@ async fn create_worktree(
     // shape check the branch does.
     if let CreateFrom::RemoteBranch { remote_ref } = source {
         validate_branch(remote_ref)?;
+    }
+    if let CreateFrom::NewBranch {
+        start_point: Some(sp),
+    } = source
+    {
+        // Same shape rule as a branch — ref names and SHAs, no `~`/`^`
+        // expressions — but named for the field that failed it.
+        validate_branch(sp).map_err(|_| err(StatusCode::BAD_REQUEST, "invalid start point"))?;
     }
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
@@ -4241,7 +4427,40 @@ async fn create_worktree(
     // sparse) is refused with nothing on disk to clean up.
     let mut captured: Option<CapturedWork> = None;
     let git_args: Vec<String> = match source {
-        CreateFrom::NewBranch => {
+        CreateFrom::NewBranch {
+            start_point: Some(sp),
+        } => {
+            // Checked before anything is created, so a ref that has gone since
+            // the dialog listed it fails the create with nothing to clean up.
+            // `^{commit}` also refuses a tree or blob a branch cannot start at.
+            if git(
+                &repo_root,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{sp}^{{commit}}"),
+                ],
+            )
+            .await
+            .is_err()
+            {
+                return Err(err(
+                    StatusCode::BAD_REQUEST,
+                    format!("this repo has no branch or commit named {sp}"),
+                ));
+            }
+            vec![
+                "worktree".into(),
+                "add".into(),
+                "-b".into(),
+                body.branch.clone(),
+                "--".into(),
+                path_str.clone(),
+                sp.clone(),
+            ]
+        }
+        CreateFrom::NewBranch { start_point: None } => {
             // Born-current create (`git.createFrom = "origin"`, the default):
             // fetch the remote and cut the new branch from `origin/<default>`
             // rather than the local HEAD, so a worktree is never *born* behind
@@ -4250,46 +4469,15 @@ async fn create_worktree(
             // goes back to update `main`, so each new worktree used to be as
             // stale as the last fetch of main.
             //
-            // Falls back to local HEAD (the previous behaviour) when the fetch
-            // or the origin ref fails — offline, a repo with no remote, or the
-            // main checkout on a branch with no origin counterpart — never
-            // silently, but never blocking the create either.
-            let mut start_point: Option<String> = None;
-            if db.git_create_from() == GitCreateSource::Origin {
-                // The default branch is the main checkout's branch — the same
-                // thing the "update main" control fast-forwards.
-                let default_branch = db
-                    .list_worktrees(&repo_root)
-                    .map_err(db_err)?
-                    .into_iter()
-                    .find(|w| w.is_main)
-                    .map(|w| w.branch);
-                if let Some(dbranch) = default_branch {
-                    // Base on origin only if the remote actually has that
-                    // branch. The fetch succeeding is not enough: a repo whose
-                    // main checkout sits on a local-only branch (never pushed)
-                    // would otherwise fail the create against a
-                    // `refs/remotes/origin/<branch>` that does not exist,
-                    // instead of falling back to local HEAD as the comment
-                    // promises. `--quiet` keeps the probe off stderr (the `git`
-                    // helper surfaces stderr on failure).
-                    if git(&repo_root, &["fetch", "origin"]).await.is_ok()
-                        && git(
-                            &repo_root,
-                            &[
-                                "rev-parse",
-                                "--verify",
-                                "--quiet",
-                                &format!("refs/remotes/origin/{dbranch}"),
-                            ],
-                        )
-                        .await
-                        .is_ok()
-                    {
-                        start_point = Some(format!("origin/{dbranch}"));
-                    }
-                }
-            }
+            // **The default branch is the repo's, never the main checkout's
+            // current one** — see [`default_start_point`] for the fallbacks
+            // (offline, a repo with no remote). None of them blocks the create,
+            // and the create response does not say which one was used.
+            let start_point = if db.git_create_from() == GitCreateSource::Origin {
+                default_start_point(&repo_root).await
+            } else {
+                None
+            };
             let mut a = vec![
                 "worktree".into(),
                 "add".into(),
@@ -6335,38 +6523,42 @@ mod tests {
 
     #[test]
     fn local_branches_report_which_checkout_holds_them() {
-        // Tab-separated `<short>\t<upstream>\t<worktreepath>`, and the path is
-        // last so a directory with a tab in its name cannot shift the fields.
+        // Tab-separated `<short>\t<upstream>\t<refname>\t<worktreepath>`, and
+        // the path is last so a directory with a tab in its name cannot shift the fields.
         // The real shape: `%00`-terminated records, each followed by
         // `for-each-ref`'s own newline. `odd` holds both a tab *and* a newline
         // in its path — the two characters a refname cannot contain and a path
         // can, and the reason for both the field order and the record
         // separator.
-        let out = "main\torigin/main\t/repo\0\n\
-                   feat/x\torigin/feat/x\t\0\n\
-                   local-only\t\t\0\n\
-                   odd\t\t/repo/we\tir\nd\0\n";
+        let out = "main\torigin/main\trefs/heads/main\t/repo\0\n\
+                   feat/x\torigin/feat/x\trefs/heads/feat/x\t\0\n\
+                   local-only\t\trefs/heads/local-only\t\0\n\
+                   odd\t\trefs/heads/odd\t/repo/we\tir\nd\0\n";
         let got = parse_local_branches(out);
         assert_eq!(
             got,
             vec![
                 LocalBranchView {
                     name: "main".into(),
+                    refname: "refs/heads/main".into(),
                     checked_out_in: Some("/repo".into()),
                     upstream: Some("origin/main".into()),
                 },
                 LocalBranchView {
                     name: "feat/x".into(),
+                    refname: "refs/heads/feat/x".into(),
                     checked_out_in: None,
                     upstream: Some("origin/feat/x".into()),
                 },
                 LocalBranchView {
                     name: "local-only".into(),
+                    refname: "refs/heads/local-only".into(),
                     checked_out_in: None,
                     upstream: None,
                 },
                 LocalBranchView {
                     name: "odd".into(),
+                    refname: "refs/heads/odd".into(),
                     checked_out_in: Some("/repo/we\tir\nd".into()),
                     upstream: None,
                 },
@@ -6378,12 +6570,14 @@ mod tests {
     fn remote_branches_skip_the_symref_and_keep_slashes_in_the_local_name() {
         // `refs/remotes/origin/HEAD` shortens to the bare remote name and
         // carries a symref — it is not a branch and must not become a row.
-        let out = "origin\trefs/remotes/origin/main\0\n\
-                   origin/main\t\0\n\
-                   origin/feat/x\t\0\n\
-                   upstream/main\t\0\n";
+        let out = "origin\trefs/remotes/origin/main\trefs/remotes/origin/HEAD\0\n\
+                   origin/main\t\trefs/remotes/origin/main\0\n\
+                   origin/feat/x\t\trefs/remotes/origin/feat/x\0\n\
+                   upstream/main\t\trefs/remotes/upstream/main\0\n\
+                   remotes/origin/odd\t\trefs/remotes/origin/odd\0\n";
         let local = vec![LocalBranchView {
             name: "main".into(),
+            refname: "refs/heads/main".into(),
             checked_out_in: None,
             upstream: None,
         }];
@@ -6393,6 +6587,7 @@ mod tests {
             vec![
                 RemoteBranchView {
                     name: "origin/main".into(),
+                    refname: "refs/remotes/origin/main".into(),
                     // A local `main` exists, so creating it from the remote ref
                     // would fail — the picker needs to know before the click.
                     local_name: "main".into(),
@@ -6402,13 +6597,23 @@ mod tests {
                     // `split_once`, not `rsplit_once`: `feat/x` must survive
                     // whole rather than becoming `x`.
                     name: "origin/feat/x".into(),
+                    refname: "refs/remotes/origin/feat/x".into(),
                     local_name: "feat/x".into(),
                     has_local: false,
                 },
                 RemoteBranchView {
                     name: "upstream/main".into(),
+                    refname: "refs/remotes/upstream/main".into(),
                     local_name: "main".into(),
                     has_local: true,
+                },
+                RemoteBranchView {
+                    // What git shortens it to when a local `origin/odd` exists;
+                    // the local name still comes out right, from the refname.
+                    name: "remotes/origin/odd".into(),
+                    refname: "refs/remotes/origin/odd".into(),
+                    local_name: "odd".into(),
+                    has_local: false,
                 },
             ]
         );
@@ -6911,16 +7116,9 @@ mod tests {
         )
         .await;
 
-        let raw = git(
-            main,
-            &[
-                "for-each-ref",
-                "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
-                "refs/heads",
-            ],
-        )
-        .await
-        .unwrap();
+        let raw = git(main, &["for-each-ref", LOCAL_BRANCH_FORMAT, "refs/heads"])
+            .await
+            .unwrap();
         let got = parse_local_branches(&raw);
         let names: Vec<&str> = got.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(
@@ -7309,7 +7507,7 @@ mod tests {
             assert!(
                 matches!(
                     body(r#"{"repo_root":"/r","branch":"b","create_branch":true}"#).create_from(),
-                    CreateFrom::NewBranch
+                    CreateFrom::NewBranch { start_point: None }
                 ),
                 "create_branch: true with no source must still cut a new branch"
             );
@@ -7341,6 +7539,27 @@ mod tests {
                     CreateFrom::LocalBranch
                 ),
                 "an explicit source must win over create_branch"
+            );
+            // A start point is optional on the wire: the bare kind every
+            // existing client sends is still the default create.
+            assert!(
+                matches!(
+                    body(r#"{"repo_root":"/r","branch":"b","source":{"kind":"new_branch"}}"#)
+                        .create_from(),
+                    CreateFrom::NewBranch { start_point: None }
+                ),
+                "new_branch without a start point must stay the default create"
+            );
+            assert!(
+                matches!(
+                    body(
+                        r#"{"repo_root":"/r","branch":"b",
+                            "source":{"kind":"new_branch","start_point":"feat/x"}}"#
+                    )
+                    .create_from(),
+                    CreateFrom::NewBranch { start_point: Some(sp) } if sp == "feat/x"
+                ),
+                "a start point must reach the create"
             );
         }
 
@@ -8003,6 +8222,221 @@ mod tests {
         // from `Some(false)`, which would claim the checkout is clean.
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(git_is_dirty(FsPath::new(empty.path())).await, None);
+    }
+
+    /// The default a create cuts from is the repo's default branch, **not** the
+    /// branch the main checkout happens to be on: a main checkout left on a
+    /// feature branch must not make every "＋" in that repo start from it.
+    #[tokio::test]
+    async fn default_branch_ignores_the_main_checkouts_current_branch() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        let origin = dir.path().join("origin");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "trunk"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "--allow-empty", "-m", "A"]);
+
+        // No remote yet: a repo whose only branch is neither main nor master
+        // has no default to offer.
+        assert_eq!(default_branch(&work).await, None);
+
+        // `trunk` on origin, with `origin/HEAD` pointing at it — the answer
+        // even though it is spelled like neither fallback.
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "-u", "origin", "trunk"]);
+        git(&work, &["remote", "set-head", "origin", "trunk"]);
+
+        // The main checkout moves to a feature branch, pushed too, as people's do.
+        git(&work, &["checkout", "-b", "feat/wip"]);
+        git(&work, &["push", "-u", "origin", "feat/wip"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("trunk"));
+        // A local branch spelled `origin/trunk` makes the short form ambiguous;
+        // the full name still reads.
+        git(&work, &["branch", "origin/trunk", "trunk"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("trunk"));
+        git(&work, &["branch", "-D", "origin/trunk"]);
+
+        // Without `origin/HEAD` it falls back to `main`, found locally.
+        git(&work, &["remote", "set-head", "origin", "--delete"]);
+        git(&work, &["branch", "main", "trunk"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
+
+        // A dangling `origin/HEAD` — what a remote renaming its default leaves
+        // behind after a pruning fetch — is not trusted.
+        git(
+            &work,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/gone",
+            ],
+        );
+        assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
+    }
+
+    /// A remote that renamed its default branch: the clone's `origin/HEAD` still
+    /// names the old one, which a non-pruning fetch leaves in place, frozen. The
+    /// create must not cut from the frozen copy — and must not rewrite
+    /// `origin/HEAD` to find that out.
+    #[tokio::test]
+    async fn default_start_point_follows_a_remote_that_renamed_its_default() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed");
+        let origin = dir.path().join("origin.git");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&seed, &["init", "-b", "master"]);
+        git(&seed, &["config", "user.email", "t@t"]);
+        git(&seed, &["config", "user.name", "t"]);
+        git(&seed, &["commit", "--allow-empty", "-m", "A"]);
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        );
+
+        git(&origin, &["branch", "-m", "master", "main"]);
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+        // Renamed again, to a name no heuristic guesses: the remote is asked.
+        git(&origin, &["branch", "-m", "main", "trunk"]);
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/trunk")
+        );
+        // Found out without touching the clone's own `origin/HEAD`.
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "refs/remotes/origin/master"
+        );
+    }
+
+    /// The fallbacks of a default create, with the main checkout parked on a
+    /// feature branch throughout: no remote → the *local* default branch, spelled
+    /// so it cannot read as an option; a remote that cannot be reached → its
+    /// last-fetched copy instead; no default branch at all → the main checkout's
+    /// HEAD.
+    #[tokio::test]
+    async fn default_start_point_falls_back_to_the_local_default_not_head() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-b", "main"]);
+        git(&work, &["config", "user.email", "t@t"]);
+        git(&work, &["config", "user.name", "t"]);
+        git(&work, &["commit", "--allow-empty", "-m", "A"]);
+        git(&work, &["checkout", "-b", "feat/parked"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/heads/main")
+        );
+
+        // A remote that cannot be reached still has its last-fetched copy,
+        // which is preferred over the local one.
+        let origin = dir.path().join("origin");
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "origin", "main"]);
+        git(
+            &work,
+            &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+        );
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+
+        // No default branch at all: the main checkout's HEAD.
+        git(&work, &["remote", "remove", "origin"]);
+        git(&work, &["branch", "-D", "main"]);
+        assert_eq!(default_start_point(&work).await, None);
     }
 
     /// The staleness computation, against a real git repo: the direction of

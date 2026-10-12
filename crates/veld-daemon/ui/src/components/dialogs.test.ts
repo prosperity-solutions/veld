@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  baseBranchOptions,
   branchForMode,
+  CURRENT_SOURCE,
+  DEFAULT_BASE,
+  defaultBase,
   chooseAgent,
   effectiveMode,
   effectiveName,
@@ -24,13 +28,13 @@ import type { RepoBranches } from "../api";
 
 const BRANCHES: RepoBranches = {
   local: [
-    { name: "main", checked_out_in: "/repo", upstream: "origin/main" },
-    { name: "feat/free", checked_out_in: null, upstream: null },
-    { name: "feat/taken", checked_out_in: "/repo/../wt/taken", upstream: null },
+    { name: "main", refname: "refs/heads/main", checked_out_in: "/repo", upstream: "origin/main" },
+    { name: "feat/free", refname: "refs/heads/feat/free", checked_out_in: null, upstream: null },
+    { name: "feat/taken", refname: "refs/heads/feat/taken", checked_out_in: "/repo/../wt/taken", upstream: null },
   ],
   remote: [
-    { name: "origin/main", local_name: "main", has_local: true },
-    { name: "origin/feat/new", local_name: "feat/new", has_local: false },
+    { name: "origin/main", refname: "refs/remotes/origin/main", local_name: "main", has_local: true },
+    { name: "origin/feat/new", refname: "refs/remotes/origin/feat/new", local_name: "feat/new", has_local: false },
   ],
 };
 
@@ -99,6 +103,7 @@ describe("branchForMode", () => {
 
 describe("sourceForMode", () => {
   const args = {
+    startPoint: "",
     remoteRef: "origin/feat/new",
     fromPath: "/repo/../wt/source",
     carryOver: true,
@@ -120,6 +125,16 @@ describe("sourceForMode", () => {
       from_path: "/repo/../wt/source",
       carry_over: true,
     });
+  });
+
+  it("sends a start point only when the base is not the default", () => {
+    expect(
+      sourceForMode({ ...args, mode: "new_branch", startPoint: "feat/base" }),
+    ).toEqual({ kind: "new_branch", start_point: "feat/base" });
+    // Only `new_branch` takes a base; the other modes name their own.
+    expect(
+      sourceForMode({ ...args, mode: "local_branch", startPoint: "feat/base" }),
+    ).toEqual({ kind: "local_branch" });
   });
 
   it("sends carry_over explicitly, because the wire default is the opposite", () => {
@@ -413,5 +428,138 @@ describe("effectiveMode", () => {
     expect(effectiveMode({ chosen: "prompt", hasAgents: false })).toBe("manual");
     // `manual` never needs an agent, so it is never redirected.
     expect(effectiveMode({ chosen: "manual", hasAgents: false })).toBe("manual");
+  });
+});
+
+describe("baseBranchOptions", () => {
+  const branches: RepoBranches = {
+    local: [
+      { name: "main", refname: "refs/heads/main", checked_out_in: "/repo", upstream: "origin/main" },
+      { name: "feat/x", refname: "refs/heads/feat/x", checked_out_in: "/wt/x", upstream: null },
+      { name: "heads/origin/odd", refname: "refs/heads/origin/odd", checked_out_in: null, upstream: null },
+    ],
+    remote: [
+      { name: "origin/main", refname: "refs/remotes/origin/main", local_name: "main", has_local: true },
+      { name: "remotes/origin/odd", refname: "refs/remotes/origin/odd", local_name: "odd", has_local: false },
+      { name: "origin/feat/y", refname: "refs/remotes/origin/feat/y", local_name: "feat/y", has_local: false },
+    ],
+    default_branch: "main",
+  };
+  const args = {
+    defaultLabel: "origin/main",
+    defaultRef: "refs/remotes/origin/main" as string | null,
+    branches,
+    current: null,
+  };
+  const labels = (a: Parameters<typeof baseBranchOptions>[0]) =>
+    baseBranchOptions(a).flatMap((g) => g.items.map((i) => i.label));
+
+  it("puts the default first, then local, then remote branches", () => {
+    const groups = baseBranchOptions(args);
+    expect(groups.map((g) => g.group)).toEqual(["Default", "Local branches", "Remote branches"]);
+    expect(groups[0].items).toEqual([{ value: DEFAULT_BASE, label: "origin/main" }]);
+    // Sent as full refnames, shown short.
+    expect(groups[1].items[0]).toEqual({ value: "refs/heads/main", label: "main" });
+    expect(groups[2].items[0]).toEqual({ value: "refs/remotes/origin/odd", label: "remotes/origin/odd" });
+  });
+
+  it("never repeats a value, even for a local branch spelled like a remote one", () => {
+    const values = baseBranchOptions(args).flatMap((g) => g.items.map((i) => i.value));
+    expect(new Set(values).size).toBe(values.length);
+    expect(values).toEqual(expect.arrayContaining(["refs/heads/origin/odd", "refs/remotes/origin/odd"]));
+  });
+
+  it("does not list the default's own ref a second time", () => {
+    // origin/main is the default, fetched — not listed again as a stale remote.
+    expect(labels(args).filter((l) => l === "origin/main")).toHaveLength(1);
+    // In local mode the default is the main checkout's branch.
+    expect(
+      labels({ ...args, defaultLabel: "feat/x", defaultRef: "refs/heads/feat/x" }).filter((l) => l === "feat/x"),
+    ).toHaveLength(1);
+  });
+
+  it("leaves a local branch alone that is merely spelled like the default", () => {
+    const values = baseBranchOptions({
+      ...args,
+      branches: { ...branches, local: [...branches.local, { name: "heads/origin/main", refname: "refs/heads/origin/main", checked_out_in: null, upstream: null }] },
+    }).flatMap((g) => g.items.map((i) => i.value));
+    expect(values).toContain("refs/heads/origin/main");
+    expect(values).not.toContain("refs/remotes/origin/main");
+  });
+
+  it("keeps origin/<default> as a remote when the default is something else", () => {
+    expect(labels({ ...args, defaultLabel: "feat/parked", defaultRef: "refs/heads/feat/parked" })).toContain(
+      "origin/main",
+    );
+  });
+
+  it("still offers the default while the branch list is unknown", () => {
+    expect(baseBranchOptions({ ...args, branches: null })).toEqual([
+      { group: "Default", items: [{ value: DEFAULT_BASE, label: "origin/main" }] },
+    ]);
+  });
+
+  it("names a non-branch source in a group of its own, above the default", () => {
+    const groups = baseBranchOptions({ ...args, branches: null, current: "feat/x" });
+    expect(groups[0]).toEqual({
+      group: "Current",
+      items: [{ value: CURRENT_SOURCE, label: "feat/x" }],
+    });
+    expect(groups[1].group).toBe("Default");
+  });
+});
+
+describe("defaultBase", () => {
+  const branches = (d: string | null, onOrigin = true): RepoBranches => ({
+    local: [],
+    remote: d && onOrigin ? [{ name: `origin/${d}`, refname: `refs/remotes/origin/${d}`, local_name: d, has_local: true }] : [],
+    default_branch: d,
+  });
+
+  it("is origin/<default> in origin mode", () => {
+    expect(defaultBase({ createFrom: "origin", branches: branches("main"), mainBranch: "feat/parked", failed: false })).toEqual({
+      label: "origin/main",
+      ref: "refs/remotes/origin/main",
+      fallback: false,
+      loading: false,
+      failed: false,
+      localOnly: false,
+    });
+  });
+
+  it("names the main checkout's own branch in local mode, since that is where it lands", () => {
+    expect(defaultBase({ createFrom: "local", branches: branches("main"), mainBranch: "feat/parked", failed: false }).label).toBe(
+      "feat/parked",
+    );
+    expect(defaultBase({ createFrom: "local", branches: null, mainBranch: "", failed: false }).label).toBe("HEAD");
+  });
+
+  it("flags the HEAD fallback when origin mode finds no default branch", () => {
+    expect(defaultBase({ createFrom: "origin", branches: branches(null), mainBranch: "develop", failed: false })).toEqual({
+      label: "develop",
+      ref: "refs/heads/develop",
+      fallback: true,
+      loading: false,
+      failed: false,
+      localOnly: false,
+    });
+  });
+
+  it("does not claim origin for a default only this repo has", () => {
+    expect(defaultBase({ createFrom: "origin", branches: branches("main", false), mainBranch: "feat", failed: false })).toEqual({
+      label: "main",
+      ref: "refs/heads/main",
+      fallback: false,
+      loading: false,
+      failed: false,
+      localOnly: true,
+    });
+  });
+
+  it("does not guess a name before the list arrives, or once it has failed to", () => {
+    expect(defaultBase({ createFrom: "origin", branches: null, mainBranch: "main", failed: false }).loading).toBe(true);
+    const failed = defaultBase({ createFrom: "origin", branches: null, mainBranch: "main", failed: true });
+    expect(failed.failed).toBe(true);
+    expect(failed.loading).toBe(false);
   });
 });
