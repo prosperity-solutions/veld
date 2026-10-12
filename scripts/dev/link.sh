@@ -68,6 +68,11 @@ port="${2:?usage: link.sh --write <daemon-port>}"
 
 mkdir -p "$HOME/.local/bin"
 
+# The dev daemon's terminal directory, derived exactly as `daemon.sh` derives it.
+# Without it this CLI resolves the installed layout (`~/.veld/pty-<port>`), so
+# `doctor` reported the dev daemon's shims and Claude Code mod as missing.
+run_digest="$(printf '%s|%s' "$root" "$run" | cksum | awk '{print $1}')"
+
 # A quoted heredoc, so nothing here expands NOW. veld has already substituted
 # its own `${...}` into the env vars above; `$HOME` and `$@` must survive into
 # the wrapper as text, and an unquoted heredoc would resolve both at write time.
@@ -79,6 +84,7 @@ cat >>"$wrapper" <<WRAPPER
 export VELD_DB_PATH="$dir/veld.db"
 export VELD_DAEMON_PORT="$port"
 export VELD_DAEMON_SOCK="\$HOME/.veld/dev-$port.sock"
+export VELD_PTY_DIR="\$HOME/.veld/pty-dv-$run_digest"
 
 # Warn, but do NOT refuse. This wrapper carries a port that was allocated to one
 # run; if that run crashed, nothing removed this file, because the \`on_stop\`

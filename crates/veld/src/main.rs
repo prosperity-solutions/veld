@@ -244,7 +244,9 @@ enum Command {
     /// value, which overrides that one key for one invocation. For Pi this writes a
     /// per-session extension module and prints its path, loaded once with `-e`.
     ///
-    /// Turned off by `terminal.agentIntegration` (Settings → Terminal).
+    /// Turned off by `terminal.agentIntegration` (Settings → Activity), and never
+    /// reached for Claude on `terminal.claudeIntegration = mod`, whose wrapper passes
+    /// straight through.
     #[command(name = "agent-settings", hide = true)]
     AgentSettings {
         /// Which agent: `claude`, `codex`, or `pi`.

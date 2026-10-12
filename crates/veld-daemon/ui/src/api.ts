@@ -539,6 +539,26 @@ export interface ShellIntercept {
   hint: { file: string; line: string } | null;
 }
 
+/** Mirrors `claude_mod_report` in `crates/veld-daemon/src/settings.rs`. */
+export interface ClaudeModCheck {
+  /**
+   * What `claude plugin validate` said of Veld's mod: `loads`, `refused` (a Claude
+   * Code too old for mods, most likely), `no_claude` (none on the terminals' PATH),
+   * or `unknown` (it could not be asked).
+   */
+  support: "loads" | "refused" | "no_claude" | "unknown";
+  version: string | null;
+  /** Claude's own first finding for `refused`; what went wrong for `unknown`. */
+  reason: string | null;
+  /** The folder a terminal names in `CLAUDE_CODE_PLUGIN_DIRS`. */
+  mod_dir: string;
+  /**
+   * The person's own `CLAUDE_CODE_PLUGIN_DIRS` from their Claude settings, when it
+   * leaves `mod_dir` out — it replaces the terminal's, so the mod would never load.
+   */
+  settings_plugin_dirs: string | null;
+}
+
 /** Mirrors `IdeView` in `crates/veld-daemon/src/desktop.rs`. */
 export interface IdeSection {
   quicklinks: Quicklink[];
@@ -2029,6 +2049,12 @@ export const api = {
    */
   shellIntercept: () =>
     request<ShellIntercept>("/api/shells/intercept", { method: "POST" }),
+  /**
+   * Whether the Claude Code a terminal would run loads Veld's mod — `veld doctor`'s
+   * question, asked before the IDE offers to switch. A `POST` for
+   * `shellIntercept`'s reason: it runs `claude`. Cached by the daemon for a minute.
+   */
+  claudeModCheck: () => request<ClaudeModCheck>("/api/claude-mod/check", { method: "POST" }),
   /**
    * Open the OS folder picker (hosted by the daemon — it runs in the user's
    * GUI session). Resolves to the chosen absolute path, or null on cancel.

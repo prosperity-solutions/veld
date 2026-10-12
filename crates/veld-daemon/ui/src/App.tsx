@@ -275,6 +275,7 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
+import { claudeLaunches, CLAUDE_MOD_OFFER_ID, wantsClaudeModOffer } from "./ide/claudeModOffer";
 import {
   DIALOG_NONE,
   escapeClosesDialog,
@@ -378,6 +379,7 @@ import {
   TrashWorktreeDialog,
   UpdateMainDirtyDialog,
   HandoffReviewDialog,
+  ClaudeModOfferDialog,
 } from "./components/dialogs";
 
 import {
@@ -1024,6 +1026,8 @@ type DialogState =
   | { kind: "move-lane-worktrees"; lane: string }
   | { kind: "trash-lane-worktrees"; lane: string }
   | { kind: "settings" }
+  /** Asked once, the first time a Claude session reports in — `ide/claudeModOffer.ts`. */
+  | { kind: "claude-mod-offer" }
   | { kind: "shortcuts" }
   | { kind: "remove-repo"; repo: Repo }
   /** Veld's own database: what is wrong with it, and putting a backup back. */
@@ -4545,6 +4549,26 @@ function AppInner(props: {
   const promotionsOpenRef = useRef(false);
   promotionsOpenRef.current = promotions.open !== null;
 
+  // The one-time offer to move Claude Code onto Veld's mod, the first time a Claude
+  // session reports in. Never over another dialog: a Claude launch is not worth
+  // interrupting one, and every launch asks again until it has been answered.
+  useEffect(
+    () =>
+      claudeLaunches.subscribe(() => {
+        if (dialogRef.current.kind !== DIALOG_NONE || promotionsOpenRef.current) return;
+        api
+          .promotionState()
+          .then(({ states }) => {
+            if (!wantsClaudeModOffer(settingsRef.current, states)) return;
+            setDialog((current) =>
+              current.kind === DIALOG_NONE ? { kind: "claude-mod-offer" } : current,
+            );
+          })
+          .catch(() => {});
+      }),
+    [],
+  );
+
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {
       if (!worktree) return;
@@ -7041,6 +7065,25 @@ function AppInner(props: {
    * belongs to worktree mode's own surfaces; this is the one that is reachable from
    * both, so this is the one that has to be hoisted.
    */
+  /** Hoisted like `settingsDialog`: a Claude session can start in either mode. */
+  const claudeModOfferDialog = dialog.kind === "claude-mod-offer" && (
+    <ClaudeModOfferDialog
+      onClose={() => {
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "dismissed").catch(() => {});
+        closeDialog();
+      }}
+      onKeep={() => {
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "read").catch(() => {});
+        closeDialog();
+      }}
+      onSwitch={async () => {
+        await saveSettings({ "terminal.claudeIntegration": "mod" });
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "read").catch(() => {});
+        closeDialog();
+      }}
+    />
+  );
+
   const settingsDialog = dialog.kind === "settings" && (
     <SettingsDialog
       settings={settings}
@@ -7400,6 +7443,7 @@ function AppInner(props: {
           logsTz={logsTz}
         />
         {settingsDialog}
+        {claudeModOfferDialog}
         {configVarsDialog}
         {whatsNewDialog}
         {shortcutsDialog}
@@ -8348,6 +8392,7 @@ function AppInner(props: {
       {moveLaneWorktreesDialog}
       {trashLaneWorktreesDialog}
       {settingsDialog}
+      {claudeModOfferDialog}
       {configVarsDialog}
       {whatsNewDialog}
       {shortcutsDialog}

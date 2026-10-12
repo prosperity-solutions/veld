@@ -34,6 +34,62 @@ pub fn routes() -> Router {
         .route("/api/settings/{key}", delete(delete_setting))
         .route("/api/shells", get(get_shells))
         .route("/api/shells/intercept", post(post_shell_intercept))
+        .route("/api/claude-mod/check", post(post_claude_mod_check))
+}
+
+/// How long a [`post_claude_mod_check`] answer is reused. Long enough that the offer
+/// and the Settings row opening together run `claude` once; short enough that a
+/// `claude update` is seen on the next look.
+const CLAUDE_MOD_TTL: Duration = Duration::from_secs(60);
+
+/// Whether the Claude Code this daemon's terminals would run loads veld's mod —
+/// `veld doctor`'s question, asked for the IDE before it offers to switch.
+///
+/// `POST` and gated for [`post_shell_intercept`]'s reason: it spawns a process. Also
+/// single-flighted and cached for [`CLAUDE_MOD_TTL`], by the same reasoning.
+async fn post_claude_mod_check(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
+    check_csrf(&headers)?;
+    static CACHE: OnceLock<tokio::sync::Mutex<Option<(Instant, Value)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| tokio::sync::Mutex::new(None));
+    let mut cached = cache.lock().await;
+    if let Some((measured_at, doc)) = cached.as_ref()
+        && measured_at.elapsed() < CLAUDE_MOD_TTL
+    {
+        return Ok(Json(doc.clone()));
+    }
+    let doc = claude_mod_report().await;
+    *cached = Some((Instant::now(), doc.clone()));
+    Ok(Json(doc))
+}
+
+async fn claude_mod_report() -> Value {
+    use veld_core::agent::ClaudeModSupport;
+    let shim_dir = veld_core::instance::shim_dir();
+    let mod_dir = veld_core::agent::claude_mod_dir(&shim_dir);
+    let path = veld_core::user_path::cached_user_path().await;
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
+    // A list of the person's own that leaves this folder out replaces the one a
+    // terminal sets, so the mod would never load however new Claude Code is.
+    let replaced_by = config_dir
+        .as_deref()
+        .and_then(veld_core::agent::claude_settings_plugin_dirs)
+        .filter(|theirs| !std::env::split_paths(theirs).any(|dir| dir == mod_dir));
+    let (support, version, reason) =
+        match veld_core::agent::claude_mod_support(&mod_dir, &path, &shim_dir).await {
+            ClaudeModSupport::Loads { version } => ("loads", version, None),
+            ClaudeModSupport::Refused { version, reason } => ("refused", version, Some(reason)),
+            ClaudeModSupport::NoClaude => ("no_claude", None, None),
+            ClaudeModSupport::Unknown { reason } => ("unknown", None, Some(reason)),
+        };
+    serde_json::json!({
+        "support": support,
+        "version": version,
+        "reason": reason,
+        "mod_dir": mod_dir.display().to_string(),
+        "settings_plugin_dirs": replaced_by,
+    })
 }
 
 /// A failure with, when there is one, a sentence for the caller.
@@ -252,6 +308,7 @@ async fn shell_intercept_report() -> Result<Value, StatusCode> {
         shell_integration: db.terminal_shell_integration(),
         agent_integration: db.terminal_agent_integration(),
         agent_context: db.terminal_agent_context(),
+        claude_integration: db.terminal_claude_integration(),
         bash_handoff: false,
     };
     opts.bash_handoff = opts.wants_handoff()
@@ -560,6 +617,32 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/shells/intercept")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn the_claude_mod_check_is_gated_and_is_not_a_safe_method() {
+        // It runs `claude`, so it takes the shell probe's rules for the same reason.
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/claude-mod/check")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let res = routes()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/claude-mod/check")
                     .body(Body::empty())
                     .unwrap(),
             )

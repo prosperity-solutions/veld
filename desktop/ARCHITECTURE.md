@@ -463,7 +463,9 @@ requests at runtime — branding rule.
   `terminal.shellIntegration` adds the OSC 133 prompt marks that mark a worktree's
   row in the rail, and `terminal.agentIntegration` puts an agent wrapper (`claude`,
   `codex`) in the shim directory (so it needs the directory on `PATH` even when the browser
-  feature is off). All three settings are read at ticket time into one
+  feature is off). `terminal.claudeIntegration = mod` adds `VELD_CLAUDE_INTEGRATION`
+  and `CLAUDE_CODE_PLUGIN_DIRS`, naming the Claude Code mod written beside the
+  wrappers; the `claude` wrapper then passes straight through. All three settings are read at ticket time into one
   `shims::SessionOptions`, and the generated file decides what to run from the
   **variables in the environment** (`VELD_SHIM_DIR`, `VELD_SHELL_INTEGRATION`,
   `VELD_AGENT_HOOKS`) rather than from a file that exists or does not. That is what
