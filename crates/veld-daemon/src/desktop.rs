@@ -1607,6 +1607,10 @@ struct LocalBranchView {
     /// Short name (`feat/x`), exactly as git has it — never slugged, since it
     /// is passed straight back as a ref.
     name: String,
+    /// `refs/heads/feat/x`. Not derivable from `name`: git disambiguates a short
+    /// name that a tag or a remote ref shares (`heads/main`), and a start point
+    /// has to name exactly one ref.
+    refname: String,
     /// The checkout that currently holds it, or `None` when the branch is free.
     checked_out_in: Option<String>,
     /// `origin/feat/x`, or `None` for a branch that tracks nothing.
@@ -1618,6 +1622,8 @@ struct LocalBranchView {
 struct RemoteBranchView {
     /// `origin/feat/x` — what a `git worktree add` start-point argument names.
     name: String,
+    /// `refs/remotes/origin/feat/x` — see [`LocalBranchView::refname`].
+    refname: String,
     /// `feat/x` — the local branch name the dialog offers by default. The
     /// remote's own name is stripped, because a local branch called
     /// `origin/feat/x` is legal, confusing, and never what was meant.
@@ -1633,22 +1639,11 @@ struct RemoteBranchView {
 struct BranchesView {
     local: Vec<LocalBranchView>,
     remote: Vec<RemoteBranchView>,
-    /// What a default create cuts from — see [`default_branch`]. `None` for a
-    /// repo with no `origin/HEAD`, `main` or `master`.
+    /// What a default create cuts from in `git.createFrom = "origin"` mode — see
+    /// [`default_branch`]. `None` for a repo with no `origin/HEAD`, `main` or
+    /// `master`.
     default_branch: Option<String>,
 }
-
-/// `git fetch origin`, also moving `origin/HEAD` to wherever the remote's HEAD
-/// is now. git's own default only ever *creates* that ref, so a remote that
-/// renamed its default branch leaves it on the old one — still present, and
-/// frozen, unless the fetch prunes — and [`default_branch`] reads it. Ignored by
-/// git older than 2.48, which has no such setting.
-const FETCH_ORIGIN: &[&str] = &[
-    "-c",
-    "remote.origin.followRemoteHEAD=always",
-    "fetch",
-    "origin",
-];
 
 /// Whether `refname` resolves. `--quiet` keeps the probe off stderr, which the
 /// [`git`] helper would otherwise surface as the error.
@@ -1659,14 +1654,32 @@ async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
 }
 
 /// The repo's default branch: what `origin/HEAD` points at, else `main`, else
-/// `master`, whichever exists on origin or locally. `main`/`master` is a
-/// heuristic for a repo with no `origin/HEAD`; [`FETCH_ORIGIN`] keeps that ref
-/// current, so it is read after a fetch where it can be.
+/// `master`, whichever exists on origin or locally — the first of
+/// [`default_branch_candidates`]. `main`/`master` is a heuristic for a repo
+/// with no `origin/HEAD`; git 2.48+ writes that ref on fetch, so it is read
+/// after one where it can be.
 ///
 /// **Not the main checkout's current branch.** The main checkout is somebody's
 /// working copy and is often on a feature branch, which is not the base the
 /// `git.createFrom` setting promises.
 async fn default_branch(repo_root: &FsPath) -> Option<String> {
+    default_branch_candidates(repo_root)
+        .await
+        .into_iter()
+        .next()
+}
+
+/// Every branch that could be the default, best first: `origin/HEAD`'s target,
+/// then `main`, then `master` — each only if it exists on origin or locally,
+/// and none twice.
+///
+/// `origin/HEAD` only while the branch it names still exists: a remote that
+/// renamed its default leaves it dangling at the old name after a pruning
+/// fetch, and git does not repair it. Without a pruning fetch the old branch
+/// stays too, frozen — which only the remote can tell; see
+/// [`default_start_point`].
+async fn default_branch_candidates(repo_root: &FsPath) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
     if let Ok(head) = git(
         repo_root,
         // Full name, not `--short`: git shortens to `remotes/origin/<b>` when
@@ -1675,39 +1688,44 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
     )
     .await
     {
-        // Only while the branch it names still exists: a remote that renamed
-        // its default leaves `origin/HEAD` dangling at the old name after a
-        // pruning fetch, and git does not repair it.
         if let Some(b) = head
             .strip_prefix("refs/remotes/origin/")
             .filter(|b| !b.is_empty())
         {
-            if ref_exists(repo_root, &format!("refs/remotes/origin/{b}")).await
-                || ref_exists(repo_root, &format!("refs/heads/{b}")).await
-            {
-                return Some(b.to_string());
-            }
+            names.push(b.to_string());
         }
     }
     for cand in ["main", "master"] {
-        if ref_exists(repo_root, &format!("refs/remotes/origin/{cand}")).await
-            || ref_exists(repo_root, &format!("refs/heads/{cand}")).await
-        {
-            return Some(cand.to_string());
+        if !names.iter().any(|n| n == cand) {
+            names.push(cand.to_string());
         }
     }
-    None
+    let mut found = Vec::new();
+    for name in names {
+        if ref_exists(repo_root, &format!("refs/remotes/origin/{name}")).await
+            || ref_exists(repo_root, &format!("refs/heads/{name}")).await
+        {
+            found.push(name);
+        }
+    }
+    found
 }
 
 /// Where a default `new_branch` create starts in `git.createFrom = "origin"`
 /// mode, or `None` for the main checkout's HEAD.
 ///
-/// Fetches first, then resolves [`default_branch`] — after the fetch, because
-/// that is what creates `origin/HEAD` on git 2.48+. `origin/<default>` whenever
-/// the repo has it — freshly fetched, or as of the last fetch when this one
-/// failed, which is still newer than a local `<default>` nobody fast-forwards,
-/// and gives the new branch an upstream — else the local `<default>`, else
-/// `None`.
+/// Fetches first, then walks [`default_branch_candidates`] — after the fetch,
+/// because that is what creates `origin/HEAD` on git 2.48+. For the first
+/// candidate: `origin/<default>` whenever the repo has it — freshly fetched, or
+/// as of the last fetch when this one failed, which is still newer than a local
+/// `<default>` nobody fast-forwards, and gives the new branch an upstream —
+/// else the local `<default>`. `None` when there is no candidate.
+///
+/// **A remote-tracking default the remote no longer has is skipped**, when the
+/// fetch reached the remote. That is a renamed default: a non-pruning fetch
+/// keeps both `origin/HEAD` and the old branch, frozen, and git only ever
+/// *creates* `origin/HEAD`. Asked with `ls-remote`, which changes nothing — so
+/// an `origin/HEAD` somebody set on purpose, to a branch the remote has, stands.
 ///
 /// Both are spelled as full refnames. A short name is ambiguous once a tag or a
 /// local branch shares it (`origin/main` as a local branch), and `worktree add`
@@ -1715,14 +1733,37 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
 /// `git branch` past the `--`, where a name beginning with `-` reads as an
 /// option.
 async fn default_start_point(repo_root: &FsPath) -> Option<String> {
-    let _ = git(repo_root, FETCH_ORIGIN).await;
-    let dbranch = default_branch(repo_root).await?;
-    let remote = format!("refs/remotes/origin/{dbranch}");
-    if ref_exists(repo_root, &remote).await {
-        return Some(remote);
+    let fetched = git(repo_root, &["fetch", "origin"]).await.is_ok();
+    for name in default_branch_candidates(repo_root).await {
+        let remote = format!("refs/remotes/origin/{name}");
+        if ref_exists(repo_root, &remote).await {
+            if fetched && !on_origin(repo_root, &name).await {
+                continue;
+            }
+            return Some(remote);
+        }
+        let local = format!("refs/heads/{name}");
+        if ref_exists(repo_root, &local).await {
+            return Some(local);
+        }
     }
-    let local = format!("refs/heads/{dbranch}");
-    ref_exists(repo_root, &local).await.then_some(local)
+    None
+}
+
+/// Whether origin still has `branch`. `true` when it cannot tell — a failed
+/// `ls-remote` is no reason to skip a branch.
+async fn on_origin(repo_root: &FsPath, branch: &str) -> bool {
+    git(
+        repo_root,
+        &[
+            "ls-remote",
+            "--heads",
+            "origin",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .await
+    .map_or(true, |out| !out.is_empty())
 }
 
 /// Parse `git for-each-ref refs/heads` in the format
@@ -1738,6 +1779,13 @@ async fn default_start_point(repo_root: &FsPath) -> Option<String> {
 /// a path containing a newline produced a phantom branch row named after the
 /// path's second half, plus a real branch reported as checked out at the
 /// first half.
+/// [`parse_local_branches`]' input: the path last, so a directory with a tab in
+/// its name cannot shift the fields.
+const LOCAL_BRANCH_FORMAT: &str =
+    "--format=%(refname:short)\t%(upstream:short)\t%(refname)\t%(worktreepath)%00";
+/// [`parse_remote_branches`]' input.
+const REMOTE_BRANCH_FORMAT: &str = "--format=%(refname:short)\t%(symref)\t%(refname)%00";
+
 fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
     out.split('\0')
         // `for-each-ref` still ends each record with its own newline *after*
@@ -1747,15 +1795,17 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
         .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
-            let mut fields = line.splitn(3, '\t');
+            let mut fields = line.splitn(4, '\t');
             let name = fields.next()?;
             if name.is_empty() {
                 return None;
             }
             let upstream = fields.next().unwrap_or("");
+            let refname = fields.next().unwrap_or("");
             let worktree = fields.next().unwrap_or("");
             Some(LocalBranchView {
                 name: name.to_string(),
+                refname: refname.to_string(),
                 checked_out_in: (!worktree.is_empty()).then(|| worktree.to_string()),
                 upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
             })
@@ -1764,7 +1814,7 @@ fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
 }
 
 /// Parse `git for-each-ref refs/remotes` in the format
-/// `<short>\t<symref>`, NUL-terminated per record (see
+/// `<short>\t<symref>\t<refname>`, NUL-terminated per record (see
 /// [`parse_local_branches`] for why).
 ///
 /// **Symbolic refs are skipped.** `refs/remotes/origin/HEAD` is a symref to the
@@ -1777,7 +1827,10 @@ fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBran
         .map(|r| r.trim_start_matches('\n'))
         .filter(|l| !l.is_empty())
         .filter_map(|line| {
-            let (name, symref) = line.split_once('\t').unwrap_or((line, ""));
+            let mut fields = line.splitn(3, '\t');
+            let name = fields.next().unwrap_or("");
+            let symref = fields.next().unwrap_or("");
+            let refname = fields.next().unwrap_or("");
             if name.is_empty() || !symref.is_empty() {
                 return None;
             }
@@ -1790,6 +1843,7 @@ fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBran
             }
             Some(RemoteBranchView {
                 name: name.to_string(),
+                refname: refname.to_string(),
                 local_name: local_name.to_string(),
                 has_local: local.iter().any(|b| b.name == local_name),
             })
@@ -1817,22 +1871,14 @@ async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>,
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
     let heads = git(
         &repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
-            "refs/heads",
-        ],
+        &["for-each-ref", LOCAL_BRANCH_FORMAT, "refs/heads"],
     )
     .await
     .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
     let local = parse_local_branches(&heads);
     let remotes = git(
         &repo_root,
-        &[
-            "for-each-ref",
-            "--format=%(refname:short)\t%(symref)%00",
-            "refs/remotes",
-        ],
+        &["for-each-ref", REMOTE_BRANCH_FORMAT, "refs/remotes"],
     )
     .await
     .map_err(|e| err(StatusCode::UNPROCESSABLE_ENTITY, e))?;
@@ -3196,7 +3242,7 @@ async fn maybe_fetch(repo_root: &FsPath) {
             .unwrap_or(true)
     };
     if due {
-        let _ = git(repo_root, FETCH_ORIGIN).await;
+        let _ = git(repo_root, &["fetch", "origin"]).await;
         LAST_FETCH
             .lock()
             .expect("last-fetch mutex poisoned")
@@ -6449,38 +6495,42 @@ mod tests {
 
     #[test]
     fn local_branches_report_which_checkout_holds_them() {
-        // Tab-separated `<short>\t<upstream>\t<worktreepath>`, and the path is
-        // last so a directory with a tab in its name cannot shift the fields.
+        // Tab-separated `<short>\t<upstream>\t<refname>\t<worktreepath>`, and
+        // the path is last so a directory with a tab in its name cannot shift the fields.
         // The real shape: `%00`-terminated records, each followed by
         // `for-each-ref`'s own newline. `odd` holds both a tab *and* a newline
         // in its path — the two characters a refname cannot contain and a path
         // can, and the reason for both the field order and the record
         // separator.
-        let out = "main\torigin/main\t/repo\0\n\
-                   feat/x\torigin/feat/x\t\0\n\
-                   local-only\t\t\0\n\
-                   odd\t\t/repo/we\tir\nd\0\n";
+        let out = "main\torigin/main\trefs/heads/main\t/repo\0\n\
+                   feat/x\torigin/feat/x\trefs/heads/feat/x\t\0\n\
+                   local-only\t\trefs/heads/local-only\t\0\n\
+                   odd\t\trefs/heads/odd\t/repo/we\tir\nd\0\n";
         let got = parse_local_branches(out);
         assert_eq!(
             got,
             vec![
                 LocalBranchView {
                     name: "main".into(),
+                    refname: "refs/heads/main".into(),
                     checked_out_in: Some("/repo".into()),
                     upstream: Some("origin/main".into()),
                 },
                 LocalBranchView {
                     name: "feat/x".into(),
+                    refname: "refs/heads/feat/x".into(),
                     checked_out_in: None,
                     upstream: Some("origin/feat/x".into()),
                 },
                 LocalBranchView {
                     name: "local-only".into(),
+                    refname: "refs/heads/local-only".into(),
                     checked_out_in: None,
                     upstream: None,
                 },
                 LocalBranchView {
                     name: "odd".into(),
+                    refname: "refs/heads/odd".into(),
                     checked_out_in: Some("/repo/we\tir\nd".into()),
                     upstream: None,
                 },
@@ -6492,12 +6542,13 @@ mod tests {
     fn remote_branches_skip_the_symref_and_keep_slashes_in_the_local_name() {
         // `refs/remotes/origin/HEAD` shortens to the bare remote name and
         // carries a symref — it is not a branch and must not become a row.
-        let out = "origin\trefs/remotes/origin/main\0\n\
-                   origin/main\t\0\n\
-                   origin/feat/x\t\0\n\
-                   upstream/main\t\0\n";
+        let out = "origin\trefs/remotes/origin/main\trefs/remotes/origin/HEAD\0\n\
+                   origin/main\t\trefs/remotes/origin/main\0\n\
+                   origin/feat/x\t\trefs/remotes/origin/feat/x\0\n\
+                   upstream/main\t\trefs/remotes/upstream/main\0\n";
         let local = vec![LocalBranchView {
             name: "main".into(),
+            refname: "refs/heads/main".into(),
             checked_out_in: None,
             upstream: None,
         }];
@@ -6507,6 +6558,7 @@ mod tests {
             vec![
                 RemoteBranchView {
                     name: "origin/main".into(),
+                    refname: "refs/remotes/origin/main".into(),
                     // A local `main` exists, so creating it from the remote ref
                     // would fail — the picker needs to know before the click.
                     local_name: "main".into(),
@@ -6516,11 +6568,13 @@ mod tests {
                     // `split_once`, not `rsplit_once`: `feat/x` must survive
                     // whole rather than becoming `x`.
                     name: "origin/feat/x".into(),
+                    refname: "refs/remotes/origin/feat/x".into(),
                     local_name: "feat/x".into(),
                     has_local: false,
                 },
                 RemoteBranchView {
                     name: "upstream/main".into(),
+                    refname: "refs/remotes/upstream/main".into(),
                     local_name: "main".into(),
                     has_local: true,
                 },
@@ -7025,16 +7079,9 @@ mod tests {
         )
         .await;
 
-        let raw = git(
-            main,
-            &[
-                "for-each-ref",
-                "--format=%(refname:short)\t%(upstream:short)\t%(worktreepath)%00",
-                "refs/heads",
-            ],
-        )
-        .await
-        .unwrap();
+        let raw = git(main, &["for-each-ref", LOCAL_BRANCH_FORMAT, "refs/heads"])
+            .await
+            .unwrap();
         let got = parse_local_branches(&raw);
         let names: Vec<&str> = got.iter().map(|b| b.name.as_str()).collect();
         assert_eq!(
@@ -8220,8 +8267,8 @@ mod tests {
 
     /// A remote that renamed its default branch: the clone's `origin/HEAD` still
     /// names the old one, which a non-pruning fetch leaves in place, frozen. The
-    /// create's own fetch must move `origin/HEAD` along rather than keep cutting
-    /// from the frozen copy.
+    /// create must not cut from the frozen copy — and must not rewrite
+    /// `origin/HEAD` to find that out.
     #[tokio::test]
     async fn default_start_point_follows_a_remote_that_renamed_its_default() {
         use std::process::Command;
@@ -8269,11 +8316,24 @@ mod tests {
             default_start_point(&work).await.as_deref(),
             Some("refs/remotes/origin/main")
         );
+        // Found out without touching the clone's own `origin/HEAD`.
+        let head = Command::new("git")
+            .arg("-C")
+            .arg(&work)
+            .args(["symbolic-ref", "refs/remotes/origin/HEAD"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&head.stdout).trim(),
+            "refs/remotes/origin/master"
+        );
     }
 
-    /// Offline (here: no reachable remote at all), a default create starts at
-    /// the *local* default branch — not at the main checkout's HEAD, which is
-    /// parked on a feature branch — and spells it so it cannot read as an option.
+    /// The fallbacks of a default create, with the main checkout parked on a
+    /// feature branch throughout: no remote → the *local* default branch, spelled
+    /// so it cannot read as an option; a remote that cannot be reached → its
+    /// last-fetched copy instead; no default branch at all → the main checkout's
+    /// HEAD.
     #[tokio::test]
     async fn default_start_point_falls_back_to_the_local_default_not_head() {
         use std::process::Command;

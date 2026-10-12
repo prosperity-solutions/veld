@@ -640,7 +640,8 @@ export const CURRENT_SOURCE = ":current";
 export function defaultBase(input: {
   createFrom: GitCreateFrom;
   branches: RepoBranches | null;
-  /** The main checkout's branch, `""` when detached, `null` when unknown. */
+  /** The main checkout's branch; `""` (detached) and `null` (unknown) both
+   *  read as `HEAD`. */
   mainBranch: string | null;
   /** The branch list failed to load. */
   failed: boolean;
@@ -662,7 +663,7 @@ export function defaultBase(input: {
   }
   const d = input.branches.default_branch;
   if (!d) return { ...none, ...head, fallback: true };
-  return input.branches.remote.some((r) => r.name === `origin/${d}`)
+  return input.branches.remote.some((r) => r.refname === `refs/remotes/origin/${d}`)
     ? { ...none, label: `origin/${d}`, ref: `refs/remotes/origin/${d}` }
     : { ...none, label: d, ref: `refs/heads/${d}`, localOnly: true };
 }
@@ -707,11 +708,11 @@ export function baseBranchOptions(input: {
     ],
   });
   const local = (input.branches?.local ?? [])
-    .map((b) => ({ value: `refs/heads/${b.name}`, label: b.name }))
+    .map((b) => ({ value: b.refname, label: b.name }))
     .filter((o) => o.value !== input.defaultRef);
   if (local.length > 0) groups.push({ group: "Local branches", items: local });
   const remote = (input.branches?.remote ?? [])
-    .map((r) => ({ value: `refs/remotes/${r.name}`, label: r.name }))
+    .map((r) => ({ value: r.refname, label: r.name }))
     .filter((o) => o.value !== input.defaultRef);
   if (remote.length > 0) groups.push({ group: "Remote branches", items: remote });
   return groups;
@@ -1376,8 +1377,8 @@ export function NewWorktreeDialog(props: {
   const baseIsDefault = mode === "new_branch" && startPoint === "";
   /**
    * The one-line note under "Starts from", written to finish the sentence the
-   * label and the pick begin: "Starts from · origin/main · fetched first, so the
-   * latest." Short enough for one line in the half-width column.
+   * label and the pick begin: "Starts from · origin/main · fetched first when
+   * online." Short enough for one line in the half-width column.
    */
   const baseNote = baseIsDefault
     ? base.failed

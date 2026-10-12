@@ -27,7 +27,7 @@ vi.mock("../api", async (importOriginal) => {
       repoBranches: () =>
         Promise.resolve({
           local: [],
-          remote: [{ name: "origin/trunk", local_name: "trunk", has_local: false }],
+          remote: [{ name: "origin/trunk", refname: "refs/remotes/origin/trunk", local_name: "trunk", has_local: false }],
           default_branch: "trunk",
         }),
       worktreeEmoji: () => new Promise(() => {}),

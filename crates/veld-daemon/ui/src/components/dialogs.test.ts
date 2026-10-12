@@ -28,13 +28,13 @@ import type { RepoBranches } from "../api";
 
 const BRANCHES: RepoBranches = {
   local: [
-    { name: "main", checked_out_in: "/repo", upstream: "origin/main" },
-    { name: "feat/free", checked_out_in: null, upstream: null },
-    { name: "feat/taken", checked_out_in: "/repo/../wt/taken", upstream: null },
+    { name: "main", refname: "refs/heads/main", checked_out_in: "/repo", upstream: "origin/main" },
+    { name: "feat/free", refname: "refs/heads/feat/free", checked_out_in: null, upstream: null },
+    { name: "feat/taken", refname: "refs/heads/feat/taken", checked_out_in: "/repo/../wt/taken", upstream: null },
   ],
   remote: [
-    { name: "origin/main", local_name: "main", has_local: true },
-    { name: "origin/feat/new", local_name: "feat/new", has_local: false },
+    { name: "origin/main", refname: "refs/remotes/origin/main", local_name: "main", has_local: true },
+    { name: "origin/feat/new", refname: "refs/remotes/origin/feat/new", local_name: "feat/new", has_local: false },
   ],
 };
 
@@ -434,14 +434,14 @@ describe("effectiveMode", () => {
 describe("baseBranchOptions", () => {
   const branches: RepoBranches = {
     local: [
-      { name: "main", checked_out_in: "/repo", upstream: "origin/main" },
-      { name: "feat/x", checked_out_in: "/wt/x", upstream: null },
-      { name: "origin/odd", checked_out_in: null, upstream: null },
+      { name: "main", refname: "refs/heads/main", checked_out_in: "/repo", upstream: "origin/main" },
+      { name: "feat/x", refname: "refs/heads/feat/x", checked_out_in: "/wt/x", upstream: null },
+      { name: "heads/origin/odd", refname: "refs/heads/origin/odd", checked_out_in: null, upstream: null },
     ],
     remote: [
-      { name: "origin/main", local_name: "main", has_local: true },
-      { name: "origin/odd", local_name: "odd", has_local: false },
-      { name: "origin/feat/y", local_name: "feat/y", has_local: false },
+      { name: "origin/main", refname: "refs/remotes/origin/main", local_name: "main", has_local: true },
+      { name: "remotes/origin/odd", refname: "refs/remotes/origin/odd", local_name: "odd", has_local: false },
+      { name: "origin/feat/y", refname: "refs/remotes/origin/feat/y", local_name: "feat/y", has_local: false },
     ],
     default_branch: "main",
   };
@@ -460,7 +460,7 @@ describe("baseBranchOptions", () => {
     expect(groups[0].items).toEqual([{ value: DEFAULT_BASE, label: "origin/main" }]);
     // Sent as full refnames, shown short.
     expect(groups[1].items[0]).toEqual({ value: "refs/heads/main", label: "main" });
-    expect(groups[2].items[0]).toEqual({ value: "refs/remotes/origin/odd", label: "origin/odd" });
+    expect(groups[2].items[0]).toEqual({ value: "refs/remotes/origin/odd", label: "remotes/origin/odd" });
   });
 
   it("never repeats a value, even for a local branch spelled like a remote one", () => {
@@ -481,7 +481,7 @@ describe("baseBranchOptions", () => {
   it("leaves a local branch alone that is merely spelled like the default", () => {
     const values = baseBranchOptions({
       ...args,
-      branches: { ...branches, local: [...branches.local, { name: "origin/main", checked_out_in: null, upstream: null }] },
+      branches: { ...branches, local: [...branches.local, { name: "heads/origin/main", refname: "refs/heads/origin/main", checked_out_in: null, upstream: null }] },
     }).flatMap((g) => g.items.map((i) => i.value));
     expect(values).toContain("refs/heads/origin/main");
     expect(values).not.toContain("refs/remotes/origin/main");
@@ -512,7 +512,7 @@ describe("baseBranchOptions", () => {
 describe("defaultBase", () => {
   const branches = (d: string | null, onOrigin = true): RepoBranches => ({
     local: [],
-    remote: d && onOrigin ? [{ name: `origin/${d}`, local_name: d, has_local: true }] : [],
+    remote: d && onOrigin ? [{ name: `origin/${d}`, refname: `refs/remotes/origin/${d}`, local_name: d, has_local: true }] : [],
     default_branch: d,
   });
 

@@ -226,6 +226,9 @@ export interface WorktreeGitSignals {
 export interface LocalBranch {
   /** Short name (`feat/x`), exactly as git has it — never slugged. */
   name: string;
+  /** `refs/heads/feat/x`, what a start point is sent as. Not derivable from
+   *  `name`, which git disambiguates (`heads/main`) when a tag shares it. */
+  refname: string;
   /** The checkout holding it, or `null` when the branch is free. */
   checked_out_in: string | null;
   /** `origin/feat/x`, or `null` for a branch that tracks nothing. */
@@ -236,6 +239,8 @@ export interface LocalBranch {
 export interface RemoteBranch {
   /** `origin/feat/x` — the start point git is given. */
   name: string;
+  /** `refs/remotes/origin/feat/x` — see {@link LocalBranch.refname}. */
+  refname: string;
   /** `feat/x` — the local branch name offered by default. */
   local_name: string;
   /**
@@ -260,8 +265,9 @@ export interface RepoBranches {
   local: LocalBranch[];
   remote: RemoteBranch[];
   /**
-   * What a default create cuts from: `origin/HEAD`'s branch, else `main`, else
-   * `master` — never the main checkout's current branch. `null` when the repo
+   * What a default create cuts from in `git.createFrom = "origin"` mode:
+   * `origin/HEAD`'s branch, else `main`, else `master` — never the main
+   * checkout's current branch. `null` when the repo
    * has none of those. Optional for a daemon that predates it.
    */
   default_branch?: string | null;
