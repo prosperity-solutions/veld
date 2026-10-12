@@ -17,7 +17,7 @@ use axum::http::StatusCode;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use veld_core::db::{
     ConfigSource, Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord,
     default_alias,
@@ -956,9 +956,9 @@ struct WorktreeGitSignals {
     /// `git status --porcelain` is non-empty — staged, unstaged or untracked work
     /// that exists in this checkout and nowhere else.
     ///
-    /// Measured by the sweep, not on the request path, and dropped once it is older
-    /// than [`DIRTY_MAX_AGE`] so a wedged sweep shows nothing rather than an answer
-    /// from five minutes ago.
+    /// Measured by the sweep, not on the request path, and dropped once it is more
+    /// than [`DIRTY_MAX_AGE`] past due so a wedged sweep shows nothing rather than
+    /// an answer from long ago.
     dirty: Option<bool>,
     /// The branch's upstream as git spells it (`origin/feat-x`), or `None` when the
     /// branch has none — never pushed, or a detached HEAD.
@@ -1027,39 +1027,73 @@ impl WorktreeGitSignals {
     }
 }
 
-/// How old a swept `dirty` answer may be before it is served as `None`.
+/// How long past its due time a swept `dirty` answer may be before it is served as
+/// `None`.
 ///
 /// The sweep is kicked by the UI's own poll, so in normal use an entry is at most
-/// [`DIRTY_REFRESH_AGE`] plus one sweep old. This is the backstop for the abnormal
-/// case — a checkout on a network filesystem that takes a minute to answer, a
-/// spawn that never returns — where the failure mode worth avoiding is a confident
-/// glyph nobody is refreshing.
+/// its own [`DirtyEntry::refresh_after`] plus one sweep old. This is the backstop
+/// for the abnormal case — a checkout on a network filesystem that takes a minute
+/// to answer, a spawn that never returns — where the failure mode worth avoiding is
+/// a confident glyph nobody is refreshing.
 ///
 /// **Derived from [`DIRTY_REFRESH_AGE`] rather than written down**, so the ratio
-/// cannot drift: six times the refresh age leaves an ordinary slow sweep plenty of
-/// room before rows start blinking. Raising the refresh age alone used to shorten
-/// nothing and lengthen nothing visible — it silently opened a window in which
-/// every glyph blanked, because this constant did not follow.
-const DIRTY_MAX_AGE: std::time::Duration =
-    std::time::Duration::from_secs(DIRTY_REFRESH_AGE.as_secs() * 6);
-
-/// How old an entry must be before the sweep recomputes it.
+/// cannot drift: five times the base refresh age of slack leaves an ordinary slow
+/// sweep — or a hidden window polling once a minute — plenty of room before rows
+/// start blinking. Raising the refresh age alone used to shorten nothing and
+/// lengthen nothing visible — it silently opened a window in which every glyph
+/// blanked, because this constant did not follow.
 ///
-/// Not a poll interval: the UI polls every 5s and this is what stops that becoming
-/// a `git status` in every checkout every 5s, which is the cost
+/// **Slack, not a total**, since the refresh age became per-entry: a checkout the
+/// sweep backs off from (see [`dirty_refresh_after`]) is legitimately minutes old,
+/// and a fixed total would blank exactly the rows that are expensive to refill.
+/// [`DirtyEntry::served_for`] adds the two.
+const DIRTY_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(DIRTY_REFRESH_AGE.as_secs() * 5);
+
+/// The shortest time an entry must age before the sweep recomputes it.
+///
+/// Not a poll interval: a visible window polls every 5s and this is what stops that
+/// becoming a `git status` in every checkout every 5s, which is the cost
 /// [`worktree_status`] was written to avoid putting on the listing. Measured on
 /// this repo, `git --no-optional-locks status --porcelain=v1 -z` is 16ms in a warm
 /// worktree and 155ms in a cold one with a large ignored `target/`, so 15s over 18
 /// worktrees is a few percent of one core rather than a busy loop.
+///
+/// **A floor, not the rate.** On a ~39k-file monorepo the same command measured
+/// 0.4–2.9s, almost all of it kernel `lstat` — and nine such checkouts at a flat
+/// 15s held a whole core busy for as long as a window was open (#400). Each entry's
+/// actual age comes from [`dirty_refresh_after`], which scales it by what that
+/// checkout cost to measure; this repo's checkouts stay at the floor.
 const DIRTY_REFRESH_AGE: std::time::Duration = std::time::Duration::from_secs(15);
 
-/// How many `git status` children the sweep runs at once.
+/// The longest the sweep will leave an entry before recomputing it, however
+/// expensive the checkout.
 ///
-/// The same reasoning — and the same number — as the delete dialog's bounded
-/// worker: each one runs git in a checkout on a machine already running this
-/// project's dev servers, so the sweep is deliberately not `join_all` over 18
-/// worktrees.
-const DIRTY_CONCURRENCY: usize = 4;
+/// Bounds how stale an honest answer can get: a pencil that outlives the commit
+/// that cleaned it by five minutes is the price of not running a 3s `git status`
+/// every 15s, and anything beyond that stops reading as the checkout's state.
+const DIRTY_REFRESH_CEILING: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How many times its own cost an entry waits before it is measured again.
+///
+/// A hundred holds each checkout's share of the sweep to about one percent of a
+/// core: 2s of `git status` buys 200s of quiet. **Only up to a 3s cost**, where
+/// [`DIRTY_REFRESH_CEILING`] takes over — past it the share grows as `cost / 300s`
+/// (a minute-long network-volume read is a fifth of a core), because there the
+/// ceiling deliberately trades load for a bound on staleness. Still a fraction of
+/// the flat 15s it replaced, which ran such a checkout back to back. Measured in wall
+/// time, which includes waiting for a disk the rest of the machine is also
+/// hammering — so the sweep backs off hardest exactly when the machine is busiest,
+/// which is when the issue that motivated this saw typing lag.
+const DIRTY_COST_FACTOR: u32 = 100;
+
+/// How long an entry that cost `cost` to measure is left before the sweep
+/// recomputes it: [`DIRTY_COST_FACTOR`] times the cost, held between
+/// [`DIRTY_REFRESH_AGE`] and [`DIRTY_REFRESH_CEILING`].
+fn dirty_refresh_after(cost: std::time::Duration) -> std::time::Duration {
+    cost.saturating_mul(DIRTY_COST_FACTOR)
+        .clamp(DIRTY_REFRESH_AGE, DIRTY_REFRESH_CEILING)
+}
 
 /// The upstream half of the cache: signals, plus the path they were measured in.
 ///
@@ -1068,12 +1102,40 @@ const DIRTY_CONCURRENCY: usize = 4;
 /// there. See [`UPSTREAMS`].
 type UpstreamCache = std::collections::HashMap<i64, (WorktreeGitSignals, String)>;
 
-/// The dirty half: the answer, the path it was measured in, and when.
+/// One swept `dirty` answer. See [`DIRTY`].
 ///
-/// Same reasoning as [`UpstreamCache`]. This is the one that actually tripped the
-/// lint when the path was added — a three-element tuple inside a `HashMap` inside a
-/// `Mutex` inside a `LazyLock`. See [`DIRTY`].
-type DirtyCache = std::collections::HashMap<i64, (bool, String, std::time::Instant)>;
+/// A struct rather than the tuple it started as: the lint already refused the
+/// three-element form inline, and a fourth element named only by position is how
+/// `measured_in` and `refresh_after` get swapped in a test without anyone noticing.
+#[derive(Clone, Debug)]
+struct DirtyEntry {
+    dirty: bool,
+    /// The path the answer was measured in — the reused-rowid guard; see [`DIRTY`].
+    measured_in: String,
+    at: std::time::Instant,
+    /// How long until the sweep should measure this checkout again, from what it
+    /// cost this time. See [`dirty_refresh_after`].
+    refresh_after: std::time::Duration,
+}
+
+impl DirtyEntry {
+    /// Whether the sweep should recompute this entry for a row now at `path`.
+    ///
+    /// A row whose answer was measured in a *different* path is due too: that is a
+    /// reused rowid, and its entry is being withheld by [`git_signals_for`] until
+    /// this replaces it.
+    fn due_for(&self, path: &str) -> bool {
+        self.measured_in != path || self.at.elapsed() >= self.refresh_after
+    }
+
+    /// How long after measurement this answer may still be served.
+    fn served_for(&self) -> std::time::Duration {
+        self.refresh_after + DIRTY_MAX_AGE
+    }
+}
+
+/// The dirty half, keyed by worktree id. See [`DIRTY`].
+type DirtyCache = std::collections::HashMap<i64, DirtyEntry>;
 
 /// `ahead`/`behind`/`gone` per worktree, keyed by worktree id, with the path the
 /// answer was measured in — the same guard [`DIRTY`] carries, and for the same
@@ -1096,7 +1158,7 @@ static UPSTREAMS: std::sync::LazyLock<std::sync::Mutex<UpstreamCache>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 /// `dirty` per worktree, keyed by worktree id: the answer, **the path it was
-/// measured in**, and the instant it was measured.
+/// measured in**, the instant it was measured, and how long it is good for.
 ///
 /// Refreshed **asynchronously** by [`spawn_dirty_sweep`], because it costs a
 /// `git status` per *worktree* and the poll must not wait for eighteen of them.
@@ -1278,7 +1340,14 @@ async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
 ///
 /// Nothing runs while no window is open, because the poll is what kicks this. That
 /// is the same property the extension-badge RPC has, reached the same way, and it
-/// is why this is not a daemon-owned interval task.
+/// is why this is not a daemon-owned interval task. A hidden window polls once a
+/// minute rather than every five seconds, which is what stops a minimised window
+/// keeping this busy.
+///
+/// **Each checkout is due on its own clock**, scaled by what it cost to measure last
+/// time ([`dirty_refresh_after`]). A small repo is re-read every 15s; a monorepo
+/// checkout whose `git status` takes seconds waits minutes, so the sweep's share of
+/// the machine stays bounded however large the repos registered with it are.
 ///
 /// Trashed worktrees are skipped: their row shows restore/delete controls, not
 /// state, and a checkout mid-`git worktree remove` is the one place a `git status`
@@ -1304,16 +1373,7 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
         let cache = DIRTY.lock().expect("dirty cache mutex poisoned");
         targets
             .iter()
-            .filter(|(id, path)| {
-                cache
-                    .get(id)
-                    // A row whose cached answer was measured in a *different* path
-                    // is due too: that is a reused rowid, and its entry is being
-                    // withheld by `git_signals_for` until this replaces it.
-                    .is_none_or(|(_, measured_in, at)| {
-                        measured_in != path || at.elapsed() >= DIRTY_REFRESH_AGE
-                    })
-            })
+            .filter(|(id, path)| cache.get(id).is_none_or(|entry| entry.due_for(path)))
             .cloned()
             .collect()
     };
@@ -1349,7 +1409,7 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
     /// Setting it back on the task's last line is what the first version did, and a
     /// panic anywhere in between — every `.expect("… mutex poisoned")` in the loop
     /// is one — left it `true` for the daemon's lifetime. The sweep would then never
-    /// run again, `DIRTY_MAX_AGE` would expire every entry within 90 seconds, and
+    /// run again, `DIRTY_MAX_AGE` would expire every entry soon after it fell due, and
     /// every dirty glyph in the app would vanish for good with nothing logged.
     /// `DIRTY_MAX_AGE` hides a stale answer; it cannot restart a dead sweep.
     struct Sweeping;
@@ -1367,23 +1427,43 @@ fn spawn_dirty_sweep(targets: Vec<(i64, String)>) {
     }
     tokio::spawn(async move {
         let _guard = Sweeping;
-        for chunk in due.chunks(DIRTY_CONCURRENCY) {
-            let measured =
-                futures_util::future::join_all(chunk.iter().map(|(id, path)| async move {
-                    (*id, path.clone(), git_is_dirty(FsPath::new(path)).await)
-                }))
-                .await;
+        // **One checkout at a time**, where this used to run four. The backoff
+        // reads each checkout's cost off the wall clock, and four `git status`
+        // children contending for the same disk measure each other: a checkout
+        // that answers in 0.2s alone measured 3s beside a 16s one, was backed off
+        // to the ceiling — and, falling due again with the same neighbour, would
+        // have stayed there. Serial also means the sweep never stacks its own
+        // `lstat` storms on a machine that is already busy, which is #400's whole
+        // complaint. It costs no protection: a chunk waited for its slowest
+        // member, so a hung checkout stalled the pass either way.
+        for (id, measured_in) in due {
+            let started = std::time::Instant::now();
+            let dirty = git_is_dirty(FsPath::new(&measured_in)).await;
+            let cost = started.elapsed();
             let mut cache = DIRTY.lock().expect("dirty cache mutex poisoned");
-            for (id, path, dirty) in measured {
-                match dirty {
-                    Some(dirty) => cache.insert(id, (dirty, path, std::time::Instant::now())),
-                    // A checkout that could not be read at all — an unmounted
-                    // volume, a `.git` mid-surgery — loses its entry rather than
-                    // keeping the last answer. The row then shows no glyph, which
-                    // is what "we do not know" has to look like.
-                    None => cache.remove(&id),
-                };
-            }
+            match dirty {
+                Some(dirty) => {
+                    let refresh_after = dirty_refresh_after(cost);
+                    // The one line that answers "why is this glyph minutes
+                    // behind" — and, the other way round, "what is the sweep
+                    // costing on this machine" — without a profiler.
+                    debug!("dirty sweep: {measured_in} took {cost:?}, next in {refresh_after:?}");
+                    cache.insert(
+                        id,
+                        DirtyEntry {
+                            dirty,
+                            measured_in,
+                            at: std::time::Instant::now(),
+                            refresh_after,
+                        },
+                    )
+                }
+                // A checkout that could not be read at all — an unmounted
+                // volume, a `.git` mid-surgery — loses its entry rather than
+                // keeping the last answer. The row then shows no glyph, which
+                // is what "we do not know" has to look like.
+                None => cache.remove(&id),
+            };
         }
     });
 }
@@ -1447,14 +1527,12 @@ fn git_signals_for(id: i64, path: &str) -> Option<WorktreeGitSignals> {
         .filter(|(_, measured_in)| measured_in == path)
         .map(|(signals, _)| signals.clone())
         .unwrap_or_default();
-    if let Some((dirty, measured_in, at)) =
-        DIRTY.lock().expect("dirty cache mutex poisoned").get(&id)
-    {
+    if let Some(entry) = DIRTY.lock().expect("dirty cache mutex poisoned").get(&id) {
         // Both guards withhold rather than substitute, because `None` renders no
         // glyph while `Some(false)` claims the checkout is clean. `measured_in`
         // catches a reused rowid (see [`DIRTY`]); `elapsed` catches a wedged sweep.
-        if measured_in == path && at.elapsed() < DIRTY_MAX_AGE {
-            signals.dirty = Some(*dirty);
+        if entry.measured_in == path && entry.at.elapsed() < entry.served_for() {
+            signals.dirty = Some(entry.dirty);
         }
     }
     (!signals.is_empty()).then_some(signals)
@@ -7937,7 +8015,7 @@ mod tests {
     ///
     /// Set-true-then-clear-on-the-last-line was the first shape, and a panic
     /// anywhere between left it `true` for the daemon's lifetime: the sweep never
-    /// runs again, `DIRTY_MAX_AGE` expires every entry inside 90 seconds, and every
+    /// runs again, `DIRTY_MAX_AGE` expires every entry soon after it falls due, and every
     /// dirty glyph in the app disappears for good with nothing logged. Exercised
     /// through a real panicking task rather than by reading the guard, because what
     /// is being asserted is unwind behaviour.
@@ -7975,10 +8053,22 @@ mod tests {
         );
     }
 
+    /// A swept answer at the floor refresh age, measured `ago` in `path`.
+    fn dirty_entry(path: &str, ago: std::time::Duration) -> DirtyEntry {
+        DirtyEntry {
+            dirty: true,
+            measured_in: path.to_owned(),
+            at: std::time::Instant::now()
+                .checked_sub(ago)
+                .expect("the test clock must be able to go back"),
+            refresh_after: DIRTY_REFRESH_AGE,
+        }
+    }
+
     /// `git_signals_for` serves a fresh `dirty` and drops an expired one.
     ///
     /// The `DIRTY_MAX_AGE` backstop is the whole "a wedged sweep shows nothing
-    /// rather than an answer from five minutes ago" claim, and it had no test. Uses
+    /// rather than an answer from long ago" claim, and it had no test. Uses
     /// a worktree id far outside anything the other tests register, because these
     /// caches are process-wide and the suite runs in parallel.
     #[test]
@@ -7989,7 +8079,7 @@ mod tests {
         DIRTY
             .lock()
             .expect("dirty cache mutex poisoned")
-            .insert(id, (true, "/repo/wt".to_owned(), std::time::Instant::now()));
+            .insert(id, dirty_entry("/repo/wt", std::time::Duration::ZERO));
         assert_eq!(
             git_signals_for(id, "/repo/wt").and_then(|s| s.dirty),
             Some(true),
@@ -8009,23 +8099,87 @@ mod tests {
 
         // Older than the backstop: withheld. `None`, never `Some(false)` — an
         // unmounted volume must not read as a tidy checkout.
-        let stale = std::time::Instant::now()
-            .checked_sub(DIRTY_MAX_AGE + std::time::Duration::from_secs(1))
-            .expect("the test clock must be able to go back 91 seconds");
-        DIRTY
-            .lock()
-            .expect("dirty cache mutex poisoned")
-            .insert(id, (true, "/repo/wt".to_owned(), stale));
+        DIRTY.lock().expect("dirty cache mutex poisoned").insert(
+            id,
+            dirty_entry(
+                "/repo/wt",
+                DIRTY_REFRESH_AGE + DIRTY_MAX_AGE + std::time::Duration::from_secs(1),
+            ),
+        );
         assert_eq!(
             git_signals_for(id, "/repo/wt").and_then(|s| s.dirty),
             None,
-            "an answer older than DIRTY_MAX_AGE must be withheld, not served"
+            "an answer more than DIRTY_MAX_AGE past due must be withheld, not served"
+        );
+
+        // **Backed off, same age: still served.** An expensive checkout is
+        // legitimately minutes old between measurements; a fixed backstop would
+        // blank exactly the rows that cost the most to refill.
+        let mut backed_off = dirty_entry(
+            "/repo/wt",
+            DIRTY_REFRESH_AGE + DIRTY_MAX_AGE + std::time::Duration::from_secs(1),
+        );
+        backed_off.refresh_after = DIRTY_REFRESH_CEILING;
+        DIRTY
+            .lock()
+            .expect("dirty cache mutex poisoned")
+            .insert(id, backed_off);
+        assert_eq!(
+            git_signals_for(id, "/repo/wt").and_then(|s| s.dirty),
+            Some(true),
+            "a backed-off answer within its own refresh age must still be served"
         );
 
         DIRTY
             .lock()
             .expect("dirty cache mutex poisoned")
             .remove(&id);
+    }
+
+    /// The sweep's per-checkout backoff: cheap checkouts at the floor, expensive
+    /// ones scaled by their cost, nothing past the ceiling.
+    ///
+    /// The numbers are #400's: a 2s `git status` in a ~39k-file monorepo checkout
+    /// re-run every 15s is what held a core busy. Pinned so a change to the factor
+    /// is a decision someone makes on purpose.
+    #[test]
+    fn the_dirty_sweep_backs_off_in_proportion_to_what_a_checkout_costs() {
+        use std::time::Duration;
+        assert_eq!(
+            dirty_refresh_after(Duration::from_millis(16)),
+            DIRTY_REFRESH_AGE,
+            "a warm small checkout stays at the floor"
+        );
+        assert_eq!(
+            dirty_refresh_after(Duration::ZERO),
+            DIRTY_REFRESH_AGE,
+            "no cost is not a reason to sweep faster than the floor"
+        );
+        assert_eq!(
+            dirty_refresh_after(Duration::from_secs(2)),
+            Duration::from_secs(200),
+            "a 2s checkout waits a hundred times its cost"
+        );
+        assert_eq!(
+            dirty_refresh_after(Duration::from_secs(60)),
+            DIRTY_REFRESH_CEILING,
+            "however slow a checkout is, its answer is never left past the ceiling"
+        );
+        assert_eq!(
+            dirty_refresh_after(Duration::MAX),
+            DIRTY_REFRESH_CEILING,
+            "an absurd cost must saturate, not overflow"
+        );
+
+        // `due_for` follows the entry's own age, not the floor.
+        let mut entry = dirty_entry("/repo/wt", Duration::from_secs(20));
+        assert!(entry.due_for("/repo/wt"), "20s past a 15s age is due");
+        entry.refresh_after = dirty_refresh_after(Duration::from_secs(2));
+        assert!(!entry.due_for("/repo/wt"), "20s into a 200s age is not due");
+        assert!(
+            entry.due_for("/repo/elsewhere"),
+            "a reused rowid is due however fresh its entry is"
+        );
     }
 
     /// The one wrong answer `ahead` gives, pinned so it stays deliberate.

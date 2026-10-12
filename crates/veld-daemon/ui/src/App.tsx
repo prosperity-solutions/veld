@@ -384,8 +384,7 @@ import {
   windowRestored,
   windowSeed,
 } from "./shell";
-
-const POLL_MS = 5000;
+import { POLL_MS, pollDue, pollOnShow } from "./shared/pollCadence";
 
 /**
  * How often the recently-edited file list is refetched while the window is visible.
@@ -1290,14 +1289,35 @@ function AppInner(props: {
   // Tick counter, bumped per poll. Effects that must re-evaluate on a
   // schedule (not only when the payload changes) depend on it — a failed
   // refresh leaves `envs`/`repoList` at the same identity.
+  //
+  // A hidden window polls once a minute instead of every five seconds (see
+  // `shared/pollCadence`): this poll is what kicks the daemon's `git status`
+  // sweep, and a minimised window keeping that running was a core's worth of
+  // kernel time on a large repo (#400). Showing the window again catches up at
+  // once rather than at the next tick.
   const [poll, setPoll] = useState(0);
   useEffect(() => {
-    void refresh();
-    const t = window.setInterval(() => {
+    // `performance.now`, not `Date.now`: a wall clock stepped backwards while the
+    // window is hidden would otherwise hold every hidden poll off until it caught
+    // up again, the database-fault banner included.
+    let last = performance.now();
+    const run = () => {
+      last = performance.now();
       setPoll((n) => n + 1);
       void refresh();
+    };
+    void refresh();
+    const t = window.setInterval(() => {
+      if (pollDue(document.hidden, performance.now() - last)) run();
     }, POLL_MS);
-    return () => window.clearInterval(t);
+    const onVisible = () => {
+      if (!document.hidden && pollOnShow(performance.now() - last)) run();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [refresh]);
 
   /**
