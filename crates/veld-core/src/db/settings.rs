@@ -2933,6 +2933,9 @@ mod tests {
         assert_eq!(s["terminal.fontSize"], Value::from(12));
         assert_eq!(s["terminal.scrollback"], Value::from(DEFAULT_SCROLLBACK));
         assert_eq!(s["worktree.markerStyle"], Value::from("color"));
+        // A prompt one agent wrote is never started unread by default: turning the
+        // review off is the user's call, made in the dialog or in Settings.
+        assert_eq!(s["worktree.reviewHandoffs"], Value::from(true));
         // Every declared key is present, so a client never has to supply one.
         // Counted against the variant list rather than against `defaults()` itself,
         // which would compare a value with itself.

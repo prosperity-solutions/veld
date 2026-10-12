@@ -34,6 +34,7 @@ import {
   worktreeStorageMode,
   worktreeStorageDir,
   stalenessHue,
+  worktreeReviewHandoffs,
 } from "./settings";
 
 describe("terminalPrefs", () => {
@@ -380,6 +381,23 @@ describe("newsSource", () => {
       expect(newsSource({ "news.source": bad as unknown as string })).toBe(
         "main",
       );
+    }
+  });
+});
+
+describe("worktreeReviewHandoffs", () => {
+  // Off would start an agent on a prompt another agent wrote, unread — so the
+  // review is the default, including against a daemon too old to send the key.
+  it("defaults on: a handed-off prompt is reviewed, never started unasked", () => {
+    expect(worktreeReviewHandoffs({})).toBe(true);
+  });
+
+  it("is off only when the user stored off", () => {
+    expect(worktreeReviewHandoffs({ "worktree.reviewHandoffs": false })).toBe(false);
+    for (const bad of ["false", 0, null]) {
+      expect(
+        worktreeReviewHandoffs({ "worktree.reviewHandoffs": bad as unknown as boolean }),
+      ).toBe(true);
     }
   });
 });
