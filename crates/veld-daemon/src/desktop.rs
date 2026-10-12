@@ -1077,7 +1077,11 @@ const DIRTY_REFRESH_CEILING: std::time::Duration = std::time::Duration::from_sec
 /// How many times its own cost an entry waits before it is measured again.
 ///
 /// A hundred holds each checkout's share of the sweep to about one percent of a
-/// core, whatever its size: 2s of `git status` buys 200s of quiet. Measured in wall
+/// core: 2s of `git status` buys 200s of quiet. **Only up to a 3s cost**, where
+/// [`DIRTY_REFRESH_CEILING`] takes over — past it the share grows as `cost / 300s`
+/// (a minute-long network-volume read is a fifth of a core), because there the
+/// ceiling deliberately trades load for a bound on staleness. Still a fraction of
+/// the flat 15s it replaced, which ran such a checkout back to back. Measured in wall
 /// time, which includes waiting for a disk the rest of the machine is also
 /// hammering — so the sweep backs off hardest exactly when the machine is busiest,
 /// which is when the issue that motivated this saw typing lag.

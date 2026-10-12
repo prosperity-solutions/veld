@@ -16,6 +16,13 @@ describe("pollDue", () => {
   it("is much slower hidden than visible — the point of #400", () => {
     expect(HIDDEN_POLL_MS).toBeGreaterThanOrEqual(10 * POLL_MS);
   });
+
+  it("pins the hidden rate the docs quote", () => {
+    // `desktop/ARCHITECTURE.md` and the dbNotice reasoning both say "a minute";
+    // changing it should be a decision, not a drift.
+    const aMinute = 60_000;
+    expect(HIDDEN_POLL_MS).toBe(aMinute);
+  });
 });
 
 describe("pollOnShow", () => {
