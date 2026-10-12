@@ -1052,8 +1052,8 @@ const DIRTY_MAX_AGE: std::time::Duration =
 
 /// The shortest time an entry must age before the sweep recomputes it.
 ///
-/// Not a poll interval: the UI polls every 5s and this is what stops that becoming
-/// a `git status` in every checkout every 5s, which is the cost
+/// Not a poll interval: a visible window polls every 5s and this is what stops that
+/// becoming a `git status` in every checkout every 5s, which is the cost
 /// [`worktree_status`] was written to avoid putting on the listing. Measured on
 /// this repo, `git --no-optional-locks status --porcelain=v1 -z` is 16ms in a warm
 /// worktree and 155ms in a cold one with a large ignored `target/`, so 15s over 18
