@@ -237,7 +237,8 @@ export interface LocalBranch {
 
 /** One remote-tracking branch, from {@link api.repoBranches}. */
 export interface RemoteBranch {
-  /** `origin/feat/x` — the start point git is given. */
+  /** `origin/feat/x` — the start point git is given, except where git has
+   *  disambiguated it (`remotes/origin/x`); `refname` is always exact. */
   name: string;
   /** `refs/remotes/origin/feat/x` — see {@link LocalBranch.refname}. */
   refname: string;

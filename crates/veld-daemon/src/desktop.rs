@@ -1620,7 +1620,9 @@ struct LocalBranchView {
 /// One remote-tracking branch, as the create dialog's source picker needs it.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct RemoteBranchView {
-    /// `origin/feat/x` — what a `git worktree add` start-point argument names.
+    /// `origin/feat/x` — what a `git worktree add` start-point argument names,
+    /// except where git has disambiguated it (`remotes/origin/x`, when a local
+    /// branch `origin/x` exists); [`Self::refname`] is always exact.
     name: String,
     /// `refs/remotes/origin/feat/x` — see [`LocalBranchView::refname`].
     refname: String,
@@ -1734,10 +1736,12 @@ async fn default_branch_candidates(repo_root: &FsPath) -> Vec<String> {
 /// option.
 async fn default_start_point(repo_root: &FsPath) -> Option<String> {
     let fetched = git(repo_root, &["fetch", "origin"]).await.is_ok();
+    let mut skipped = false;
     for name in default_branch_candidates(repo_root).await {
         let remote = format!("refs/remotes/origin/{name}");
         if ref_exists(repo_root, &remote).await {
             if fetched && !on_origin(repo_root, &name).await {
+                skipped = true;
                 continue;
             }
             return Some(remote);
@@ -1747,7 +1751,28 @@ async fn default_start_point(repo_root: &FsPath) -> Option<String> {
             return Some(local);
         }
     }
+    // A default renamed to something other than `main`/`master`: no candidate
+    // names it, so ask the remote which branch its HEAD is now.
+    if skipped {
+        let head = origin_head(repo_root).await?;
+        let remote = format!("refs/remotes/origin/{head}");
+        return ref_exists(repo_root, &remote).await.then_some(remote);
+    }
     None
+}
+
+/// The branch origin's HEAD points at, asked of the remote (`ls-remote
+/// --symref`, read-only) rather than read from `origin/HEAD`, which git leaves
+/// where it was when the remote's default moves.
+async fn origin_head(repo_root: &FsPath) -> Option<String> {
+    let out = git(repo_root, &["ls-remote", "--symref", "origin", "HEAD"])
+        .await
+        .ok()?;
+    out.lines().find_map(|line| {
+        let target = line.strip_prefix("ref: refs/heads/")?;
+        let (branch, rest) = target.split_once('\t')?;
+        (rest == "HEAD" && !branch.is_empty()).then(|| branch.to_string())
+    })
 }
 
 /// Whether origin still has `branch`. `true` when it cannot tell — a failed
@@ -1766,19 +1791,6 @@ async fn on_origin(repo_root: &FsPath, branch: &str) -> bool {
     .map_or(true, |out| !out.is_empty())
 }
 
-/// Parse `git for-each-ref refs/heads` in the format
-/// `<short>\t<upstream:short>\t<worktreepath>`.
-///
-/// **Records are NUL-terminated and fields are tab-separated, and both halves
-/// are about the worktree path.** A refname cannot contain a tab or a newline
-/// (`git check-ref-format` rejects every ASCII control character) but a
-/// *filesystem path* can hold either — so the record separator is `%00` rather
-/// than the newline `for-each-ref` would otherwise end each record with, and
-/// the path is the last field so `splitn(3, …)` leaves whatever it holds
-/// intact. Splitting records on lines was the first version, and a worktree at
-/// a path containing a newline produced a phantom branch row named after the
-/// path's second half, plus a real branch reported as checked out at the
-/// first half.
 /// [`parse_local_branches`]' input: the path last, so a directory with a tab in
 /// its name cannot shift the fields.
 const LOCAL_BRANCH_FORMAT: &str =
@@ -1786,6 +1798,19 @@ const LOCAL_BRANCH_FORMAT: &str =
 /// [`parse_remote_branches`]' input.
 const REMOTE_BRANCH_FORMAT: &str = "--format=%(refname:short)\t%(symref)\t%(refname)%00";
 
+/// Parse `git for-each-ref refs/heads` in the format
+/// `<short>\t<upstream:short>\t<refname>\t<worktreepath>` ([`LOCAL_BRANCH_FORMAT`]).
+///
+/// **Records are NUL-terminated and fields are tab-separated, and both halves
+/// are about the worktree path.** A refname cannot contain a tab or a newline
+/// (`git check-ref-format` rejects every ASCII control character) but a
+/// *filesystem path* can hold either — so the record separator is `%00` rather
+/// than the newline `for-each-ref` would otherwise end each record with, and
+/// the path is the last field so `splitn(4, …)` leaves whatever it holds
+/// intact. Splitting records on lines was the first version, and a worktree at
+/// a path containing a newline produced a phantom branch row named after the
+/// path's second half, plus a real branch reported as checked out at the
+/// first half.
 fn parse_local_branches(out: &str) -> Vec<LocalBranchView> {
     out.split('\0')
         // `for-each-ref` still ends each record with its own newline *after*
@@ -1834,18 +1859,21 @@ fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBran
             if name.is_empty() || !symref.is_empty() {
                 return None;
             }
-            // `origin/feat/x` → `feat/x`. Only the first component is the
-            // remote, so `split_once` and not `rsplit_once`: a branch called
-            // `feat/x` under `origin` must not become `x`.
-            let (_remote, local_name) = name.split_once('/')?;
+            // `refs/remotes/origin/feat/x` → `feat/x`. From the refname, not
+            // the short name, which git disambiguates (`remotes/origin/x`) when
+            // a local branch shares it. Only the first component is the remote,
+            // so `split_once` and not `rsplit_once`: a branch called `feat/x`
+            // under `origin` must not become `x`.
+            let (_remote, local_name) = refname.strip_prefix("refs/remotes/")?.split_once('/')?;
             if local_name.is_empty() {
                 return None;
             }
+            let local_ref = format!("refs/heads/{local_name}");
             Some(RemoteBranchView {
                 name: name.to_string(),
                 refname: refname.to_string(),
                 local_name: local_name.to_string(),
-                has_local: local.iter().any(|b| b.name == local_name),
+                has_local: local.iter().any(|b| b.refname == local_ref),
             })
         })
         .collect()
@@ -6545,7 +6573,8 @@ mod tests {
         let out = "origin\trefs/remotes/origin/main\trefs/remotes/origin/HEAD\0\n\
                    origin/main\t\trefs/remotes/origin/main\0\n\
                    origin/feat/x\t\trefs/remotes/origin/feat/x\0\n\
-                   upstream/main\t\trefs/remotes/upstream/main\0\n";
+                   upstream/main\t\trefs/remotes/upstream/main\0\n\
+                   remotes/origin/odd\t\trefs/remotes/origin/odd\0\n";
         let local = vec![LocalBranchView {
             name: "main".into(),
             refname: "refs/heads/main".into(),
@@ -6577,6 +6606,14 @@ mod tests {
                     refname: "refs/remotes/upstream/main".into(),
                     local_name: "main".into(),
                     has_local: true,
+                },
+                RemoteBranchView {
+                    // What git shortens it to when a local `origin/odd` exists;
+                    // the local name still comes out right, from the refname.
+                    name: "remotes/origin/odd".into(),
+                    refname: "refs/remotes/origin/odd".into(),
+                    local_name: "odd".into(),
+                    has_local: false,
                 },
             ]
         );
@@ -8315,6 +8352,13 @@ mod tests {
         assert_eq!(
             default_start_point(&work).await.as_deref(),
             Some("refs/remotes/origin/main")
+        );
+        // Renamed again, to a name no heuristic guesses: the remote is asked.
+        git(&origin, &["branch", "-m", "main", "trunk"]);
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/trunk"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/trunk")
         );
         // Found out without touching the clone's own `origin/HEAD`.
         let head = Command::new("git")
