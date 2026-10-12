@@ -616,7 +616,11 @@ export const CURRENT_SOURCE = ":current";
 /**
  * What a default create starts from, named the way the daemon will resolve it.
  *
- * - `origin` mode with a default branch → `origin/<default>`, fetched first.
+ * - `origin` mode with a default branch on origin → `origin/<default>`,
+ *   fetched first.
+ * - `origin` mode with a default branch only this repo has (no `origin`, or
+ *   never pushed) → `<default>`, flagged `localOnly`: the daemon's fetch has
+ *   nothing to bring, and naming it `origin/…` would claim one.
  * - `local` mode → the main checkout's HEAD, named by the branch it is on
  *   (`HEAD` when detached). Named by *that* branch rather than the default,
  *   because that is where the create really lands: a main checkout parked on
@@ -633,12 +637,16 @@ export function defaultBase(input: {
   branches: RepoBranches | null;
   /** The main checkout's branch, `""` when detached, `null` when unknown. */
   mainBranch: string | null;
-}): { label: string; fallback: boolean; loading: boolean } {
+}): { label: string; fallback: boolean; loading: boolean; localOnly: boolean } {
+  const none = { fallback: false, loading: false, localOnly: false };
   const head = input.mainBranch || "HEAD";
-  if (input.createFrom === "local") return { label: head, fallback: false, loading: false };
-  if (input.branches === null) return { label: "Loading…", fallback: false, loading: true };
+  if (input.createFrom === "local") return { ...none, label: head };
+  if (input.branches === null) return { ...none, label: "Loading…", loading: true };
   const d = input.branches.default_branch;
-  return d ? { label: `origin/${d}`, fallback: false, loading: false } : { label: head, fallback: true, loading: false };
+  if (!d) return { ...none, label: head, fallback: true };
+  return input.branches.remote.some((r) => r.name === `origin/${d}`)
+    ? { ...none, label: `origin/${d}` }
+    : { ...none, label: d, localOnly: true };
 }
 
 /**
@@ -649,9 +657,13 @@ export function defaultBase(input: {
  * is still loading or failed to load: it is the base almost every create wants,
  * and the one somebody who started from the wrong place is looking for.
  *
- * A remote ref spelled exactly like a local branch is dropped — the picker
- * cannot hold two options with one value, and git would resolve that name to
- * the local branch anyway.
+ * **Values are full refnames** (`refs/heads/x`, `refs/remotes/origin/x`), and
+ * that is what the daemon is sent: a short name is ambiguous once a tag or a
+ * branch shares it, and `git worktree add` refuses an ambiguous start point.
+ * Labels stay short, under their group.
+ *
+ * The branch the default already is (`origin/main`, or in local mode the main
+ * checkout's own) is not listed a second time.
  */
 export function baseBranchOptions(input: {
   /** The default option's label — see [`defaultBase`]. */
@@ -674,21 +686,18 @@ export function baseBranchOptions(input: {
       },
     ],
   });
-  const local = input.branches?.local ?? [];
+  const local = (input.branches?.local ?? []).filter((b) => b.name !== input.defaultLabel);
   if (local.length > 0) {
     groups.push({
       group: "Local branches",
-      items: local.map((b) => ({ value: b.name, label: b.name })),
+      items: local.map((b) => ({ value: `refs/heads/${b.name}`, label: b.name })),
     });
   }
-  // When the default *is* `origin/<default>`, fetched, the stale copy of it is
-  // not offered beside it under the same name.
-  const taken = new Set([...local.map((b) => b.name), input.defaultLabel]);
-  const remote = (input.branches?.remote ?? []).filter((r) => !taken.has(r.name));
+  const remote = (input.branches?.remote ?? []).filter((r) => r.name !== input.defaultLabel);
   if (remote.length > 0) {
     groups.push({
       group: "Remote branches",
-      items: remote.map((r) => ({ value: r.name, label: r.name })),
+      items: remote.map((r) => ({ value: `refs/remotes/${r.name}`, label: r.name })),
     });
   }
   return groups;
@@ -1358,13 +1367,15 @@ export function NewWorktreeDialog(props: {
   const baseNote = baseIsDefault
     ? base.fallback
       ? "no default branch found."
-      : props.createFrom === "origin"
-        ? "fetched first, so the latest."
-        : "the main checkout's HEAD."
+      : base.localOnly
+        ? "local only, not on origin."
+        : props.createFrom === "origin"
+          ? "fetched first, so the latest."
+          : "the main checkout's HEAD."
     : mode === "new_branch"
-      ? props.createFrom === "origin" && startPoint === branches?.default_branch
+      ? props.createFrom === "origin" && startPoint === `refs/heads/${branches?.default_branch}`
         ? "not fetched, may be behind."
-        : branches?.remote.some((r) => r.name === startPoint)
+        : startPoint.startsWith("refs/remotes/")
           ? "as of the last fetch."
           : "as it is locally."
       : mode === "worktree"

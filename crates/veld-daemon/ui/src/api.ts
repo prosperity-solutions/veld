@@ -315,8 +315,8 @@ export type CreateWorktreeSource =
   /**
    * Cut the branch fresh, per the `git.createFrom` setting. The default.
    *
-   * `start_point` cuts it from that ref instead — a local branch or a
-   * remote-tracking ref — used as given, with no fetch.
+   * `start_point` cuts it from that ref instead, as a full refname
+   * (`refs/heads/x`, `refs/remotes/origin/x`) — used as given, with no fetch.
    */
   | { kind: "new_branch"; start_point?: string }
   /** Check out the existing local branch named by `branch`. */

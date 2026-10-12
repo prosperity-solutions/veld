@@ -453,14 +453,22 @@ describe("baseBranchOptions", () => {
     const groups = baseBranchOptions(args);
     expect(groups.map((g) => g.group)).toEqual(["Default", "Local branches", "Remote branches"]);
     expect(groups[0].items).toEqual([{ value: DEFAULT_BASE, label: "origin/main" }]);
-    expect(groups[1].items[1]).toEqual({ value: "feat/x", label: "feat/x" });
+    // Sent as full refnames, shown short.
+    expect(groups[1].items[0]).toEqual({ value: "refs/heads/main", label: "main" });
+    expect(groups[2].items[0]).toEqual({ value: "refs/remotes/origin/odd", label: "origin/odd" });
   });
 
-  it("never repeats a value or a label", () => {
+  it("never repeats a value, even for a local branch spelled like a remote one", () => {
     const values = baseBranchOptions(args).flatMap((g) => g.items.map((i) => i.value));
     expect(new Set(values).size).toBe(values.length);
+    expect(values).toEqual(expect.arrayContaining(["refs/heads/origin/odd", "refs/remotes/origin/odd"]));
+  });
+
+  it("does not list the default's own branch a second time", () => {
     // origin/main is the default, fetched — not listed again as a stale remote.
     expect(labels(args).filter((l) => l === "origin/main")).toHaveLength(1);
+    // In local mode the default is the main checkout's branch.
+    expect(labels({ ...args, defaultLabel: "feat/x" }).filter((l) => l === "feat/x")).toHaveLength(1);
   });
 
   it("keeps origin/<default> as a remote when the default is something else", () => {
@@ -484,13 +492,18 @@ describe("baseBranchOptions", () => {
 });
 
 describe("defaultBase", () => {
-  const branches = (d: string | null): RepoBranches => ({ local: [], remote: [], default_branch: d });
+  const branches = (d: string | null, onOrigin = true): RepoBranches => ({
+    local: [],
+    remote: d && onOrigin ? [{ name: `origin/${d}`, local_name: d, has_local: true }] : [],
+    default_branch: d,
+  });
 
   it("is origin/<default> in origin mode", () => {
     expect(defaultBase({ createFrom: "origin", branches: branches("main"), mainBranch: "feat/parked" })).toEqual({
       label: "origin/main",
       fallback: false,
       loading: false,
+      localOnly: false,
     });
   });
 
@@ -506,6 +519,16 @@ describe("defaultBase", () => {
       label: "develop",
       fallback: true,
       loading: false,
+      localOnly: false,
+    });
+  });
+
+  it("does not claim origin for a default only this repo has", () => {
+    expect(defaultBase({ createFrom: "origin", branches: branches("main", false), mainBranch: "feat" })).toEqual({
+      label: "main",
+      fallback: false,
+      loading: false,
+      localOnly: true,
     });
   });
 

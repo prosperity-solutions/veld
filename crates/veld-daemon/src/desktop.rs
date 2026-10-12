@@ -1659,19 +1659,19 @@ async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
 async fn default_branch(repo_root: &FsPath) -> Option<String> {
     if let Ok(head) = git(
         repo_root,
-        &[
-            "symbolic-ref",
-            "--quiet",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ],
+        // Full name, not `--short`: git shortens to `remotes/origin/<b>` when
+        // a local branch `origin/<b>` makes `origin/<b>` ambiguous.
+        &["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
     )
     .await
     {
         // Only while the branch it names still exists: a remote that renamed
         // its default leaves `origin/HEAD` dangling at the old name after a
         // pruning fetch, and git does not repair it.
-        if let Some(b) = head.strip_prefix("origin/").filter(|b| !b.is_empty()) {
+        if let Some(b) = head
+            .strip_prefix("refs/remotes/origin/")
+            .filter(|b| !b.is_empty())
+        {
             if ref_exists(repo_root, &format!("refs/remotes/origin/{b}")).await
                 || ref_exists(repo_root, &format!("refs/heads/{b}")).await
             {
@@ -1693,17 +1693,23 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
 /// mode, or `None` for the main checkout's HEAD.
 ///
 /// Fetches first, then resolves [`default_branch`] — after the fetch, because
-/// that is what creates `origin/HEAD` on git 2.48+. `origin/<default>` only if
-/// the remote actually has it, else the local `<default>`, else `None`.
+/// that is what creates `origin/HEAD` on git 2.48+. `origin/<default>` whenever
+/// the repo has it — freshly fetched, or as of the last fetch when this one
+/// failed, which is still newer than a local `<default>` nobody fast-forwards,
+/// and gives the new branch an upstream — else the local `<default>`, else
+/// `None`.
 ///
-/// The local fallback is spelled `refs/heads/<default>`: `worktree add` hands
-/// its start point to `git branch` as a bare argument, past the `--`, so a
-/// name beginning with `-` would be read as an option. `origin/…` never does.
+/// Both are spelled as full refnames. A short name is ambiguous once a tag or a
+/// local branch shares it (`origin/main` as a local branch), and `worktree add`
+/// refuses an ambiguous start point outright; it also hands the start point to
+/// `git branch` past the `--`, where a name beginning with `-` reads as an
+/// option.
 async fn default_start_point(repo_root: &FsPath) -> Option<String> {
-    let fetched = git(repo_root, &["fetch", "origin"]).await.is_ok();
+    let _ = git(repo_root, &["fetch", "origin"]).await;
     let dbranch = default_branch(repo_root).await?;
-    if fetched && ref_exists(repo_root, &format!("refs/remotes/origin/{dbranch}")).await {
-        return Some(format!("origin/{dbranch}"));
+    let remote = format!("refs/remotes/origin/{dbranch}");
+    if ref_exists(repo_root, &remote).await {
+        return Some(remote);
     }
     let local = format!("refs/heads/{dbranch}");
     ref_exists(repo_root, &local).await.then_some(local)
@@ -4379,10 +4385,9 @@ async fn create_worktree(
             // stale as the last fetch of main.
             //
             // **The default branch is the repo's, never the main checkout's
-            // current one** — see [`default_branch`]. When the fetch or the
-            // origin ref fails (offline, a repo with no remote), it falls back to
-            // the *local* default branch, and only then to local HEAD — never
-            // silently, but never blocking the create either.
+            // current one** — see [`default_start_point`] for the fallbacks
+            // (offline, a repo with no remote). None of them blocks the create,
+            // and the create response does not say which one was used.
             let start_point = if db.git_create_from() == GitCreateSource::Origin {
                 default_start_point(&repo_root).await
             } else {
@@ -8179,6 +8184,11 @@ mod tests {
         git(&work, &["checkout", "-b", "feat/wip"]);
         git(&work, &["push", "-u", "origin", "feat/wip"]);
         assert_eq!(default_branch(&work).await.as_deref(), Some("trunk"));
+        // A local branch spelled `origin/trunk` makes the short form ambiguous;
+        // the full name still reads.
+        git(&work, &["branch", "origin/trunk", "trunk"]);
+        assert_eq!(default_branch(&work).await.as_deref(), Some("trunk"));
+        git(&work, &["branch", "-D", "origin/trunk"]);
 
         // Without `origin/HEAD` it falls back to `main`, found locally.
         git(&work, &["remote", "set-head", "origin", "--delete"]);
@@ -8232,7 +8242,32 @@ mod tests {
             Some("refs/heads/main")
         );
 
+        // A remote that cannot be reached still has its last-fetched copy,
+        // which is preferred over the local one.
+        let origin = dir.path().join("origin");
+        let out = Command::new("git")
+            .arg("init")
+            .arg("--bare")
+            .arg(&origin)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "bare init failed");
+        git(
+            &work,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&work, &["push", "origin", "main"]);
+        git(
+            &work,
+            &["remote", "set-url", "origin", "/nonexistent/origin.git"],
+        );
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+
         // No default branch at all: the main checkout's HEAD, as before.
+        git(&work, &["remote", "remove", "origin"]);
         git(&work, &["branch", "-D", "main"]);
         assert_eq!(default_start_point(&work).await, None);
     }
