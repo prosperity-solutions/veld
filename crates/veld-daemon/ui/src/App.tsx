@@ -119,6 +119,7 @@ import {
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
+  withWorktreeRestored,
   type PendingAction,
   type RailGroup,
   type LaneRows,
@@ -6057,26 +6058,48 @@ function AppInner(props: {
   };
 
   /** Resolves to whether the worktree came back, after the list has refreshed. */
+  /** Worktrees whose restore is on its way, so a second click is not a second request. */
+  const restoringRef = useRef(new Set<number>());
   const restoreWorktree = async (w: Worktree): Promise<boolean> => {
+    if (restoringRef.current.has(w.id)) return false;
+    restoringRef.current.add(w.id);
     let restored = false;
+    // Out of the trash on screen at once, as binning is: the restore itself is a
+    // few milliseconds, but the listing that confirms it can take a second on a
+    // big rail, and a row that sits in the trash that long reads as a click that
+    // did nothing — and invites the next one.
+    const write = async () => {
+      try {
+        await api.restoreWorktree(w.id);
+        notifyDone(`Restored ${worktreeLabel(w)}`);
+        restored = true;
+      } catch (e) {
+        // 404 is the expected failure — the worker got there first — and saying so
+        // is better than a generic error for a race the design admits to. Anything
+        // else (a 500, a dead daemon) must NOT claim the worktree was removed,
+        // because it is still there and the user would stop looking for it.
+        const gone = e instanceof Error && /not found|already removed/i.test(e.message);
+        notifyError(
+          gone
+            ? `${worktreeLabel(w)} has already been deleted`
+            : `Could not restore ${worktreeLabel(w)}`,
+          e,
+        );
+      }
+    };
     try {
-      await api.restoreWorktree(w.id);
-      notifyDone(`Restored ${worktreeLabel(w)}`);
-      restored = true;
-    } catch (e) {
-      // 404 is the expected failure — the worker got there first — and saying so is
-      // better than a generic error for a race the design admits to. Anything else
-      // (a 500, a dead daemon) must NOT claim the worktree was removed, because it
-      // is still there and the user would stop looking for it.
-      const gone = e instanceof Error && /not found|already removed/i.test(e.message);
-      notifyError(
-        gone
-          ? `${worktreeLabel(w)} has already been deleted`
-          : `Could not restore ${worktreeLabel(w)}`,
-        e,
+      // The refresh `optimisticRepos` ends with is the daemon's word, so a refused
+      // restore puts the row back in the trash by itself.
+      await optimisticRepos(
+        patchRepo(w.repo_root, (r) => ({
+          ...r,
+          worktrees: withWorktreeRestored(r.worktrees, w.path),
+        })),
+        write,
       );
+    } finally {
+      restoringRef.current.delete(w.id);
     }
-    await refresh();
     return restored;
   };
 

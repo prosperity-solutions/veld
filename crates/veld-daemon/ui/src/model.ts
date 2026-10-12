@@ -1296,6 +1296,17 @@ export function withWorktreeTrashed(
 }
 
 /**
+ * The worktree list with `path` back out of the trash — the optimistic half of
+ * **Restore**, the mirror of [`withWorktreeTrashed`]. Idempotent, so replaying it
+ * over a poll that already has the daemon's answer changes nothing.
+ */
+export function withWorktreeRestored(worktrees: Worktree[], path: string): Worktree[] {
+  return worktrees.map((w) =>
+    w.path === path && w.trashed_at ? { ...w, trashed_at: "", trash_error: "" } : w,
+  );
+}
+
+/**
  * The lane rows in the order [`moveLane`] produced — the optimistic half of a
  * lane drag.
  *

@@ -23,6 +23,7 @@ import {
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
+  withWorktreeRestored,
   needsAttention,
   parsePendingKey,
   pendingKey,
@@ -1693,6 +1694,23 @@ describe("repoFetchVerdict", () => {
 
   it("applies the drop's own refresh, issued just past the fence", () => {
     expect(repoFetchVerdict(4, 2, 3)).toBe("apply");
+  });
+});
+
+
+describe("withWorktreeRestored", () => {
+  it("takes the row out of the trash at once, and only that row", () => {
+    const binned = [
+      rw("/wts/a", { trashed_at: "2026-01-02T00:00:00.000000Z", trash_error: "busy" }),
+      rw("/wts/b", { trashed_at: "2026-01-02T00:00:00.000000Z" }),
+    ];
+    const next = withWorktreeRestored(binned, "/wts/a");
+    expect(next.map((w) => [w.path, w.trashed_at, w.trash_error])).toEqual([
+      ["/wts/a", "", ""],
+      ["/wts/b", "2026-01-02T00:00:00.000000Z", ""],
+    ]);
+    // Replayed over a poll that already restored it: nothing changes.
+    expect(withWorktreeRestored(next, "/wts/a")).toEqual(next);
   });
 });
 
