@@ -75,7 +75,7 @@ export const register: Register = (on) => {
     const verdict = await next(e)
     if (hooks && verdict.decision === 'ask') {
       blocked = true
-      await report($, 'blocked')
+      await report($, 'blocked', true)
     }
     return verdict
   }).catch(passThrough)
@@ -84,7 +84,7 @@ export const register: Register = (on) => {
     if (!hooks) return next(e)
     if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') {
       blocked = true
-      await report($, 'blocked')
+      await report($, 'blocked', true)
       const result = await next(e)
       blocked = false
       await report($, 'working')
@@ -113,14 +113,16 @@ export const register: Register = (on) => {
 const passThrough = (_$: unknown, e: any, next: (e: any) => any) => next(e)
 
 // Bounded, and never fails the hook: a daemon that is down or slow costs a badge,
-// not the person's session.
-async function report($: EngineInterface, state: string): Promise<void> {
+// not the person's session. `held` marks a "waiting for you" the window keeps until
+// this mod reports the next state, which for a question or a permission prompt is the
+// moment it is answered.
+async function report($: EngineInterface, state: string, held = false): Promise<void> {
   try {
     await Promise.race([
       $.http.fetch(`${DAEMON}/api/pty/sessions/${encodeURIComponent(session)}/agent-state`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', 'x-veld-request': '1' },
-        body: JSON.stringify({ tool: 'claude', state }),
+        body: JSON.stringify(held ? { tool: 'claude', state, held } : { tool: 'claude', state }),
       }),
       $.clock.sleep(TIMEOUT_MS),
     ])

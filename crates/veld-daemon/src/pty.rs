@@ -3293,6 +3293,11 @@ struct AgentStateRequest {
     /// send that one, because "we were told something we do not understand" is not a
     /// state worth storing at hook authority.
     state: String,
+    /// A `blocked` that stays until the agent reports its next state, rather than until
+    /// somebody looks at the pane. Sent by Veld's Claude Code mod, which reports the
+    /// moment it was answered; the wrapper's hooks cannot, so they never send it.
+    #[serde(default)]
+    held: bool,
 }
 
 /// Report that a coding agent in this terminal is working, waiting on the user, or
@@ -3342,7 +3347,8 @@ async fn agent_state(
     };
 
     debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
-    super::ide::broadcast_agent_state(worktree_id, &id, tool, state);
+    let held = body.held && state == veld_core::agent::State::Blocked;
+    super::ide::broadcast_agent_state(worktree_id, &id, tool, state, held);
     // 202: the event has been handed to the clients that are connected, which is not
     // the same as a badge appearing. Nothing the caller could do with a richer answer —
     // it is a hook, and its own contract is to exit and get out of the way.
@@ -6675,6 +6681,8 @@ mod tests {
             r#"{"tool":"claude","state":"blocked","surface":"pane-1"}"#,
             r#"{"tool":"claude"}"#,
             r#"not json"#,
+            // `held` is a flag, not anything truthy.
+            r#"{"tool":"claude","state":"blocked","held":"yes"}"#,
         ] {
             assert!(
                 post("/api/pty/sessions/abc/agent-state", body)
@@ -6683,6 +6691,16 @@ mod tests {
                 "{body}"
             );
         }
+        // `held` is part of the shape: a held report gets past the parse to the session
+        // lookup, which is a 404 here because no terminal is registered.
+        assert_eq!(
+            post(
+                "/api/pty/sessions/abc/agent-state",
+                r#"{"tool":"claude","state":"blocked","held":true}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
         // An invalid session id never reaches the registry.
         assert_eq!(
             post(

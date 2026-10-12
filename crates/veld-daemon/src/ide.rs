@@ -883,6 +883,10 @@ enum ServerMsg {
         session_id: String,
         tool: &'static str,
         state: &'static str,
+        /// A `blocked` only looking cannot clear — see `AgentStateRequest::held`.
+        /// Left off the wire when false, which is what an older client expects.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        held: bool,
     },
     /// Show a text file in a file pane of this worktree — `veld ide open`, the
     /// `open` shim on a text file, or a click the daemon resolved.
@@ -1513,6 +1517,7 @@ pub fn broadcast_agent_state(
     session_id: &str,
     tool: veld_core::agent::AgentTool,
     state: veld_core::agent::State,
+    held: bool,
 ) {
     let session_id = session_id.to_owned();
     tokio::spawn(async move {
@@ -1523,6 +1528,7 @@ pub fn broadcast_agent_state(
                 session_id: session_id.clone(),
                 tool: tool.as_str(),
                 state: state.as_str(),
+                held,
             });
         }
     });
