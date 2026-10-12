@@ -2656,9 +2656,8 @@ async fn launch_prompt_in_argv(
     let Some(direct) = launch.direct_argv.as_deref() else {
         return false;
     };
-    let runs_claude = std::path::Path::new(&direct[0])
-        .file_name()
-        .is_some_and(|name| name == veld_core::agent::AgentTool::Claude.shim_name());
+    let runs_claude =
+        veld_core::agent::agent_tool_of(&direct[0]) == Some(veld_core::agent::AgentTool::Claude);
     if !runs_claude
         || !veld_core::agent::args_take_launch_prompt(
             veld_core::agent::AgentTool::Claude,

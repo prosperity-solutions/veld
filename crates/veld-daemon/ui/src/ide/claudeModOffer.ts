@@ -1,28 +1,31 @@
 /**
  * The one-time offer to move Claude Code from Veld's wrapper to Veld's mod
- * (`terminal.claudeIntegration`), made the first time a Claude session reports in.
+ * (`terminal.claudeIntegration`), made just before a pane that runs Claude starts.
  *
- * Asked at that moment rather than on load because it is the one moment the
- * question is about something in front of the person: a Claude session just
- * started in one of their terminals. Somebody who never runs Claude in Veld is
- * never asked.
+ * **Before, not after.** The integration is fixed when Claude launches — the
+ * terminal's environment either names the mod or does not — so an offer made once a
+ * session had reported in switched a setting the session in front of the person
+ * could not follow, and it then went on behaving the old way. Asked first, the pane
+ * starts the way the answer says. Claude typed into a plain terminal is never asked
+ * about: nothing sees it coming, and Settings and `veld doctor` cover it.
  *
  * Whether it was asked lives in the daemon's promotion store, under an id in the
- * namespace `model.ts` reserves for sources other than Veld's own cards, so every
- * window and every browser profile agree and no new daemon state was needed.
+ * namespace `promotions/model.ts` reserves for sources other than Veld's own cards,
+ * so every window and every browser profile agree and no new daemon state was needed.
  */
 
-import type { SettingsDoc } from "../api";
+import type { PaneSpec, SettingsDoc } from "../api";
 
 /** Never renamed and never reused, by the promotion store's rules. */
 export const CLAUDE_MOD_OFFER_ID = "offer:claude-mod";
 
 /**
- * Whether an agent event is the one that prompts the offer: a Claude session
- * starting. Only the wrapper and the mod report `ready`, once per launch.
+ * Whether a pane about to start a session must ask first: one whose own `argv`
+ * runs Claude (the daemon's `agent_tool`), starting a session rather than showing
+ * one that is already running.
  */
-export function isClaudeLaunch(tool: unknown, state: unknown): boolean {
-  return tool === "claude" && state === "ready";
+export function asksBeforeStarting(spec: Pick<PaneSpec, "agent_tool"> | undefined, existed: boolean): boolean {
+  return !existed && spec?.agent_tool === "claude";
 }
 
 /**
@@ -45,27 +48,35 @@ export function wantsClaudeModOffer(
   return !(CLAUDE_MOD_OFFER_ID in states);
 }
 
-type Listener = () => void;
+type Asker = () => Promise<void>;
+
+let asker: Asker | null = null;
+let pending: Promise<void> | null = null;
 
 /**
- * Where the IDE channel says a Claude session started. A listener, not a store:
- * the decision needs settings and the promotion store, which the app has and the
- * channel does not.
+ * Install what a pane waits on: the app's function that asks if it has to and
+ * resolves once answered (or at once when there is nothing to ask). Returns the
+ * uninstaller.
  */
-class ClaudeLaunches {
-  private listeners = new Set<Listener>();
-
-  notice(tool: unknown, state: unknown): void {
-    if (!isClaudeLaunch(tool, state)) return;
-    for (const listener of this.listeners) listener();
-  }
-
-  subscribe(listener: Listener): () => void {
-    this.listeners.add(listener);
-    return () => {
-      this.listeners.delete(listener);
-    };
-  }
+export function setClaudeModAsker(next: Asker): () => void {
+  asker = next;
+  return () => {
+    if (asker === next) asker = null;
+  };
 }
 
-export const claudeLaunches = new ClaudeLaunches();
+/**
+ * Resolves when a Claude pane may start. Every pane that asks while the question
+ * is open waits on the same answer, and a failure never holds a pane back.
+ */
+export function askBeforeClaude(): Promise<void> {
+  if (pending) return pending;
+  if (!asker) return Promise.resolve();
+  const asking = asker()
+    .catch(() => {})
+    .finally(() => {
+      pending = null;
+    });
+  pending = asking;
+  return asking;
+}

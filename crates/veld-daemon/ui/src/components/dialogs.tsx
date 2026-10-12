@@ -3223,7 +3223,8 @@ export function HandoffReviewDialog(props: {
 
 /**
  * The one-time offer to run Claude Code on Veld's mod instead of its wrapper —
- * `terminal.claudeIntegration`. See `ide/claudeModOffer.ts` for when it is asked.
+ * `terminal.claudeIntegration`, asked just before a Claude pane starts, which
+ * waits for the answer. See `ide/claudeModOffer.ts`.
  *
  * It asks the daemon first whether the person's Claude Code can load the mod, and
  * offers the switch only when nothing it found says the switch would leave Claude
@@ -3287,7 +3288,8 @@ export function ClaudeModOfferDialog(props: {
           <Alert color="yellow" variant="light" p="sm">
             <Text size="sm">
               Your Claude Code{version} cannot load it yet: {check.reason}. Run{" "}
-              <code>claude update</code>, then switch under Settings → Activity.
+              <code>claude update</code>, then switch under Settings → Activity; this pane starts
+              on the wrapper.
             </Text>
           </Alert>
         )}
@@ -3304,8 +3306,8 @@ export function ClaudeModOfferDialog(props: {
           </Text>
         )}
         <Text size="xs" c="dimmed">
-          Takes effect in new terminals. Codex CLI and Pi keep their wrappers. Change it any
-          time under Settings → Activity.
+          The Claude pane you are opening starts the way you choose here. Codex CLI and Pi keep
+          their wrappers. Change it any time under Settings → Activity.
         </Text>
         <Group>
           <Button

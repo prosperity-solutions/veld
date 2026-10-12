@@ -28,7 +28,6 @@
 import { api } from "../api";
 import { dispatchOpenFile, dispatchOpenUrl } from "../files/openRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
-import { claudeLaunches } from "./claudeModOffer";
 
 /** What kind of client this is, which decides whether it can be raised. */
 export type ClientKind = "electron" | "browser";
@@ -395,8 +394,6 @@ class Channel {
           // is nothing on the other end that could report at a lower one.
           source: "hook",
         });
-        // After the gate above for the same reason: one window offers, not every one.
-        claudeLaunches.notice(msg.tool, msg.state);
         return;
       }
       case "open_file":

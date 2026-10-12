@@ -275,7 +275,7 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
-import { claudeLaunches, CLAUDE_MOD_OFFER_ID, wantsClaudeModOffer } from "./ide/claudeModOffer";
+import { CLAUDE_MOD_OFFER_ID, setClaudeModAsker, wantsClaudeModOffer } from "./ide/claudeModOffer";
 import {
   DIALOG_NONE,
   escapeClosesDialog,
@@ -1026,7 +1026,7 @@ type DialogState =
   | { kind: "move-lane-worktrees"; lane: string }
   | { kind: "trash-lane-worktrees"; lane: string }
   | { kind: "settings" }
-  /** Asked once, the first time a Claude session reports in — `ide/claudeModOffer.ts`. */
+  /** Asked once, just before a Claude pane first starts — `ide/claudeModOffer.ts`. */
   | { kind: "claude-mod-offer" }
   | { kind: "shortcuts" }
   | { kind: "remove-repo"; repo: Repo }
@@ -4549,25 +4549,32 @@ function AppInner(props: {
   const promotionsOpenRef = useRef(false);
   promotionsOpenRef.current = promotions.open !== null;
 
-  // The one-time offer to move Claude Code onto Veld's mod, the first time a Claude
-  // session reports in. Never over another dialog: a Claude launch is not worth
-  // interrupting one, and every launch asks again until it has been answered.
+  // The one-time offer to move Claude Code onto Veld's mod, asked by a Claude pane
+  // before it starts (see `ide/claudeModOffer.ts`), which waits on the answer so it
+  // starts the way the answer says. Never over another dialog: the pane starts as it
+  // is, and the next one asks again.
+  const claudeOfferAnswered = useRef<(() => void) | null>(null);
   useEffect(
     () =>
-      claudeLaunches.subscribe(() => {
+      setClaudeModAsker(async () => {
         if (dialogRef.current.kind !== DIALOG_NONE || promotionsOpenRef.current) return;
-        api
-          .promotionState()
-          .then(({ states }) => {
-            if (!wantsClaudeModOffer(settingsRef.current, states)) return;
-            setDialog((current) =>
-              current.kind === DIALOG_NONE ? { kind: "claude-mod-offer" } : current,
-            );
-          })
-          .catch(() => {});
+        const { states } = await api.promotionState();
+        if (!wantsClaudeModOffer(settingsRef.current, states)) return;
+        if (dialogRef.current.kind !== DIALOG_NONE) return;
+        await new Promise<void>((resolve) => {
+          claudeOfferAnswered.current = resolve;
+          setDialog({ kind: "claude-mod-offer" });
+        });
       }),
     [],
   );
+  // However the dialog went away — answered, closed, or replaced by another — the
+  // panes waiting on it start.
+  useEffect(() => {
+    if (dialog.kind === "claude-mod-offer") return;
+    claudeOfferAnswered.current?.();
+    claudeOfferAnswered.current = null;
+  }, [dialog.kind]);
 
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {

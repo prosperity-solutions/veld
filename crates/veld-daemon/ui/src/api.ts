@@ -687,6 +687,9 @@ export interface PaneSpec {
    *  none — see `paneTakesPrompt`, which owns what absent means. Optional in the
    *  type for that reason *and* because an older daemon omits the key entirely. */
   agent?: boolean;
+  /** The agent the pane's `argv` runs directly (`claude`, `codex`, `pi`), from its
+   *  first word; absent for a `shell` spec, any other command, or an older daemon. */
+  agent_tool?: "claude" | "codex" | "pi";
   /** Whether a restored pane whose shell is gone may resume without a click. */
   auto_resume: boolean;
   /** Whether a clean (status 0) exit closes the pane. Never applies to a

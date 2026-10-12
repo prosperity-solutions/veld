@@ -1928,7 +1928,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (SettingKey::TerminalAgentContext, Value::from(true)),
         // The wrapper, because it works on every Claude Code this integration has ever
         // supported and the mod needs one recent enough to load function hooks. The
-        // mod is offered once, from the IDE, when a Claude session first reports in.
+        // mod is offered once, from the IDE, just before the first Claude pane starts.
         (
             SettingKey::TerminalClaudeIntegration,
             Value::from("wrapper"),

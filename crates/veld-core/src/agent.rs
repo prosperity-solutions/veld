@@ -436,6 +436,18 @@ impl AgentTool {
     }
 }
 
+/// The agent a command line runs directly, from its first word: `claude`,
+/// `/opt/homebrew/bin/claude`. A script that runs one somewhere inside (`claude-yolo`,
+/// `npx …`) is not recognised — nothing here guesses at what a command does.
+#[must_use]
+pub fn agent_tool_of(program: &str) -> Option<AgentTool> {
+    let name = Path::new(program).file_name()?.to_str()?;
+    AgentTool::ALL
+        .iter()
+        .copied()
+        .find(|tool| tool.shim_name() == name)
+}
+
 /// Whether `args` — a command line's arguments after the agent's own name — can have a
 /// launch prompt appended as `-- <prompt>`.
 ///
@@ -1932,6 +1944,19 @@ printf '\n✘ Found 1 error:\n\n  ❯ hooks: modules is not a known key\n\n✘ V
             claude_settings_plugin_dirs(tmp.path()).as_deref(),
             Some("/a:/b")
         );
+    }
+
+    #[test]
+    fn an_agent_is_recognised_by_its_command_name_only() {
+        assert_eq!(agent_tool_of("claude"), Some(AgentTool::Claude));
+        assert_eq!(
+            agent_tool_of("/opt/homebrew/bin/claude"),
+            Some(AgentTool::Claude)
+        );
+        assert_eq!(agent_tool_of("codex"), Some(AgentTool::Codex));
+        assert_eq!(agent_tool_of("claude-yolo"), None);
+        assert_eq!(agent_tool_of("npx"), None);
+        assert_eq!(agent_tool_of(""), None);
     }
 
     #[test]
