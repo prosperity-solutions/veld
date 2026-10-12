@@ -1877,6 +1877,9 @@ function AppInner(props: {
     // a restore that selects what it restored. A discovered checkout is opened
     // only once it is adopted.
     if (isDiscovered(w)) return false;
+    // Already on screen with a hand-off still waiting: the user put it off with
+    // **Not now** and is asking for it again.
+    if (w.id === shownId && w.handoff) setHandoffAsk((n) => n + 1);
     // A detached window shows one dock of a worktree its origin owns; it is a
     // satellite of that claim and never makes one of its own.
     if (chromeless) {
@@ -3885,6 +3888,13 @@ function AppInner(props: {
    * claim and makes none of its own.
    */
   const [shownId, setShownId] = useState<number | null>(null);
+  /**
+   * Bumped to ask about a waiting hand-off again for the worktree already on
+   * screen. The seed effect asks when the shown worktree *changes*; a click on
+   * the row that is already shown changes nothing, so after **Not now** that
+   * click needs its own trigger.
+   */
+  const [handoffAsk, setHandoffAsk] = useState(0);
   /** …and through a ref, for the reconnect handler, which is registered once. */
   const shownRef = useRef<number | null>(null);
   shownRef.current = shownId;
@@ -4208,7 +4218,7 @@ function AppInner(props: {
     return () => {
       cancelled = true;
     };
-  }, [shownId, chromeless]);
+  }, [shownId, chromeless, handoffAsk]);
 
   /**
    * Let go of one worktree's panes, because another window is taking it.
@@ -8232,9 +8242,12 @@ function AppInner(props: {
             }
           }}
           onDiscard={async () => {
-            await api.deleteWorktreeHandoff(dialog.worktreeId);
+            // To the trash, with the hand-off still attached: restoring the
+            // worktree brings back its prompt and its review. Deleting it from
+            // the trash is what drops the hand-off (the row cascades).
+            const w = allWorktreesRef.current.find((x) => x.id === dialog.worktreeId);
             closeDialog();
-            await refresh();
+            if (w) await trashWorktree(w.path);
           }}
         />
       )}

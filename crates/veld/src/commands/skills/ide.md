@@ -199,7 +199,7 @@ which files, how to tell it is done.
   you get a plain worktree, filed with the user's other new worktrees, and no
   agent.
 - By default the human sees your prompt before anything runs, and can edit,
-  start or discard it; if they have turned that review off
+  start, or move it to the trash; if they have turned that review off
   (`worktree.reviewHandoffs`), it is sent **as you wrote it** the moment they
   open the worktree. Write it for both: an instruction a person can judge at a
   glance, and one that is safe to run unread.

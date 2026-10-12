@@ -172,7 +172,12 @@ requests at runtime — branding rule.
   same `startHandoff`, after storing an edited prompt (`PUT …/handoff`) so a
   reload before the spawn sends the edit; a tab already in the layout under that
   session id means it was approved before a reload, so it is not asked again.
-  The review never opens over another dialog — reopening the worktree asks. The hourglass on a
+  The review never opens over another dialog — reopening the worktree asks, and
+  so does a click on the row already shown (`handoffAsk`, since the seed effect
+  only runs when the shown worktree changes). **Move to trash** bins the
+  worktree and leaves the hand-off row on it: trashing keeps the lane, so a
+  restore puts it back in the section, ⌛ and prompt intact, and only a
+  permanent delete drops the hand-off (the row cascades). The hourglass on a
   row reads `worktree.handoff`, not the lane, because `--group` files a
   hand-off straight into a user group where it is just as much waiting.
 - **Creating a worktree happens in a lane, not beside the rail.** There is one

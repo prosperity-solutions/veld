@@ -3135,8 +3135,9 @@ export function UpdateMainDirtyDialog(props: {
  * `worktree.reviewHandoffs` is on.
  *
  * The prompt is editable, because the most likely reason to stop here is that it
- * is nearly right. **Not now** leaves the hand-off waiting (the next open asks
- * again); **Discard** drops it, leaving an ordinary worktree. The checkbox turns
+ * is nearly right. **Not now** leaves the hand-off waiting (clicking the row
+ * again asks again); **Discard** moves the worktree to the trash with its prompt,
+ * so restoring it brings the review back. The checkbox turns
  * the review off for every later hand-off — the "I trust my agents" answer —
  * and is applied only together with **Start**, so ticking it cannot by itself
  * do anything to this one.
@@ -3195,17 +3196,23 @@ export function HandoffReviewDialog(props: {
               Not now
             </Button>
           </Group>
-          <Button
-            color="red"
-            variant="subtle"
-            loading={discard.busy}
-            onClick={(e) => {
-              e.preventDefault();
-              void discard.submit(e);
-            }}
+          <Tooltip
+            label="Moves the worktree to the trash, prompt included — restore it to get the prompt back."
+            multiline
+            w={240}
           >
-            Discard
-          </Button>
+            <Button
+              color="red"
+              variant="subtle"
+              loading={discard.busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void discard.submit(e);
+              }}
+            >
+              Move to trash
+            </Button>
+          </Tooltip>
         </Group>
         <ErrorText error={discard.error} />
       </Stack>

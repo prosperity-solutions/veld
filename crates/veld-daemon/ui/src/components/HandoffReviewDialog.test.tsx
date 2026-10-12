@@ -55,9 +55,9 @@ describe("HandoffReviewDialog", () => {
     expect(p.onDiscard).not.toHaveBeenCalled();
   });
 
-  test("Discard drops the hand-off", async () => {
+  test("Move to trash hands off to the trash flow", async () => {
     const p = open();
-    fireEvent.click(screen.getByRole("button", { name: "Discard" }));
+    fireEvent.click(screen.getByRole("button", { name: "Move to trash" }));
     await waitFor(() => expect(p.onDiscard).toHaveBeenCalled());
     expect(p.onStart).not.toHaveBeenCalled();
   });

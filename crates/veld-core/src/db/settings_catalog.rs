@@ -927,7 +927,7 @@ impl SettingKey {
             Self::WorktreeReviewHandoffs => toggle(
                 "Review prompts handed off by agents",
                 "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
-                 opening it shows the agent's prompt first, to edit, start, or discard. Off: \
+                 opening it shows the agent's prompt first, to edit, start, or move to the trash. Off: \
                  opening it starts the agent with the prompt as the agent wrote it.",
                 Git,
             ),
