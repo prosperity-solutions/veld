@@ -25,15 +25,32 @@ export const POLL_MS = 5000;
 export const HIDDEN_POLL_MS = 60_000;
 
 /**
+ * How early a tick may land and still count as on time: half a tick.
+ *
+ * Timers are not exact. A hidden poll measured at exactly 60s from the last one
+ * reads 59 998ms as often as 60 002ms, and an exact comparison skips the first to
+ * the next tick — 65s, or 120s once Chromium's intensive throttling has aligned a
+ * long-hidden window's timers to the minute, which also outlives a cheap
+ * checkout's served dirty answer (#400 review). Half a tick absorbs any jitter
+ * without ever letting two ticks in a row through early.
+ */
+export const TICK_SLACK_MS: number = POLL_MS / 2;
+
+/**
  * Whether an interval tick should actually poll, given whether the document is
  * hidden and how long ago the last poll was issued.
  *
  * The interval itself keeps running at {@link POLL_MS} either way: a tick that
  * returns here costs nothing, and it means the window picks the visible cadence
  * back up on its own without anyone restarting a timer.
+ *
+ * Visible ticks are gated too, not waved through: the catch-up poll on show
+ * ({@link pollOnShow}) does not move the interval's phase, so without a gate the
+ * next tick — often milliseconds later — would poll a second time.
  */
 export function pollDue(hidden: boolean, sinceLastMs: number): boolean {
-  return !hidden || sinceLastMs >= HIDDEN_POLL_MS;
+  const due = hidden ? HIDDEN_POLL_MS : POLL_MS;
+  return sinceLastMs >= due - TICK_SLACK_MS;
 }
 
 /**

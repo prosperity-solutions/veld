@@ -1297,18 +1297,21 @@ function AppInner(props: {
   // once rather than at the next tick.
   const [poll, setPoll] = useState(0);
   useEffect(() => {
-    let last = Date.now();
+    // `performance.now`, not `Date.now`: a wall clock stepped backwards while the
+    // window is hidden would otherwise hold every hidden poll off until it caught
+    // up again, the database-fault banner included.
+    let last = performance.now();
     const run = () => {
-      last = Date.now();
+      last = performance.now();
       setPoll((n) => n + 1);
       void refresh();
     };
     void refresh();
     const t = window.setInterval(() => {
-      if (pollDue(document.hidden, Date.now() - last)) run();
+      if (pollDue(document.hidden, performance.now() - last)) run();
     }, POLL_MS);
     const onVisible = () => {
-      if (!document.hidden && pollOnShow(Date.now() - last)) run();
+      if (!document.hidden && pollOnShow(performance.now() - last)) run();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
