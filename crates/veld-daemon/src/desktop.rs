@@ -1638,6 +1638,18 @@ struct BranchesView {
     default_branch: Option<String>,
 }
 
+/// `git fetch origin`, also moving `origin/HEAD` to wherever the remote's HEAD
+/// is now. git's own default only ever *creates* that ref, so a remote that
+/// renamed its default branch leaves it on the old one — still present, and
+/// frozen, unless the fetch prunes — and [`default_branch`] reads it. Ignored by
+/// git older than 2.48, which has no such setting.
+const FETCH_ORIGIN: &[&str] = &[
+    "-c",
+    "remote.origin.followRemoteHEAD=always",
+    "fetch",
+    "origin",
+];
+
 /// Whether `refname` resolves. `--quiet` keeps the probe off stderr, which the
 /// [`git`] helper would otherwise surface as the error.
 async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
@@ -1648,14 +1660,12 @@ async fn ref_exists(repo_root: &FsPath, refname: &str) -> bool {
 
 /// The repo's default branch: what `origin/HEAD` points at, else `main`, else
 /// `master`, whichever exists on origin or locally. `main`/`master` is a
-/// heuristic for a repo with no `origin/HEAD`; git 2.48+ writes that ref on any
-/// fetch, so it is read after one where it can be.
+/// heuristic for a repo with no `origin/HEAD`; [`FETCH_ORIGIN`] keeps that ref
+/// current, so it is read after a fetch where it can be.
 ///
-/// **Not the main checkout's current branch**, which is what this used to be.
-/// The main checkout is somebody's working copy and is often on a feature
-/// branch, and reading its branch as "the default" made every default create in
-/// that repo cut from that feature branch — the checkout the user happened to
-/// be working in, rather than the base the `git.createFrom` setting promises.
+/// **Not the main checkout's current branch.** The main checkout is somebody's
+/// working copy and is often on a feature branch, which is not the base the
+/// `git.createFrom` setting promises.
 async fn default_branch(repo_root: &FsPath) -> Option<String> {
     if let Ok(head) = git(
         repo_root,
@@ -1705,7 +1715,7 @@ async fn default_branch(repo_root: &FsPath) -> Option<String> {
 /// `git branch` past the `--`, where a name beginning with `-` reads as an
 /// option.
 async fn default_start_point(repo_root: &FsPath) -> Option<String> {
-    let _ = git(repo_root, &["fetch", "origin"]).await;
+    let _ = git(repo_root, FETCH_ORIGIN).await;
     let dbranch = default_branch(repo_root).await?;
     let remote = format!("refs/remotes/origin/{dbranch}");
     if ref_exists(repo_root, &remote).await {
@@ -3186,7 +3196,7 @@ async fn maybe_fetch(repo_root: &FsPath) {
             .unwrap_or(true)
     };
     if due {
-        let _ = git(repo_root, &["fetch", "origin"]).await;
+        let _ = git(repo_root, FETCH_ORIGIN).await;
         LAST_FETCH
             .lock()
             .expect("last-fetch mutex poisoned")
@@ -4013,8 +4023,9 @@ async fn remove_repo(Json(body): Json<RemoveRepoBody>) -> Result<StatusCode, Api
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum CreateFrom {
-    /// Cut `branch` fresh — from `origin/<default>` or the repo's local `HEAD`
-    /// per the `git.createFrom` setting. **The default**, and what a client
+    /// Cut `branch` fresh — from the repo's default branch (see
+    /// [`default_start_point`]) or the main checkout's `HEAD`, per the
+    /// `git.createFrom` setting. **The default**, and what a client
     /// that predates this field asks for by sending `create_branch: true`.
     ///
     /// `start_point` names any other ref to cut from instead — a local branch,
@@ -8130,9 +8141,8 @@ mod tests {
     }
 
     /// The default a create cuts from is the repo's default branch, **not** the
-    /// branch the main checkout happens to be on. The bug this pins: a main
-    /// checkout left on a feature branch made every "＋" in that repo start from
-    /// that feature branch.
+    /// branch the main checkout happens to be on: a main checkout left on a
+    /// feature branch must not make every "＋" in that repo start from it.
     #[tokio::test]
     async fn default_branch_ignores_the_main_checkouts_current_branch() {
         use std::process::Command;
@@ -8208,6 +8218,59 @@ mod tests {
         assert_eq!(default_branch(&work).await.as_deref(), Some("main"));
     }
 
+    /// A remote that renamed its default branch: the clone's `origin/HEAD` still
+    /// names the old one, which a non-pruning fetch leaves in place, frozen. The
+    /// create's own fetch must move `origin/HEAD` along rather than keep cutting
+    /// from the frozen copy.
+    #[tokio::test]
+    async fn default_start_point_follows_a_remote_that_renamed_its_default() {
+        use std::process::Command;
+
+        fn git(cwd: &std::path::Path, args: &[&str]) {
+            let out = Command::new("git")
+                .arg("-C")
+                .arg(cwd)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let seed = dir.path().join("seed");
+        let origin = dir.path().join("origin.git");
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&seed, &["init", "-b", "master"]);
+        git(&seed, &["config", "user.email", "t@t"]);
+        git(&seed, &["config", "user.name", "t"]);
+        git(&seed, &["commit", "--allow-empty", "-m", "A"]);
+        git(
+            dir.path(),
+            &[
+                "clone",
+                "--bare",
+                seed.to_str().unwrap(),
+                origin.to_str().unwrap(),
+            ],
+        );
+        git(
+            dir.path(),
+            &["clone", origin.to_str().unwrap(), work.to_str().unwrap()],
+        );
+
+        git(&origin, &["branch", "-m", "master", "main"]);
+        git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        assert_eq!(
+            default_start_point(&work).await.as_deref(),
+            Some("refs/remotes/origin/main")
+        );
+    }
+
     /// Offline (here: no reachable remote at all), a default create starts at
     /// the *local* default branch — not at the main checkout's HEAD, which is
     /// parked on a feature branch — and spells it so it cannot read as an option.
@@ -8266,7 +8329,7 @@ mod tests {
             Some("refs/remotes/origin/main")
         );
 
-        // No default branch at all: the main checkout's HEAD, as before.
+        // No default branch at all: the main checkout's HEAD.
         git(&work, &["remote", "remove", "origin"]);
         git(&work, &["branch", "-D", "main"]);
         assert_eq!(default_start_point(&work).await, None);

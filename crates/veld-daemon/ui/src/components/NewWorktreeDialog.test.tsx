@@ -347,7 +347,7 @@ describe("NewWorktreeDialog base branch", () => {
     open(undefined, { sources: [main, feat] });
     const field = startsFrom();
     await waitFor(() => expect(field.value).toBe("origin/trunk"));
-    expect(screen.getByText("fetched first, so the latest.")).toBeTruthy();
+    expect(screen.getByText("fetched first when online.")).toBeTruthy();
   });
 
   test("a spin-off is flagged, and the default is one pick away", async () => {

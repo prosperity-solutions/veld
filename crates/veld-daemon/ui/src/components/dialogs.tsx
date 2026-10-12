@@ -560,8 +560,8 @@ export function sourceForMode(input: {
 }): CreateWorktreeSource {
   switch (input.mode) {
     case "new_branch":
-      // Omitted rather than `""` for the default: absent is what the daemon
-      // reads as "fetch and cut from origin/<default>".
+      // Omitted rather than `""` for the default: absent means the base the
+      // `git.createFrom` setting names.
       return input.startPoint === ""
         ? { kind: "new_branch" }
         : { kind: "new_branch", start_point: input.startPoint };
@@ -630,23 +630,41 @@ export const CURRENT_SOURCE = ":current";
  *   fallback — flagged as `fallback`, because it is not what the setting asked
  *   for and the dialog says so.
  *
- * `null` branches means the list (which carries the default) has not arrived.
+ * `null` branches means the list (which carries the default) has not arrived,
+ * or — with `failed` — never will. Either way the dialog cannot name the base,
+ * and says so instead of guessing.
+ *
+ * `ref` is the default's full refname where one names it, so the picker can
+ * leave that exact ref out of its other groups.
  */
 export function defaultBase(input: {
   createFrom: GitCreateFrom;
   branches: RepoBranches | null;
   /** The main checkout's branch, `""` when detached, `null` when unknown. */
   mainBranch: string | null;
-}): { label: string; fallback: boolean; loading: boolean; localOnly: boolean } {
-  const none = { fallback: false, loading: false, localOnly: false };
-  const head = input.mainBranch || "HEAD";
-  if (input.createFrom === "local") return { ...none, label: head };
-  if (input.branches === null) return { ...none, label: "Loading…", loading: true };
+  /** The branch list failed to load. */
+  failed: boolean;
+}): {
+  label: string;
+  ref: string | null;
+  fallback: boolean;
+  loading: boolean;
+  failed: boolean;
+  localOnly: boolean;
+} {
+  const none = { ref: null, fallback: false, loading: false, failed: false, localOnly: false };
+  const head = { label: input.mainBranch || "HEAD", ref: input.mainBranch ? `refs/heads/${input.mainBranch}` : null };
+  if (input.createFrom === "local") return { ...none, ...head };
+  if (input.branches === null) {
+    return input.failed
+      ? { ...none, label: "default branch", failed: true }
+      : { ...none, label: "Loading…", loading: true };
+  }
   const d = input.branches.default_branch;
-  if (!d) return { ...none, label: head, fallback: true };
+  if (!d) return { ...none, ...head, fallback: true };
   return input.branches.remote.some((r) => r.name === `origin/${d}`)
-    ? { ...none, label: `origin/${d}` }
-    : { ...none, label: d, localOnly: true };
+    ? { ...none, label: `origin/${d}`, ref: `refs/remotes/origin/${d}` }
+    : { ...none, label: d, ref: `refs/heads/${d}`, localOnly: true };
 }
 
 /**
@@ -668,6 +686,8 @@ export function defaultBase(input: {
 export function baseBranchOptions(input: {
   /** The default option's label — see [`defaultBase`]. */
   defaultLabel: string;
+  /** The default's own full refname, left out of the other groups. */
+  defaultRef: string | null;
   branches: RepoBranches | null;
   /** The branch the dialog is on when it is not a new branch — shown as its
    *  own first group, so the picker can say where that is. */
@@ -686,20 +706,14 @@ export function baseBranchOptions(input: {
       },
     ],
   });
-  const local = (input.branches?.local ?? []).filter((b) => b.name !== input.defaultLabel);
-  if (local.length > 0) {
-    groups.push({
-      group: "Local branches",
-      items: local.map((b) => ({ value: `refs/heads/${b.name}`, label: b.name })),
-    });
-  }
-  const remote = (input.branches?.remote ?? []).filter((r) => r.name !== input.defaultLabel);
-  if (remote.length > 0) {
-    groups.push({
-      group: "Remote branches",
-      items: remote.map((r) => ({ value: `refs/remotes/${r.name}`, label: r.name })),
-    });
-  }
+  const local = (input.branches?.local ?? [])
+    .map((b) => ({ value: `refs/heads/${b.name}`, label: b.name }))
+    .filter((o) => o.value !== input.defaultRef);
+  if (local.length > 0) groups.push({ group: "Local branches", items: local });
+  const remote = (input.branches?.remote ?? [])
+    .map((r) => ({ value: `refs/remotes/${r.name}`, label: r.name }))
+    .filter((o) => o.value !== input.defaultRef);
+  if (remote.length > 0) groups.push({ group: "Remote branches", items: remote });
   return groups;
 }
 
@@ -1339,6 +1353,7 @@ export function NewWorktreeDialog(props: {
     createFrom: props.createFrom,
     branches,
     mainBranch: props.sources.find((w) => w.is_main)?.branch ?? null,
+    failed: branchesError !== null,
   });
   /** The source the base picker last replaced, so a misclick can be undone: the
    *  ⋯ menu's "Spin off…" carries a choice (and its carry-over) that the picker
@@ -1365,15 +1380,19 @@ export function NewWorktreeDialog(props: {
    * latest." Short enough for one line in the half-width column.
    */
   const baseNote = baseIsDefault
-    ? base.fallback
-      ? "no default branch found."
-      : base.localOnly
-        ? "local only, not on origin."
-        : props.createFrom === "origin"
-          ? "fetched first, so the latest."
-          : "the main checkout's HEAD."
+    ? base.failed
+      ? "branch list failed to load."
+      : base.fallback
+        ? "no default branch found."
+        : base.localOnly
+          ? "local only, not on origin."
+          : props.createFrom === "origin"
+            ? "fetched first when online."
+            : "the main checkout's HEAD."
     : mode === "new_branch"
-      ? props.createFrom === "origin" && startPoint === `refs/heads/${branches?.default_branch}`
+      ? props.createFrom === "origin" &&
+        branches?.default_branch &&
+        startPoint === `refs/heads/${branches.default_branch}`
         ? "not fetched, may be behind."
         : startPoint.startsWith("refs/remotes/")
           ? "as of the last fetch."
@@ -1404,6 +1423,7 @@ export function NewWorktreeDialog(props: {
       limit={200}
       data={baseBranchOptions({
         defaultLabel: base.label,
+        defaultRef: base.ref,
         branches,
         current: currentSource || null,
       })}

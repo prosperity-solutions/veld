@@ -445,7 +445,12 @@ describe("baseBranchOptions", () => {
     ],
     default_branch: "main",
   };
-  const args = { defaultLabel: "origin/main", branches, current: null };
+  const args = {
+    defaultLabel: "origin/main",
+    defaultRef: "refs/remotes/origin/main" as string | null,
+    branches,
+    current: null,
+  };
   const labels = (a: Parameters<typeof baseBranchOptions>[0]) =>
     baseBranchOptions(a).flatMap((g) => g.items.map((i) => i.label));
 
@@ -464,15 +469,28 @@ describe("baseBranchOptions", () => {
     expect(values).toEqual(expect.arrayContaining(["refs/heads/origin/odd", "refs/remotes/origin/odd"]));
   });
 
-  it("does not list the default's own branch a second time", () => {
+  it("does not list the default's own ref a second time", () => {
     // origin/main is the default, fetched — not listed again as a stale remote.
     expect(labels(args).filter((l) => l === "origin/main")).toHaveLength(1);
     // In local mode the default is the main checkout's branch.
-    expect(labels({ ...args, defaultLabel: "feat/x" }).filter((l) => l === "feat/x")).toHaveLength(1);
+    expect(
+      labels({ ...args, defaultLabel: "feat/x", defaultRef: "refs/heads/feat/x" }).filter((l) => l === "feat/x"),
+    ).toHaveLength(1);
+  });
+
+  it("leaves a local branch alone that is merely spelled like the default", () => {
+    const values = baseBranchOptions({
+      ...args,
+      branches: { ...branches, local: [...branches.local, { name: "origin/main", checked_out_in: null, upstream: null }] },
+    }).flatMap((g) => g.items.map((i) => i.value));
+    expect(values).toContain("refs/heads/origin/main");
+    expect(values).not.toContain("refs/remotes/origin/main");
   });
 
   it("keeps origin/<default> as a remote when the default is something else", () => {
-    expect(labels({ ...args, defaultLabel: "feat/parked" })).toContain("origin/main");
+    expect(labels({ ...args, defaultLabel: "feat/parked", defaultRef: "refs/heads/feat/parked" })).toContain(
+      "origin/main",
+    );
   });
 
   it("still offers the default while the branch list is unknown", () => {
@@ -499,40 +517,49 @@ describe("defaultBase", () => {
   });
 
   it("is origin/<default> in origin mode", () => {
-    expect(defaultBase({ createFrom: "origin", branches: branches("main"), mainBranch: "feat/parked" })).toEqual({
+    expect(defaultBase({ createFrom: "origin", branches: branches("main"), mainBranch: "feat/parked", failed: false })).toEqual({
       label: "origin/main",
+      ref: "refs/remotes/origin/main",
       fallback: false,
       loading: false,
+      failed: false,
       localOnly: false,
     });
   });
 
   it("names the main checkout's own branch in local mode, since that is where it lands", () => {
-    expect(defaultBase({ createFrom: "local", branches: branches("main"), mainBranch: "feat/parked" }).label).toBe(
+    expect(defaultBase({ createFrom: "local", branches: branches("main"), mainBranch: "feat/parked", failed: false }).label).toBe(
       "feat/parked",
     );
-    expect(defaultBase({ createFrom: "local", branches: null, mainBranch: "" }).label).toBe("HEAD");
+    expect(defaultBase({ createFrom: "local", branches: null, mainBranch: "", failed: false }).label).toBe("HEAD");
   });
 
   it("flags the HEAD fallback when origin mode finds no default branch", () => {
-    expect(defaultBase({ createFrom: "origin", branches: branches(null), mainBranch: "develop" })).toEqual({
+    expect(defaultBase({ createFrom: "origin", branches: branches(null), mainBranch: "develop", failed: false })).toEqual({
       label: "develop",
+      ref: "refs/heads/develop",
       fallback: true,
       loading: false,
+      failed: false,
       localOnly: false,
     });
   });
 
   it("does not claim origin for a default only this repo has", () => {
-    expect(defaultBase({ createFrom: "origin", branches: branches("main", false), mainBranch: "feat" })).toEqual({
+    expect(defaultBase({ createFrom: "origin", branches: branches("main", false), mainBranch: "feat", failed: false })).toEqual({
       label: "main",
+      ref: "refs/heads/main",
       fallback: false,
       loading: false,
+      failed: false,
       localOnly: true,
     });
   });
 
-  it("does not guess a name before the list arrives", () => {
-    expect(defaultBase({ createFrom: "origin", branches: null, mainBranch: "main" }).loading).toBe(true);
+  it("does not guess a name before the list arrives, or once it has failed to", () => {
+    expect(defaultBase({ createFrom: "origin", branches: null, mainBranch: "main", failed: false }).loading).toBe(true);
+    const failed = defaultBase({ createFrom: "origin", branches: null, mainBranch: "main", failed: true });
+    expect(failed.failed).toBe(true);
+    expect(failed.loading).toBe(false);
   });
 });
