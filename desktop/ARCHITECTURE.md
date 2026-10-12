@@ -169,8 +169,10 @@ requests at runtime — branding rule.
   already in the layout is the same tab, not a second one. With
   `worktree.reviewHandoffs` on (the default) the seed effect opens a
   `handoff-review` dialog instead of seeding, and **Start** seeds through the
-  same `startHandoff`; a tab already in the layout under that session id means
-  it was approved before a reload, so it is not asked again. The hourglass on a
+  same `startHandoff`, after storing an edited prompt (`PUT …/handoff`) so a
+  reload before the spawn sends the edit; a tab already in the layout under that
+  session id means it was approved before a reload, so it is not asked again.
+  The review never opens over another dialog — reopening the worktree asks. The hourglass on a
   row reads `worktree.handoff`, not the lane, because `--group` files a
   hand-off straight into a user group where it is just as much waiting.
 - **Creating a worktree happens in a lane, not beside the rail.** There is one

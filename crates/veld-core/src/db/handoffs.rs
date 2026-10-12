@@ -135,6 +135,23 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Replace a pending hand-off's prompt with the one its reviewer edited, so a
+    /// window that reloads before the agent starts sends the edit, not the
+    /// original. Matched on the session too, so it can never rewrite a later
+    /// hand-off that replaced the one reviewed. Returns whether it did.
+    pub fn set_handoff_prompt(
+        &self,
+        worktree_id: i64,
+        session_id: &str,
+        prompt: &str,
+    ) -> Result<bool, DbError> {
+        let n = self.lock().execute(
+            "UPDATE worktree_handoffs SET prompt = ?3 WHERE worktree_id = ?1 AND session_id = ?2",
+            params![worktree_id, session_id, prompt],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Retire a hand-off because its session has been spawned. Returns whether
     /// there was one for exactly that worktree and session.
     ///
@@ -234,6 +251,16 @@ mod tests {
         assert!(!db.delete_lane(root, HANDOFF_LANE).unwrap());
         assert!(!db.rename_lane(root, HANDOFF_LANE, "mine").unwrap());
         assert_eq!(db.get_worktree(wt).unwrap().unwrap().lane, HANDOFF_LANE);
+    }
+
+    #[test]
+    fn a_reviewed_prompt_replaces_only_its_own_handoff() {
+        let (_dir, db) = test_db();
+        let wt = seed_worktree(&db, "/r", "/r/_wt/a");
+        db.put_handoff(wt, "sess-1", "", "original").unwrap();
+        assert!(!db.set_handoff_prompt(wt, "sess-0", "stale").unwrap());
+        assert!(db.set_handoff_prompt(wt, "sess-1", "edited").unwrap());
+        assert_eq!(db.handoff(wt).unwrap().unwrap().prompt, "edited");
     }
 
     #[test]

@@ -4034,9 +4034,12 @@ function AppInner(props: {
     const tab = handoffPaneTab(spec, sessionId);
     queueInitialPrompt(tab.id, prompt, spec.label);
     setLayouts((prev) => {
-      const base =
-        prev[worktreeId] ?? defaultLayout(Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO);
-      return hasTab(base, tab.id) ? prev : { ...prev, [worktreeId]: seedPane(base, tab) };
+      // A worktree this window has no layout for is one it no longer holds (it
+      // was yielded or removed while the review was open): starting there would
+      // persist a default layout over the real one, so it is left alone.
+      const base = prev[worktreeId];
+      if (base === undefined || hasTab(base, tab.id)) return prev;
+      return { ...prev, [worktreeId]: seedPane(base, tab) };
     });
   };
   const startHandoffRef = useRef(startHandoff);
@@ -8207,9 +8210,26 @@ function AppInner(props: {
           prompt={dialog.prompt}
           onClose={closeDialog}
           onStart={(prompt, always) => {
-            if (always) void saveSettingsRef.current({ "worktree.reviewHandoffs": false });
-            startHandoffRef.current(dialog.worktreeId, dialog.spec, dialog.sessionId, prompt);
+            if (always) {
+              saveSettingsRef
+                .current({ "worktree.reviewHandoffs": false })
+                .catch((e) => notifyError("Could not save the setting", e));
+            }
+            const { worktreeId, spec, sessionId } = dialog;
+            const start = () => startHandoffRef.current(worktreeId, spec, sessionId, prompt);
             closeDialog();
+            // An edit is stored first, so a window that reloads before the agent
+            // spawns sends it rather than the agent's original. If storing it
+            // fails the agent still starts with the edit; only that reload case
+            // would fall back to the original.
+            if (prompt.trim() === dialog.prompt.trim()) {
+              start();
+            } else {
+              void api
+                .updateWorktreeHandoff(worktreeId, sessionId, prompt)
+                .catch((e) => notifyError("Could not save the edited prompt", e))
+                .finally(start);
+            }
           }}
           onDiscard={async () => {
             await api.deleteWorktreeHandoff(dialog.worktreeId);
@@ -9532,11 +9552,14 @@ function ProjectColumn(props: {
  * that will start, named by its label when the hand-off named one this checkout
  * declares, else "your usual agent" (`handoffAgent` resolves it the same way).
  */
-function handoffNote(w: Worktree): string {
+function handoffNote(w: Worktree, review: boolean): string {
   const named = w.handoff?.pane
     ? w.ide.panes.find((p) => p.id === w.handoff?.pane && paneTakesPrompt(p))?.label
     : undefined;
-  return `waiting for you: opening it starts ${named ?? "your usual agent"} on the task an agent handed off`;
+  const agent = named ?? "your usual agent";
+  return review
+    ? `waiting for you: opening it shows the task an agent handed off, to start ${agent} on`
+    : `waiting for you: opening it starts ${agent} on the task an agent handed off`;
 }
 
 function Rail(props: {
@@ -10456,7 +10479,7 @@ function Rail(props: {
                   className="lane-name"
                   title={
                     group.key === HANDOFF_LANE
-                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one marked with an hourglass starts the agent it was handed with, on the task it was handed; the rest have started already. Drag a row into a group to file it."
+                      ? "Worktrees an agent or a script made for you with `veld worktree new`. Opening one marked with an hourglass shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
                       : undefined
                   }
                 >
@@ -10784,7 +10807,7 @@ function Rail(props: {
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
                           : w.handoff
-                          ? `${worktreeLabel(w)} — ${w.branch} · ${handoffNote(w)}`
+                          ? `${worktreeLabel(w)} — ${w.branch} · ${handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}`
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
@@ -10931,7 +10954,7 @@ function Rail(props: {
                       Wide-only: the collapsed row's grid has no slot for it, and
                       its hover text carries the same note there. */}
                   {props.wide && !trashed && w.handoff && (
-                    <span className="wt-handoff" aria-hidden title={handoffNote(w)}>
+                    <span className="wt-handoff" aria-hidden title={handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}>
                       <IconHourglassEmpty size={12} />
                     </span>
                   )}

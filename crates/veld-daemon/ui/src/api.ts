@@ -2236,6 +2236,12 @@ export const api = {
    */
   worktreeHandoff: (worktreeId: number) =>
     request<WorktreeHandoff & { prompt: string }>(`/api/worktrees/${worktreeId}/handoff`),
+  /** Store the prompt as its reviewer left it, before the agent starts. */
+  updateWorktreeHandoff: (worktreeId: number, sessionId: string, prompt: string) =>
+    request<void>(`/api/worktrees/${worktreeId}/handoff`, {
+      method: "PUT",
+      body: JSON.stringify({ session_id: sessionId, prompt }),
+    }),
   /** Give up on a hand-off this window cannot start. */
   deleteWorktreeHandoff: (worktreeId: number) =>
     request<void>(`/api/worktrees/${worktreeId}/handoff`, { method: "DELETE" }),

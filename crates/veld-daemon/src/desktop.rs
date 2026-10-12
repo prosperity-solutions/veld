@@ -63,7 +63,7 @@ pub fn routes() -> Router {
         .route("/api/handoffs/groups", get(handoff_groups))
         .route(
             "/api/worktrees/{id}/handoff",
-            get(get_handoff).delete(delete_handoff),
+            get(get_handoff).put(put_handoff).delete(delete_handoff),
         )
         .route("/api/worktrees/{id}/restore", post(restore_worktree))
         .route("/api/worktrees/{id}/adopt", post(adopt_worktree))
@@ -5422,6 +5422,46 @@ async fn get_handoff(
         "pane": handoff.pane,
         "prompt": handoff.prompt,
     })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffEdit {
+    session_id: String,
+    prompt: String,
+}
+
+/// `PUT /api/worktrees/{id}/handoff` — store the prompt as the reviewer left it
+/// before the agent starts (see [`veld_core::db::Db::set_handoff_prompt`]).
+/// `404` when that hand-off is no longer pending.
+async fn put_handoff(
+    Path(id): Path<i64>,
+    Json(body): Json<HandoffEdit>,
+) -> Result<StatusCode, ApiError> {
+    let prompt = body.prompt.trim().to_owned();
+    if prompt.is_empty()
+        || prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES
+        || prompt.contains('\0')
+    {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "the prompt must be non-empty text of at most 64 KiB",
+        ));
+    }
+    let done = crate::offload::blocking(move || {
+        open_desktop_db()?
+            .set_handoff_prompt(id, &body.session_id, &prompt)
+            .map_err(write_err)
+    })
+    .await?;
+    if done {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(err(
+            StatusCode::NOT_FOUND,
+            "no agent pane is waiting in this worktree",
+        ))
+    }
 }
 
 /// `DELETE /api/worktrees/{id}/handoff` — give up on a pending agent pane: the
