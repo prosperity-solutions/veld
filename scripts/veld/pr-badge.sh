@@ -77,7 +77,7 @@ fi
 # The rest is one transform over the payload already fetched, so the badge costs
 # exactly one API call however many fields it renders.
 printf '%s' "$payload" | python3 -c '
-import json, sys
+import json, re, sys
 
 pr = json.load(sys.stdin)
 branch = sys.argv[1]
@@ -86,8 +86,79 @@ branch = sys.argv[1]
 def outcome(check):
     return (check.get("conclusion") or check.get("state") or "").upper()
 
-results = [outcome(c) for c in (pr.get("statusCheckRollup") or [])]
-BAD = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
+# **The rollup is every check on the head commit, including superseded runs.**
+# When a newer workflow run replaces an older one on the same commit (marking a
+# draft ready, a concurrency group cancelling in progress), the jobs of the old
+# run stay in the rollup as CANCELLED — and an `if: always()` gate job in it as
+# FAILURE. Folding them in painted a PR red whose current run was fine.
+#
+# So only the newest run of each workflow counts. Run ids are monotonic, which
+# is what makes the largest one the newest. This assumes every run of one
+# workflow on a pull request head is the same kind of run, which holds when
+# `push` is limited to the trunk, and that no two workflow files share a
+# `name:` — either way, a run that was not superseded would be read as if it were.
+def run_id(check):
+    m = re.search(r"/actions/runs/(\d+)", check.get("detailsUrl") or "")
+    return int(m.group(1)) if m else None
+
+checks_in = pr.get("statusCheckRollup") or []
+# A check with no workflow name is its own workflow: lumping those together
+# would let one unrelated run supersede another.
+def workflow(c):
+    return c.get("workflowName") or "run {}".format(run_id(c))
+
+newest_run = {}
+for c in checks_in:
+    rid = run_id(c)
+    if rid is not None:
+        newest_run[workflow(c)] = max(rid, newest_run.get(workflow(c), rid))
+
+def is_newest(c):
+    return run_id(c) == newest_run[workflow(c)]
+
+# Every job of the newest run counts, same-named ones included: the rollup
+# already holds only the latest attempt of a re-run job. A job the newest run
+# skipped counts as skipped even if an older run failed it — the same call
+# GitHub makes for a required check.
+current = [c for c in checks_in if run_id(c) is not None and is_newest(c)]
+
+# A job the old run reached and the new one has not yet is still to come — a
+# gate that `needs:` everything only appears once the rest has finished. It
+# reads as pending, not as absent, or the badge goes green before the gate has
+# had its say. Only while the new run is still going, though: a job can also
+# never reappear (renamed, or a matrix that expanded differently), and once the
+# new run has finished a missing name is that, not a job still to come. Two
+# kinds are skipped outright: a job the old run skipped (a draft run skips
+# everything), and a matrix job skipped before expansion, whose name is the
+# literal `${{ matrix.… }}` template.
+running = {workflow(c) for c in current if (c.get("status") or "COMPLETED") != "COMPLETED"}
+present = {(workflow(c), c.get("name")) for c in current}
+results = [outcome(c) for c in current]
+for c in checks_in:
+    if run_id(c) is None or is_newest(c) or workflow(c) not in running:
+        continue
+    name = c.get("name") or ""
+    if (workflow(c), name) in present:
+        continue
+    if outcome(c) == "SKIPPED" or "${{" in name:
+        continue
+    present.add((workflow(c), name))
+    results.append("PENDING")
+
+# Anything without a workflow run (a third-party check, a commit status) is
+# deduplicated by name, keeping the newest: a check run still going beats any
+# that finished, then the one that started last. (A commit status needs none of
+# this — the rollup already holds one per context.)
+latest = {}
+for c in checks_in:
+    if run_id(c) is not None:
+        continue
+    key = ("context", c["context"]) if c.get("context") else ("name", c.get("name"))
+    rank = ((c.get("status") or "COMPLETED") != "COMPLETED", c.get("startedAt") or "")
+    if key not in latest or rank >= latest[key][0]:
+        latest[key] = (rank, c)
+results += [outcome(c) for _, c in latest.values()]
+BAD = {"FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE"}
 WAITING = {"", "PENDING", "IN_PROGRESS", "QUEUED", "WAITING", "EXPECTED", "REQUESTED"}
 if not results:
     checks = "none"
@@ -95,6 +166,11 @@ elif any(r in BAD for r in results):
     checks = "failing"
 elif any(r in WAITING for r in results):
     checks = "pending"
+# A cancelled current run did not fail and did not pass: somebody stopped it,
+# or a job ran past `timeout-minutes` (Actions reports that as cancelled too),
+# and nothing re-ran it. Neither red nor green.
+elif "CANCELLED" in results:
+    checks = "cancelled"
 else:
     checks = "passing"
 
@@ -115,6 +191,8 @@ elif state == "OPEN":
         tone, detail = "warning", "conflicting"
     elif checks == "pending":
         tone, detail = "warning", "checks running"
+    elif checks == "cancelled":
+        tone, detail = "warning", "checks cancelled"
     elif checks == "passing":
         tone, detail = "success", "checks green"
     else:
