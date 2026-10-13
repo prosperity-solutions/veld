@@ -1054,9 +1054,9 @@ fn init_tracing(debug: bool) {
 /// that needs one has been picked.
 ///
 /// `veld agent-state` is the reason. Claude Code runs it from a blocking hook at least
-/// twice per turn, and all it does is one POST to `127.0.0.1` — so it is dispatched
-/// here, to a synchronous path, before a multi-thread runtime (one worker per core)
-/// or a TLS stack exists. It was never behind the update gate or the version check
+/// twice per turn, and all it does is one POST to `127.0.0.1` (two, when an older
+/// daemon refuses the naming turn) — so it is dispatched here, to a synchronous path,
+/// before a multi-thread runtime (one worker per core) or a TLS stack exists. It was never behind the update gate or the version check
 /// (see [`command_survives_an_update`] and `needs_version_check` in [`run`]), so
 /// answering it before them changes nothing it used to do.
 fn main() {

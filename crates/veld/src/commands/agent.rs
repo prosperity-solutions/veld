@@ -263,32 +263,13 @@ fn report(
     naming: Option<serde_json::Value>,
 ) -> i32 {
     let port = veld_core::instance::daemon_port();
-    let host = format!("127.0.0.1:{port}");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    // One budget for both requests: the hook's own `timeout` is barely more than one.
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS);
-    let post = |naming: Option<&serde_json::Value>| {
-        let request = agent_state_request(&host, session, tool, reported, naming)?;
-        post_to(addr, &request, deadline)
-    };
-    let mut sent = post(naming.as_ref());
-    if sent
-        .as_ref()
-        .is_some_and(|r| resend_without_naming(naming.is_some(), r.status))
-    {
-        sent = post(None);
-    }
-    match sent {
-        Some(resp) if (200..300).contains(&resp.status) => {
+    match send_report(addr, session, tool, reported, naming.as_ref(), deadline) {
+        Some(remind) => {
             // Claude reads a hook's stdout as its answer: the reminder, or the stop
             // refused. Nothing else is ever printed here.
-            let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
-            let remind = match body["naming"].as_str() {
-                Some("remind") => Some(true),
-                Some("block") => Some(false),
-                _ => None,
-            };
             if let Some(remind) = remind {
                 println!(
                     "{}",
@@ -299,8 +280,42 @@ fn report(
         }
         // Silent on every failure. A daemon that is down, busy or a different version is
         // not something to interrupt an agent about.
-        _ => 1,
+        None => 1,
     }
+}
+
+/// The exchange behind [`report`]: `None` unless the daemon answered 2xx, otherwise
+/// its naming verdict — `Some(true)` to remind, `Some(false)` to refuse the stop.
+///
+/// A report carrying a naming turn that an older daemon refuses (422) is sent once
+/// more without it. `deadline` is one budget for both requests: the hook's own
+/// `timeout` is barely more than one.
+fn send_report(
+    addr: std::net::SocketAddr,
+    session: &str,
+    tool: AgentTool,
+    reported: agent::State,
+    naming: Option<&serde_json::Value>,
+    deadline: std::time::Instant,
+) -> Option<Option<bool>> {
+    let host = addr.to_string();
+    let post = |naming: Option<&serde_json::Value>| {
+        let request = agent_state_request(&host, session, tool, reported, naming)?;
+        post_to(addr, &request, deadline)
+    };
+    let mut sent = post(naming)?;
+    if resend_without_naming(naming.is_some(), sent.status) {
+        sent = post(None)?;
+    }
+    if !(200..300).contains(&sent.status) {
+        return None;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap_or_default();
+    Some(match body["naming"].as_str() {
+        Some("remind") => Some(true),
+        Some("block") => Some(false),
+        _ => None,
+    })
 }
 
 /// The exact bytes of the agent-state POST, or `None` for a session id that must not
@@ -362,7 +377,8 @@ const MAX_REPLY_BYTES: usize = 16 * 1024;
 /// `deadline` bounds the whole exchange, as the `reqwest` client's timeout did: each
 /// connect, write and read gets whatever is left of it. The body is read only up to its
 /// `Content-Length` (axum's `Json` always sets one), so a well-behaved daemon is never
-/// waited on to close the socket.
+/// waited on to close the socket. It is read whatever the status, a refusal's too:
+/// that keeps one code path, and a refusal's body is a few dozen bytes on loopback.
 fn post_to(
     addr: std::net::SocketAddr,
     request: &[u8],
@@ -791,6 +807,49 @@ mod tests {
         (addr, rx, handle)
     }
 
+    /// Local server for `replies.len()` connections in turn: reads each request, hands
+    /// its raw bytes to the test, and answers with the matching reply.
+    fn serve_each(
+        replies: &'static [&'static str],
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            for reply in replies {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut got = Vec::new();
+                let mut buf = [0u8; 1024];
+                loop {
+                    let n = sock.read(&mut buf).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    got.extend_from_slice(&buf[..n]);
+                    if let Some(split) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let head = String::from_utf8_lossy(&got[..split]).to_ascii_lowercase();
+                        let len: usize = head
+                            .lines()
+                            .find_map(|l| l.strip_prefix("content-length: "))
+                            .and_then(|v| v.trim().parse().ok())
+                            .unwrap_or(0);
+                        if got.len() >= split + 4 + len {
+                            break;
+                        }
+                    }
+                }
+                tx.send(got).unwrap();
+                let _ = sock.write_all(reply.as_bytes());
+            }
+        });
+        (addr, rx, handle)
+    }
+
     fn sample_request() -> Vec<u8> {
         agent_state_request("h", "abc", AgentTool::Claude, agent::State::Ready, None).unwrap()
     }
@@ -817,6 +876,75 @@ mod tests {
             json,
             serde_json::json!({"tool": "claude", "state": "ready", "naming": turn})
         );
+    }
+
+    fn body_of(request: &[u8]) -> serde_json::Value {
+        let text = std::str::from_utf8(request).unwrap();
+        serde_json::from_str(text.split_once("\r\n\r\n").unwrap().1).unwrap()
+    }
+
+    /// A CLI newer than its daemon: the naming turn is refused, the state is sent
+    /// again without it, and the second reply is the one that counts.
+    #[test]
+    fn a_refused_naming_turn_is_resent_without_it() {
+        let (addr, rx, handle) = serve_each(&[
+            "HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 2\r\n\r\n{}",
+            "HTTP/1.1 202 Accepted\r\ncontent-length: 19\r\n\r\n{\"naming\":\"remind\"}",
+        ]);
+        let turn = serde_json::json!({"turn": "prompt", "fresh": true});
+        let verdict = send_report(
+            addr,
+            "abc",
+            AgentTool::Claude,
+            agent::State::Working,
+            Some(&turn),
+            within(std::time::Duration::from_secs(2)),
+        );
+        assert_eq!(verdict, Some(Some(true)));
+        assert_eq!(body_of(&rx.recv().unwrap())["naming"], turn);
+        let resent = body_of(&rx.recv().unwrap());
+        assert!(resent.get("naming").is_none(), "{resent}");
+        assert_eq!(resent["state"], "working");
+        handle.join().unwrap();
+    }
+
+    /// Without a naming turn a 422 is just a refusal: nothing is sent twice.
+    #[test]
+    fn a_refusal_without_a_naming_turn_is_final() {
+        let (addr, rx, handle) =
+            serve_each(&["HTTP/1.1 422 Unprocessable Entity\r\ncontent-length: 2\r\n\r\n{}"]);
+        let verdict = send_report(
+            addr,
+            "abc",
+            AgentTool::Claude,
+            agent::State::Working,
+            None,
+            within(std::time::Duration::from_secs(2)),
+        );
+        assert_eq!(verdict, None);
+        assert!(rx.recv().is_ok());
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_2xx_carries_the_daemons_naming_verdict() {
+        let (addr, _rx, handle) = serve_each(&[
+            "HTTP/1.1 202 Accepted\r\ncontent-length: 18\r\n\r\n{\"naming\":\"block\"}",
+            "HTTP/1.1 202 Accepted\r\ncontent-length: 2\r\n\r\n{}",
+        ]);
+        let send = || {
+            send_report(
+                addr,
+                "abc",
+                AgentTool::Claude,
+                agent::State::Ready,
+                None,
+                within(std::time::Duration::from_secs(2)),
+            )
+        };
+        assert_eq!(send(), Some(Some(false)));
+        assert_eq!(send(), Some(None));
+        handle.join().unwrap();
     }
 
     #[test]
