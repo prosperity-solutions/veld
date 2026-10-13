@@ -23,7 +23,10 @@
 //!   (original timestamps, original stream) once the burst is over or the process is
 //!   stopping. A token bucket sheds the *tail* of a burst, and the tail of a crash
 //!   loop's output is the fatal error that `veld start` and the orchestrator show the
-//!   user. Keeping it costs at most [`SHED_TAIL_LINES`] rows per burst.
+//!   user. Keeping it costs at most [`SHED_TAIL_LINES`] rows per burst. A tail is kept
+//!   only while it *is* the end: once a later line is admitted, the tail is discarded
+//!   ([`RateShed::discard_tail`]), because every log reader orders by row id, and rows
+//!   written back after newer ones would read as the run's latest output.
 //!
 //! There is deliberately no de-duplication: identical lines are dropped or kept by the
 //! budget alone, so what is stored is always a real prefix of what the node printed.
@@ -164,6 +167,16 @@ impl RateShed {
         s.tail.push_back(line);
     }
 
+    /// Forget the held tail because a newer line was admitted ahead of it.
+    ///
+    /// Written back now, the tail would get row ids after that newer line, and every
+    /// log reader orders by id: the stale burst would read as the most recent output.
+    /// Its lines stay counted in the drop notice. Called from the reader thread, only
+    /// for the first admitted line after a shed one.
+    pub fn discard_tail(&self) {
+        self.lock().tail.clear();
+    }
+
     /// Whether anything is waiting to be reported or written back.
     pub fn pending(&self) -> bool {
         let s = self.lock();
@@ -301,6 +314,20 @@ mod tests {
             tail[SHED_TAIL_LINES - 1].1,
             format!("line {}", SHED_TAIL_LINES + 24)
         );
+        assert!(!shed.pending());
+    }
+
+    #[test]
+    fn a_discarded_tail_is_still_counted_but_not_written_back() {
+        let shed = RateShed::default();
+        let t0 = Instant::now();
+        for i in 0..5 {
+            shed.record(t0, line(i));
+        }
+        shed.discard_tail();
+        let claim = shed.claim(t0 + SHED_QUIET, false).expect("drops to report");
+        assert_eq!(claim.dropped, 5);
+        assert!(claim.tail.is_none_or(|t| t.is_empty()));
         assert!(!shed.pending());
     }
 

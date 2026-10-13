@@ -1615,6 +1615,9 @@ async fn run(command: Command) {
             // queue and turn its excess into "the database was not keeping up".
             // See `log_budget` for what is kept of a refused burst.
             let mut bucket = log_budget::TokenBucket::for_log_pump(std::time::Instant::now());
+            // Whether a line was shed since the last admitted one: the first line
+            // admitted after a shed burst makes its held tail no longer the end.
+            let mut shed_since_admit = false;
             let mut queue = |lines: &mut Vec<String>| {
                 for line in lines.drain(..) {
                     if let Some((ref tx, _, ref dropped, ref shed)) = writer {
@@ -1622,7 +1625,13 @@ async fn run(command: Command) {
                         let ts = chrono::Utc::now();
                         if !bucket.try_take(now) {
                             shed.record(now, (ts, line));
-                        } else if tx.try_send((ts, line)).is_err() {
+                            shed_since_admit = true;
+                            continue;
+                        }
+                        if std::mem::take(&mut shed_since_admit) {
+                            shed.discard_tail();
+                        }
+                        if tx.try_send((ts, line)).is_err() {
                             dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
