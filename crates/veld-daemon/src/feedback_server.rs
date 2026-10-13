@@ -53,7 +53,7 @@ mod settings;
 mod config_vars;
 
 #[path = "config_cache.rs"]
-mod config_cache;
+pub(crate) mod config_cache;
 
 #[path = "promotions.rs"]
 mod promotions;
