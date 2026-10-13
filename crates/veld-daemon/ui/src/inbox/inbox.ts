@@ -816,6 +816,10 @@ class WorktreeInbox {
    * event (`setWatching`), so the queue empties by being walked rather than by this
    * remembering where it got to, and nothing has to be reset when an event lands or
    * a pane goes away.
+   *
+   * Except for a **held** event, which arriving cannot read: in the pane being watched
+   * it is already in front of the person, so it is passed over, or the gesture would
+   * land on it again and again and never reach the next one.
    */
   nextUnread(worktreeIds: ReadonlySet<number>): NextTarget | null {
     let best: NextTarget | null = null;
@@ -823,6 +827,7 @@ class WorktreeInbox {
     for (const [sessionId, session] of this.sessions) {
       const unseen = session.unseen;
       if (!unseen) continue;
+      if (session.held && sessionId === this.watching) continue;
       if (!worktreeIds.has(session.worktreeId)) continue;
       const rank = PRECEDENCE.indexOf(unseen.kind);
       if (rank > bestRank) continue;

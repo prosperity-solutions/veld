@@ -1566,4 +1566,16 @@ describe("a held 'waiting for you'", () => {
     box.restarted("t1");
     expect(rowState(box, WT, false)).toBe(null);
   });
+
+  it("is passed over by 'next' once it is the pane being watched", () => {
+    const ALL = new Set([WT]);
+    const box = createInbox();
+    box.report("t1", WT, held, NOW + 1);
+    box.report("t2", WT, agent("idle"), NOW);
+    expect(box.nextUnread(ALL)?.sessionId).toBe("t1");
+    box.setWatching("t1");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("t2");
+    box.setWatching("t2");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("t1");
+  });
 });

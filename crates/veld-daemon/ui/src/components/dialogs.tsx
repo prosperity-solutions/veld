@@ -3242,8 +3242,8 @@ export function ClaudeModOfferDialog(props: {
         <Text size="sm">
           Veld can now hear from Claude Code through a Claude Code mod, instead of
           through a wrapper script in front of <code>claude</code>. An interrupted turn
-          stops spinning straight away, and a permission prompt you have answered stops
-          reading as waiting. Nothing in your Claude settings changes. On a Team or
+          stops spinning straight away, and a question it asks you stays waiting until
+          you answer it. Nothing in your Claude settings changes. On a Team or
           Enterprise plan, a question from an MCP server is the one thing it does not
           see, unless your organization allows it.
         </Text>
