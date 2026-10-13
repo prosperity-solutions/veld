@@ -341,8 +341,9 @@ async fn run(args: Args) -> Result<()> {
 
     // Whether the database is still intact, and whether those backups are
     // actually happening. Its own task for the same reason the backup scheduler
-    // is: the interval is unrelated (a `quick_check` is cheap enough to run far
-    // more often than a backup is worth taking), and a probe that stopped
+    // is: the interval is unrelated (the probe ticks every five minutes for the
+    // backup deadman, running `quick_check` at startup and then hourly — every
+    // tick while a fault is recorded), and a probe that stopped
     // because the *backup* path failed would be a health check that goes quiet
     // exactly when it matters. See `dbhealth`'s module docs for the incident.
     // **Every `Db::open()` failure in this process now reports itself.** The
@@ -367,7 +368,9 @@ async fn run(args: Args) -> Result<()> {
     // The user's login-shell PATH, kept warm on its own timer for the same
     // reason stats is: resolving it spawns a login shell (up to 10s on a stalled
     // rc file), and the request handlers that need it — stop/restart/action,
-    // Desktop's start, share start — must never pay that on a click.
+    // Desktop's start, share start — must never pay that on a click. The timer
+    // ticks every 20 s but spawns the shell only when a startup file changed or
+    // the last answer is five minutes old; see `user_path`'s module docs.
     let user_path_handle = tokio::spawn(veld_core::user_path::warm_user_path_cache());
 
     // Same reasoning, for the directory-scoped sibling: prime every already-
