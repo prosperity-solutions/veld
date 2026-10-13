@@ -816,17 +816,19 @@ async fn run_single_liveness_check(
                 let url = format!("http://127.0.0.1:{port}{path}");
                 let expected = liveness.expect_status.unwrap_or(200);
 
-                let client = match reqwest::Client::builder()
-                    .timeout(Duration::from_secs(5))
-                    .build()
-                {
+                let client = match liveness_http_client() {
                     Ok(c) => c,
                     Err(e) => {
                         return Err(LivenessFailure::Failed(format!("http client error: {e}")));
                     }
                 };
 
-                match client.get(&url).send().await {
+                match client
+                    .get(&url)
+                    .timeout(Duration::from_secs(5))
+                    .send()
+                    .await
+                {
                     Ok(resp) => {
                         let status = resp.status().as_u16();
                         if status == expected {
@@ -859,11 +861,41 @@ async fn run_single_liveness_check(
     }
 }
 
+/// The one HTTP client every liveness probe shares, so a probe does not pay for
+/// building a client (connector, TLS roots, resolver) on every run, every scan.
+///
+/// **`pool_max_idle_per_host(0)` is load-bearing.** Dev servers close an idle
+/// keep-alive connection after about 5 s, and a scan runs every 5 s: with pooling
+/// on, the next probe would race the server's close, pick up a dead socket and
+/// report a spurious liveness failure — which the monitor answers with a
+/// recovery restart. Every probe therefore opens a fresh connection, exactly as
+/// the per-probe client it replaces did. Each request sets its own timeout; the
+/// client-wide one is a backstop for a caller that forgets. Only a built client is
+/// kept: a build that fails is retried by the next probe, as it was when every
+/// probe built its own.
+fn liveness_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .timeout(Duration::from_secs(5))
+        .build()?;
+    Ok(CLIENT.get_or_init(|| built))
+}
+
 /// Load the VeldConfig for a project root, if a root config exists.
+///
+/// Through the stat-validated config cache: this runs every scan (5 s) for every
+/// live run, and a fresh parse is an include-glob walk plus a JSONC strip, a hash
+/// and a serde pass — for a file that almost never changes. The cache re-stamps
+/// every path the parse read, so an edited config is re-parsed on the next scan,
+/// exactly as before; see the cache module's docs for why acting on it is safe.
 fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
     // `root_config_in` already proved the file exists.
     let config_path = veld_core::config::root_config_in(project_root)?;
-    config::parse_config(&config_path).ok()
+    crate::feedback_server::config_cache::parse_config(&config_path)
 }
 
 /// Find the veld CLI binary path.

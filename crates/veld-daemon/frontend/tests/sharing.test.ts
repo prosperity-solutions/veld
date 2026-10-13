@@ -5,6 +5,7 @@ import {
   buildSharingMenuItem,
   updateSharingIndicator,
   pollShareStatus,
+  startSharePolling,
 } from "../src/feedback-overlay/sharing";
 import { dispatch, getState } from "../src/feedback-overlay/store";
 import { refs } from "../src/feedback-overlay/refs";
@@ -154,5 +155,72 @@ describe("sharing fetch orchestration", () => {
     const start = (item.sub ?? []).find((s) => s.id === "share-start")!;
     start.onSelect!();
     await vi.waitFor(() => expect(toastTexts().some((t) => t === "no gateway configured")).toBe(true));
+  });
+});
+
+describe("startSharePolling", () => {
+  const stops: Array<() => void> = [];
+  let hidden = false;
+  const setHidden = (next: boolean) => {
+    hidden = next;
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    setupOverlayEnv();
+    hidden = false;
+    vi.useFakeTimers();
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => hidden });
+  });
+  afterEach(() => {
+    for (const stop of stops.splice(0)) stop();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  const stubFetch = () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ shares: [] }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    return fetchMock;
+  };
+
+  it("polls on every tick while the tab is visible", () => {
+    const fetchMock = stubFetch();
+    stops.push(startSharePolling(5000));
+    vi.advanceTimersByTime(15_000);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not poll on ticks while the tab is hidden", () => {
+    const fetchMock = stubFetch();
+    stops.push(startSharePolling(5000));
+    hidden = true;
+    vi.advanceTimersByTime(60_000);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("catches up as soon as the tab is shown again", () => {
+    const fetchMock = stubFetch();
+    stops.push(startSharePolling(5000));
+    hidden = true;
+    vi.advanceTimersByTime(60_000);
+    setHidden(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not poll when the tab becomes hidden", () => {
+    const fetchMock = stubFetch();
+    stops.push(startSharePolling(5000));
+    setHidden(true);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves a direct pollShareStatus() alone — it follows a click, not a timer", () => {
+    const fetchMock = stubFetch();
+    hidden = true;
+    pollShareStatus();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

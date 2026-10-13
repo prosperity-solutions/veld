@@ -34,6 +34,9 @@ export interface DOMRefs {
   componentTraceEl: HTMLElement;
   screenshotRect: HTMLElement;
   screenshotFrame: HTMLImageElement;
+  /** Sibling of the frame carrying its pulsing glow — an `<img>` cannot have a
+   *  pseudo-element, and the glow animates opacity only (see styles.ts). */
+  screenshotFrameGlow: HTMLElement;
   screenshotBanner: HTMLElement;
   screenshotFullBtn: HTMLElement;
 
@@ -79,6 +82,7 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     componentTraceEl: null!,
     screenshotRect: null!,
     screenshotFrame: null!,
+    screenshotFrameGlow: null!,
     screenshotBanner: null!,
     screenshotFullBtn: null!,
     panel: null!,

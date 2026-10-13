@@ -1,5 +1,6 @@
 mod commands;
 mod hints;
+mod log_budget;
 mod output;
 
 use std::time::Duration;
@@ -1049,21 +1050,45 @@ fn init_tracing(debug: bool) {
         .init();
 }
 
-#[tokio::main]
-async fn main() {
+/// A plain `fn main`, not `#[tokio::main]`: the runtime is built only once a command
+/// that needs one has been picked.
+///
+/// `veld agent-state` is the reason. Claude Code runs it from a blocking hook at least
+/// twice per turn, and all it does is one POST to `127.0.0.1` (two, when an older
+/// daemon refuses the naming turn) — so it is dispatched here, to a synchronous path,
+/// before a multi-thread runtime (one worker per core) or a TLS stack exists. It was never behind the update gate or the version check
+/// (see [`command_survives_an_update`] and `needs_version_check` in [`run`]), so
+/// answering it before them changes nothing it used to do.
+fn main() {
     let cli = Cli::parse();
 
     init_tracing(cli.debug);
 
     // Handle bare `veld` with no subcommand -- print help.
-    if cli.command.is_none() {
-        let _ = Cli::command().print_help();
-        println!();
-        return;
-    }
+    let command = match cli.command {
+        None => {
+            let _ = Cli::command().print_help();
+            println!();
+            return;
+        }
+        Some(Command::AgentState {
+            tool,
+            session,
+            launched,
+            payload,
+        }) => std::process::exit(commands::agent::state(tool, session, launched, payload)),
+        Some(command) => command,
+    };
 
-    let command = cli.command.unwrap();
+    // Exactly what `#[tokio::main]` expanded to: a multi-thread runtime, every driver on.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the tokio runtime");
+    runtime.block_on(run(command));
+}
 
+async fn run(command: Command) {
     // An update in flight is replacing veld, veld-daemon, veld-helper and caddy
     // and restarting both services. Nearly every command either execs one of
     // those binaries or expects a daemon that is currently down, so it gets a
@@ -1116,14 +1141,19 @@ async fn main() {
         }
     }
 
-    // Auto-GC: trigger background GC if it hasn't run in >30 minutes.
+    // Housekeeping on the commands a person or an agent runs most: one database
+    // open shared by both steps (they used to open it separately, and the command
+    // itself opens it a third time).
+    //
+    // - Auto-GC: trigger background GC if it hasn't run in >30 minutes.
+    // - Update check: show a banner if a newer version is available (once per day).
     if needs_version_check {
-        maybe_auto_gc();
-    }
-
-    // Update check: show banner if a newer version is available (once per day).
-    if needs_version_check {
-        maybe_show_update_banner().await;
+        if let Ok(db) = veld_core::db::Db::open() {
+            maybe_auto_gc(&db);
+            if update_banner_wanted(&command) {
+                maybe_show_update_banner(&db).await;
+            }
+        }
     }
 
     let exit_code = match command {
@@ -1180,12 +1210,14 @@ async fn main() {
 
         Command::AgentSettings { tool, session } => commands::agent::settings(tool, session),
 
+        // Normally answered in `main`, before any runtime exists; kept so the match
+        // stays exhaustive and a future caller of `run` gets the same behaviour.
         Command::AgentState {
             tool,
             session,
             launched,
             payload,
-        } => commands::agent::state(tool, session, launched, payload).await,
+        } => commands::agent::state(tool, session, launched, payload),
 
         Command::AgentPrompt { take } => commands::agent::take_prompt(&take),
 
@@ -1493,10 +1525,15 @@ async fn main() {
                 // 20,000 lines piped in, 2,592 dropped, and not one notice.
                 let dropped = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
                 let writer_dropped = std::sync::Arc::clone(&dropped);
+                // Lines over the ingest budget (`log_budget`): counted and kept
+                // separately from queue-full drops, because they are reported
+                // differently and for a different reason.
+                let shed = std::sync::Arc::new(log_budget::RateShed::default());
+                let writer_shed = std::sync::Arc::clone(&shed);
                 let handle = std::thread::spawn(move || {
-                    log_pump_writer(&db, &scope, &rx, &writer_dropped);
+                    log_pump_writer(&db, &scope, &rx, &writer_dropped, &writer_shed);
                 });
-                (tx, handle, dropped)
+                (tx, handle, dropped, shed)
             });
 
             // **A stop must flush, and must not be slowed down.** Two wrong
@@ -1572,10 +1609,20 @@ async fn main() {
             // sanctioned failure mode for this process, and the count is owned by
             // the writer — see `log_pump_writer`, which reports it, because a
             // reporter on *this* side cannot report through a queue that is full.
-            let queue = |lines: &mut Vec<String>| {
+            //
+            // **The ingest budget is spent first**, so a line the budget refuses
+            // never takes a queue slot — a crash-looping worker must not fill the
+            // queue and turn its excess into "the database was not keeping up".
+            // See `log_budget` for what is kept of a refused burst.
+            let mut gate = log_budget::LogGate::for_log_pump(std::time::Instant::now());
+            let mut queue = |lines: &mut Vec<String>| {
                 for line in lines.drain(..) {
-                    if let Some((ref tx, _, ref dropped)) = writer {
-                        if tx.try_send((chrono::Utc::now(), line)).is_err() {
+                    if let Some((ref tx, _, ref dropped, ref shed)) = writer {
+                        let now = std::time::Instant::now();
+                        let Some(line) = gate.offer(now, (chrono::Utc::now(), line), shed) else {
+                            continue;
+                        };
+                        if tx.try_send(line).is_err() {
                             dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
@@ -1668,7 +1715,7 @@ async fn main() {
             // Drop the sender so the writer sees the channel close, flushes its
             // partial batch and exits; then wait for it, so the last lines the
             // server produced are on disk before this process is.
-            if let Some((tx, handle, _)) = writer {
+            if let Some((tx, handle, _, _)) = writer {
                 drop(tx);
                 let _ = handle.join();
             }
@@ -1880,6 +1927,10 @@ static LOG_PUMP_TERMINATING: std::sync::atomic::AtomicBool =
 /// user cannot see and did not start.
 const LOG_PUMP_QUEUE: usize = 16_384;
 
+/// How often the `veld _log` writer looks at the ingest budget's bookkeeping while no
+/// line is arriving.
+const LOG_SHED_POLL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// The `veld _log` pump's database side: batch what the reader thread sends and
 /// write each batch as one transaction.
 ///
@@ -1890,6 +1941,7 @@ fn log_pump_writer(
     scope: &(std::path::PathBuf, String, Option<String>, String, String),
     rx: &std::sync::mpsc::Receiver<(chrono::DateTime<chrono::Utc>, String)>,
     dropped: &std::sync::atomic::AtomicU64,
+    shed: &log_budget::RateShed,
 ) {
     use std::sync::atomic::Ordering;
     use std::sync::mpsc::RecvTimeoutError;
@@ -1955,10 +2007,82 @@ fn log_pump_writer(
         .is_ok()
     };
 
+    // What the ingest budget refused (`log_budget`), as opposed to what the queue
+    // refused. Called between batches and on the way out; `finishing` releases the
+    // kept tail even though the burst has not been quiet for long, because there is
+    // no later pass. `drained` says the queue was seen empty, so no line admitted
+    // before the burst is still waiting to be written after its tail.
+    //
+    // Order is the point: the notice goes in first, on the `internal` stream, and the
+    // kept tail follows as ordinary lines with their original timestamps and stream.
+    // A failed notice hands the claim back untouched, and the tail is not written
+    // without its notice.
+    let report_shed = |finishing: bool, drained: bool| {
+        let Some(claim) = shed.claim(std::time::Instant::now(), finishing, drained) else {
+            return;
+        };
+        let kept = claim.tail.as_ref().map_or(0, Vec::len);
+        let limit = format!(
+            "output over the {} lines/s ingest limit ({} line burst)",
+            log_budget::LOG_RATE_PER_SEC,
+            log_budget::LOG_BURST
+        );
+        let message = match (claim.dropped, kept) {
+            (0, k) => format!(
+                "[log] rate limit: re-adding the last {k} dropped line(s) from {node}:{variant} \
+                 at their original timestamps"
+            ),
+            (n, 0) => {
+                format!("[log] rate limit: dropped {n} line(s) from {node}:{variant} — {limit}")
+            }
+            (n, k) => format!(
+                "[log] rate limit: dropped {n} line(s) from {node}:{variant} — {limit}; the \
+                 last {k} dropped line(s) are re-added at their original timestamps"
+            ),
+        };
+        let written = db
+            .append_log(
+                project_root,
+                run,
+                run_id.as_deref(),
+                None,
+                None,
+                veld_core::db::LogStream::Internal,
+                chrono::Utc::now(),
+                &message,
+            )
+            .is_ok();
+        if !written {
+            shed.restore(claim);
+            return;
+        }
+        if let Some(mut tail) = claim.tail {
+            let lost = write(&mut tail);
+            dropped.fetch_add(lost, Ordering::Relaxed);
+        }
+    };
+
     // Nothing buffered: block for the first line rather than waking every flush
-    // interval on an idle server. `recv` erroring means the reader thread hit
-    // EOF and dropped the sender.
-    while let Ok(first) = rx.recv() {
+    // interval on an idle server — except while the budget has refused lines, when
+    // a short timeout lets a process that went quiet get its notice and its tail
+    // without waiting for another line (or for EOF) that may never come. `recv`
+    // erroring means the reader thread hit EOF and dropped the sender.
+    loop {
+        let first = if shed.pending() {
+            match rx.recv_timeout(LOG_SHED_POLL) {
+                Ok(item) => item,
+                Err(RecvTimeoutError::Timeout) => {
+                    report_shed(false, true);
+                    continue;
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match rx.recv() {
+                Ok(item) => item,
+                Err(_) => break,
+            }
+        };
         batch.push(first);
 
         // The deadline belongs to the batch, not to each line — see
@@ -1966,6 +2090,9 @@ fn log_pump_writer(
         // documents why a per-line deadline is the bug to avoid.
         let deadline = std::time::Instant::now() + veld_core::logging::LOG_BATCH_FLUSH;
         let mut closed = false;
+        // Whether the batch ended because the queue ran dry, not because it was full
+        // or out of time.
+        let mut drained = false;
         while batch.len() < veld_core::logging::LOG_BATCH_MAX_LINES {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -1973,9 +2100,13 @@ fn log_pump_writer(
             }
             match rx.recv_timeout(left) {
                 Ok(item) => batch.push(item),
-                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    drained = true;
+                    break;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     closed = true;
+                    drained = true;
                     break;
                 }
             }
@@ -1991,6 +2122,7 @@ fn log_pump_writer(
         if !report_drops(claimed) {
             dropped.fetch_add(claimed, Ordering::Relaxed);
         }
+        report_shed(false, drained);
 
         if closed {
             break;
@@ -2016,6 +2148,7 @@ fn log_pump_writer(
             "veld _log: dropped {claimed} line(s) from {node}:{variant} and could not record it"
         );
     }
+    report_shed(true, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -2030,10 +2163,7 @@ const AUTO_GC_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 minutes
 /// claimed atomically, so concurrent CLI invocations don't all trigger GC.
 /// Using a subprocess keeps GC off the foreground command's critical path
 /// and survives `process::exit`.
-fn maybe_auto_gc() {
-    let Ok(db) = veld_core::db::Db::open() else {
-        return;
-    };
+fn maybe_auto_gc(db: &veld_core::db::Db) {
     if !matches!(
         db.kv_try_claim_interval("gc.last_auto_run", AUTO_GC_INTERVAL),
         Ok(true)
@@ -2063,15 +2193,38 @@ const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // 24
 const KV_UPDATE_LAST_CHECK: &str = "update.last_check";
 const KV_UPDATE_LATEST: &str = "update.latest_version";
 
+/// Whether this invocation should look for, and announce, a newer version.
+///
+/// The banner is written to **stderr** for a person, so it is skipped when stderr is
+/// not a terminal — which is how a coding agent runs every command — and with `--json`.
+/// Skipping matters for more than tidiness: the daily check is an inline network
+/// request with a 5-second timeout on the command's critical path, and an agent
+/// would otherwise pay it (and have the banner land in its transcript) on the first
+/// command of each day. The check still happens, and is still stamped only after it
+/// succeeds, the next time a human runs one of these in a terminal.
+fn update_banner_wanted(command: &Command) -> bool {
+    use std::io::IsTerminal;
+    !command_wants_json(command) && std::io::stderr().is_terminal()
+}
+
+/// `--json` on the commands that run the update check. There is no global flag, so
+/// each carries its own.
+fn command_wants_json(command: &Command) -> bool {
+    match command {
+        Command::Status { json, .. }
+        | Command::Urls { json, .. }
+        | Command::Action { json, .. }
+        | Command::Logs { json, .. } => *json,
+        Command::Stats(args) => args.json,
+        _ => false,
+    }
+}
+
 /// Check for a new version and print a banner if one is available.
 /// When a fetch is needed, it runs inline with the `check_update` timeout
 /// (which is capped at a few seconds). Results are cached in the database so
 /// subsequent invocations within UPDATE_CHECK_INTERVAL are instant.
-async fn maybe_show_update_banner() {
-    let Ok(db) = veld_core::db::Db::open() else {
-        return;
-    };
-
+async fn maybe_show_update_banner(db: &veld_core::db::Db) {
     let needs_fetch = match db.kv_updated_at(KV_UPDATE_LAST_CHECK) {
         Ok(Some(t)) => {
             let age = chrono::Utc::now() - t;
@@ -2309,6 +2462,7 @@ mod update_gate_tests {
 
 #[cfg(test)]
 mod log_pump_tests {
+    use super::log_budget::{self, RateShed};
     use super::{LOG_PUMP_QUEUE, log_pump_writer};
     use std::sync::Arc;
     use std::sync::atomic::AtomicU64;
@@ -2392,7 +2546,7 @@ mod log_pump_tests {
         drop(tx);
 
         let dropped = AtomicU64::new(0);
-        log_pump_writer(&db, &scope(), &rx, &dropped);
+        log_pump_writer(&db, &scope(), &rx, &dropped, &RateShed::default());
 
         let rows = stored(&db, LogStream::Server);
         assert_eq!(
@@ -2428,7 +2582,7 @@ mod log_pump_tests {
 
         // What the reader does when `try_send` is refused.
         let dropped = AtomicU64::new(7);
-        log_pump_writer(&db, &scope(), &rx, &dropped);
+        log_pump_writer(&db, &scope(), &rx, &dropped, &RateShed::default());
 
         assert_eq!(stored(&db, LogStream::Server), vec!["survivor".to_owned()]);
 
@@ -2452,7 +2606,7 @@ mod log_pump_tests {
         drop(tx);
 
         let dropped = AtomicU64::new(0);
-        log_pump_writer(&db, &scope(), &rx, &dropped);
+        log_pump_writer(&db, &scope(), &rx, &dropped, &RateShed::default());
 
         assert!(stored(&db, LogStream::Internal).is_empty());
     }
@@ -2472,7 +2626,7 @@ mod log_pump_tests {
         drop(tx);
 
         let dropped = Arc::new(AtomicU64::new(3));
-        log_pump_writer(&db, &scope(), &rx, &dropped);
+        log_pump_writer(&db, &scope(), &rx, &dropped, &RateShed::default());
 
         let internal = stored(&db, LogStream::Internal);
         assert_eq!(
@@ -2481,5 +2635,121 @@ mod log_pump_tests {
             "the same drop count must not be re-reported on every later batch: {internal:?}"
         );
         assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    /// Lines the ingest budget refused are reported as a *rate limit* on the
+    /// `internal` stream, and the end of the burst is written back after the notice.
+    ///
+    /// The notice must be distinguishable from the queue-full one (a reader chasing
+    /// lost logs needs to know whether the database or the process was the cause), and
+    /// the kept tail must be ordinary `server` lines with their original timestamps —
+    /// it is the fatal error at the end of a crash loop that `veld start` and the
+    /// orchestrator show the user.
+    #[test]
+    fn rate_limited_lines_are_reported_on_internal_and_the_tail_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        tx.send((chrono::Utc::now(), "stored".to_owned())).unwrap();
+        drop(tx);
+
+        let shed = RateShed::default();
+        let t0 = std::time::Instant::now();
+        let original = chrono::Utc::now() - chrono::Duration::hours(1);
+        for i in 0..80 {
+            shed.record(t0, (original, format!("shed {i}")));
+        }
+        log_pump_writer(&db, &scope(), &rx, &AtomicU64::new(0), &shed);
+
+        let internal = stored(&db, LogStream::Internal);
+        assert_eq!(internal.len(), 1, "exactly one notice: {internal:?}");
+        assert!(
+            internal[0].contains("rate limit")
+                && internal[0].contains("dropped 80 line(s)")
+                && internal[0].contains("api:local")
+                && internal[0].contains("re-added"),
+            "the notice must name the rate limit, the count and the node: {internal:?}"
+        );
+        assert!(
+            !internal[0].contains("database was not keeping up"),
+            "a rate-limit notice must not read as a queue-full one: {internal:?}"
+        );
+
+        let server = stored(&db, LogStream::Server);
+        assert_eq!(server.len(), 1 + log_budget::SHED_TAIL_LINES);
+        assert_eq!(server[0], "stored");
+        // Only the newest 50 of the 80 survive, in order.
+        assert_eq!(server[1], "shed 30");
+        assert_eq!(server[50], "shed 79");
+        let rows = db
+            .tail_logs(
+                std::path::Path::new("/proj"),
+                "dev",
+                &LogFilter {
+                    streams: Some(vec![LogStream::Server.as_str()]),
+                    ..Default::default()
+                },
+                100,
+            )
+            .unwrap();
+        assert!(
+            rows.iter().skip(1).all(|r| {
+                chrono::DateTime::parse_from_rfc3339(&r.ts)
+                    .is_ok_and(|t| t.timestamp() == original.timestamp())
+            }),
+            "the kept lines carry the time they were printed, not the time they were written"
+        );
+        assert!(!shed.pending());
+    }
+
+    /// A process that goes quiet after being rate-limited gets its notice and tail
+    /// without another line or EOF arriving: the writer polls while a burst is pending.
+    #[test]
+    fn a_quiet_process_still_gets_its_tail_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        let shed = Arc::new(RateShed::default());
+        // Shed "a long time ago" so the quiet window has already passed.
+        let long_ago = std::time::Instant::now() - log_budget::SHED_QUIET * 2;
+        shed.record(long_ago, (chrono::Utc::now(), "fatal: boom".to_owned()));
+
+        let writer_shed = Arc::clone(&shed);
+        let handle = std::thread::scope(|scope_| {
+            let (db, writer_shed) = (&db, &writer_shed);
+            let h = scope_.spawn(move || {
+                log_pump_writer(db, &scope(), &rx, &AtomicU64::new(0), writer_shed);
+            });
+            // The sender stays open: this is a live process that has gone quiet.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while shed.pending() && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            let flushed = !shed.pending();
+            drop(tx);
+            h.join().unwrap();
+            flushed
+        });
+        assert!(
+            handle,
+            "the tail must be flushed while the sender is still open"
+        );
+        assert_eq!(
+            stored(&db, LogStream::Server),
+            vec!["fatal: boom".to_owned()]
+        );
+        assert_eq!(stored(&db, LogStream::Internal).len(), 1);
+    }
+
+    /// A run that was never rate-limited writes no rate-limit notice.
+    #[test]
+    fn an_unthrottled_run_writes_no_rate_limit_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Db::open_at(&dir.path().join("pump.db")).unwrap();
+        let (tx, rx) = std::sync::mpsc::sync_channel(LOG_PUMP_QUEUE);
+        tx.send((chrono::Utc::now(), "fine".to_owned())).unwrap();
+        drop(tx);
+        log_pump_writer(&db, &scope(), &rx, &AtomicU64::new(0), &RateShed::default());
+        assert!(stored(&db, LogStream::Internal).is_empty());
     }
 }

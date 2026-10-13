@@ -47,3 +47,22 @@ describe("pollOnShow", () => {
     expect(pollOnShow(POLL_MS - 1)).toBe(false);
   });
 });
+
+describe("a poll with its own tick", () => {
+  it("measures slack against its own cadence, not the main poll's", () => {
+    // A 1s poll with the main poll's 2.5s of slack would skip every other tick.
+    expect(pollDue(false, 1000, 1000)).toBe(true);
+    expect(pollDue(false, 990, 1000)).toBe(true);
+    expect(pollDue(false, 400, 1000)).toBe(false);
+  });
+
+  it("still uses the shared hidden cadence", () => {
+    expect(pollDue(true, 1000, 1000)).toBe(false);
+    expect(pollDue(true, HIDDEN_POLL_MS - 500, 1000)).toBe(true);
+  });
+
+  it("catches up on show once a tick of its own has passed", () => {
+    expect(pollOnShow(1999, 2000)).toBe(false);
+    expect(pollOnShow(2000, 2000)).toBe(true);
+  });
+});

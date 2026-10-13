@@ -14,9 +14,15 @@
 //! paths is enough — and it is a `stat` each, where the load was a read, a parse
 //! and a directory walk.
 //!
-//! **Only the listing reads through here.** Starting a run, running an extension
-//! action and resolving a pane all parse the config fresh, so a stale entry could
-//! at worst show an out-of-date rail — never act on a config that has changed.
+//! **Callers.** The repo listing and `/api/environments` only display what they
+//! read. The liveness monitor *acts* on it (it decides whether to probe and what
+//! to restart), and that is safe because an entry is served only while every
+//! stamp it holds still matches the filesystem, and a load whose inputs changed
+//! within [`SETTLE`] is never kept — so a config edited at any point is re-parsed
+//! on the monitor's next scan (at most 5 s later), exactly as a fresh parse
+//! would be. The residual risk is a change a stamp cannot see (mtime, ctime,
+//! inode and length all unchanged), which no editor produces. Starting a run,
+//! running an extension action and resolving a pane still parse the config fresh.
 //!
 //! [`LoadedConfig::watched`]: veld_core::include::LoadedConfig::watched
 

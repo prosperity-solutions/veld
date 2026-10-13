@@ -185,24 +185,6 @@ export interface PaneTab {
    * purpose — so this parser is the only gate it has to clear.
    */
   spec?: string;
-  /**
-   * `terminal` only: the title the shell set with an OSC 0/2 sequence, when the
-   * pane is allowed to rename itself.
-   *
-   * Kept **off** the config-declared `title` so the pane's configured `label`
-   * survives as the thing a fresh pane (and a pinned pane) is named by:
-   * `fixed_label` decides at *write time* whether this field is ever set, and
-   * `paneTabLabel` just prefers it when present. A plain terminal always fills
-   * it; a config pane unless the project pinned its label.
-   *
-   * The type is [`AdoptedTermTitle`] and not `string` **so that the clamp
-   * cannot be skipped.** This is the one field on a tab whose content a process
-   * writes, and since a config pane adopts its title by default rather than by
-   * opting in, the population that can write it is now every declared pane. A
-   * second write site passing a raw OSC payload here is the natural mistake,
-   * and it is one the compiler refuses rather than one a convention asks for.
-   */
-  termTitle?: AdoptedTermTitle;
   /** `browser` only: where the pane opens, and where it returns after a
    *  reload. Kept in the layout rather than in `browserHost` because it is the
    *  one piece of a pane worth restoring — the page itself is re-fetchable. */
@@ -1895,10 +1877,10 @@ export const MAX_TERM_TITLE = 200;
  * A terminal title that has been through [`adoptedTermTitle`].
  *
  * A branded `string`, so it reads as one everywhere it is *used* and can only be
- * *produced* by the one function that cleans it. `PaneTab.termTitle` is typed as
- * this rather than `string` for the reason recorded there: a raw OSC payload
- * reaching the field is the mistake worth a compiler error rather than a code
- * comment.
+ * *produced* by the one function that cleans it. The title store
+ * (`termTitles.ts`) holds this rather than `string`: a raw OSC payload reaching
+ * a tab's name is the mistake worth a compiler error rather than a code
+ * comment. It lives there and not on `PaneTab` — see that module for why.
  */
 export type AdoptedTermTitle = string & { readonly __adoptedTermTitle: unique symbol };
 
@@ -1912,10 +1894,10 @@ export type AdoptedTermTitle = string & { readonly __adoptedTermTitle: unique sy
  *
  * **What the bound is for: rendering.** The title is drawn in the tab strip and
  * its tooltip, and a detached window's native title is built from it
- * (`paneTabLabel` → `desktopWindow.setTitle`, where the shell applies its own
+ * (`paneTabLabel`'s output → `desktopWindow.setTitle`, where the shell applies its own
  * `safeTitle`). It is *not* a bound on any stored or transferred document —
- * `layoutForPersistence` and `tabForTransport` keep the field out of those
- * entirely, which is structural rather than a limit to respect. Do not
+ * the title lives in `termTitles.ts`, outside the layout, so it never reaches
+ * those at all — structural rather than a limit to respect. Do not
  * re-justify `MAX_TERM_TITLE` in terms of a byte ceiling somewhere else; those
  * were the reasons before the stripping existed, and they are all gone.
  *
@@ -1975,69 +1957,6 @@ export function adoptedTermTitle(raw: string): AdoptedTermTitle | undefined {
     .slice(0, MAX_TERM_TITLE)
     .join("")
     .trimEnd() as AdoptedTermTitle;
-}
-
-/**
- * A layout stripped of the fields nothing reads back, ready to persist.
- *
- * Today that is exactly one field: `termTitle`. `parseTab` deliberately does not
- * read it back — an adopted title is display-only, and a reattach gets it from
- * the process itself — so writing it was never restoring anything. What it *did*
- * do, once every declared pane adopted a title by default rather than by opting
- * in, is turn each title a process sets into a layout mutation: a `PUT`, a
- * SQLite `IMMEDIATE` transaction and a `layout_changed` broadcast to every other
- * client, per debounce window, for as long as a tool keeps its title live. The
- * write debounce collapses one gesture; it does not collapse a stream.
- *
- * Two other problems go with it. A 10-million-character OSC payload is now
- * structurally unable to reach `MAX_LAYOUT_BYTES`, whatever the clamp does. And
- * the dedupe in `writeLayout` keys on this document, so a title change no longer
- * counts as a change at all.
- *
- * Read and write are now symmetric, which is the property to keep: `termTitle`
- * lives in memory for as long as the page does, and nowhere else.
- */
-export function layoutForPersistence(layout: PaneLayout): PaneLayout {
-  let touched = false;
-  const docks = layout.docks.map((dock) => ({
-    ...dock,
-    tabs: dock.tabs.map((tab) => {
-      const stripped = tabForTransport(tab);
-      if (stripped !== tab) touched = true;
-      return stripped;
-    }),
-  })) as [Dock, Dock];
-  return touched ? { ...layout, docks } : layout;
-}
-
-/**
- * One tab with the same fields stripped, for handing to another window.
- *
- * The sibling of [`layoutForPersistence`] for the *other* boundary a tab
- * crosses. A detach or a cross-window move sends live `PaneTab`s through the
- * shell's main process, and the receiving renderer runs them through `parseTab`
- * — which drops `termTitle` exactly as a restore does. So carrying it there buys
- * nothing and costs twice: against `MAX_TAB_BYTES`, which drops the offending
- * tab from the transfer with nothing on screen to say a dragged pane went
- * nowhere, and against `MAX_SEED_BYTES`, where a whole dock's worth is the
- * difference between a new window opening and "Couldn't open a new window".
- *
- * With `layoutForPersistence` this makes the rule stateable: **`termTitle` never
- * leaves the page as a field, and is never stored.** Three boundaries carry
- * tabs out and all three strip it — the layout write (`layoutForPersistence`),
- * a detach or cross-window move (`PaneArea`), and a detached window's retained
- * snapshot (`App.tsx`). The shell truncates the field too, because a boundary
- * defends itself.
- *
- * The title *text* does travel, on exactly one path: `paneTabLabel` feeds
- * `desktopWindow.setTitle` so a detached window has a native title. That is a
- * rendered string, bounded again by the shell's own `safeTitle`, not a tab field
- * anything reads back — which is the distinction the rule above turns on.
- */
-export function tabForTransport(tab: PaneTab): PaneTab {
-  if (tab.termTitle === undefined) return tab;
-  const { termTitle: _dropped, ...rest } = tab;
-  return rest;
 }
 
 /**
@@ -2296,16 +2215,22 @@ export function updateTab(
  * depending on what an older build wrote into storage, and it is the one place
  * tab naming lives.
  */
-export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
+export function paneTabLabel(
+  layout: PaneLayout,
+  tab: PaneTab,
+  termTitle?: AdoptedTermTitle,
+): string {
   switch (tab.kind) {
     case "terminal":
       // A config-declared pane is named by its spec, not numbered among the
       // shells: "Claude" and "Terminal 2" are different things in one strip.
-      // `termTitle` is the title the process set via OSC 0/2 — written to the
-      // layout only when the pane is allowed to rename itself (a plain
-      // terminal always is; a config pane unless it declares `fixed_label`),
-      // so reaching for it here is safe without re-checking the flag.
-      return tab.termTitle || (tab.spec ? tab.title : terminalLabel(layout, tab.id));
+      // `termTitle` is the title the process set via OSC 0/2, read by the
+      // caller from the title store (`useTermTitle`) — it is not part of the
+      // layout, so that a title animating at 10 Hz does not re-render the app.
+      // The host only stores one when the pane is allowed to rename itself (a
+      // plain terminal always is; a config pane unless it declares
+      // `fixed_label`), so reaching for it here is safe without re-checking.
+      return termTitle || (tab.spec ? tab.title : terminalLabel(layout, tab.id));
     case "new":
       return "New pane";
     case "logs":
@@ -2385,11 +2310,7 @@ export function layoutSlotKey(slot: string): string {
 }
 
 export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
-  const persistable: Record<number, PaneLayout> = {};
-  for (const [key, layout] of Object.entries(layouts)) {
-    persistable[Number(key)] = layoutForPersistence(layout);
-  }
-  return JSON.stringify(persistable);
+  return JSON.stringify(layouts);
 }
 
 /** The two `getItem`/`setItem` calls this module needs, so tests can pass fakes

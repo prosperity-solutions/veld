@@ -56,6 +56,7 @@ import {
   setBellSuppressed,
   setPaneCloseHandler,
 } from "./panes/terminalHost";
+import { getTermTitle, subscribeTermTitle } from "./panes/termTitles";
 import { StartScreen } from "./promotions/StartScreen";
 import { usePromotions } from "./promotions/usePromotions";
 import { WhatsNewDialog } from "./promotions/WhatsNew";
@@ -234,7 +235,6 @@ import {
   addTab,
   addTabToFocused,
   adoptTabs,
-  adoptedTermTitle,
   allTabs,
   besideDock,
   browserIds,
@@ -261,7 +261,6 @@ import {
   newTabId,
   paneTakesPrompt,
   paneTabLabel,
-  tabForTransport,
   parseTransferTabs,
   revealDiagPane,
   saveLayouts,
@@ -324,8 +323,6 @@ import {
   applyTerminalTheme,
   onTerminalFilePath,
   onTerminalOpenUrl,
-  onTerminalTitleChange,
-  reannounceTerminalTitles,
   openExternally,
   pruneTerminals,
   noteExpectedResumes,
@@ -394,6 +391,7 @@ import {
   windowRestored,
   windowSeed,
 } from "./shell";
+import { keepIfEqual } from "./shared/keepIfEqual";
 import { POLL_MS, pollDue, pollOnShow } from "./shared/pollCadence";
 
 /**
@@ -1282,9 +1280,15 @@ function AppInner(props: {
         if (verdict === "refetch") continue;
         if (verdict === "apply") {
           repoApplied.current = ticket;
-          setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
+          // Patches first, then compare: a queued local patch that changes the
+          // list must not be mistaken for "the daemon said nothing new".
+          const patched = repoPatches.current.reduce((list, patch) => patch(list), repos);
+          setRepoList((cur) => keepIfEqual(cur, patched));
         }
-        setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+        // Compare the pruned value: the cut-off moves with the clock, so the raw
+        // response can be unchanged while what is stored is not (and vice versa).
+        const pruned = pruneRunHistory(environments, historyDays, new Date());
+        setEnvs((cur) => keepIfEqual(cur, pruned));
         break;
       }
       setOffline(false);
@@ -1292,7 +1296,8 @@ function AppInner(props: {
       setOffline(true);
     }
     try {
-      setDbHealth(await healthRequest);
+      const health = await healthRequest;
+      setDbHealth((cur) => keepIfEqual(cur, health));
     } catch {
       // Deliberately silent. The offline notice already covers a daemon that is
       // not answering at all, and a daemon too old for this endpoint is not a
@@ -1300,12 +1305,18 @@ function AppInner(props: {
     }
     if (!extras) return;
     const [sharesResult, statsResult] = await extras;
-    if (sharesResult.status === "fulfilled") setShares(sharesResult.value);
+    if (sharesResult.status === "fulfilled") {
+      const next = sharesResult.value;
+      setShares((cur) => keepIfEqual(cur, next));
+    }
     // Tracked, unlike stats: shares drive a *control* surface, and a panel that
     // says "nothing shared" from a read that never landed invites the user to
     // start a second share of a run that already has one.
     setSharesStale(sharesResult.status !== "fulfilled");
-    if (statsResult.status === "fulfilled") setStats(statsResult.value);
+    if (statsResult.status === "fulfilled") {
+      const next = statsResult.value;
+      setStats((cur) => keepIfEqual(cur, next));
+    }
   }, [wantRunState, historyDays]);
 
   // Tick counter, bumped per poll. Effects that must re-evaluate on a
@@ -1849,13 +1860,6 @@ function AppInner(props: {
         noteExpectedResumes(terminalIds(next));
         return { ...prev, [worktreeId]: next };
       });
-      // The adopted tab names do not travel with a layout — `parseTab` drops
-      // `termTitle` on purpose — so an external write would otherwise collapse a
-      // rail of agent panes back to four identical `label`s until each process
-      // retitled itself, which a tool that titles itself once at startup never
-      // does. The sessions still know their titles; queued after the adoption so
-      // it lands on top of it.
-      reannounceTerminalTitles();
     });
   }, []);
 
@@ -5009,31 +5013,12 @@ function AppInner(props: {
     [],
   );
 
-  // A shell set its own tab title (OSC 0/2). The host has already gated it on
-  // the pane allowing renaming (a plain terminal always may; a config pane
-  // unless it declares `fixed_label`), so the only judgement left here is
-  // `adoptedTermTitle`, which bounds and cleans the string — the payload is
-  // whatever a process wrote, and since the flip it reaches this tab by default
-  // rather than by a repo opting in. An empty result clears the field, which is
-  // how a fresh relaunch gets the tab back to its `label`. Keyed off the layouts
-  // so a shell in a worktree the user has switched away from still renames its
-  // own tab.
-  useEffect(
-    () =>
-      onTerminalTitleChange(({ sessionId, title }) => {
-        const termTitle = adoptedTermTitle(title);
-        setLayouts((prev) => {
-          for (const [key, l] of Object.entries(prev)) {
-            if (dockOf(l, sessionId) === null) continue;
-            const idx = Number(key);
-            const next = updateTab(prev[idx], sessionId, { termTitle });
-            return next === prev[idx] ? prev : { ...prev, [idx]: next };
-          }
-          return prev;
-        });
-      }),
-    [],
-  );
+  // A shell's own tab title (OSC 0/2) is deliberately *not* handled here: it
+  // goes from `terminalHost` straight into the per-session store in
+  // `panes/termTitles.ts`, and only the tab strip (and a detached window's
+  // title bar, below) subscribe to it. Routing it through `layouts` re-rendered
+  // this whole component and re-ran every `[layouts]` effect on each frame of a
+  // working agent's title animation.
 
   // A process asked to be noticed (OSC 9). This is the terminal ergonomics
   // surface, not a coding-agent dashboard: the notification names the worktree
@@ -5476,13 +5461,9 @@ function AppInner(props: {
     // nothing, which is the one thing closing a detached window must never do.
     if (activeWtKey !== "" && String(worktree.id) !== activeWtKey) return;
     void desktopWindow
-      // Stripped, like every other tab crossing into the shell: the snapshot is
-      // only ever handed back through `parseTransferTabs`, which drops
-      // `termTitle` anyway, and an unstripped one made every OSC title change a
-      // retained-snapshot IPC into the privileged process.
       .snapshot({
         worktreeId: worktree.id,
-        tabs: layout ? allTabs(layout).map(tabForTransport) : [],
+        tabs: layout ? allTabs(layout) : [],
       })
       .catch(() => {
         // The window can still be used; only the hand-back is lost, and the
@@ -5653,7 +5634,7 @@ function AppInner(props: {
       // of being reaped with the worktree like every other window's are.
       const ownId = Number(activeWtKey);
       const own = Number.isSafeInteger(ownId) ? layouts[ownId] : undefined;
-      const tabs = own ? allTabs(own).map(tabForTransport) : [];
+      const tabs = own ? allTabs(own) : [];
       if (tabs.length > 0) {
         void desktopWindow.snapshot({ worktreeId: ownId, tabs }).catch(() => {});
       }
@@ -5663,10 +5644,19 @@ function AppInner(props: {
     if (layout && allTabs(layout).length > 0) {
       heldTabs.current = true;
       const active = activeTab(layout, layout.focused);
-      const label = active ? paneTabLabel(layout, active) : "Veld";
-      const title = worktree ? `${label} — ${worktreeLabel(worktree)}` : label;
-      void desktopWindow.setTitle(title).catch(() => {});
-      return;
+      const win = desktopWindow;
+      const apply = () => {
+        // The terminal's own title is read from the store, not the layout, so a
+        // title animating at 10 Hz retitles the window without re-rendering the
+        // app (see `panes/termTitles.ts`).
+        const label = active ? paneTabLabel(layout, active, getTermTitle(active.id)) : "Veld";
+        const title = worktree ? `${label} — ${worktreeLabel(worktree)}` : label;
+        void win.setTitle(title).catch(() => {});
+      };
+      apply();
+      // Subscribe to just the focused session's title, directly rather than via
+      // React state: a title frame calls `apply` and nothing else.
+      return active?.kind === "terminal" ? subscribeTermTitle(active.id, apply) : undefined;
     }
     if (heldTabs.current) void desktopWindow.close().catch(() => {});
     // `display_name` alongside `alias`: the title renders `worktreeLabel`, so a
@@ -5763,7 +5753,7 @@ function AppInner(props: {
     const onDisk = readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
     const next = pruneSessionSets(onDisk, allWorktrees.map((w) => w.id));
     if (next !== onDisk) setSessionsRaw(serializeSessionRegistry(next));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs per poll result
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when the repo list changes (a poll with the same answer keeps its identity)
   }, [repoList]);
   const inUseEverywhere = () => sessionsInUse(Object.values(layouts));
   const retired = useMemo(

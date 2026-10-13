@@ -163,8 +163,9 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 ///
 /// **A closure, not a `bool`, and the difference is the whole race.** Phase 1
 /// below reaps orphans, and each reap is a `kill_process` with a 5-second SIGTERM
-/// budget — so a pass can spend seconds there. The health probe (300 s) and this
-/// pass (600 s) tick together, so on the pass that first coincides with detection
+/// budget — so a pass can spend seconds there. The health probe (300 s tick; its
+/// `quick_check` runs at startup and then hourly, or every tick while a fault is
+/// recorded) and this pass (600 s) tick together, so on the pass that first coincides with detection
 /// a `bool` evaluated at the top of `run_gc` answers "healthy" before the probe's
 /// blocking `quick_check` has recorded anything, and the pass then prunes and
 /// vacuums a file SQLite has called malformed. That is the measured 17 ms race

@@ -118,12 +118,38 @@ fn raise_fd_limit() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// A plain `fn main` so the runtime can depend on the mode.
+///
+/// - **Daemon**: the multi-thread runtime `#[tokio::main]` gave it. It has to stay
+///   that way: `offload` calls `Handle::current().block_on` from inside
+///   `spawn_blocking`, and the HTTP, WebSocket, monitor and sampler tasks all want
+///   real parallelism.
+/// - **`--pty-holder`**: a current-thread runtime. A holder pumps one PTY fd and one
+///   socket for a single terminal, and there is one holder process per terminal, so a
+///   worker thread per core (and its stack and allocator arenas) was paid N times for
+///   nothing. Everything it awaits is non-blocking I/O (`AsyncFd`, unix sockets,
+///   channels) plus a `spawn_blocking` for `child.wait()`, which runs on the blocking
+///   pool and works on any flavour. Nothing on the holder path may call
+///   `block_in_place` (it panics on a current-thread runtime) — there is none in the
+///   workspace today.
+fn main() -> Result<()> {
     // Parsed before tracing is initialised, because the mode decides where the
     // logs go — and parsing writes nothing.
     let args = parse_args();
 
+    let mut builder = if args.pty_holder {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    builder
+        .enable_all()
+        .build()
+        .context("failed to build the tokio runtime")?
+        .block_on(run(args))
+}
+
+async fn run(args: Args) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     if args.pty_holder {
@@ -315,8 +341,9 @@ async fn main() -> Result<()> {
 
     // Whether the database is still intact, and whether those backups are
     // actually happening. Its own task for the same reason the backup scheduler
-    // is: the interval is unrelated (a `quick_check` is cheap enough to run far
-    // more often than a backup is worth taking), and a probe that stopped
+    // is: the interval is unrelated (the probe ticks every five minutes for the
+    // backup deadman, running `quick_check` at startup and then hourly — every
+    // tick while a fault is recorded), and a probe that stopped
     // because the *backup* path failed would be a health check that goes quiet
     // exactly when it matters. See `dbhealth`'s module docs for the incident.
     // **Every `Db::open()` failure in this process now reports itself.** The
@@ -341,7 +368,9 @@ async fn main() -> Result<()> {
     // The user's login-shell PATH, kept warm on its own timer for the same
     // reason stats is: resolving it spawns a login shell (up to 10s on a stalled
     // rc file), and the request handlers that need it — stop/restart/action,
-    // Desktop's start, share start — must never pay that on a click.
+    // Desktop's start, share start — must never pay that on a click. The timer
+    // ticks every 20 s but spawns the shell only when a startup file changed or
+    // the last answer is five minutes old; see `user_path`'s module docs.
     let user_path_handle = tokio::spawn(veld_core::user_path::warm_user_path_cache());
 
     // Same reasoning, for the directory-scoped sibling: prime every already-

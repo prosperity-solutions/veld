@@ -47,10 +47,16 @@ export const TICK_SLACK_MS: number = POLL_MS / 2;
  * Visible ticks are gated too, not waved through: the catch-up poll on show
  * ({@link pollOnShow}) does not move the interval's phase, so without a gate the
  * next tick — often milliseconds later — would poll a second time.
+ *
+ * `tickMs` is the poll's own visible cadence (default: the main poll's). The
+ * smaller polls — logs every 2s, a watched file every 1s — share this decision
+ * through `gatedInterval` rather than each inventing a hidden rule.
  */
-export function pollDue(hidden: boolean, sinceLastMs: number): boolean {
-  const due = hidden ? HIDDEN_POLL_MS : POLL_MS;
-  return sinceLastMs >= due - TICK_SLACK_MS;
+export function pollDue(hidden: boolean, sinceLastMs: number, tickMs: number = POLL_MS): boolean {
+  const due = hidden ? HIDDEN_POLL_MS : tickMs;
+  // Slack is half of *this* poll's tick, not of the main poll's: a 1s poll with
+  // 2.5s of slack would skip every other tick.
+  return sinceLastMs >= due - tickMs / 2;
 }
 
 /**
@@ -61,6 +67,6 @@ export function pollDue(hidden: boolean, sinceLastMs: number): boolean {
  * seconds, but a window covered for a moment and uncovered again has nothing to
  * catch up on, and polling then would just double the next tick.
  */
-export function pollOnShow(sinceLastMs: number): boolean {
-  return sinceLastMs >= POLL_MS;
+export function pollOnShow(sinceLastMs: number, tickMs: number = POLL_MS): boolean {
+  return sinceLastMs >= tickMs;
 }

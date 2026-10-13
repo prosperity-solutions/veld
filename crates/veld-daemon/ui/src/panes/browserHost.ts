@@ -1711,9 +1711,22 @@ function pushGeometry(
  * `getBoundingClientRect` per visible pane per interval.
  */
 if (desktop) {
+  // Not while the document is hidden (minimised, on another desktop, covered): a
+  // hidden window's panes cannot be seen to be in the wrong place, and the walk is
+  // a layout read per visible pane every 400 ms for nobody. Nothing is lost by
+  // skipping — the tick resumes on its own the moment the document is shown, so
+  // the first tick after that re-reads the settled box; `visibilitychange` below
+  // just does it at once instead of up to 400 ms later; and a window regaining OS
+  // focus still re-asserts everything through `reassertVisibility`, which does not
+  // depend on this tick.
   window.setInterval(() => {
+    if (document.hidden) return;
     for (const v of views.values()) syncGeometry(v);
   }, 400);
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    for (const v of views.values()) syncGeometry(v);
+  });
   window.addEventListener("resize", () => {
     for (const v of views.values()) syncGeometry(v);
   });

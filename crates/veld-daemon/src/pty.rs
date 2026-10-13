@@ -114,6 +114,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
+use veld_core::agent::valid_session_id;
 
 use super::management::{check_csrf, open_db};
 use wire::HolderConfig;
@@ -334,9 +335,17 @@ const HOLDER_INPUT_CHANNEL: usize = 64;
 /// the kernel for an absurd winsize. Comfortably past any real display.
 const MAX_DIMENSION: u16 = 1000;
 
-/// Read buffer for PTY output. One page: big enough that a `cat` of a large
-/// file doesn't syscall per line, small enough to stay responsive.
-const READ_BUF: usize = 4096;
+/// Read buffer for PTY output, and so the cap on one drained OUTPUT frame (see
+/// `holder::pty_read`). 16 KiB: big enough that a burst of small writes from an
+/// animating TUI, or a `cat` of a large file, becomes one frame instead of one
+/// per write, small enough that one drain stays a short, fair slice of the
+/// holder's loop and far below `wire::MAX_PAYLOAD`.
+const READ_BUF: usize = 16 * 1024;
+
+/// Read-ahead buffer for the holder socket, on both ends. Frames are a 5-byte
+/// header plus a payload that is usually a few KiB; this holds several of them
+/// per `read(2)`.
+const HOLDER_READ_BUF: usize = 16 * 1024;
 
 /// Cap on a single WebSocket message. Comfortably past any realistic paste, and
 /// far below the 64 MiB the transport would otherwise buffer per frame.
@@ -849,16 +858,6 @@ impl Drop for SessionSlot {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-/// Session ids are client-chosen, so they are checked before being used as a
-/// map key or printed into a log line.
-fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// End a session: take it out of the registry and ask its holder to hang the
@@ -4983,10 +4982,97 @@ async fn adopt_one(path: &FsPath) -> bool {
     true
 }
 
+/// Largest batch the WebSocket sender builds from already-queued output chunks.
+///
+/// Soft: the chunk that crosses it is included whole, so a batch can overshoot by
+/// less than one chunk (the holder frames at most `READ_BUF`). Past this size
+/// another chunk saves almost nothing per byte and only delays the first of them.
+const WS_COALESCE_MAX: usize = 64 * 1024;
+
+/// What [`coalesce_output`] collected.
+#[derive(Debug)]
+struct Coalesced {
+    /// Everything taken, in order, to be sent as one binary message.
+    bytes: Bytes,
+    /// Set when the drain hit a gap: the receiver fell behind and this many
+    /// chunks are gone. The caller sends `bytes` first, **then** `Lagged` — the
+    /// bytes are the ones that preceded the gap, and the client must not be told
+    /// its screen is missing output before it has the output that is not.
+    lagged: Option<u64>,
+}
+
+/// Starting from a chunk `recv` just returned, take whatever is *already queued*
+/// behind it (never waiting) so one WebSocket message carries it all.
+///
+/// Every output chunk used to be its own message: a send, a flush and a browser
+/// `onmessage` apiece, which for ten animating sessions is hundreds a second. The
+/// client treats a binary message as an opaque byte run for `term.write` — there
+/// is no per-chunk framing or offset in it, and the replay on attach is already
+/// one large message — so concatenation changes nothing it can observe.
+///
+/// A single chunk is returned as it came, uncopied. `Empty` and `Closed` end the
+/// drain normally (the loop's own `recv` reports a close); `Lagged` ends it with
+/// the count in [`Coalesced::lagged`], so it is reported exactly as `recv`
+/// reports it.
+fn coalesce_output(first: Bytes, rx: &mut broadcast::Receiver<Bytes>) -> Coalesced {
+    use broadcast::error::TryRecvError;
+
+    if first.len() >= WS_COALESCE_MAX {
+        return Coalesced {
+            bytes: first,
+            lagged: None,
+        };
+    }
+    let mut next = match rx.try_recv() {
+        Ok(chunk) => chunk,
+        Err(TryRecvError::Lagged(n)) => {
+            return Coalesced {
+                bytes: first,
+                lagged: Some(n),
+            };
+        }
+        Err(TryRecvError::Empty | TryRecvError::Closed) => {
+            return Coalesced {
+                bytes: first,
+                lagged: None,
+            };
+        }
+    };
+    let mut batch = Vec::with_capacity((first.len() + next.len()).max(READ_BUF));
+    batch.extend_from_slice(&first);
+    let mut lagged = None;
+    loop {
+        batch.extend_from_slice(&next);
+        if batch.len() >= WS_COALESCE_MAX {
+            break;
+        }
+        next = match rx.try_recv() {
+            Ok(chunk) => chunk,
+            Err(TryRecvError::Lagged(n)) => {
+                lagged = Some(n);
+                break;
+            }
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        };
+    }
+    Coalesced {
+        bytes: batch.into(),
+        lagged,
+    }
+}
+
 /// Drain the holder connection for the session's whole life, feeding the mirror
 /// and any attached socket, then record the shell's exit status.
-async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
+async fn pump_holder(session: Arc<Session>, reader: OwnedReadHalf) {
     let pid = session.pid;
+    // Buffered here, once, for the whole loop: `read_frame` is two `read_exact`s
+    // per frame, which unbuffered is two `read(2)`s. The buffer must be created
+    // *after* the handshake (which read the greeting unbuffered, so nothing past
+    // the SCROLLBACK frame was swallowed) and must outlive every read_frame call
+    // — a fresh one per frame would drop whatever it had read ahead and desync.
+    // It is never wrapped in a `select!`/timeout: `read_exact` is not
+    // cancel-safe, and that does not change by buffering it.
+    let mut reader = tokio::io::BufReader::with_capacity(HOLDER_READ_BUF, reader);
     loop {
         let frame = match wire::read_frame(&mut reader).await {
             Ok(Some(frame)) => frame,
@@ -5463,8 +5549,19 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         tokio::select! {
             chunk = output.recv() => match chunk {
                 Ok(bytes) => {
+                    // One WebSocket message for however much is already queued,
+                    // not one per chunk — see `coalesce_output`.
+                    let Coalesced { bytes, lagged } = coalesce_output(bytes, &mut output);
                     if ws_tx.send(Message::Binary(bytes)).await.is_err() {
                         break;
+                    }
+                    // After the batch, never instead of it: the bytes above are
+                    // the ones that preceded the gap.
+                    if let Some(n) = lagged {
+                        warn!(session = %session.id, dropped = n, "terminal client fell behind");
+                        if ws_tx.send(ServerControl::Lagged.frame()).await.is_err() {
+                            break;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -5495,9 +5592,27 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                 if let Some(code) = exited {
                     // Let the pump's last chunks through before the notice.
                     tokio::time::sleep(EXIT_DRAIN).await;
-                    while let Ok(bytes) = output.try_recv() {
-                        if ws_tx.send(Message::Binary(bytes)).await.is_err() {
-                            break;
+                    loop {
+                        let (bytes, lagged) = match output.try_recv() {
+                            Ok(first) => {
+                                let Coalesced { bytes, lagged } = coalesce_output(first, &mut output);
+                                (Some(bytes), lagged)
+                            }
+                            // A gap is reported, as it is in the live arm, and the
+                            // drain carries on from the oldest chunk still held.
+                            Err(broadcast::error::TryRecvError::Lagged(n)) => (None, Some(n)),
+                            Err(_) => break,
+                        };
+                        if let Some(bytes) = bytes {
+                            if ws_tx.send(Message::Binary(bytes)).await.is_err() {
+                                break;
+                            }
+                        }
+                        if let Some(n) = lagged {
+                            warn!(session = %session.id, dropped = n, "terminal client fell behind");
+                            if ws_tx.send(ServerControl::Lagged.frame()).await.is_err() {
+                                break;
+                            }
                         }
                     }
                     // `select!` is unbiased, so a socket that was busy sending
@@ -5703,6 +5818,84 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn queued_output_chunks_leave_as_one_message_in_order() {
+        use super::{Bytes, broadcast, coalesce_output};
+        let (tx, mut rx) = broadcast::channel::<Bytes>(16);
+        for c in ["one ", "two ", "three"] {
+            tx.send(Bytes::from(c)).unwrap();
+        }
+        let first = rx.try_recv().unwrap();
+        let got = coalesce_output(first, &mut rx);
+        assert_eq!(&got.bytes[..], b"one two three");
+        assert_eq!(got.lagged, None);
+        // Nothing was left behind, and an empty queue ends the drain.
+        assert!(rx.try_recv().is_err());
+
+        // A lone chunk comes back as is.
+        tx.send(Bytes::from("solo")).unwrap();
+        let first = rx.try_recv().unwrap();
+        let got = coalesce_output(first, &mut rx);
+        assert_eq!(&got.bytes[..], b"solo");
+        assert_eq!(got.lagged, None);
+    }
+
+    #[test]
+    fn coalescing_stops_at_the_cap_and_leaves_the_rest_queued() {
+        use super::{Bytes, WS_COALESCE_MAX, broadcast, coalesce_output};
+        let chunk = 16 * 1024;
+        let (tx, mut rx) = broadcast::channel::<Bytes>(64);
+        // Ten chunks of 16 KiB = 160 KiB queued.
+        for i in 0..10u8 {
+            tx.send(Bytes::from(vec![i; chunk])).unwrap();
+        }
+        let first = rx.try_recv().unwrap();
+        let got = coalesce_output(first, &mut rx);
+        // The cap is soft by less than one chunk; with 16 KiB chunks it lands on
+        // it exactly: chunks 0..4 are in, chunk 4 is not.
+        assert_eq!(got.bytes.len(), WS_COALESCE_MAX);
+        assert!(got.bytes.len() < WS_COALESCE_MAX + chunk);
+        // Order is preserved across the boundaries.
+        for (i, window) in got.bytes.chunks(chunk).enumerate() {
+            assert!(
+                window.iter().all(|b| *b == i as u8),
+                "chunk {i} out of order"
+            );
+        }
+        // The remainder is still queued, in order, for the next message.
+        let next = rx.try_recv().unwrap();
+        assert_eq!(next[0], 4);
+
+        // A chunk already at the cap is not copied and drains nothing.
+        let (tx, mut rx) = broadcast::channel::<Bytes>(4);
+        tx.send(Bytes::from("later")).unwrap();
+        let got = coalesce_output(Bytes::from(vec![0u8; WS_COALESCE_MAX]), &mut rx);
+        assert_eq!(got.bytes.len(), WS_COALESCE_MAX);
+        assert_eq!(&rx.try_recv().unwrap()[..], b"later");
+    }
+
+    #[test]
+    fn a_lag_found_while_coalescing_is_reported_after_the_batch_not_swallowed() {
+        use super::{Bytes, broadcast, coalesce_output};
+        // Capacity 2: after `a` is taken, sending b, c, d overwrites b.
+        let (tx, mut rx) = broadcast::channel::<Bytes>(2);
+        tx.send(Bytes::from("a")).unwrap();
+        let first = rx.try_recv().unwrap();
+        for c in ["b", "c", "d"] {
+            tx.send(Bytes::from(c)).unwrap();
+        }
+        let got = coalesce_output(first, &mut rx);
+        // `a` is flushed on its own and the gap is surfaced for the caller to
+        // report; nothing is silently dropped or mislabelled.
+        assert_eq!(&got.bytes[..], b"a");
+        assert_eq!(got.lagged, Some(1));
+        // The receiver resumes at the oldest chunk still held, in order.
+        let first = rx.try_recv().unwrap();
+        let got = coalesce_output(first, &mut rx);
+        assert_eq!(&got.bytes[..], b"cd");
+        assert_eq!(got.lagged, None);
+    }
+
     #[test]
     fn only_the_handoffs_own_session_moves_it_on() {
         use super::{HandoffStep, handoff_step};

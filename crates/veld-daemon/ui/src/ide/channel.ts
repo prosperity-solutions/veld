@@ -153,6 +153,16 @@ interface Handlers {
   onClosed(): void;
 }
 
+/** Whether two id lists name the same set — the daemon's view of both `holds`
+ *  and `keep`, so a reorder or a repeated id is not a change. */
+function sameSet<T>(a: readonly T[], b: readonly T[]): boolean {
+  const left = new Set(a);
+  const right = new Set(b);
+  if (left.size !== right.size) return false;
+  for (const x of left) if (!right.has(x)) return false;
+  return true;
+}
+
 /**
  * The control socket.
  *
@@ -175,6 +185,16 @@ class Channel {
    *  more at stake: until it is back, the daemon believes nobody has these panes
    *  and its reaper is free to hang the shells up. See [`keep`]. */
   private kept: string[] = [];
+  /** What the daemon is known to hold for this client right now — the last
+   *  `holds` / `keep` frame actually written to the open socket. The dedupe key:
+   *  a call whose set equals it says nothing new, and the app's `[layouts]`
+   *  effects make that call constantly. Deliberately **not** `held` / `kept`
+   *  (what a reconnect resends): [`forget`] edits `held` without the daemon
+   *  necessarily having followed, and `null` — "unknown" — is how it makes the
+   *  next `holds` send regardless. Reset to what the handshake resent on every
+   *  open, because the daemon's copy died with the old socket. */
+  private heldSent: number[] | null = null;
+  private keptSent: string[] | null = null;
   private kind: ClientKind = "browser";
   private label = "";
   private started = false;
@@ -263,6 +283,9 @@ class Channel {
       if (this.held.length > 0) {
         ws.send(JSON.stringify({ type: "holds", worktree_ids: this.held }));
       }
+      // A fresh daemon-side client starts empty, so after this the daemon's copy
+      // is exactly `held` whether or not a frame was needed to say so.
+      this.heldSent = [...this.held];
       // And re-declare the shells. The daemon dropped this client's set with the
       // old socket, so between the drop and this frame its reaper counts these
       // panes as belonging to nobody — a daemon restart is precisely when they
@@ -271,6 +294,7 @@ class Channel {
       if (this.kept.length > 0) {
         ws.send(JSON.stringify({ type: "keep", session_ids: this.kept }));
       }
+      this.keptSent = [...this.kept];
     };
 
     ws.onmessage = (ev) => {
@@ -416,9 +440,13 @@ class Channel {
     }
   }
 
-  private send(payload: Record<string, unknown>): void {
-    if (this.ws?.readyState !== WebSocket.OPEN) return;
+  /** Whether the frame was actually written — `false` when there is no open
+   *  socket, which is what stops a dedupe key being recorded for a frame the
+   *  daemon never saw. */
+  private send(payload: Record<string, unknown>): boolean {
+    if (this.ws?.readyState !== WebSocket.OPEN) return false;
     this.ws.send(JSON.stringify(payload));
+    return true;
   }
 
   private scheduleRetry(): void {
@@ -486,7 +514,10 @@ class Channel {
   /** Which worktrees this page has panes mounted for. */
   holds(worktreeIds: number[]): void {
     this.held = worktreeIds;
-    this.send({ type: "holds", worktree_ids: worktreeIds });
+    // The daemon replaces its set outright, so repeating it is a no-op there and
+    // a frame here. Order-insensitive: the daemon keeps a `HashSet`.
+    if (this.heldSent !== null && sameSet(this.heldSent, worktreeIds)) return;
+    if (this.send({ type: "holds", worktree_ids: worktreeIds })) this.heldSent = [...worktreeIds];
   }
 
   /**
@@ -505,7 +536,9 @@ class Channel {
    */
   keep(sessionIds: string[]): void {
     this.kept = sessionIds;
-    this.send({ type: "keep", session_ids: sessionIds });
+    // Same dedupe as `holds`: a state replacement the daemon keeps as a set.
+    if (this.keptSent !== null && sameSet(this.keptSent, sessionIds)) return;
+    if (this.send({ type: "keep", session_ids: sessionIds })) this.keptSent = [...sessionIds];
   }
 
   /**
@@ -530,6 +563,9 @@ class Channel {
   forget(worktreeIds: number[]): void {
     if (worktreeIds.length === 0) return;
     this.held = this.held.filter((id) => !worktreeIds.includes(id));
+    // The daemon only drops the ids it verifies are gone, so what it holds for us
+    // is no longer known to equal `held`: make the next `holds` say so again.
+    this.heldSent = null;
     this.send({ type: "forget", worktree_ids: worktreeIds });
   }
 }

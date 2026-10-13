@@ -16,6 +16,7 @@ import {
 import { EnvCard } from "./EnvCard";
 import { JoinRequestRow, runOfShare } from "../shared/Sharing";
 import { countHidden, hiddenByHorizon, pruneRunHistory } from "../shared/runHistory";
+import { gatedInterval } from "../shared/gatedInterval";
 import { notifyError } from "../shared/notify";
 import type { LogTimeZone } from "../shared/settings";
 import { confirmedUnattached, unattachedShareIds } from "../shared/util";
@@ -86,8 +87,9 @@ export function RunsMode(props: { modeSwitch: ReactNode;
 
   useEffect(() => {
     void refresh();
-    const t = window.setInterval(() => void refresh(), 3000);
-    return () => window.clearInterval(t);
+    // Gated: a hidden window polls at the hidden cadence and catches up on show
+    // (`shared/pollCadence`), instead of asking the daemon every 3s for nobody.
+    return gatedInterval(() => void refresh(), 3000);
   }, [refresh]);
 
   useEffect(() => {
@@ -99,8 +101,7 @@ export function RunsMode(props: { modeSwitch: ReactNode;
       }
     };
     void tick();
-    const t = window.setInterval(() => void tick(), 5000);
-    return () => window.clearInterval(t);
+    return gatedInterval(() => void tick(), 5000);
   }, []);
 
   /** A share mutation from this panel: report a failure, then re-poll. Without

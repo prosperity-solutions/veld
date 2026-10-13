@@ -56,6 +56,7 @@ const {
   serializeWindowList,
   slotFor,
 } = require("./windowState");
+const { focusGatedInterval } = require("./focusPoll");
 
 /**
  * @typedef {object} WindowRecord
@@ -660,15 +661,18 @@ function boundsOnScreen(bounds) {
  * window restored on a per-origin remembered zoom never fires anything. A short
  * poll that repositions when the factor *moved* is the one mechanism that
  * catches all of them. `getZoomFactor()` is a synchronous read of a cached
- * value — a few hundred per second across every window is noise next to the
- * 16ms cursor poll this file already runs.
+ * value, and the poll runs only while its window is focused (`focusGatedInterval`),
+ * so it is ten reads a second at most — noise next to the 16ms cursor poll this
+ * file already runs.
  */
 const ZOOM_POLL_MS = 100;
 // The rate: Chromium animates wheel zoom over roughly a couple of frames, so
 // 100ms repositions the lights mid-gesture instead of snapping at the end,
-// while staying cheap enough to run for the lifetime of the window. There is
+// while staying cheap enough to run whenever the window is focused. There is
 // nothing more to it than that — it is a latency/cheapness balance, not a
 // measured value.
+
+// Returns whether the factor moved since the last sync.
 function syncTrafficLights(record) {
   const win = record.win;
   // `setWindowButtonPosition` exists on every platform but only does anything
@@ -677,7 +681,7 @@ function syncTrafficLights(record) {
   // window down with it; the position is cosmetic on the other platforms anyway.
   if (win.isDestroyed() || typeof win.setWindowButtonPosition !== "function") return;
   const zoom = win.webContents.getZoomFactor();
-  if (zoom === record.trafficZoom) return;
+  if (zoom === record.trafficZoom) return false;
   record.trafficZoom = zoom;
   win.setWindowButtonPosition({
     x: 13,
@@ -689,6 +693,7 @@ function syncTrafficLights(record) {
   // `styles.css`. Sent only when the factor moved, which is exactly when the
   // CSS inset has to move to hold its DIP width.
   win.webContents.send("veld:window:zoom", { zoom });
+  return true;
 }
 
 /**
@@ -874,8 +879,23 @@ function openWindow(options = {}) {
   // rather than an event, and why the `did-finish-load` sync is a backstop for
   // the per-origin zoom a window can be restored at.
   if (!detached) {
-    const zoomTimer = setInterval(() => syncTrafficLights(record), ZOOM_POLL_MS);
-    win.on("closed", () => clearInterval(zoomTimer));
+    // Only while this window has focus: a background window has nobody zooming
+    // it, and ten reads a second per window for nothing adds up with several open.
+    // Focus restarts the poll and syncs at once, which catches a zoom changed
+    // while the window was in the background (a wheel zoom, say). Chromium's zoom
+    // is per origin and every main window shares one, so a change seen here has
+    // zoomed the unfocused main windows too: they are re-synced with it.
+    const stopZoomPoll = focusGatedInterval(
+      win,
+      () => {
+        if (!syncTrafficLights(record)) return;
+        for (const other of allRecords()) {
+          if (other !== record && other.kind === "main") syncTrafficLights(other);
+        }
+      },
+      ZOOM_POLL_MS,
+    );
+    win.on("closed", stopZoomPoll);
     win.webContents.on("did-finish-load", () => syncTrafficLights(record));
   }
 

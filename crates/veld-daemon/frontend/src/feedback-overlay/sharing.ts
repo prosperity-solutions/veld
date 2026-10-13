@@ -90,6 +90,33 @@ export function pollShareStatus(): void {
     });
 }
 
+/**
+ * Keep the share status fresh on a timer — but only while this tab is visible.
+ *
+ * The share dot is for a person looking at the page, so a background tab has no
+ * use for the answer; with several dev tabs open the flat 5 s poll was a request
+ * per tab per tick for nobody. Showing the tab again polls at once, so the dot is
+ * right by the time anyone sees it rather than up to a tick later.
+ *
+ * Deliberately only this poll: `pollEvents` and `pollListenStatus` stay
+ * ungated, because a background tab is exactly where an agent's reply should
+ * raise a notification. Direct `pollShareStatus()` calls (right after a start or
+ * stop) are not gated either — they follow a click.
+ */
+export function startSharePolling(intervalMs = 5000): () => void {
+  const timer = setInterval(() => {
+    if (!document.hidden) pollShareStatus();
+  }, intervalMs);
+  const onVisibility = () => {
+    if (!document.hidden) pollShareStatus();
+  };
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    clearInterval(timer);
+    document.removeEventListener("visibilitychange", onVisibility);
+  };
+}
+
 async function startSharing(): Promise<void> {
   if (busy) return;
   busy = true;

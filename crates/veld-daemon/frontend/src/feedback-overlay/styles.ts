@@ -83,19 +83,29 @@ export const LIGHT_CSS = `
   z-index: 999998;
   pointer-events: none;
 }
-.veld-feedback-screenshot-frame-show {
+.veld-feedback-screenshot-frame-show { display: block; }
+/* The pulsing accent glow around the frozen frame. It used to be a keyframed
+   box-shadow on the frame itself, re-painted every frame the whole time a
+   screenshot was being framed. Now the shadow is static, drawn once on a sibling
+   (an <img> cannot have a pseudo-element), and only its opacity animates, which
+   the compositor does without repainting. The glow is drawn at its strongest and
+   faded down to ~70%, where the old 42%-to-58% shadow pulse spent its time. The
+   sibling is sized like the frame by repositionFrozenFrame() and sits under it. */
+.veld-feedback-screenshot-frame-glow {
+  position: fixed;
+  display: none;
+  border-radius: 8px;
+  box-shadow: 0 0 20px 4px color-mix(in srgb, var(--vfl-accent) 58%, transparent);
+  z-index: 999998;
+  pointer-events: none;
+}
+.veld-feedback-screenshot-frame-glow-show {
   display: block;
   animation: veld-feedback-frame-glow 1.4s ease-in-out infinite;
 }
 @keyframes veld-feedback-frame-glow {
-  0%, 100% {
-    box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.35),
-      0 0 12px 2px color-mix(in srgb, var(--vfl-accent) 42%, transparent);
-  }
-  50% {
-    box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.35),
-      0 0 20px 4px color-mix(in srgb, var(--vfl-accent) 58%, transparent);
-  }
+  0%, 100% { opacity: .7; }
+  50% { opacity: 1; }
 }
 .veld-feedback-hover-outline {
   position: absolute;

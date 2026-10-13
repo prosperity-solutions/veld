@@ -273,9 +273,24 @@ fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
     out
 }
 
-/// Load a project's root config for action lookup. Returns `None` if the
-/// project has no readable config — the dashboard then simply shows no actions.
+/// Load a project's root config for the `/api/environments` listing. Returns
+/// `None` if the project has no readable config — the dashboard then simply
+/// shows no actions.
+///
+/// Read through the stat-validated [`config_cache`](crate::feedback_server::config_cache)
+/// rather than parsed fresh: this runs for every registry entry on every poll,
+/// and a fresh parse is an include-glob walk, a JSONC strip, a hash and a serde
+/// pass per project. Display-only — see [`load_project_config_fresh`] for the
+/// caller that acts on the result.
 fn load_project_config(project_root: &std::path::Path) -> Option<config::VeldConfig> {
+    crate::feedback_server::config_cache::parse_config(&config::root_config_in(project_root)?)
+}
+
+/// [`load_project_config`] parsed fresh, for the one path that *acts* on the
+/// config (deciding whether an action may be spawned). One parse per explicit
+/// request, so the cache buys nothing there and a fresh read keeps "never act on
+/// a config that has changed" trivially true.
+fn load_project_config_fresh(project_root: &std::path::Path) -> Option<config::VeldConfig> {
     config::parse_config(&config::root_config_in(project_root)?).ok()
 }
 
@@ -1423,7 +1438,7 @@ async fn run_action(
     };
 
     // Only spawn actions that actually exist in the project's config.
-    let cfg = load_project_config(&project_root);
+    let cfg = load_project_config_fresh(&project_root);
     // Confirm the action name is configured on some node (the CLI re-validates
     // the optional --node filter and output availability when it runs).
     let action_defined = cfg
@@ -1717,7 +1732,7 @@ pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) 
     // and a directory-agnostic global PATH cannot represent — one project
     // starting with another's Node version, or the daemon's own bare
     // launchd-cwd PATH, was the top-bar/terminal-pane divergence this
-    // resolves. Still cached (`PATH_WARM_INTERVAL`, keyed per directory) so a
+    // resolves. Still cached (`DIR_PATH_TTL`, keyed per directory) so a
     // stalled rc file doesn't hang the click for the full 10s resolution
     // budget on every one of the stop/restart/action/start handlers this
     // backs.

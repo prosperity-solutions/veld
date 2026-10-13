@@ -329,7 +329,8 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     // `child.wait()` is blocking; on the pool it both reaps the zombie and
     // yields the status.
     let mut waiter = tokio::task::spawn_blocking(move || child.wait());
-    let mut buf = [0u8; READ_BUF];
+    // Heap, not stack: this lives in the loop's future for the process's life.
+    let mut buf = vec![0u8; READ_BUF];
     // Placeholder deadline: the branch is disabled until the shell exits and the
     // timer is reset at that moment, so this duration never fires.
     let drain = tokio::time::sleep(Duration::from_secs(3600));
@@ -1059,10 +1060,14 @@ async fn pump_writer(
 
 /// Decode the daemon's frames into [`Cmd`]s until the connection ends.
 async fn pump_reader(
-    mut reader: tokio::net::unix::OwnedReadHalf,
+    reader: tokio::net::unix::OwnedReadHalf,
     generation: u64,
     tx: mpsc::Sender<Cmd>,
 ) {
+    // Buffered once for the connection's life, after the greeting exchange (which
+    // this half never read). Same rules as the daemon's `pump_holder`: one
+    // buffer, never recreated per frame, never under a timeout.
+    let mut reader = tokio::io::BufReader::with_capacity(super::HOLDER_READ_BUF, reader);
     loop {
         match wire::read_frame(&mut reader).await {
             Ok(Some(frame)) => {
@@ -1334,18 +1339,45 @@ fn async_dup(raw: RawFd) -> anyhow::Result<AsyncFd<File>> {
     Ok(AsyncFd::new(File::from(owned))?)
 }
 
-/// Read PTY output, waiting for readiness. `Ok(0)` means hangup.
+/// Read PTY output, waiting for readiness, and drain what is already queued.
+/// `Ok(0)` means hangup.
+///
+/// After the first successful read this keeps reading — without waiting — until
+/// the descriptor reports `WouldBlock` or `buf` is full, and returns everything
+/// as one chunk. A busy TUI (an animating Claude Code session) emits many small
+/// writes back to back, and each chunk costs a frame, two socket writes and a
+/// wakeup on every hop after this one; reading them together turns that into one
+/// of each.
+///
+/// Anything that is not more data ends the drain **without being reported**: a
+/// hangup (`Ok(0)`, or `EIO` on Linux) or an error after some bytes must not
+/// discard those bytes, so they are returned first. The condition is persistent
+/// — the next call reads it again and reports it then.
 async fn pty_read(fd: &AsyncFd<File>, buf: &mut [u8]) -> std::io::Result<usize> {
     loop {
         let mut guard = fd.readable().await?;
-        match guard.try_io(|inner| {
+        let mut filled = match guard.try_io(|inner| {
             let mut file = inner.get_ref();
             file.read(buf)
         }) {
-            Ok(result) => return result,
+            Ok(Ok(n)) if n > 0 => n,
+            // Hangup, or an error with nothing accumulated: report as is.
+            Ok(other) => return other,
             // Readiness was stale; wait for it again.
             Err(_would_block) => continue,
+        };
+        while filled < buf.len() {
+            match guard.try_io(|inner| {
+                let mut file = inner.get_ref();
+                file.read(&mut buf[filled..])
+            }) {
+                Ok(Ok(n)) if n > 0 => filled += n,
+                // Hangup, error or `WouldBlock` (which `try_io` has already
+                // turned into readiness-cleared): deliver what we have.
+                _ => break,
+            }
         }
+        return Ok(filled);
     }
 }
 
@@ -1430,6 +1462,72 @@ fn signal_group(pid: i32, sig: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A non-blocking pipe standing in for the PTY master: same `AsyncFd<File>`
+    /// plumbing, same `WouldBlock`/EOF semantics, and it can be written to and
+    /// hung up from the test.
+    fn pipe() -> (AsyncFd<File>, File) {
+        let mut fds = [0 as RawFd; 2];
+        // SAFETY: `fds` is a valid two-element array.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        let reader = async_dup(fds[0]).unwrap();
+        // SAFETY: `fds[0]` is the original descriptor, still open and owned here;
+        // `async_dup` made its own duplicate. `fds[1]` is a fresh descriptor with
+        // no other owner.
+        unsafe { libc::close(fds[0]) };
+        let writer = unsafe { File::from_raw_fd(fds[1]) };
+        (reader, writer)
+    }
+
+    #[tokio::test]
+    async fn a_burst_of_small_writes_is_read_as_one_chunk() {
+        let (fd, mut w) = pipe();
+        for piece in ["frame 1 ", "frame 2 ", "frame 3"] {
+            w.write_all(piece.as_bytes()).unwrap();
+        }
+        let mut buf = vec![0u8; READ_BUF];
+        let n = pty_read(&fd, &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"frame 1 frame 2 frame 3");
+        // Drained to WouldBlock: nothing is ready, so the next read waits.
+        let again = tokio::time::timeout(Duration::from_millis(100), pty_read(&fd, &mut buf)).await;
+        assert!(again.is_err(), "nothing more was queued");
+    }
+
+    #[tokio::test]
+    async fn a_drain_stops_at_the_buffer_and_the_rest_comes_next() {
+        let (fd, mut w) = pipe();
+        let data: Vec<u8> = (0..40_000u32).map(|i| (i % 251) as u8).collect();
+        w.write_all(&data).unwrap();
+        let mut buf = vec![0u8; READ_BUF];
+        let mut got = Vec::new();
+        let mut reads = 0;
+        while got.len() < data.len() {
+            let n = pty_read(&fd, &mut buf).await.unwrap();
+            assert!(n <= READ_BUF);
+            // Full buffers while more is queued: 16 KiB, 16 KiB, then the rest.
+            if got.len() + n < data.len() {
+                assert_eq!(n, READ_BUF, "a drain must fill the buffer if it can");
+            }
+            got.extend_from_slice(&buf[..n]);
+            reads += 1;
+        }
+        assert_eq!(got, data, "order and content preserved across chunks");
+        assert_eq!(reads, 3);
+    }
+
+    #[tokio::test]
+    async fn data_followed_by_a_hangup_is_delivered_before_the_hangup() {
+        let (fd, mut w) = pipe();
+        w.write_all(b"last words").unwrap();
+        drop(w);
+        let mut buf = vec![0u8; READ_BUF];
+        // The bytes first — the EOF seen inside the drain must not eat them.
+        let n = pty_read(&fd, &mut buf).await.unwrap();
+        assert_eq!(&buf[..n], b"last words");
+        // And the hangup is reported on the next call, not lost.
+        assert_eq!(pty_read(&fd, &mut buf).await.unwrap(), 0);
+        assert_eq!(pty_read(&fd, &mut buf).await.unwrap(), 0);
+    }
 
     /// Losing a daemon after the orphan grace has *already elapsed while
     /// attached* must start a fresh grace, not hang up immediately.

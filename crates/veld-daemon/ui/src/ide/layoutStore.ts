@@ -23,7 +23,7 @@
  */
 
 import { api } from "../api";
-import { allTabs, layoutForPersistence, parseLayout, type PaneLayout } from "../panes/model";
+import { allTabs, parseLayout, type PaneLayout } from "../panes/model";
 import { channel } from "./channel";
 
 /**
@@ -273,17 +273,12 @@ export async function refreshLayout(worktreeId: number): Promise<void> {
  * including ones that only touched a different worktree.
  */
 export function writeLayout(worktreeId: number, layout: PaneLayout): void {
-  // What gets stored, not what is on screen: `layoutForPersistence` drops the
-  // fields `parseTab` will not read back. That makes the dedupe below answer the
-  // right question — a terminal renaming itself is not a layout change — so a
-  // tool with a live title costs no `PUT`, no SQLite transaction and no
-  // `layout_changed` broadcast. (It still costs the `keep` frame the app sends
-  // on every `layouts` change; that one is not this function's to collapse.)
-  // See `layoutForPersistence`'s own doc comment.
-  const persistable = layoutForPersistence(layout);
-  const serialized = JSON.stringify(persistable);
+  // A terminal renaming itself is not a layout change, and structurally cannot
+  // be: the title lives in `panes/termTitles.ts`, not on the tab. (The app's
+  // `[layouts]` effects, including the `keep` frame, no longer run for it either.)
+  const serialized = JSON.stringify(layout);
   if (written.get(worktreeId) === serialized) return;
-  queued.set(worktreeId, persistable);
+  queued.set(worktreeId, layout);
   const existing = timers.get(worktreeId);
   if (existing) clearTimeout(existing);
   timers.set(

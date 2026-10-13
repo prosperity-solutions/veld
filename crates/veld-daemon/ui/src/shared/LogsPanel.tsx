@@ -10,6 +10,7 @@ import {
   useComputedColorScheme,
 } from "@mantine/core";
 import { api, type HistoryEntry, type LogResponse, type RunRef } from "../api";
+import { gatedInterval } from "./gatedInterval";
 import { extractMsg, extractTs, fmtTs, fmtTsFull, fmtWhen, nodeColor } from "./util";
 import type { LogTimeZone } from "./settings";
 import { ansiCss, markAnsiSpans, parseAnsi, type AnsiSpan } from "./ansi";
@@ -103,10 +104,12 @@ export function LogsPanel(props: {
       }
     };
     void fetchLogs();
-    const t = window.setInterval(() => void fetchLogs(), 2000);
+    // Gated like the main poll: nobody reads a log in a hidden window, and the
+    // catch-up on show means it is current by the time they do.
+    const stop = gatedInterval(() => void fetchLogs(), 2000);
     return () => {
       cancelled = true;
-      window.clearInterval(t);
+      stop();
     };
     // Scalar deps only — see the note on the effect above.
   }, [
