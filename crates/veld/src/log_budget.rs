@@ -25,14 +25,14 @@
 //!   loop's output is the fatal error that `veld start` and the orchestrator show the
 //!   user. Keeping it costs at most [`SHED_TAIL_LINES`] rows per burst. A tail is kept
 //!   only while it *is* the end: once a later line is admitted, the tail is discarded
-//!   ([`RateShed::discard_tail`]), because every log reader orders by row id, and rows
-//!   written back after newer ones would read as the run's latest output.
+//!   ([`LogGate::offer`]), because every log reader orders by row id, and rows written
+//!   back after newer ones would read as the run's latest output.
 //!
 //! There is deliberately no de-duplication: identical lines are dropped or kept by the
 //! budget alone, so what is stored is always a real prefix of what the node printed.
 //!
-//! The reader thread never waits on any of this: [`TokenBucket::try_take`] is
-//! arithmetic, [`RateShed::record`] is a brief uncontended lock.
+//! The reader thread never waits on any of this: [`LogGate::offer`] is arithmetic,
+//! plus a brief uncontended lock on [`RateShed`] only around a shed burst.
 //!
 //! Foreground ingest (`veld_core::process`'s `LineAssembler`/`LogTarget`, used by `veld
 //! start` without `--detach` and by one-shot runs) is **not** covered; it has the same
@@ -116,6 +116,39 @@ impl TokenBucket {
     }
 }
 
+/// The reader thread's side of the budget: the bucket, and whether the held tail is
+/// still the end of the output.
+pub struct LogGate {
+    bucket: TokenBucket,
+    /// Whether a line was shed since the last admitted one: the first line admitted
+    /// after a shed burst makes that burst's held tail no longer the end.
+    shed_since_admit: bool,
+}
+
+impl LogGate {
+    /// The pump's gate, with a full [`TokenBucket::for_log_pump`].
+    pub fn for_log_pump(now: Instant) -> Self {
+        Self {
+            bucket: TokenBucket::for_log_pump(now),
+            shed_since_admit: false,
+        }
+    }
+
+    /// Spend budget on one line. `Some` hands it back to be stored; `None` means it was
+    /// shed into `shed`.
+    pub fn offer(&mut self, now: Instant, line: Line, shed: &RateShed) -> Option<Line> {
+        if !self.bucket.try_take(now) {
+            shed.record(now, line);
+            self.shed_since_admit = true;
+            return None;
+        }
+        if std::mem::take(&mut self.shed_since_admit) {
+            shed.discard_tail();
+        }
+        Some(line)
+    }
+}
+
 #[derive(Default)]
 struct ShedState {
     /// Lines shed since the last notice.
@@ -126,6 +159,9 @@ struct ShedState {
     last_drop: Option<Instant>,
     /// The most recent shed lines, oldest first.
     tail: VecDeque<Line>,
+    /// Bumped by every [`RateShed::discard_tail`], so a claimed tail that was
+    /// superseded while out is not [`RateShed::restore`]d.
+    tail_epoch: u64,
 }
 
 /// What the reader thread sheds, handed to the writer thread.
@@ -144,6 +180,7 @@ pub struct ShedClaim {
     unreported_since: Option<Instant>,
     /// The kept tail, present only when the burst is over (or the process is ending).
     pub tail: Option<Vec<Line>>,
+    tail_epoch: u64,
 }
 
 impl RateShed {
@@ -171,12 +208,14 @@ impl RateShed {
     ///
     /// Written back now, the tail would get row ids after that newer line, and every
     /// log reader orders by id: the stale burst would read as the most recent output.
-    /// Its lines stay counted in the drop notice. Called from the reader thread, only
-    /// for the first admitted line after a shed one. A tail the notice writer already
-    /// claimed is past saving: that needs [`SHED_QUIET`] to pass between the shed line
-    /// and the admitted one, so the tail can still land after it in that window.
+    /// Its lines stay counted in the drop notice. Called by [`LogGate::offer`], only for
+    /// the first admitted line after a shed one. A tail the writer has already claimed
+    /// is still written ahead of that line (one writer, and the line waits in the queue
+    /// behind it); one whose write failed is not put back by [`RateShed::restore`].
     pub fn discard_tail(&self) {
-        self.lock().tail.clear();
+        let mut s = self.lock();
+        s.tail.clear();
+        s.tail_epoch += 1;
     }
 
     /// Whether anything is waiting to be reported or written back.
@@ -210,6 +249,7 @@ impl RateShed {
             dropped: std::mem::take(&mut s.dropped),
             unreported_since: s.unreported_since.take(),
             tail: over.then(|| s.tail.drain(..).collect()),
+            tail_epoch: s.tail_epoch,
         };
         Some(claim)
     }
@@ -226,7 +266,8 @@ impl RateShed {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        if let Some(tail) = claim.tail {
+        // A tail discarded while it was out is no longer the end of the output.
+        if let Some(tail) = claim.tail.filter(|_| claim.tail_epoch == s.tail_epoch) {
             // The claimed lines are older than anything recorded since.
             let newer: Vec<Line> = s.tail.drain(..).collect();
             s.tail.extend(tail);
@@ -319,18 +360,62 @@ mod tests {
         assert!(!shed.pending());
     }
 
+    /// A gate whose bucket is empty at `t0`, so the next line is shed.
+    fn drained_gate(t0: Instant, shed: &RateShed) -> LogGate {
+        let mut gate = LogGate::for_log_pump(t0);
+        for i in 0..LOG_BURST as usize {
+            assert!(gate.offer(t0, line(i), shed).is_some());
+        }
+        gate
+    }
+
     #[test]
-    fn a_discarded_tail_is_still_counted_but_not_written_back() {
+    fn a_line_admitted_after_a_shed_burst_discards_its_tail_but_not_its_count() {
         let shed = RateShed::default();
         let t0 = Instant::now();
+        let mut gate = drained_gate(t0, &shed);
         for i in 0..5 {
-            shed.record(t0, line(i));
+            assert!(gate.offer(t0, line(i), &shed).is_none(), "over budget");
         }
-        shed.discard_tail();
-        let claim = shed.claim(t0 + SHED_QUIET, false).expect("drops to report");
+        // Refilled: this line is admitted, so the shed burst is no longer the end.
+        let later = t0 + Duration::from_millis(100);
+        assert!(gate.offer(later, line(99), &shed).is_some());
+        let claim = shed
+            .claim(later + SHED_QUIET, false)
+            .expect("drops to report");
         assert_eq!(claim.dropped, 5);
         assert!(claim.tail.is_none_or(|t| t.is_empty()));
         assert!(!shed.pending());
+    }
+
+    #[test]
+    fn a_shed_burst_with_nothing_admitted_after_it_keeps_its_tail() {
+        let shed = RateShed::default();
+        let t0 = Instant::now();
+        let mut gate = drained_gate(t0, &shed);
+        for i in 0..5 {
+            assert!(gate.offer(t0, line(i), &shed).is_none());
+        }
+        let claim = shed.claim(t0 + SHED_QUIET, false).expect("burst is over");
+        assert_eq!(claim.tail.map(|t| t.len()), Some(5));
+    }
+
+    #[test]
+    fn a_tail_discarded_while_claimed_is_not_restored() {
+        let shed = RateShed::default();
+        let t0 = Instant::now();
+        let mut gate = drained_gate(t0, &shed);
+        assert!(gate.offer(t0, line(0), &shed).is_none());
+        // The writer claims the tail; before its failed write is restored, a newer
+        // line is admitted.
+        let claim = shed.claim(t0 + SHED_QUIET, false).expect("burst is over");
+        assert!(gate.offer(t0 + SHED_QUIET, line(1), &shed).is_some());
+        shed.restore(claim);
+        let again = shed
+            .claim(t0 + SHED_QUIET * 2, false)
+            .expect("count restored");
+        assert_eq!(again.dropped, 1);
+        assert!(again.tail.is_none_or(|t| t.is_empty()));
     }
 
     #[test]

@@ -1614,24 +1614,15 @@ async fn run(command: Command) {
             // never takes a queue slot — a crash-looping worker must not fill the
             // queue and turn its excess into "the database was not keeping up".
             // See `log_budget` for what is kept of a refused burst.
-            let mut bucket = log_budget::TokenBucket::for_log_pump(std::time::Instant::now());
-            // Whether a line was shed since the last admitted one: the first line
-            // admitted after a shed burst makes its held tail no longer the end.
-            let mut shed_since_admit = false;
+            let mut gate = log_budget::LogGate::for_log_pump(std::time::Instant::now());
             let mut queue = |lines: &mut Vec<String>| {
                 for line in lines.drain(..) {
                     if let Some((ref tx, _, ref dropped, ref shed)) = writer {
                         let now = std::time::Instant::now();
-                        let ts = chrono::Utc::now();
-                        if !bucket.try_take(now) {
-                            shed.record(now, (ts, line));
-                            shed_since_admit = true;
+                        let Some(line) = gate.offer(now, (chrono::Utc::now(), line), shed) else {
                             continue;
-                        }
-                        if std::mem::take(&mut shed_since_admit) {
-                            shed.discard_tail();
-                        }
-                        if tx.try_send((ts, line)).is_err() {
+                        };
+                        if tx.try_send(line).is_err() {
                             dropped.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     }

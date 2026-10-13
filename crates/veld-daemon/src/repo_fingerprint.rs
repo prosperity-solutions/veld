@@ -109,7 +109,9 @@ fn fingerprint_at(repo_root: &Path, now: SystemTime) -> Option<RepoFingerprint> 
     out.tree(&common.join("refs"), true)?;
     out.tree(&common.join("reftable"), false)?;
     if gitdir != common {
-        // A linked worktree used as the root keeps its own stack on reftable.
+        // A linked worktree used as the root keeps its own stack on reftable. The
+        // worktrees loop below reaches the same directory; stamping it here too keeps
+        // the root's own HEAD independent of that listing succeeding.
         out.tree(&gitdir.join("reftable"), false)?;
     }
 
