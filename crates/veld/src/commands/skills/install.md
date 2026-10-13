@@ -69,11 +69,10 @@ app reappears — a `.dmg` dragged to `/Applications` — `veld update` leaves i
 alone and says so, because a recent manual install is a better signal than an old
 answer, and silently deleting an app is not something an update may do.
 
-Arriving through the CLI rather than a `.dmg` download is what avoids the
-Gatekeeper prompt: a browser marks a download with `com.apple.quarantine` and
-macOS then refuses the first launch of an app that is not notarized, while curl
-sets no such flag. macOS only — on Linux the AppImage updates itself and a `.deb`
-belongs to the package manager.
+Release builds are Developer ID signed and notarized, so a `.dmg` download opens
+without a Gatekeeper prompt too. Arriving through the CLI additionally sets no
+`com.apple.quarantine` flag. macOS only — on Linux the AppImage updates itself and a `.deb` belongs to
+the package manager.
 
 On Linux `veld desktop status` therefore **reports rather than manages**: it
 names the `.deb`'s binary if it finds one and says the version belongs to your
@@ -120,8 +119,8 @@ therefore keeps the generic icon until its next `veld update`.
 
 One documented cost: a custom icon lives in the file's resource fork, and
 `codesign --verify --strict` rejects a Mach-O carrying one. Plain
-`codesign --verify` passes, the ad-hoc signature is intact, and the binaries run
-and are launched by launchd normally.
+`codesign --verify` passes, the Developer ID signature is intact, and the binaries
+run and are launched by launchd normally.
 
 **The app's own *Check for Updates…* updates the whole release.** It offers
 *veld `<version>`* rather than a new app, spawns `veld update --target-version

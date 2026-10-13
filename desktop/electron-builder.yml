@@ -11,10 +11,10 @@ appId: dev.veld.desktop
 productName: Veld
 copyright: Copyright © Prosperity Solutions
 
-# `buildResources` is deliberately left at its default (`build/`, which does not
-# exist here): electron-builder excludes that directory from the packaged app, and
-# `assets/` has to ship — the tray icon is read from it at runtime. The icons are
-# referenced by explicit path below instead.
+# `buildResources` is deliberately left at its default (`build/`, which holds only
+# the release signature's entitlements): electron-builder excludes that directory
+# from the packaged app, and `assets/` has to ship — the tray icon is read from it
+# at runtime. The icons are referenced by explicit path below instead.
 directories:
   output: dist
 
@@ -52,13 +52,28 @@ mac:
     # whose update feed describes files that aren't there.
     - target: zip
       arch: [arm64, x64]
-  # No Developer ID yet (issue #167 §10). electron-builder's own signing is
-  # skipped explicitly rather than left to auto-discovery — otherwise the
-  # artifacts depend on which certificates happen to be in the keychain of the
-  # machine that built them, which is the one property a release must not have.
-  # `scripts/adhoc-sign.js` then ad-hoc signs the bundle, which is not a
-  # trust signal but *is* what makes it launch at all on Apple Silicon.
+  # `null` here, and the real identity on the command line in release CI only
+  # (`-c.mac.identity=<team id>`, see `.github/workflows/release.yml` → desktop).
+  # So a local or pull-request build never signs for real, whatever certificates
+  # sit in the keychain of the machine that built it — artifacts must not depend
+  # on that — and `scripts/adhoc-sign.js` ad-hoc signs it instead, which is not a
+  # trust signal but *is* what makes it launch at all on Apple Silicon. The team id
+  # as the qualifier picks this team's Developer ID certificate and no other.
   identity: null
+  # Only take effect when the identity above is overridden. Notarization requires
+  # the hardened runtime; the entitlements are what let Electron run under it
+  # (reasons in the plist).
+  hardenedRuntime: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.inherit.plist
+# The disk image is signed and notarized by release CI after the build, with a
+# secure timestamp electron-builder's own dmg signing does not add — so it must
+# not sign it here, and must not write a blockmap for it: signing changes the
+# bytes the blockmap would describe. The update feed points at the zips, which
+# keep theirs.
+dmg:
+  sign: false
+  writeUpdateInfo: false
 linux:
   category: Development
   icon: assets/icon.png

@@ -31,7 +31,7 @@
 //! relaunching onto a changed on-disk binary (see
 //! `crates/veld-helper/src/signing.rs`; the list is
 //! `veld_core::signing::ORG_SIGNING_KEYRING`). CI runs this over the *final*
-//! shipped bytes — on macOS that is the ad-hoc signed binary, and install.sh
+//! shipped bytes — on macOS that is the Developer ID signed binary, and install.sh
 //! leaves a binary whose signature verifies alone (it re-signs only one that
 //! fails `codesign --verify`), so the `.sig` still matches.
 //!
