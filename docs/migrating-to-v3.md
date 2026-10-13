@@ -535,14 +535,9 @@ this release does not know the key, so it lints the pane with an
 works, which is the same additive path every other new pane field took. See
 [configuration.md](configuration.md#idepanes-the-projects-own-panes).
 
-`ide.worktreeName` is new and additive: one `argv`/`shell` command that names a
-new worktree from the prompt the IDE's create dialog was given. Absent — the
-default — nothing changes; the dialog names checkouts from the prompt's first
-clause as it does without it. The prompt is written to the command's **stdin**,
-so there is no new interpolation name to learn and nothing new in any argument
-list. It runs after the create has already answered and only ever sets
-`display_name`, so it cannot fail a create or move a checkout. See
-[configuration.md](configuration.md#ideworktreename-naming-a-new-worktree-from-its-prompt).
+`ide.worktreeName` was added and then removed: a worktree is now named by the
+agent working in it, with `veld ide worktree name`. A config that still carries
+the key keeps loading; `veld lint` reports it as no longer read.
 
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld

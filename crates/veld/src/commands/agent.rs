@@ -172,6 +172,7 @@ pub async fn state(
     // It claims hook authority for the pane while saying nothing is happening, which is
     // what stops the shell's "a command is running here" driving an activity spinner for
     // a session sitting idle at its prompt.
+    let mut naming = None;
     let reported = if launched {
         agent::State::Ready
     } else {
@@ -192,6 +193,9 @@ pub async fn state(
                 None => return 1,
             },
         };
+        if tool == AgentTool::Claude {
+            naming = naming_turn(&payload);
+        }
         match tool {
             AgentTool::Claude => agent::claude_state(&payload),
             AgentTool::Codex => agent::codex_state(&payload),
@@ -205,10 +209,41 @@ pub async fn state(
     if reported == agent::State::Unknown {
         return 0;
     }
-    report(&session, tool, reported).await
+    report(&session, tool, reported, naming).await
 }
 
-async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
+/// The naming nudge's half of a Claude hook payload: which turn this is, and what
+/// the daemon needs to decide whether to nudge. `None` for every other event.
+fn naming_turn(payload: &agent::HookPayload) -> Option<serde_json::Value> {
+    match payload.hook_event_name.as_str() {
+        "UserPromptSubmit" => {
+            let fresh = payload
+                .transcript_path
+                .as_deref()
+                .is_none_or(|p| agent::claude_transcript_is_fresh(Path::new(p)));
+            Some(serde_json::json!({ "turn": "prompt", "fresh": fresh }))
+        }
+        "Stop" => Some(serde_json::json!({
+            "turn": "stop",
+            "continued": payload.stop_hook_active.unwrap_or(false),
+        })),
+        _ => None,
+    }
+}
+
+/// How the naming nudge spells the CLI — the same word [`agent::agent_context`]
+/// used, so the two instructions name one command.
+fn naming_cli_word() -> String {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "veld".into());
+    agent::context_cli_word(&exe, veld_core::db::Db::uses_installed_database())
+}
+
+async fn report(
+    session: &str,
+    tool: AgentTool,
+    reported: agent::State,
+    naming: Option<serde_json::Value>,
+) -> i32 {
     let base = veld_core::instance::daemon_base();
     let Ok(client) = reqwest::Client::builder()
         .timeout(std::time::Duration::from_millis(
@@ -221,14 +256,36 @@ async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
     let sent = client
         .post(format!("{base}/api/pty/sessions/{session}/agent-state"))
         .header("X-Veld-Request", "1")
-        .json(&serde_json::json!({
-            "tool": tool.as_str(),
-            "state": reported.as_str(),
-        }))
+        .json(&{
+            let mut body = serde_json::json!({
+                "tool": tool.as_str(),
+                "state": reported.as_str(),
+            });
+            if let Some(naming) = naming {
+                body["naming"] = naming;
+            }
+            body
+        })
         .send()
         .await;
     match sent {
-        Ok(resp) if resp.status().is_success() => 0,
+        Ok(resp) if resp.status().is_success() => {
+            // Claude reads a hook's stdout as its answer: the reminder, or the stop
+            // refused. Nothing else is ever printed here.
+            let body: serde_json::Value = resp.json().await.unwrap_or_default();
+            let remind = match body["naming"].as_str() {
+                Some("remind") => Some(true),
+                Some("block") => Some(false),
+                _ => None,
+            };
+            if let Some(remind) = remind {
+                println!(
+                    "{}",
+                    agent::claude_naming_output(&naming_cli_word(), remind)
+                );
+            }
+            0
+        }
         // Silent on both arms. A daemon that is down, busy or a different version is
         // not something to interrupt an agent about.
         _ => 1,
@@ -373,6 +430,35 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only Claude's prompt and stop carry a naming turn; a prompt in a resumed
+    /// transcript says so.
+    #[test]
+    fn a_naming_turn_rides_only_the_prompt_and_the_stop() {
+        let event = |name: &str| agent::HookPayload {
+            hook_event_name: name.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            naming_turn(&event("UserPromptSubmit")).unwrap(),
+            serde_json::json!({"turn": "prompt", "fresh": true})
+        );
+        let mut stop = event("Stop");
+        stop.stop_hook_active = Some(true);
+        assert_eq!(
+            naming_turn(&stop).unwrap(),
+            serde_json::json!({"turn": "stop", "continued": true})
+        );
+        assert!(naming_turn(&event("Notification")).is_none());
+        assert!(naming_turn(&event("SessionEnd")).is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+        let mut resumed = event("UserPromptSubmit");
+        resumed.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        assert_eq!(naming_turn(&resumed).unwrap()["fresh"], false);
+    }
 
     /// The wrapper reads only the exit status: 0 hands the agent the prompt, any
     /// other code launches it bare and leaves the prompt to the window.

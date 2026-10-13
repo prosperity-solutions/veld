@@ -66,7 +66,6 @@ function open(
       agents={[claude]}
       newMode="prompt"
       onNewModeChange={() => {}}
-      generatesNames={false}
       rememberedAgent=""
       promptDraft=""
       onPromptDraft={() => {}}
@@ -302,7 +301,6 @@ describe("NewWorktreeDialog attachments", () => {
     const body = onCreate.mock.calls[0][0];
     expect(body.agent).toBe("claude");
     expect(body.prompt).toBe("");
-    expect(body.name_prompt).toBeUndefined();
     expect(body.attachments?.map((a) => [a.file.name, a.path])).toEqual([
       ["shot.png", "/Users/me/shot.png"],
     ]);

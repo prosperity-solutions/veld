@@ -13,6 +13,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const DAEMON = __VELD_DAEMON__
 const CONTEXT = __VELD_CONTEXT__
+const NAMING = __VELD_NAMING__
 const TIMEOUT_MS = __VELD_TIMEOUT_MS__
 
 // Read once per load: `session.start` runs before any other event, and a reload runs
@@ -27,6 +28,12 @@ let contextPending = false
 // that runs, an MCP server's question being answered, the turn ending, or a new one
 // starting.
 let blocked = false
+// A resumed conversation named its worktree the first time round; Veld nudges only a
+// new one to name it. Settled once this session's first prompt and first stop have
+// both been put to the daemon, which keeps the rest of the count.
+let resumed = false
+let namingPrompt = false
+let namingStop = false
 // Veld rewrites these files when it is upgraded, which reloads them in every running
 // session and resets the variables above. The two that are the session's own, not read
 // from its environment, are kept where a reload does not reach; that they are kept at
@@ -48,10 +55,18 @@ export const register: Register = (on) => {
     if (kept) {
       contextPending = kept.contextPending
       blocked = kept.blocked
+      resumed = kept.resumed ?? true
       return result
     }
     contextPending = context
     blocked = false
+    // A resumed session's figures count from its first launch, so a start well before
+    // this one's is a conversation that already had its first turn. Unknown counts as
+    // resumed: a missed nudge costs less than one that renames a named worktree.
+    const launched = await $.clock.now()
+    resumed = await $.session
+      .usage()
+      .then((u) => u.startedAt < launched - 60_000, () => true)
     await keep($)
     if (hooks) await report($, 'ready')
     return result
@@ -77,8 +92,25 @@ export const register: Register = (on) => {
     const result = await next(e)
     await setBlocked($, false)
     if (hooks) await report($, 'working')
+    // The context on this prompt was the reminder; this tells Veld the stop may need
+    // refusing.
+    if (hooks && context && !namingPrompt) {
+      namingPrompt = true
+      await askNaming($, { turn: 'prompt', fresh: !resumed })
+    }
     return result
   })
+
+  // A first turn that ends with the worktree still unnamed is refused once. Classic,
+  // like `classic.Notification` below, so it reaches a mod only where no organization
+  // guard sits in front of it; where one does, the context alone asks.
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    if (!hooks || !context || !namingPrompt || namingStop) return result
+    namingStop = true
+    const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active })
+    return verdict === 'block' ? { ...result, block: NAMING } : result
+  }).catch(passThrough)
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
@@ -173,7 +205,7 @@ const passThrough = (_$: unknown, e: any, next: (e: any) => any) => next(e)
 
 async function keep($: EngineInterface): Promise<void> {
   try {
-    await $.state.set(KEPT, { contextPending, blocked })
+    await $.state.set(KEPT, { contextPending, blocked, resumed })
   } catch {}
 }
 
@@ -216,4 +248,24 @@ async function report($: EngineInterface, state: string, held = false): Promise<
     .catch(() => {})
   sending = send
   await Promise.race([send, $.clock.sleep(TIMEOUT_MS)]).catch(() => {})
+}
+
+// Put one naming turn to the daemon and read its answer: `remind`, `block`, or nothing.
+// Bounded like a report, and nothing on any failure.
+async function askNaming($: EngineInterface, turn: object): Promise<string | undefined> {
+  try {
+    const res = await Promise.race([
+      $.http.fetch(`${DAEMON}/api/pty/sessions/${encodeURIComponent(session)}/naming`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-veld-request': '1' },
+        body: JSON.stringify(turn),
+      }),
+      $.clock.sleep(TIMEOUT_MS).then(() => undefined),
+    ])
+    if (!res || !res.ok) return undefined
+    const answer = JSON.parse(res.text).naming
+    return typeof answer === 'string' ? answer : undefined
+  } catch {
+    return undefined
+  }
 }

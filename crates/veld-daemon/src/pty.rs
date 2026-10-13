@@ -384,6 +384,7 @@ pub fn routes() -> Router {
         // the pane-push tail.
         .route("/api/pty/sessions/{id}/open-file", post(open_file))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
+        .route("/api/pty/sessions/{id}/naming", post(naming))
         // The New worktree dialog's first message, in two halves: the files it
         // carries go up before the pane exists (`reserve`), and the window asks
         // afterwards whether the agent took the message at launch (`take`). See
@@ -875,6 +876,7 @@ async fn end_session(id: &str, reason: &str) -> bool {
     if let Some(path) = unclaimed {
         discard_launch_prompt(path);
     }
+    forget_naming(id);
     let session = SESSIONS.lock().await.remove(id);
     let Some(session) = session else {
         // Not in the registry is not the same as not running: [`release_session`]
@@ -2415,6 +2417,9 @@ async fn mint_ticket(
     opts.bash_handoff = opts.wants_handoff()
         && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
+    if !resumed && opts.agent_integration && opts.agent_context {
+        arm_naming(&body.session_id);
+    }
     let shim_env = shims::session_env(&body.session_id, &shell, opts);
     // Derived from the environment rather than from `bash_handoff` directly, so the
     // flag and the variable it depends on can never disagree: `--posix` without an
@@ -3321,6 +3326,102 @@ struct AgentStateRequest {
     /// moment it was answered; the wrapper's hooks cannot, so they never send it.
     #[serde(default)]
     held: bool,
+    /// The hook turn this report came from, for the naming nudge — see
+    /// [`naming_verdict`]. Absent from a tool whose hooks cannot answer back.
+    #[serde(default)]
+    naming: Option<NamingTurn>,
+}
+
+/// Which of the two hook turns the naming nudge answers, and what it needs to know
+/// about each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(tag = "turn", rename_all = "snake_case", deny_unknown_fields)]
+enum NamingTurn {
+    /// `UserPromptSubmit`. `fresh` is whether the conversation has no earlier turn —
+    /// false for a resumed one, which named its worktree the first time round.
+    Prompt { fresh: bool },
+    /// `Stop`. `continued` is Claude's `stop_hook_active`: this turn already exists
+    /// because a stop hook blocked the last one.
+    Stop { continued: bool },
+}
+
+/// What the hook should hand back to the agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NamingVerdict {
+    /// Add the reminder to this prompt's context.
+    Remind,
+    /// Refuse this stop once, with the reminder as the reason.
+    Block,
+}
+
+/// Where one terminal's agent is with naming its worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Naming {
+    /// Spawned with the agent context on; no prompt seen yet.
+    Armed,
+    /// Reminded on its first prompt and has not named it yet.
+    Reminded,
+    /// Done with: named, blocked once already, or a resumed conversation. Kept
+    /// rather than removed so a `/clear` in the same terminal is not nudged again.
+    Settled,
+}
+
+/// The naming nudge's state, per terminal session.
+///
+/// **Only sessions this daemon spawned with agent integration and the agent context
+/// both on are ever in here** ([`arm_naming`]), so turning either setting off — or
+/// a shell adopted across a daemon restart — means no nudge at all rather than one
+/// for an agent that was never told the rule. In memory on purpose: it only has
+/// to outlive one conversation's first turn.
+static NAMING: LazyLock<Mutex<HashMap<String, Naming>>> = LazyLock::new(Default::default);
+
+fn arm_naming(session: &str) {
+    NAMING
+        .lock()
+        .expect("naming poisoned")
+        .insert(session.to_owned(), Naming::Armed);
+}
+
+/// `veld ide worktree name` ran in this terminal: nothing more to nudge about.
+pub(super) fn settle_naming(session: &str) {
+    if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session) {
+        *state = Naming::Settled;
+    }
+}
+
+fn forget_naming(session: &str) {
+    NAMING.lock().expect("naming poisoned").remove(session);
+}
+
+/// The nudge for one hook turn, advancing `session`'s state.
+///
+/// A fresh conversation is reminded on its **first** prompt only and, if that turn
+/// ends without a name, has its stop refused **once**. Never more than that: the
+/// rule the agent was given says a worktree is named early and then left alone, so
+/// a nudge on turn five would be asking it to break the rule.
+fn naming_verdict(session: &str, turn: NamingTurn) -> Option<NamingVerdict> {
+    let mut map = NAMING.lock().expect("naming poisoned");
+    let state = map.get_mut(session)?;
+    match (*state, turn) {
+        (Naming::Armed, NamingTurn::Prompt { fresh: true }) => {
+            *state = Naming::Reminded;
+            Some(NamingVerdict::Remind)
+        }
+        (Naming::Armed, NamingTurn::Prompt { fresh: false }) => {
+            *state = Naming::Settled;
+            None
+        }
+        (Naming::Reminded, NamingTurn::Stop { continued: false }) => {
+            *state = Naming::Settled;
+            Some(NamingVerdict::Block)
+        }
+        (Naming::Reminded, NamingTurn::Prompt { .. }) => {
+            *state = Naming::Settled;
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Report that a coding agent in this terminal is working, waiting on the user, or
@@ -3341,7 +3442,7 @@ async fn agent_state(
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<AgentStateRequest>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
     if !valid_session_id(&id) {
@@ -3372,10 +3473,33 @@ async fn agent_state(
     debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
     let held = body.held && state == veld_core::agent::State::Blocked;
     super::ide::broadcast_agent_state(worktree_id, &id, tool, state, held);
+    let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
     // 202: the event has been handed to the clients that are connected, which is not
-    // the same as a badge appearing. Nothing the caller could do with a richer answer —
-    // it is a hook, and its own contract is to exit and get out of the way.
-    Ok(StatusCode::ACCEPTED)
+    // the same as a badge appearing. The body is only ever the naming nudge, for the
+    // hook to hand back to the agent; a CLI that predates it ignores it.
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "naming": naming })),
+    ))
+}
+
+/// The naming nudge on its own, for Veld's Claude Code mod: its prompt and its stop
+/// are not state reports, so they do not ride `agent-state` as the wrapper's hooks do.
+/// `{"naming": "remind" | "block" | null}`; an unknown session is `null`, not an
+/// error, since there is nothing a hook should do differently.
+async fn naming(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(turn): Json<NamingTurn>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    Ok(Json(
+        serde_json::json!({ "naming": naming_verdict(&id, turn) }),
+    ))
 }
 
 /// The project half of the exempt list, for the worktree a session belongs to.
@@ -5659,6 +5783,73 @@ mod tests {
 
     use super::*;
 
+    /// A fresh conversation is reminded on its first prompt and has its first stop
+    /// refused once; a second stop, a continued one, a later prompt, a resumed
+    /// conversation, a session that already named its worktree and a session never
+    /// armed all get nothing.
+    #[test]
+    fn the_naming_nudge_reminds_once_and_blocks_once() {
+        use NamingTurn::{Prompt, Stop};
+        let fresh = Prompt { fresh: true };
+        let stop = Stop { continued: false };
+
+        arm_naming("nudge-a");
+        assert_eq!(
+            naming_verdict("nudge-a", fresh),
+            Some(NamingVerdict::Remind)
+        );
+        assert_eq!(
+            naming_verdict("nudge-a", Stop { continued: true }),
+            None,
+            "a continued stop is never refused"
+        );
+        assert_eq!(naming_verdict("nudge-a", stop), Some(NamingVerdict::Block));
+        assert_eq!(naming_verdict("nudge-a", stop), None);
+        assert_eq!(naming_verdict("nudge-a", fresh), None);
+
+        // Named during the first turn: the stop goes through.
+        arm_naming("nudge-b");
+        assert_eq!(
+            naming_verdict("nudge-b", fresh),
+            Some(NamingVerdict::Remind)
+        );
+        settle_naming("nudge-b");
+        assert_eq!(naming_verdict("nudge-b", stop), None);
+
+        // A resumed conversation named its worktree the first time round.
+        arm_naming("nudge-c");
+        assert_eq!(naming_verdict("nudge-c", Prompt { fresh: false }), None);
+        assert_eq!(naming_verdict("nudge-c", stop), None);
+
+        // A stop before any prompt (an interrupted launch) refuses nothing.
+        arm_naming("nudge-d");
+        assert_eq!(naming_verdict("nudge-d", stop), None);
+
+        // Never armed: agent context or integration off, or an adopted shell.
+        assert_eq!(naming_verdict("nudge-e", fresh), None);
+        settle_naming("nudge-e");
+        assert_eq!(naming_verdict("nudge-e", fresh), None);
+
+        forget_naming("nudge-a");
+        assert_eq!(naming_verdict("nudge-a", fresh), None);
+        for s in ["nudge-b", "nudge-c", "nudge-d"] {
+            forget_naming(s);
+        }
+    }
+
+    /// The wire shape the CLI sends for a turn, and what an unknown one costs.
+    #[test]
+    fn a_naming_turn_parses_from_the_cli_shape() {
+        let prompt: NamingTurn =
+            serde_json::from_value(serde_json::json!({"turn": "prompt", "fresh": true})).unwrap();
+        assert_eq!(prompt, NamingTurn::Prompt { fresh: true });
+        let stop: NamingTurn =
+            serde_json::from_value(serde_json::json!({"turn": "stop", "continued": false}))
+                .unwrap();
+        assert_eq!(stop, NamingTurn::Stop { continued: false });
+        assert!(serde_json::from_value::<NamingTurn>(serde_json::json!({"turn": "x"})).is_err());
+    }
+
     /// An `argv` pane runs inside the user's login+interactive shell — the
     /// whole point being that a pane inherits the same environment a real
     /// terminal gives, not just the injected `PATH`. The shape must be exactly
@@ -6629,6 +6820,12 @@ mod tests {
                 "POST",
                 "/api/pty/sessions/a/agent-state",
                 r#"{"tool":"claude","state":"blocked"}"#,
+            ),
+            // The naming nudge can refuse an agent's stop.
+            (
+                "POST",
+                "/api/pty/sessions/a/naming",
+                r#"{"turn":"stop","continued":false}"#,
             ),
             // A write grant for the paste directory, and a claim on a prompt.
             ("POST", "/api/pty/sessions/a/reserve", ""),
