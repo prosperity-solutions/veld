@@ -1,0 +1,42 @@
+name: Lock
+
+# The maintainer's lock (scripts/dev/lock.sh). Red while the `Lock` ruleset is
+# active and the PR's author or pusher is not an owner. The ruleset is what
+# actually stops the merge; this check is what tells the author why, early.
+#
+# `pull_request_target`, not `pull_request`, and that is the point: this workflow
+# and the script it runs come from the BASE branch, so a pull request cannot
+# switch its own lock off by editing either. That is only safe because nothing
+# from the pull request is checked out or executed — the default checkout of a
+# `pull_request_target` run is the base. Never add `ref: …head…` here.
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+# No `push` trigger: while locked only owners can update `main`, so a push-time
+# check could never fail. A PR that went green before `lock.sh on` stays green —
+# the ruleset is what stops its merge — and `lock.sh off` re-runs the red ones.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  lock:
+    name: Lock
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft == false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Only owners may work while the repo is locked
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Author and pusher both: a teammate pushing to an owner's PR is
+          # outside work too. Logins cannot contain spaces.
+          ACTORS: ${{ github.event.pull_request.user.login }} ${{ github.actor }}
+        run: bash scripts/dev/lock.sh ci

@@ -56,12 +56,29 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git checkout -B main
 
+      # The maintainer's lock (scripts/dev/lock.sh). While it is on, its ruleset
+      # would reject semantic-release's push to `main`, so stand down instead of
+      # building four targets to fail at the tag: with no `new_release_*`
+      # outputs every later job skips, and the next merge after the lock lifts
+      # releases what was merged under it.
+      - name: Is the repo locked?
+        id: lock
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if bash scripts/dev/lock.sh locked; then
+            echo "locked=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::veld is locked — no release until it is unlocked"
+          fi
+
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
       - uses: cycjimmy/semantic-release-action@16ca923e6ccbb50770c415a0ccd43709a8c5f7a4
         id: semantic
+        if: steps.lock.outputs.locked != 'true'
         with:
           dry_run: true
           # conventional-changelog-conventionalcommits is pinned to v9:
@@ -778,6 +795,13 @@ jobs:
     permissions:
       contents: write
     needs: [plan, release]
+    # A run whose `release` job tagged nothing has nothing to publish: a newer
+    # merge landed while it built, semantic-release saw `main` move ("the local
+    # branch main is behind the remote one") and stood down, and that newer run
+    # releases both commits. Without this gate the job went red on every such
+    # overlap (#416/#417), and docker-gateway pushed an image under a version
+    # this run never tagged — built from the older commit's binaries.
+    if: needs.release.outputs.new_release_git_tag != ''
     runs-on: ubuntu-latest
     # The publish step's own worst case is ~75 min, counting the `-k` grace
     # periods: 5 upload attempts at 600+30 s = 52.5 min, 225 s of upload
@@ -1071,6 +1095,8 @@ jobs:
       contents: read
       packages: write
     needs: [plan, release]
+    # Same gate as `publish` — see there.
+    if: needs.release.outputs.new_release_git_tag != ''
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
