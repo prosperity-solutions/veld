@@ -76,11 +76,12 @@
 //! `terminal.claudeIntegration = mod` ([`ClaudeIntegration`]) hands Claude both halves
 //! through a Claude Code mod instead — [`claude_mod_files`], a plugin of function hooks
 //! written into the shim directory once per daemon and named in the session's
-//! [`CLAUDE_PLUGIN_DIRS_ENV`]. The wrapper stays on `PATH` and passes straight through.
+//! [`CLAUDE_PLUGIN_DIRS_ENV`]. The wrapper stays on `PATH` and passes straight through
+//! while that variable still names the folder, and reports itself when it does not.
 //! The invariants above all hold: nothing of the user's is written (the variable loads
 //! the folder for one process, as `--plugin-dir` would), the mod does nothing outside a
 //! Veld session or without a terminal to draw on (`claude -p`), and none of its hooks
-//! can block the person — each passes its event on when it fails. See
+//! can block the person — each that can gate an event passes it on when it fails. See
 //! [`claude_mod_files`] for which events it uses, and why not the `classic.*` ones.
 //!
 //! # Adding another agent
@@ -1479,7 +1480,8 @@ pub enum ClaudeIntegration {
     #[default]
     Wrapper,
     /// Veld's Claude Code mod ([`claude_mod_files`]), named in the session's
-    /// [`CLAUDE_PLUGIN_DIRS_ENV`]. The `claude` wrapper steps aside entirely.
+    /// [`CLAUDE_PLUGIN_DIRS_ENV`]. The `claude` wrapper steps aside entirely while Claude
+    /// will still load it.
     Mod,
 }
 
@@ -1502,7 +1504,8 @@ impl ClaudeIntegration {
 }
 
 /// Set to `mod` in a session whose Claude Code runs veld's mod: the `claude` wrapper
-/// then `exec`s the real binary untouched, and the mod is active only where it sees it.
+/// then `exec`s the real binary untouched while [`CLAUDE_PLUGIN_DIRS_ENV`] still names the
+/// mod, and the mod is active only where it sees it.
 pub const CLAUDE_INTEGRATION_ENV: &str = "VELD_CLAUDE_INTEGRATION";
 
 /// Claude Code's own variable naming plugin folders to load for one process, each
@@ -1583,7 +1586,9 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// policy mod answers it, so the text goes in as `context` on the first `prompt.submit`
 /// of each conversation instead — once per session, and again after a `/clear` or a
 /// compaction, whose summary need not keep it. It is still a fixed string at a fixed
-/// place, so it caches the way the appended system prompt did.
+/// place, so it caches the way the appended system prompt did. A `--continue` or
+/// `--resume` is a new process with nothing kept, so the resumed conversation gets it
+/// once more, on its next prompt: a few static sentences per relaunch, accepted.
 ///
 /// # A rewrite reloads the mod in every running session
 ///
@@ -1599,10 +1604,11 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 ///
 /// # Every gating hook passes the event on
 ///
-/// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`) catch
-/// their own failure by passing the event on unchanged, and each report is bounded by
-/// [`HOOK_REQUEST_TIMEOUT_MS`] and swallows its errors: a daemon that is down or slow
-/// costs a badge, never the person's prompt or tool call.
+/// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`,
+/// `session.compact`, `classic.Notification`) catch their own failure by passing the
+/// event on unchanged, and each report is bounded by [`HOOK_REQUEST_TIMEOUT_MS`] and
+/// swallows its errors: a daemon that is down or slow costs a badge, never the
+/// person's prompt or tool call.
 #[must_use]
 pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String); 4] {
     const MODULE: &str = include_str!("agent/claude-mod/register.ts");

@@ -24,7 +24,8 @@ let context = false
 // first after a /clear, which ends the conversation without a new `session.start`.
 let contextPending = false
 // A tool-approval dialog or a question is on screen. Cleared by the next tool call
-// that runs, the turn ending, or a new one starting.
+// that runs, an MCP server's question being answered, the turn ending, or a new one
+// starting.
 let blocked = false
 // Veld rewrites these files when it is upgraded, which reloads them in every running
 // session and resets the variables above. The two that are the session's own, not read
@@ -60,9 +61,10 @@ export const register: Register = (on) => {
   // not the context, so the next prompt carries it again.
   on('session.compact', async ($, e, next) => {
     const result = await next(e)
-    if (e.agentId === undefined) await setPending($, context)
+    // A compaction another hook skipped left the conversation, context and all, as it was.
+    if (!('skip' in result) && e.agentId === undefined) await setPending($, context)
     return result
-  })
+  }).catch(passThrough)
 
   on('prompt.submit', async ($, e, next) => {
     if (!contextPending) return next(e)

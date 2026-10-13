@@ -16,7 +16,7 @@
 //! | `VELD_SHELL_INTEGRATION` | `terminal.shellIntegration`: the handoff's OSC 133 half registers its hooks only when this is set. |
 //! | `VELD_AGENT_HOOKS` | `terminal.agentIntegration`: an agent wrapper injects its ephemeral hook configuration only when this is set, and is a bare `exec` otherwise. |
 //! | `VELD_AGENT_CONTEXT` | `terminal.agentContext`: an agent wrapper hands the agent [`veld_core::agent::agent_context`] only when this is set. Independent of `VELD_AGENT_HOOKS` — either half runs without the other. |
-//! | `VELD_CLAUDE_INTEGRATION` | `terminal.claudeIntegration = mod`, set beside `CLAUDE_CODE_PLUGIN_DIRS` and never without it: the `claude` wrapper passes straight through, and veld's Claude Code mod does both halves above from inside Claude. |
+//! | `VELD_CLAUDE_INTEGRATION` | `terminal.claudeIntegration = mod`, set beside `CLAUDE_CODE_PLUGIN_DIRS` and never without it: the `claude` wrapper passes straight through while `CLAUDE_CODE_PLUGIN_DIRS` still names the mod, and veld's Claude Code mod does both halves above from inside Claude. |
 //! | `CLAUDE_CODE_PLUGIN_DIRS` | Claude Code's own: the folder of veld's mod ([`veld_core::agent::claude_mod_dir`]), loaded for that process as `--plugin-dir` would. |
 //! | `VELD_SHIM_BROWSER` | The same path as `BROWSER`, kept under its own name so the `veld_browser` hook can re-assert it after an rc file exports a `$BROWSER` of its own. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
