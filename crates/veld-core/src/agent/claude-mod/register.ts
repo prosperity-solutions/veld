@@ -11,7 +11,10 @@ const CONTEXT = __VELD_CONTEXT__
 const TIMEOUT_MS = __VELD_TIMEOUT_MS__
 
 // Read once per load: `session.start` runs before any other event, and a reload runs
-// it again.
+// it again. Veld rewrites these files when it is upgraded, which reloads them in every
+// running session, so whether this session already started is kept where a reload
+// does not reach.
+const STARTED = { plugin: 'veld', key: 'started' } as const
 let session = ''
 let hooks = false
 let context = false
@@ -32,9 +35,21 @@ export const register: Register = (on) => {
     const mine = interactive && session !== '' && (await $.env.get('VELD_CLAUDE_INTEGRATION')) === 'mod'
     hooks = mine && !!(await $.env.get('VELD_AGENT_HOOKS'))
     context = mine && !!(await $.env.get('VELD_AGENT_CONTEXT'))
-    contextPending = context
     blocked = false
+    // A reload mid-session: the session is wherever it was, and has had the context.
+    const { value: started } = await $.state.get(STARTED)
+    if (started) return result
+    await $.state.set(STARTED, true)
+    contextPending = context
     if (hooks) await report($, 'ready')
+    return result
+  })
+
+  // A compacted conversation keeps a summary of the prompt that carried the context,
+  // not the context, so the next prompt carries it again.
+  on('session.compact', async ($, e, next) => {
+    const result = await next(e)
+    if (e.agentId === undefined) contextPending = context
     return result
   })
 

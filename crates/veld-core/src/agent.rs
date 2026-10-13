@@ -1542,7 +1542,7 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 ///
 /// | Event | State |
 /// |---|---|
-/// | `session.start` | [`State::Ready`] |
+/// | `session.start`, the session's first (a reload of the mod raises it again) | [`State::Ready`] |
 /// | `turn.start` (the session's own; a subagent raises none) | [`State::Working`] |
 /// | `tool.check` answering `ask` — the approval dialog | [`State::Blocked`] |
 /// | `tool.call` of `AskUserQuestion`/`ExitPlanMode`, while it runs | [`State::Blocked`] |
@@ -1581,9 +1581,19 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 ///
 /// `prompt.compose` is the mod's way to add a system-prompt section, and the same
 /// policy mod answers it, so the text goes in as `context` on the first `prompt.submit`
-/// of each conversation instead — once per session, and again after a `/clear`. It is
-/// still a fixed string at a fixed place, so it caches the way the appended system
-/// prompt did.
+/// of each conversation instead — once per session, and again after a `/clear` or a
+/// compaction, whose summary need not keep it. It is still a fixed string at a fixed
+/// place, so it caches the way the appended system prompt did.
+///
+/// # A rewrite reloads the mod in every running session
+///
+/// Claude Code reloads a plugin folder it watches on any write, and veld rewrites these
+/// files when it is upgraded. A reload runs `session.start` again with the module's
+/// variables gone, so whether the session already started is kept in `$.state`, which
+/// survives it and which `types/index.d.ts` declares, as `claude plugin validate`
+/// requires: a reload neither reports `ready` over a running turn nor adds the context
+/// a second time. Measured on Claude Code 2.1.296, which also reloads once at startup
+/// when it applies managed settings — one `ready`, not two.
 ///
 /// # Every hook passes the event on
 ///
@@ -1592,22 +1602,27 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// [`HOOK_REQUEST_TIMEOUT_MS`] and swallows its errors: a daemon that is down or slow
 /// costs a badge, never the person's prompt or tool call.
 #[must_use]
-pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String); 3] {
+pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String); 4] {
     const MODULE: &str = include_str!("agent/claude-mod/register.ts");
+    const CONTRACT: &str = include_str!("agent/claude-mod/types.d.ts");
     let manifest = serde_json::json!({
         "name": "veld",
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Tells Veld when Claude Code is working or waiting, and tells Claude how to show you a file.",
+        "types": "./types/index.d.ts",
     });
     let hooks = serde_json::json!({ "modules": ["./register.ts"] });
     let module = MODULE
         .replace("__VELD_DAEMON__", &json_string(daemon))
         .replace("__VELD_CONTEXT__", &json_string(context))
         .replace("__VELD_TIMEOUT_MS__", &HOOK_REQUEST_TIMEOUT_MS.to_string());
+    // In the order they are written, the manifest last: a write reloads the mod, and a
+    // manifest naming a file not there yet would fail that load.
     [
-        (".claude-plugin/plugin.json", format!("{manifest:#}\n")),
+        ("types/index.d.ts", CONTRACT.to_owned()),
         ("hooks/hooks.json", format!("{hooks:#}\n")),
         ("hooks/register.ts", module),
+        (".claude-plugin/plugin.json", format!("{manifest:#}\n")),
     ]
 }
 
@@ -1837,6 +1852,21 @@ mod tests {
             serde_json::json!(["./register.ts"])
         );
         assert!(files.iter().any(|(path, _)| *path == "hooks/register.ts"));
+        // `claude plugin validate` refuses a `$.state` key no contract declares.
+        assert_eq!(
+            read(".claude-plugin/plugin.json")["types"],
+            "./types/index.d.ts"
+        );
+        let contract = &files
+            .iter()
+            .find(|(path, _)| *path == "types/index.d.ts")
+            .unwrap()
+            .1;
+        assert!(
+            contract.contains("veld: { started: boolean }"),
+            "{contract}"
+        );
+        assert_eq!(files.last().unwrap().0, ".claude-plugin/plugin.json");
     }
 
     /// The module reports with the same wire spellings `veld agent-state` uses, so the

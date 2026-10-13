@@ -2646,6 +2646,12 @@ async fn stage_launch_prompt(session_id: &str, prompt: &str, launch: &mut PaneLa
 /// window's protocol is unchanged: its `take` finds the file gone and knows the agent
 /// has the message. A pane that is not such a command — a `shell` spec, a script that
 /// runs `claude` somewhere inside — answers `false`, and the window types it.
+///
+/// So does a login shell other than zsh or bash, the same gate as
+/// [`login_shell_script`]'s. The prompt becomes text that shell parses, quoted the
+/// POSIX way, and it is text anyone can paste: in fish `\'` ends a single-quoted
+/// string, so a prompt could run a command before Claude starts, and csh breaks on
+/// the newline any longer prompt has.
 async fn launch_prompt_in_argv(
     session_id: &str,
     prompt: &str,
@@ -2653,6 +2659,12 @@ async fn launch_prompt_in_argv(
     shell: &str,
     shell_flags: &[String],
 ) -> bool {
+    if !matches!(
+        veld_core::shell::kind(shell),
+        veld_core::shell::Kind::Zsh | veld_core::shell::Kind::Bash
+    ) {
+        return false;
+    }
     let Some(direct) = launch.direct_argv.as_deref() else {
         return false;
     };
@@ -7275,6 +7287,16 @@ mod tests {
                 !launch_prompt_in_argv(&session_id(), prompt, &mut shell_spec, TEST_SHELL, &[])
                     .await
             );
+
+            // Nor under a shell that would not parse POSIX quoting as written.
+            for shell in ["/opt/homebrew/bin/fish", "/bin/tcsh", "/usr/bin/nu"] {
+                let mut launch = agent_launch();
+                let before = launch.argv.clone();
+                assert!(
+                    !launch_prompt_in_argv(&session_id(), prompt, &mut launch, shell, &[]).await
+                );
+                assert_eq!(launch.argv, before, "{shell}");
+            }
         }
 
         #[tokio::test]

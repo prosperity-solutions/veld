@@ -407,7 +407,9 @@ class WorktreeInbox {
       this.notify();
       // Only a genuinely new event, and only one that stuck. A read, a retraction, or
       // an event in the pane the user is watching must not raise a banner.
-      if (session.unseen !== null && session.unseen === event) {
+      // A held event in the watched pane is filed, so it outlasts the looking, but is
+      // in front of the person already and raises nothing.
+      if (session.unseen !== null && session.unseen === event && sessionId !== this.watching) {
         const payload: InboxEvent = { sessionId, worktreeId, unseen: session.unseen };
         for (const fn of this.eventListeners) fn(payload);
       }
@@ -464,6 +466,8 @@ class WorktreeInbox {
           session.agentCommand = false;
           session.agentSource = null;
           session.agentWorking = false;
+          // Nobody is left to answer a held question, or to say it was answered.
+          session.held = false;
           return undefined;
         }
         // And separately: an unread "needs you" from a hook is never buried by a command
@@ -505,6 +509,9 @@ class WorktreeInbox {
         session.agentSource = null;
         session.agentCommand = false;
         session.delegated = false;
+        // A held question dies with the agent: the report that would release it never
+        // comes, and held it could not be read or marked read at all.
+        session.held = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page

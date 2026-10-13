@@ -1520,11 +1520,27 @@ describe("a held 'waiting for you'", () => {
     expect(rowState(box, WT, false)).toBe(null);
   });
 
-  it("is filed even in the pane being watched", () => {
+  it("is filed even in the pane being watched, without a banner", () => {
     const box = createInbox();
+    const events: string[] = [];
+    box.onEvent((e) => events.push(e.unseen.detail));
     box.setWatching("t1");
     box.report("t1", WT, held, NOW);
     expect(rowState(box, WT)).toBe("attention");
+    expect(events).toEqual([]);
+    // Elsewhere it still raises one.
+    box.report("t2", WT, held, NOW);
+    expect(events).toHaveLength(1);
+  });
+
+  it("can be read once the agent is gone", () => {
+    const box = createInbox();
+    box.report("t1", WT, agent("working"), NOW);
+    box.report("t1", WT, held, NOW + 1);
+    box.report("t1", WT, { type: "exit", code: 137 }, NOW + 2);
+    expect(box.hasUnread(WT)).toBe(true);
+    box.markWorktreeRead(WT);
+    expect(rowState(box, WT, false)).toBe(null);
   });
 
   it("is seen once released in the pane being watched", () => {

@@ -284,7 +284,8 @@ fn session_env_in(
     // the mod's gates, read by the mod itself, so either switch still works alone.
     //
     // `CLAUDE_CODE_PLUGIN_DIRS` replaces any value the daemon was started with; an rc
-    // file that exports its own replaces this one in turn, and the mod does not load.
+    // file that exports its own replaces this one in turn: the mod does not load, and the
+    // wrapper, finding its folder missing from the variable, reports instead.
     let mod_manifest = veld_core::agent::claude_mod_dir(dir).join(".claude-plugin/plugin.json");
     if (agent || context)
         && claude_integration == veld_core::agent::ClaudeIntegration::Mod
@@ -1208,9 +1209,13 @@ unset veld_prompt veld_prompt_file
     // and the variable is only ever set beside the folder the mod loads from.
     let mod_passthrough = if tool == veld_core::agent::AgentTool::Claude {
         format!(
-            "\n# `terminal.claudeIntegration` = mod: Veld's Claude Code mod reports from inside\n# Claude, so pass straight through.\nif [ \"${{{env}-}}\" = {value} ]; then\n  unset VELD_LAUNCH_PROMPT\n  exec \"$veld_real\" \"$@\"\nfi\n",
+            "\n# `terminal.claudeIntegration` = mod: Veld's Claude Code mod reports from inside\n# Claude, so pass straight through — while Claude will still load it. An rc file that\n# exported its own {dirs} replaced Veld's, and then this wrapper reports instead.\nif [ \"${{{env}-}}\" = {value} ]; then\n  case \":${{{dirs}-}}:\" in\n    *:{mod_dir}:*)\n      unset VELD_LAUNCH_PROMPT\n      exec \"$veld_real\" \"$@\" ;;\n  esac\nfi\n",
             env = veld_core::agent::CLAUDE_INTEGRATION_ENV,
             value = veld_core::agent::ClaudeIntegration::Mod.as_str(),
+            dirs = veld_core::agent::CLAUDE_PLUGIN_DIRS_ENV,
+            mod_dir = veld_core::console::quote(
+                &veld_core::agent::claude_mod_dir(dir).display().to_string()
+            ),
         )
     } else {
         String::new()
@@ -1932,16 +1937,9 @@ mod tests {
         );
     }
 
-    /// The `claude` wrapper, run for real, in every case it must and must not touch.
-    ///
-    /// Executed rather than pattern-matched, because the interesting parts are shell
-    /// control flow: which invocations get `--settings` injected, whether the real
-    /// binary is found without finding the wrapper, and whether every failure falls
-    /// through to a plain `exec`. A textual assertion about `case` patterns would pass
-    /// on a script that could not run.
     /// `terminal.claudeIntegration = mod`: the mod is written, a session names it with
-    /// both variables or neither, and the `claude` wrapper becomes a bare `exec` —
-    /// while Codex's wrapper is untouched.
+    /// both variables or neither, and the `claude` wrapper becomes a bare `exec` while
+    /// Claude will load the mod — while Codex's wrapper is untouched.
     #[test]
     fn on_the_claude_mod_the_wrapper_steps_aside_and_the_session_names_the_mod() {
         use veld_core::agent::{CLAUDE_INTEGRATION_ENV, CLAUDE_PLUGIN_DIRS_ENV, ClaudeIntegration};
@@ -2021,7 +2019,8 @@ mod tests {
             set_mode(&real, 0o755).unwrap();
         }
         let path = format!("{}:{}", shims.display(), real_dir.display());
-        let run = |tool: &str| -> String {
+        let named = format!("/elsewhere:{}", mod_dir.display());
+        let run_with = |tool: &str, plugin_dirs: &str| -> String {
             let out = std::process::Command::new(shims.join(tool))
                 .env_clear()
                 .env("PATH", &path)
@@ -2030,6 +2029,7 @@ mod tests {
                 .env("VELD_AGENT_CONTEXT", "1")
                 .env("VELD_LAUNCH_PROMPT", "/nonexistent")
                 .env(CLAUDE_INTEGRATION_ENV, "mod")
+                .env(CLAUDE_PLUGIN_DIRS_ENV, plugin_dirs)
                 .output()
                 .expect("run the shim");
             format!(
@@ -2038,10 +2038,18 @@ mod tests {
                 String::from_utf8_lossy(&out.stderr)
             )
         };
+        let run = |tool: &str| run_with(tool, &named);
         assert_eq!(
             run("claude").trim(),
             "REAL",
             "no flag, no report, no prompt"
+        );
+        // An rc file's own value replaced Veld's, so Claude will not load the mod: the
+        // wrapper reports as it would without the setting.
+        let replaced = run_with("claude", "/elsewhere");
+        assert!(
+            replaced.starts_with("REAL --append-system-prompt"),
+            "{replaced}"
         );
         // Codex's wrapper is untouched by the Claude setting: it still adds its context.
         let codex = run("codex");
@@ -2051,6 +2059,13 @@ mod tests {
         );
     }
 
+    /// The `claude` wrapper, run for real, in every case it must and must not touch.
+    ///
+    /// Executed rather than pattern-matched, because the interesting parts are shell
+    /// control flow: which invocations get `--settings` injected, whether the real
+    /// binary is found without finding the wrapper, and whether every failure falls
+    /// through to a plain `exec`. A textual assertion about `case` patterns would pass
+    /// on a script that could not run.
     #[test]
     fn the_agent_wrapper_injects_only_for_an_interactive_launch_and_always_falls_open() {
         let tmp = tempfile::TempDir::new().unwrap();
