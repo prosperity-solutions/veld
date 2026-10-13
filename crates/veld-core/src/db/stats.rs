@@ -319,13 +319,29 @@ impl Db {
         let Some(run_row) = run_row_id(&conn, &root, run_name)? else {
             return Ok(HashMap::new());
         };
+        // A skip scan over the distinct node keys, then one `ORDER BY sampled_at
+        // DESC LIMIT 1` seek per key — both on `idx_node_stats_lookup(run_row,
+        // node_key, sampled_at)`, so the cost is O(nodes · log n) however many
+        // samples a long-lived run has accumulated. The correlated
+        // `sampled_at = (SELECT MAX(..))` form this replaced probed the index
+        // once per *row* of the run (a 21k-sample run: 16 ms against <1 ms).
+        // `id DESC` breaks a tie between two samples stamped
+        // the same instant towards the later insert, deterministically.
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {STATS_COLS} FROM node_stats
-             WHERE run_row = ?1
-               AND sampled_at = (
-                   SELECT MAX(sampled_at) FROM node_stats ns2
-                   WHERE ns2.run_row = ?1 AND ns2.node_key = node_stats.node_key
-               )"
+            "WITH RECURSIVE keys(k) AS (
+                 SELECT MIN(node_key) FROM node_stats WHERE run_row = ?1
+                 UNION ALL
+                 SELECT (SELECT MIN(node_key) FROM node_stats
+                         WHERE run_row = ?1 AND node_key > keys.k)
+                 FROM keys WHERE k IS NOT NULL
+             )
+             SELECT {STATS_COLS} FROM node_stats
+             WHERE id IN (
+                 SELECT (SELECT id FROM node_stats
+                         WHERE run_row = ?1 AND node_key = keys.k
+                         ORDER BY sampled_at DESC, id DESC LIMIT 1)
+                 FROM keys WHERE k IS NOT NULL
+             )"
         ))?;
         let rows = stmt.query_map([run_row], stats_from_row)?;
         let mut out = HashMap::new();
@@ -645,6 +661,33 @@ mod tests {
             .unwrap();
         }
         (dir, db)
+    }
+
+    #[test]
+    fn latest_is_newest_per_key_and_ties_go_to_the_later_insert() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projStatsLatest");
+        db.save_run(root, "proj", &RunState::new("dev", "proj"))
+            .unwrap();
+        // Keys interleaved, out of timestamp order, and a same-instant tie on
+        // `b:local`: the newest sample wins per key, and of two equal stamps the
+        // later insert does.
+        for (key, mem, secs) in [
+            ("b:local", 1u64, 300),
+            ("a:local", 2, 100),
+            ("a:local", 3, 200),
+            ("b:local", 4, 100),
+            ("b:local", 5, 300),
+            ("c:local", 6, 50),
+        ] {
+            db.record_node_stats(root, "dev", &[(key.into(), stat(1.0, mem, 1, secs))], &[])
+                .unwrap();
+        }
+        let latest = db.latest_node_stats(root, "dev").unwrap();
+        assert_eq!(latest.len(), 3);
+        assert_eq!(latest["a:local"].memory_bytes, 3);
+        assert_eq!(latest["b:local"].memory_bytes, 5);
+        assert_eq!(latest["c:local"].memory_bytes, 6);
     }
 
     #[test]
