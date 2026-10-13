@@ -782,6 +782,13 @@ pub struct HookPayload {
     /// that one field, not turn the whole `Stop` into an unparseable payload.
     #[serde(default)]
     pub background_tasks: Option<serde_json::Value>,
+    /// Claude's transcript file, read once per terminal to tell a fresh conversation
+    /// from a resumed one — see [`claude_transcript_is_fresh`].
+    #[serde(default)]
+    pub transcript_path: Option<String>,
+    /// Claude's `Stop`: this turn exists because a stop hook refused the last one.
+    #[serde(default)]
+    pub stop_hook_active: Option<bool>,
 }
 
 /// Whether a `Stop` was sent while the session still has a background agent running —
@@ -1134,6 +1141,11 @@ pub fn pi_state(payload: &HookPayload) -> State {
 /// Together with the wrapper's [`State::Ready`] these cover the whole cycle: launched and
 /// idle → working → blocked or finished → gone.
 ///
+/// `UserPromptSubmit` and `Stop` are also the two that can answer back, and the naming
+/// nudge uses exactly that: the CLI prints [`claude_naming_output`] when the daemon
+/// says to, on a new conversation's first prompt and that turn's stop, and nothing on
+/// any other turn.
+///
 /// Two events are deliberately absent, and both absences were paid for:
 ///
 /// - **`SessionStart`** was installed and is not any more. It is blocking, and the state
@@ -1332,8 +1344,15 @@ export default function (pi) {{
 #[must_use]
 pub fn agent_context(cli: &str) -> String {
     format!(
-        "You are running inside a Veld IDE terminal. To show the human a file (markdown, CSV, \
-         code) or a web page next to this terminal, run `{cli} ide open <path-or-url>[:line] \
+        "You are running inside a Veld IDE terminal. First action in every new conversation: \
+         before you write your first reply, run `{cli} ide worktree name \"<2-4 words>\"` (at \
+         most 18 columns, e.g. \"Fix login timeout\"). Do it even when the first message is \
+         trivial or not yet a task — name the worktree after what was asked. The human tells \
+         their worktrees apart by this name. You may rename it once more, early on, when what \
+         you learn (what a PR, issue or link is actually about) shows the first name was off. \
+         After that, never rename it unless the human asks, and do not rename it in a resumed \
+         conversation. To show the human a file (markdown, CSV, code) or a web page next to this \
+         terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
          not for every file you touch. Veld can also hand work to the human as a new \
          worktree. Whenever your reply points out something outside the current task that \
@@ -1343,6 +1362,65 @@ pub fn agent_context(cli: &str) -> String {
          Only once they agree, run `{cli} ide worktree new` (see its `--help`): it creates a \
          worktree where an agent starts on a prompt you write. Details: `{cli} skills ide`."
     )
+}
+
+/// The one line both enforcing hooks hand the agent: the wrapper's
+/// [`claude_naming_output`] and the mod's stop.
+#[must_use]
+pub fn naming_line(cli: &str) -> String {
+    format!(
+        "Veld: name this worktree now, before anything else — run `{cli} ide worktree name \
+         \"<2-4 words>\"` (at most 18 columns) saying what was asked. Rename it again only if \
+         what you learn next shows the name was off, and never after that unless asked."
+    )
+}
+
+/// What a Claude hook hands back to make the agent name its worktree — the
+/// enforcing half of [`agent_context`]'s first instruction.
+///
+/// `remind` is the first prompt of a fresh conversation, answered with
+/// `additionalContext`: a line beside the user's message is followed where the same
+/// sentence in a system prompt is weighed against how small the request looks.
+/// Otherwise it is that turn's stop, refused once with the same line as the reason —
+/// the daemon decides which and guarantees "once" (`naming_verdict`).
+///
+/// Short, but whole: it states the renaming rule as well, because an agent can get
+/// this without the context — the wrapper leaves the context out when the user passed
+/// a system-prompt flag of their own, and keeps the hooks.
+#[must_use]
+pub fn claude_naming_output(cli: &str, remind: bool) -> serde_json::Value {
+    let line = naming_line(cli);
+    if remind {
+        serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": line,
+            },
+        })
+    } else {
+        serde_json::json!({ "decision": "block", "reason": line })
+    }
+}
+
+/// Whether the Claude transcript at `path` holds no reply yet — i.e. this
+/// `UserPromptSubmit` opens a new conversation rather than continuing a resumed one.
+///
+/// Reads up to the first assistant entry and stops, so a resumed multi-megabyte
+/// transcript costs its first few lines. A transcript that is missing or unreadable
+/// is a new conversation: Claude creates the file with the first message.
+#[must_use]
+pub fn claude_transcript_is_fresh(path: &Path) -> bool {
+    use std::io::BufRead as _;
+    let Ok(file) = std::fs::File::open(path) else {
+        return true;
+    };
+    !std::io::BufReader::new(file)
+        .lines()
+        .map_while(Result::ok)
+        .any(|line| {
+            serde_json::from_str::<serde_json::Value>(&line)
+                .is_ok_and(|entry| entry["type"] == "assistant")
+        })
 }
 
 /// How [`agent_context`] spells the CLI: the bare word `veld` when this daemon is the
@@ -1562,8 +1640,10 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// reminder, and an approved tool call clears "waiting" without waiting for the turn
 /// to end.
 ///
-/// One `classic.*` event is hooked anyway: `classic.Notification`, for the dialogs no
-/// native event shows. It reaches the mod only where the policy mod is not seated —
+/// Two `classic.*` events are hooked anyway: `classic.Notification`, for the dialogs no
+/// native event shows, and `classic.Stop`, for the naming nudge's one refused stop
+/// (`claude_naming_output` is the wrapper's form of it). They reach the mod only where
+/// the policy mod is not seated —
 /// an organization whose managed `prependPlugins` leaves out `sec-default@builtin`,
 /// or a machine with no managed settings on a personal plan — and where it is, the hook
 /// never runs and the table above is all there is. Measured on Claude Code 2.1.296 with
@@ -1605,12 +1685,12 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// # Every gating hook passes the event on
 ///
 /// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`,
-/// `session.compact`, `classic.Notification`) catch their own failure by passing the
+/// `session.compact`, `classic.Notification`, `classic.Stop`) catch their own failure by passing the
 /// event on unchanged, and each report is bounded by [`HOOK_REQUEST_TIMEOUT_MS`] and
 /// swallows its errors: a daemon that is down or slow costs a badge, never the
 /// person's prompt or tool call.
 #[must_use]
-pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String); 4] {
+pub fn claude_mod_files(daemon: &str, context: &str, naming: &str) -> [(&'static str, String); 4] {
     const MODULE: &str = include_str!("agent/claude-mod/register.ts");
     const CONTRACT: &str = include_str!("agent/claude-mod/types.d.ts");
     let manifest = serde_json::json!({
@@ -1624,6 +1704,7 @@ pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String);
     let module = MODULE
         .replace("__VELD_DAEMON__", &json_string(daemon))
         .replace("__VELD_CONTEXT__", &json_string(context))
+        .replace("__VELD_NAMING__", &json_string(naming))
         .replace("__VELD_TIMEOUT_MS__", &HOOK_REQUEST_TIMEOUT_MS.to_string());
     // In the order they are written, the manifest last: a write reloads the mod, and a
     // manifest naming a file not there yet would fail that load.
@@ -1858,7 +1939,7 @@ mod tests {
     #[test]
     fn the_claude_mod_bakes_in_its_values_as_literals() {
         let context = "Say \"hi\"\nthen `veld ide open`\u{7f}";
-        let files = claude_mod_files("http://127.0.0.1:2999", context);
+        let files = claude_mod_files("http://127.0.0.1:2999", context, "n");
         let module = &files
             .iter()
             .find(|(path, _)| *path == "hooks/register.ts")
@@ -1874,7 +1955,7 @@ mod tests {
     /// either loads nothing, silently, in every session.
     #[test]
     fn the_claude_mod_manifest_names_its_module() {
-        let files = claude_mod_files("http://127.0.0.1:2999", "x");
+        let files = claude_mod_files("http://127.0.0.1:2999", "x", "n");
         let read = |name: &str| -> serde_json::Value {
             let text = &files.iter().find(|(path, _)| *path == name).unwrap().1;
             serde_json::from_str(text).unwrap()
@@ -1922,7 +2003,7 @@ mod tests {
     /// rather than a badge.
     #[test]
     fn the_claude_mod_reports_only_states_the_daemon_accepts() {
-        let files = claude_mod_files("d", "c");
+        let files = claude_mod_files("d", "c", "n");
         let module = &files
             .iter()
             .find(|(p, _)| *p == "hooks/register.ts")
@@ -1975,7 +2056,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt as _;
         let tmp = tempfile::TempDir::new().unwrap();
         let mod_dir = tmp.path().join("mod");
-        for (name, body) in claude_mod_files("http://127.0.0.1:1", "x") {
+        for (name, body) in claude_mod_files("http://127.0.0.1:1", "x", "n") {
             let path = mod_dir.join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, body).unwrap();
@@ -2623,6 +2704,59 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         assert!(!AgentTool::Pi.takes_launch_prompt());
     }
 
+    /// The two answers a Claude hook gives for the naming nudge are the shapes Claude
+    /// Code reads: `additionalContext` under `hookSpecificOutput` for a prompt, and a
+    /// top-level `decision: "block"` with a `reason` for a stop. Both name the command
+    /// by the CLI word they were handed.
+    #[test]
+    fn the_naming_nudge_is_shaped_for_each_hook() {
+        let remind = claude_naming_output("/dev/veld", true);
+        assert_eq!(
+            remind["hookSpecificOutput"]["hookEventName"],
+            "UserPromptSubmit"
+        );
+        let context = remind["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap();
+        assert!(
+            context.contains("`/dev/veld ide worktree name "),
+            "{context}"
+        );
+        assert!(remind.get("decision").is_none());
+
+        let block = claude_naming_output("veld", false);
+        assert_eq!(block["decision"], "block");
+        assert!(
+            block["reason"]
+                .as_str()
+                .unwrap()
+                .contains("`veld ide worktree name ")
+        );
+        assert!(block.get("hookSpecificOutput").is_none());
+    }
+
+    /// A transcript with a reply in it is a resumed conversation; one with only the
+    /// user's message, or none at all yet, is a new one. Lines that are not JSON —
+    /// a partly written last line — are skipped, not taken as a reply.
+    #[test]
+    fn a_transcript_is_fresh_until_it_holds_a_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        assert!(claude_transcript_is_fresh(&path), "missing file");
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\",\"message\":{\"content\":\"type assistant\"}}\n{\"type\":\"assist",
+        )
+        .unwrap();
+        assert!(claude_transcript_is_fresh(&path));
+        std::fs::write(
+            &path,
+            "{\"type\":\"user\"}\n{\"type\":\"assistant\",\"message\":{}}\n{\"type\":\"user\"}\n",
+        )
+        .unwrap();
+        assert!(!claude_transcript_is_fresh(&path));
+    }
+
     /// The context names the CLI of the daemon that wrote it — the bare `veld` only for
     /// the installed instance — in both places it names one, with the flag pair the CLI
     /// requires. The reported bug: a dev stack's agent was told `veld`, ran the installed
@@ -2643,6 +2777,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         assert!(text.contains(&format!("`{} skills ide`", dev.display())));
         assert!(text.contains("--quiet") && text.contains("--notify"));
         assert!(text.contains(&format!("`{} ide worktree new`", dev.display())));
+        assert!(text.contains(&format!("`{} ide worktree name ", dev.display())));
         assert!(
             !text.contains("`veld "),
             "no bare word left for a dev instance: {text}"

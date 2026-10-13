@@ -881,12 +881,6 @@ export function NewWorktreeDialog(props: {
     /** What to type into that pane once it is ready. Absent when the user left
      *  the field empty, which is the "just give me the checkout" case. */
     prompt?: string;
-    /** The same text, for the daemon's `ide.worktreeName` command to name the
-     *  checkout by. Separate from `prompt` because they go to different places
-     *  and are gated on different things: `prompt` is typed into a pane by this
-     *  client, `name_prompt` rides the create request and is only sent when the
-     *  project declares a naming command. */
-    name_prompt?: string;
     /** Files to paste after the prompt, as paths — see `ide/promptAttachments.ts`.
      *  Like `prompt`, an instruction to this client and never sent to the daemon. */
     attachments?: IncomingFile[];
@@ -930,15 +924,6 @@ export function NewWorktreeDialog(props: {
   newMode: WorktreeNewMode;
   /** Record the mode the user is working in, so the next create opens on it. */
   onNewModeChange: (mode: "prompt" | "manual") => void;
-  /**
-   * Whether the project declares `ide.worktreeName` — a command that turns the
-   * prompt into the checkout's name.
-   *
-   * Gates whether the prompt goes on the create request at all: a project with
-   * no such command has no use for it, and the dialog's own derivation already
-   * named the checkout.
-   */
-  generatesNames: boolean;
   /** The agent this project was last created with, or `""` — see `ide/lastAgent.ts`. */
   rememberedAgent: string;
   /**
@@ -1327,11 +1312,6 @@ export function NewWorktreeDialog(props: {
         // See `launch`: the pane and the text travel together or not at all.
         agent: launch?.agent,
         prompt: launch?.prompt,
-        // Only when the project declares a naming command. Otherwise the daemon
-        // has nothing to do with it and the dialog has already named the
-        // checkout — see the `generatesNames` prop.
-        // `|| undefined`: a files-only launch has no words to name it by.
-        name_prompt: props.generatesNames ? launch?.prompt || undefined : undefined,
         attachments: launch?.attachments.map((a) => ({ file: a.file, path: a.path })),
       })
       .then(() => {
@@ -2188,9 +2168,7 @@ export function NewWorktreeDialog(props: {
                   the full text is on hover if a narrow window clamps it. */}
               {(() => {
                 const line = [
-                  props.generatesNames && launch?.prompt
-                    ? "Named by the project's naming command."
-                    : `Named '${displayName}'.`,
+                  `Named '${displayName}'.`,
                   launch === null
                     ? null
                     : launch.attachments.length === 0

@@ -161,6 +161,37 @@ human may already have open:
   untracked ones. This is the human's cheap review surface; it is why you do not
   need to open every file you edited.
 
+## Naming the worktree you are in (`veld ide worktree name`)
+
+The rail lists every worktree by its title, and that title is how the human
+tells four agents apart. **Name yours early** — as soon as you know what the task
+is, usually in your first reply:
+
+```sh
+veld ide worktree name "Fix login timeout"
+veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previous"}
+```
+
+- A few words in sentence case saying what the work is, at most 18 columns (a
+  wide character such as 漢 or an emoji counts as two). Not the branch name, not
+  a sentence. A blank or longer title is refused with exit `2`.
+- **Rename it at most once more, and only early**: when what you learn next —
+  what a PR, issue or link is actually about — shows the first name was off.
+  After that, leave it alone unless the human asks; they may have renamed it
+  themselves, and a title that keeps changing is no landmark.
+- **In Claude Code this is enforced once**, when *Notice when a coding agent is
+  waiting for you* is on as well. Veld adds a reminder to the first
+  prompt of a new conversation, and refuses that turn's stop once if the worktree
+  is still unnamed (except on Veld's Claude mod where Claude Code's built-in
+  policy mod is seated, typical on a Team plan: there a stop cannot be refused). Naming it first means you never see either.
+  A `/clear` in the same terminal is not nudged again; a new `claude` launch is.
+- It retitles the worktree containing your working directory (or, when that
+  cannot be read, the one your terminal runs in). Only the label changes — never
+  the branch, the directory, or the run's hostname.
+
+Exit status: `0` named; `1` failed (the daemon is not running, or refused);
+`2` not a usable title; `3` not inside a worktree Veld knows.
+
 ## Handing a task to the human in a new worktree (`veld ide worktree new`)
 
 When your reply points out something outside the current task that somebody

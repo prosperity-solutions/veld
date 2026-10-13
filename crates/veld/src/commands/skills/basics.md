@@ -44,7 +44,7 @@ read it:
 | Understand the project | `presets`, `nodes`, `graph`, `config`, `lint` |
 | Act on a node | `actions`, `action` |
 | Share | `share`, `join`, `shares`, `unshare` |
-| Work with a human | `feedback`, `ide open`, `ide worktree new` |
+| Work with a human | `feedback`, `ide open`, `ide worktree name`, `ide worktree new` |
 | Machine setup | `setup`, `doctor`, `update`, `desktop`, `settings` |
 
 ## Five things agents get wrong

@@ -1241,18 +1241,21 @@ impl SettingKey {
                 "Notice when a coding agent is waiting for you",
                 "Works with Claude Code, Codex CLI and Pi. Tells Veld when one is working, \
                  waiting for you, or finished, without touching any of your own agent config. \
-                 Takes effect for new terminals.",
+                 With the row below on too, Claude Code is held to naming its worktree on its \
+                 first turn: a reminder on the first prompt, and its first stop refused once \
+                 if it has not (on the mod, not where Claude Code's built-in policy mod is \
+                 seated). Takes effect for new terminals.",
                 Activity,
                 NOTICING,
             ),
             Self::TerminalAgentContext => toggle_in(
                 "Tell coding agents how to show you files",
                 "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
-                 in a Veld terminal: that `veld ide open` puts a file or a page next to that \
-                 terminal, and that separate work they come across can be offered to you as a \
+                 in a Veld terminal: to name its worktree first (`veld ide worktree name`), that \
+                 `veld ide open` puts a file or a page next to that terminal, and that separate work they come across can be offered to you as a \
                  new worktree (`veld ide worktree new`). Nothing of yours is edited, and the text \
                  is the same every time. \
-                 Independent of the row above. Takes effect for new agents.",
+                 Works without the row above. Takes effect for new agents.",
                 Activity,
                 NOTICING,
             ),

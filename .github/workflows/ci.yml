@@ -281,7 +281,7 @@ jobs:
       # `injection-test` and `release-build`'s darwin legs are Rust jobs on
       # macOS too, but they build and run the CLI rather than the test suite.
       # So deleting or renaming `signing-smoke` leaves CI fully green with zero
-      # coverage of the sign-ad-hoc-then-.sig ordering release.yml depends on — a silent
+      # coverage of the codesign-then-.sig ordering release.yml depends on — a silent
       # reopening of the exact gap this issue closed. Nothing else notices:
       # `validate-workflow-gates.py` reads jobs only to check their draft guard,
       # never that a given job exists.
@@ -306,7 +306,7 @@ jobs:
           smoke = open("crates/veld-sign/tests/smoke.rs").read()
           if "fn adhoc_resign_after_ed25519_signing_is_byte_idempotent" not in smoke:
               sys.exit("crates/veld-sign/tests/smoke.rs: the ad-hoc resign "
-                       "idempotency test is gone; CI's sign-ad-hoc-then-.sig order "
+                       "idempotency test is gone; CI's codesign-then-.sig order "
                        "would be unverified again (issue #339)")
           # The test that actually holds the fix for a helper whose .sig stopped
           # matching: install.sh must not touch a binary that already verifies,
@@ -329,6 +329,45 @@ jobs:
               sys.exit("crates/veld-sign/tests/smoke.rs: an #[ignore] here means a "
                        "signing case silently stops running; delete the test or fix "
                        "it rather than skipping it (issue #339)")
+
+          # Same "gate that cannot fail" problem for the Developer ID scripts:
+          # they run only on a push to main, so `apple-signing-smoke` is the
+          # one place a pull request exercises them. And the self-test switch
+          # that job uses skips the timestamp and team checks, so it must never
+          # appear in the release workflow.
+          job = ci["jobs"].get("apple-signing-smoke")
+          if job is None or "tests/macos-signing-smoke.sh" not in " ".join(
+              str(s.get("run", "")) for s in job["steps"]):
+              sys.exit("ci.yml: the `apple-signing-smoke` job is gone or no longer runs "
+                       "tests/macos-signing-smoke.sh; the release's macOS signing scripts "
+                       "would first run after merge")
+          selftest_switch = "VELD_CODESIGN" + "_SELFTEST"
+          release_text = open(".github/workflows/release.yml").read()
+          if selftest_switch in release_text:
+              sys.exit("release.yml mentions the codesign self-test switch, which skips "
+                       "the timestamp and team checks; it belongs to the PR smoke only")
+          # The signing identifiers are each install's code identity: macOS keys
+          # TCC grants and Login Items on identifier + team. Renaming one, or
+          # giving veld/veld-daemon the hardened runtime (which strips DYLD_*
+          # from the dev servers they start), passes every other check and
+          # silently costs every user their grants. docs/macos-signing.md has
+          # the table; change it and this list together, deliberately.
+          for line in (
+              '$sign --no-runtime "$identity" dev.veld.cli "$bin/veld"',
+              '$sign --no-runtime "$identity" dev.veld.daemon "$bin/veld-daemon"',
+              '$sign "$identity" dev.veld.helper "$bin/veld-helper"',
+              '$sign "$identity" dev.veld.gateway "$bin/veld-gateway"',
+              '$sign "$identity" dev.veld.caddy dist/caddy',
+              '../scripts/release/macos-codesign.sh --no-runtime "$IDENTITY" dev.veld.desktop.dmg "$dmg"',
+          ):
+              # A whole, indented line: a commented-out copy beside a renamed
+              # identifier must not satisfy it.
+              if not re.search(r"(?m)^[ \t]+" + re.escape(line) + r"[ \t]*$", release_text):
+                  sys.exit(f"release.yml no longer signs with `{line}`. That identifier is "
+                           "a shipped code identity; see docs/macos-signing.md before changing it")
+          if not re.search(r"(?m)^appId: dev\.veld\.desktop$", open("desktop/electron-builder.yml").read()):
+              sys.exit("desktop/electron-builder.yml: appId is no longer dev.veld.desktop. It is the "
+                       "app's signing identifier; see docs/macos-signing.md before changing it")
 
           # No job that a pull request can start may reach ANY org signing
           # secret. Checking every workflow, and checking the *guard* rather than
@@ -369,6 +408,11 @@ jobs:
           # clean tree — which is the gate working, and is why the constants are
           # referred to by file rather than by name below.
           secret_prefix = "SIGN" + "ING_"
+          # The Developer ID certificate and notary key (docs/macos-signing.md).
+          # Matched as a reference into the secrets context rather than as a bare
+          # prefix: tests/macos-signing-smoke.sh legitimately exports same-named
+          # variables with throwaway values.
+          apple_ref = "secrets." + "APPLE_"
           bulk_ref = "toJSON(" + "secrets)"
           dynamic_ref = "secrets" + "["
           def strings(node):
@@ -391,6 +435,8 @@ jobs:
                   # is the thing this file must not contain.
                   if secret_prefix in s:
                       return "a signing secret"
+                  if apple_ref in packed:
+                      return "an Apple signing secret"
                   if bulk_ref in packed:
                       return "the whole secrets context"
                   if dynamic_ref in packed:
@@ -419,6 +465,14 @@ jobs:
                   # as surely as spelling it out.
                   if what is None and str(job.get("secrets", "")).strip() == "inherit":
                       what = "every secret, via `secrets: inherit`"
+                  # A job in the `release` environment can read every secret in
+                  # it without naming one here. GitHub's branch rule on the
+                  # environment is the real lock; this keeps the guard honest.
+                  env = job.get("environment")
+                  if isinstance(env, dict):
+                      env = env.get("name")
+                  if what is None and str(env or "").strip() == "release":
+                      what = "the `release` environment"
                   if what is None:
                       continue
                   # Quote style is not meaning: `== 'push'` and `== "push"` are
@@ -793,7 +847,7 @@ jobs:
               ("more_keys_than_slots_is_a_usage_error",
                "without it a release can claim more slots than any reader looks at"),
               ("adhoc_resign_is_byte_idempotent_for_a_multi_slot_signature",
-               "CI's sign-ad-hoc-then-.sig order is unverified for the multi-slot shape "
+               "CI's codesign-then-.sig order is unverified for the multi-slot shape "
                "otherwise, and this is the only macOS home for it"),
               ("slots_is_the_same_signature_as_key_env_plus_expected_pubkeys",
                "--slots is the flag the release actually uses, and every other guard in "
@@ -1056,7 +1110,7 @@ jobs:
           bash -n install.sh
           bash -n tests/validate-install-contract.sh
           bash -n tests/validate-ship-stamp.sh
-          shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
+          shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh tests/macos-signing-smoke.sh scripts/dev/*.sh scripts/release/*.sh
       # The drift neither of the above can see: a `VELD_*` variable renamed on
       # one side of the CLI/install.sh boundary. Both files stay individually
       # valid while every app update silently reinstalls the CLI and restarts
@@ -1961,7 +2015,7 @@ jobs:
   # ── Helper signing smoke test (issue #339) ────────────────────────
   #
   # `release.yml`'s `Package client binaries` step is the only place `veld-sign`
-  # and the macOS ad-hoc-then-ed25519 ordering ever run — and it runs only on a
+  # and the macOS codesign-then-ed25519 ordering ever run — and it runs only on a
   # tagged release, so the first execution of a change to that path used to be
   # the release itself. v16.58.1 failed there because the `SIGNING_PRIVATE_KEY`
   # secret held a PEM of the wrong kind, and nothing before the release could
@@ -1971,7 +2025,7 @@ jobs:
   #
   # Linux coverage is already free: `check` runs `cargo test --workspace` on
   # ubuntu, which includes `crates/veld-sign/tests/smoke.rs`. This job exists
-  # for the macOS half — `codesign` is what the ad-hoc-then-ed25519 ordering
+  # for the macOS half — `codesign` is what the codesign-then-ed25519 ordering
   # rests on, and nothing else in CI can exercise it. Note what it cannot see:
   # a re-sign is idempotent on the runner's own codesign and NOT across macOS
   # releases (macOS 27 truncates a CI-signed helper by 18000 bytes), which is
@@ -1984,9 +2038,10 @@ jobs:
   # What this still does NOT cover, so nobody reads the job name as more than it
   # is. Both are in `Package client binaries` and both first run at a release:
   #
-  #   * The `macos-amd64` leg ad-hoc signs a **cross-compiled** `x86_64-apple-darwin`
-  #     binary on an arm64 runner. The idempotency test signs a host-native
-  #     Mach-O, so the cross-arch case is unexercised.
+  #   * The `macos-amd64` leg Developer ID signs a **cross-compiled**
+  #     `x86_64-apple-darwin` binary on an arm64 runner ("Developer ID-sign the
+  #     macOS binaries"). The idempotency test and `apple-signing-smoke` sign
+  #     host-native or throwaway Mach-Os, so the cross-arch case is unexercised.
   #   * Nothing asserts `veld-helper.sig` actually lands in the tarball that
   #     `tar -czf ... -C dist .` produces.
   signing-smoke:
@@ -2002,3 +2057,22 @@ jobs:
       - uses: Swatinem/rust-cache@49a0bdc70d2e1b713ca9e2869b211fcce03d3c1c
       - name: Sign a dummy binary end to end
         run: cargo test -p veld-sign
+
+  # The release's Developer ID scripts (`scripts/release/macos-*.sh`) run only on
+  # a push to `main`, with secrets no pull request can reach — so without this
+  # job, a typo in either would be found by the first release after the merge,
+  # and the release fails closed on macOS by design. This runs both scripts end
+  # to end with a throwaway certificate on every PR; the script says what that
+  # can and cannot prove.
+  apple-signing-smoke:
+    permissions:
+      contents: read
+    name: Developer ID Signing Smoke (macOS)
+    runs-on: macos-latest
+    needs: check
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Sign with the release scripts end to end
+        run: tests/macos-signing-smoke.sh

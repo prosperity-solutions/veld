@@ -172,6 +172,7 @@ pub fn state(
     // It claims hook authority for the pane while saying nothing is happening, which is
     // what stops the shell's "a command is running here" driving an activity spinner for
     // a session sitting idle at its prompt.
+    let mut naming = None;
     let reported = if launched {
         agent::State::Ready
     } else {
@@ -192,6 +193,9 @@ pub fn state(
                 None => return 1,
             },
         };
+        if tool == AgentTool::Claude {
+            naming = naming_turn(&payload);
+        }
         match tool {
             AgentTool::Claude => agent::claude_state(&payload),
             AgentTool::Codex => agent::codex_state(&payload),
@@ -205,10 +209,43 @@ pub fn state(
     if reported == agent::State::Unknown {
         return 0;
     }
-    report(&session, tool, reported)
+    report(&session, tool, reported, naming)
 }
 
-/// Tell the daemon, over one plain-HTTP request on a blocking socket.
+/// The naming nudge's half of a Claude hook payload: which turn this is, and what
+/// the daemon needs to decide whether to nudge. `None` for every other event.
+fn naming_turn(payload: &agent::HookPayload) -> Option<serde_json::Value> {
+    match payload.hook_event_name.as_str() {
+        "UserPromptSubmit" => {
+            let fresh = payload
+                .transcript_path
+                .as_deref()
+                .is_none_or(|p| agent::claude_transcript_is_fresh(Path::new(p)));
+            Some(serde_json::json!({ "turn": "prompt", "fresh": fresh }))
+        }
+        "Stop" => Some(serde_json::json!({
+            "turn": "stop",
+            "continued": payload.stop_hook_active.unwrap_or(false),
+        })),
+        _ => None,
+    }
+}
+
+/// Whether a report refused with `status` is worth sending again without its naming
+/// turn: a daemon older than this CLI refuses the unknown field outright (422), and the
+/// state is still worth reporting without it.
+fn resend_without_naming(had_naming: bool, status: u16) -> bool {
+    had_naming && status == 422
+}
+
+/// How the naming nudge spells the CLI — the same word [`agent::agent_context`]
+/// used, so the two instructions name one command.
+fn naming_cli_word() -> String {
+    let exe = std::env::current_exe().unwrap_or_else(|_| "veld".into());
+    agent::context_cli_word(&exe, veld_core::db::Db::uses_installed_database())
+}
+
+/// Tell the daemon, over plain-HTTP requests on a blocking socket.
 ///
 /// **No HTTP client and no async runtime, on purpose.** This runs inside a blocking
 /// Claude Code hook, at least twice a turn, and the previous version started a
@@ -217,19 +254,51 @@ pub fn state(
 /// loopback, so there is no TLS, redirect or proxy case a client would have bought.
 /// `main` dispatches here before any runtime exists.
 ///
-/// Exit code is the whole contract: 0 for a 2xx, 1 for everything else, nothing printed.
-fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
+/// Exit code is the contract for every tool: 0 for a 2xx, 1 for everything else. The
+/// one thing ever printed is the naming nudge's answer, on a 2xx that carries one.
+fn report(
+    session: &str,
+    tool: AgentTool,
+    reported: agent::State,
+    naming: Option<serde_json::Value>,
+) -> i32 {
     let port = veld_core::instance::daemon_port();
-    let Some(request) = agent_state_request(&format!("127.0.0.1:{port}"), session, tool, reported)
-    else {
-        return 1;
-    };
+    let host = format!("127.0.0.1:{port}");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let timeout = std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS);
-    match post_status(addr, &request, timeout) {
+    // One budget for both requests: the hook's own `timeout` is barely more than one.
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS);
+    let post = |naming: Option<&serde_json::Value>| {
+        let request = agent_state_request(&host, session, tool, reported, naming)?;
+        post_to(addr, &request, deadline)
+    };
+    let mut sent = post(naming.as_ref());
+    if sent
+        .as_ref()
+        .is_some_and(|r| resend_without_naming(naming.is_some(), r.status))
+    {
+        sent = post(None);
+    }
+    match sent {
+        Some(resp) if (200..300).contains(&resp.status) => {
+            // Claude reads a hook's stdout as its answer: the reminder, or the stop
+            // refused. Nothing else is ever printed here.
+            let body: serde_json::Value = serde_json::from_slice(&resp.body).unwrap_or_default();
+            let remind = match body["naming"].as_str() {
+                Some("remind") => Some(true),
+                Some("block") => Some(false),
+                _ => None,
+            };
+            if let Some(remind) = remind {
+                println!(
+                    "{}",
+                    agent::claude_naming_output(&naming_cli_word(), remind)
+                );
+            }
+            0
+        }
         // Silent on every failure. A daemon that is down, busy or a different version is
         // not something to interrupt an agent about.
-        Some(status) if (200..300).contains(&status) => 0,
         _ => 1,
     }
 }
@@ -247,15 +316,19 @@ fn agent_state_request(
     session: &str,
     tool: AgentTool,
     reported: agent::State,
+    naming: Option<&serde_json::Value>,
 ) -> Option<Vec<u8>> {
     if !valid_session_id(session) {
         return None;
     }
-    let body = serde_json::to_vec(&serde_json::json!({
+    let mut body = serde_json::json!({
         "tool": tool.as_str(),
         "state": reported.as_str(),
-    }))
-    .ok()?;
+    });
+    if let Some(naming) = naming {
+        body["naming"] = naming.clone();
+    }
+    let body = serde_json::to_vec(&body).ok()?;
     let mut request = format!(
         "POST /api/pty/sessions/{session}/agent-state HTTP/1.1\r\n\
          Host: {host}\r\n\
@@ -271,43 +344,91 @@ fn agent_state_request(
     Some(request)
 }
 
-/// Send `request` to `addr` and return the response's status code, or `None` for
-/// anything that went wrong.
+/// What [`post_to`] read back.
+#[derive(Debug, PartialEq)]
+struct Reply {
+    status: u16,
+    /// Empty when the reply had none, did not say how long it was, was larger than
+    /// [`MAX_REPLY_BYTES`], or did not arrive in time — the status alone still counts.
+    body: Vec<u8>,
+}
+
+/// The most of a reply [`post_to`] reads. The daemon answers this endpoint with a few
+/// dozen bytes of JSON; anything near this size is not that answer.
+const MAX_REPLY_BYTES: usize = 16 * 1024;
+
+/// Send `request` to `addr` and read the reply, or `None` if no status line came back.
 ///
-/// `timeout` bounds the whole exchange, as the `reqwest` client's did: the connect gets
-/// all of it, and each later read or write gets whatever is left of the deadline. Only
-/// the status line is read; the response body is irrelevant and the socket is dropped.
-fn post_status(
+/// `deadline` bounds the whole exchange, as the `reqwest` client's timeout did: each
+/// connect, write and read gets whatever is left of it. The body is read only up to its
+/// `Content-Length` (axum's `Json` always sets one), so a well-behaved daemon is never
+/// waited on to close the socket.
+fn post_to(
     addr: std::net::SocketAddr,
     request: &[u8],
-    timeout: std::time::Duration,
-) -> Option<u16> {
+    deadline: std::time::Instant,
+) -> Option<Reply> {
     use std::io::{Read, Write};
     use std::time::Instant;
 
-    let deadline = Instant::now() + timeout;
     let remaining = || {
         deadline
             .checked_duration_since(Instant::now())
             .filter(|d| !d.is_zero())
     };
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, remaining()?).ok()?;
     let _ = stream.set_nodelay(true);
     stream.set_write_timeout(Some(remaining()?)).ok()?;
     stream.write_all(request).ok()?;
 
-    // "HTTP/1.1 202 Accepted\r\n": the status is the first 12 bytes at most.
-    let mut head = [0u8; 12];
-    let mut filled = 0;
-    while filled < head.len() {
+    let mut buf = Vec::with_capacity(512);
+    let mut read_more = |buf: &mut Vec<u8>| -> Option<()> {
+        let mut chunk = [0u8; 1024];
         stream.set_read_timeout(Some(remaining()?)).ok()?;
-        match stream.read(&mut head[filled..]) {
-            Ok(0) | Err(_) => return None,
-            Ok(n) => filled += n,
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => None,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                Some(())
+            }
+        }
+    };
+    let head_end = loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break i + 4;
+        }
+        if buf.len() > MAX_REPLY_BYTES {
+            return None;
+        }
+        read_more(&mut buf)?;
+    };
+    let head = std::str::from_utf8(&buf[..head_end]).ok()?;
+    let status = head
+        .strip_prefix("HTTP/1.")?
+        .get(2..5)?
+        .parse::<u16>()
+        .ok()?;
+    let length = head.split("\r\n").find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case("content-length")
+            .then(|| value.trim().parse::<usize>().ok())?
+    });
+    let mut body = Vec::new();
+    if let Some(length) = length.filter(|&n| n <= MAX_REPLY_BYTES) {
+        let complete = loop {
+            if buf.len() >= head_end + length {
+                break true;
+            }
+            if read_more(&mut buf).is_none() {
+                break false;
+            }
+        };
+        if complete {
+            body = buf[head_end..head_end + length].to_vec();
         }
     }
-    let head = std::str::from_utf8(&head).ok()?;
-    head.strip_prefix("HTTP/1.")?.get(2..5)?.parse::<u16>().ok()
+    Some(Reply { status, body })
 }
 
 /// `veld agent-prompt --take <PATH>`: print a launch prompt and remove it, or fail.
@@ -449,6 +570,45 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// A CLI newer than its daemon keeps reporting states: only a 422 to a report
+    /// that carried a naming turn is sent again, without it.
+    #[test]
+    fn an_older_daemon_still_gets_the_state() {
+        assert!(resend_without_naming(true, 422));
+        assert!(!resend_without_naming(false, 422));
+        assert!(!resend_without_naming(true, 400));
+        assert!(!resend_without_naming(true, 202));
+    }
+
+    /// Only Claude's prompt and stop carry a naming turn; a prompt in a resumed
+    /// transcript says so.
+    #[test]
+    fn a_naming_turn_rides_only_the_prompt_and_the_stop() {
+        let event = |name: &str| agent::HookPayload {
+            hook_event_name: name.to_owned(),
+            ..Default::default()
+        };
+        assert_eq!(
+            naming_turn(&event("UserPromptSubmit")).unwrap(),
+            serde_json::json!({"turn": "prompt", "fresh": true})
+        );
+        let mut stop = event("Stop");
+        stop.stop_hook_active = Some(true);
+        assert_eq!(
+            naming_turn(&stop).unwrap(),
+            serde_json::json!({"turn": "stop", "continued": true})
+        );
+        assert!(naming_turn(&event("Notification")).is_none());
+        assert!(naming_turn(&event("SessionEnd")).is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let transcript = dir.path().join("t.jsonl");
+        std::fs::write(&transcript, "{\"type\":\"assistant\"}\n").unwrap();
+        let mut resumed = event("UserPromptSubmit");
+        resumed.transcript_path = Some(transcript.to_string_lossy().into_owned());
+        assert_eq!(naming_turn(&resumed).unwrap()["fresh"], false);
+    }
+
     /// The wrapper reads only the exit status: 0 hands the agent the prompt, any
     /// other code launches it bare and leaves the prompt to the window.
     #[test]
@@ -516,6 +676,7 @@ mod tests {
             "0123abcd-_Z",
             AgentTool::Claude,
             agent::State::Blocked,
+            None,
         )
         .unwrap();
         let text = String::from_utf8(bytes).unwrap();
@@ -566,7 +727,8 @@ mod tests {
         ] {
             assert!(!valid_session_id(bad), "{bad:?}");
             assert!(
-                agent_state_request("h", bad, AgentTool::Claude, agent::State::Ready).is_none(),
+                agent_state_request("h", bad, AgentTool::Claude, agent::State::Ready, None)
+                    .is_none(),
                 "{bad:?}"
             );
         }
@@ -630,7 +792,76 @@ mod tests {
     }
 
     fn sample_request() -> Vec<u8> {
-        agent_state_request("h", "abc", AgentTool::Claude, agent::State::Ready).unwrap()
+        agent_state_request("h", "abc", AgentTool::Claude, agent::State::Ready, None).unwrap()
+    }
+
+    fn within(d: std::time::Duration) -> std::time::Instant {
+        std::time::Instant::now() + d
+    }
+
+    #[test]
+    fn a_naming_turn_rides_in_the_body() {
+        let turn = serde_json::json!({"turn": "stop", "continued": false});
+        let bytes = agent_state_request(
+            "h",
+            "abc",
+            AgentTool::Claude,
+            agent::State::Ready,
+            Some(&turn),
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (_, body) = text.split_once("\r\n\r\n").unwrap();
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"tool": "claude", "state": "ready", "naming": turn})
+        );
+    }
+
+    #[test]
+    fn the_reply_body_is_read_up_to_its_content_length() {
+        let (addr, _rx, handle) = serve_once(Some(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nContent-Length: 19\r\n\r\n{\"naming\":\"remind\"}",
+        ));
+        let reply = post_to(
+            addr,
+            &sample_request(),
+            within(std::time::Duration::from_secs(2)),
+        );
+        assert_eq!(
+            reply,
+            Some(Reply {
+                status: 200,
+                body: br#"{"naming":"remind"}"#.to_vec()
+            })
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_reply_without_a_usable_length_keeps_its_status_and_drops_its_body() {
+        for reply in [
+            "HTTP/1.1 200 OK\r\n\r\n{\"naming\":\"remind\"}",
+            "HTTP/1.1 200 OK\r\ncontent-length: 99999999\r\n\r\n{}",
+            // Cut short: the server closes before the promised body arrives.
+            "HTTP/1.1 200 OK\r\ncontent-length: 50\r\n\r\n{}",
+        ] {
+            let (addr, _rx, handle) = serve_once(Some(reply));
+            assert_eq!(
+                post_to(
+                    addr,
+                    &sample_request(),
+                    within(std::time::Duration::from_secs(2))
+                ),
+                Some(Reply {
+                    status: 200,
+                    body: Vec::new()
+                }),
+                "{reply:?}"
+            );
+            handle.join().unwrap();
+        }
     }
 
     #[test]
@@ -638,8 +869,8 @@ mod tests {
         let (addr, rx, handle) =
             serve_once(Some("HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n"));
         let request = sample_request();
-        let status = post_status(addr, &request, std::time::Duration::from_secs(2));
-        assert_eq!(status, Some(202));
+        let reply = post_to(addr, &request, within(std::time::Duration::from_secs(2)));
+        assert_eq!(reply.map(|r| r.status), Some(202));
         assert_eq!(rx.recv().unwrap(), request);
         handle.join().unwrap();
     }
@@ -650,7 +881,12 @@ mod tests {
             "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n",
         ));
         assert_eq!(
-            post_status(addr, &sample_request(), std::time::Duration::from_secs(2)),
+            post_to(
+                addr,
+                &sample_request(),
+                within(std::time::Duration::from_secs(2))
+            )
+            .map(|r| r.status),
             Some(500)
         );
         handle.join().unwrap();
@@ -661,10 +897,10 @@ mod tests {
         let (addr, _rx, handle) = serve_once(None);
         let started = std::time::Instant::now();
         assert_eq!(
-            post_status(
+            post_to(
                 addr,
                 &sample_request(),
-                std::time::Duration::from_millis(200)
+                within(std::time::Duration::from_millis(200))
             ),
             None
         );
@@ -680,10 +916,10 @@ mod tests {
             .local_addr()
             .unwrap();
         assert_eq!(
-            post_status(
+            post_to(
                 addr,
                 &sample_request(),
-                std::time::Duration::from_millis(500)
+                within(std::time::Duration::from_millis(500))
             ),
             None
         );
@@ -693,7 +929,11 @@ mod tests {
     fn garbage_instead_of_a_status_line_is_an_error() {
         let (addr, _rx, handle) = serve_once(Some("not http at all\r\n\r\n"));
         assert_eq!(
-            post_status(addr, &sample_request(), std::time::Duration::from_secs(2)),
+            post_to(
+                addr,
+                &sample_request(),
+                within(std::time::Duration::from_secs(2))
+            ),
             None
         );
         handle.join().unwrap();

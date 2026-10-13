@@ -14,9 +14,14 @@ const GITHUB_REPO = "prosperity-solutions/veld";
  * wrong instruction: `updateMode`'s catch-all also returns `"download"`, so
  * removing the darwin case changes nothing and the existing test still passes —
  * a contributor doing exactly what the comment said would ship no behaviour
- * change and believe otherwise. Flipping this to `true` (and packaging with a
- * real identity, and notarizing) is the whole switch, and both sides of it are
- * tested.
+ * change and believe otherwise. Flipping this to `true` is the whole switch, and
+ * both sides of it are tested.
+ *
+ * Releases are now Developer ID signed and notarized (docs/macos-signing.md),
+ * but that alone is not the criterion: Squirrel.Mac compares the update against
+ * the *running* app's signature, and an install still running an older ad-hoc
+ * build cannot match a Developer ID one. Flip it once signed releases are what
+ * people run.
  */
 const MACOS_SIGNED = false;
 
@@ -40,8 +45,8 @@ const MACOS_SIGNED = false;
  *   the release already promises.
  * - `"download"` — check and tell the user, but hand the install to them. macOS
  *   lands here only with no CLI to delegate to, because Squirrel.Mac verifies that
- *   the replacement carries the same code signature as the running app and veld
- *   has no Developer ID yet (issue #167 §10); the .deb is here because its files
+ *   the replacement carries the same code signature as the running app, which
+ *   an ad-hoc install cannot (issue #167 §10, `MACOS_SIGNED`); the .deb is here because its files
  *   belong to dpkg.
  *
  * The macOS *self*-install half flips with `MACOS_SIGNED` above, once signing

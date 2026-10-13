@@ -50,10 +50,11 @@
 //!
 //! # What this deliberately does not do
 //!
-//! It never re-signs the binary on macOS. CI ad-hoc signs the helper *before*
-//! `veld-sign` covers it, so the shipped bytes already carry the code signature
-//! and the detached `.sig` matches them exactly. A re-sign here would invalidate
-//! the signature this store exists to enforce — and it is not byte-idempotent
+//! It never re-signs the binary on macOS. CI Developer ID signs the helper
+//! *before* `veld-sign` covers it, so the shipped bytes already carry the code
+//! signature and the detached `.sig` matches them exactly. A re-sign here would
+//! invalidate the signature this store exists to enforce, swap the helper's code
+//! identity for an ad-hoc one (see `docs/macos-signing.md`) — and it is not byte-idempotent
 //! even when it looks like it should be: macOS 27's `codesign` packs the
 //! signature tighter than CI's and truncates the file. `install.sh` re-signs only
 //! a binary whose signature does not verify, for the same reason.

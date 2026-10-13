@@ -7,7 +7,8 @@
 //! the first window that shows it starts an agent pane there with the prompt
 //! already sent. From then on the human drives it; nothing reports back here.
 //!
-//! `veld ide worktree groups` lists the groups a hand-off can be filed into instead.
+//! `veld ide worktree groups` lists the groups a hand-off can be filed into instead,
+//! and `veld ide worktree name` retitles the worktree the caller is in.
 //!
 //! # Exit status
 //!
@@ -89,6 +90,29 @@ pub enum WorktreeCommand {
         session: Option<String>,
     },
 
+    /// Set the title the rail shows for the worktree this is run in.
+    ///
+    /// The worktree is the one containing the current directory (or, when that
+    /// cannot be read, the one this terminal runs in). Changes the label only —
+    /// never the branch, the directory, or the run's hostname.
+    ///
+    /// Exit status: 0 named, 1 failed, 2 not a usable title, 3 not inside a
+    /// worktree Veld knows.
+    Name {
+        /// A few words saying what the work is, at most 18 columns so it fits the
+        /// sidebar (e.g. "Fix login timeout").
+        name: String,
+
+        /// Print `{"id", "path", "name", "previous"}` on stdout.
+        #[arg(long)]
+        json: bool,
+
+        /// Terminal session to resolve from when the working directory cannot be
+        /// read. Defaults to `$VELD_PTY_SESSION`.
+        #[arg(long, hide = true)]
+        session: Option<String>,
+    },
+
     /// List the groups of this project's rail that `veld ide worktree new --group` can
     /// file into.
     ///
@@ -158,6 +182,59 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                 Ok(body) => {
                     report(&body, json);
                     0
+                }
+                Err(refusal) => {
+                    eprintln!("veld: {}", refusal.message);
+                    exit_for(refusal.code.as_deref())
+                }
+            }
+        }
+        WorktreeCommand::Name {
+            name,
+            json,
+            session,
+        } => {
+            if let Err(e) = veld_core::db::check_handoff_name(&name) {
+                eprintln!("veld: {e}");
+                return 2;
+            }
+            let (cwd, session) = whereabouts(session);
+            let request = serde_json::json!({
+                "session_id": session,
+                "cwd": cwd,
+                "name": name,
+            });
+            match send(
+                reqwest::Client::new()
+                    .post(format!(
+                        "{}/api/ide/worktree/name",
+                        veld_core::instance::daemon_base()
+                    ))
+                    .json(&request),
+                std::time::Duration::from_secs(10),
+            )
+            .await
+            {
+                Ok(body) => {
+                    let named = body["name"].as_str().unwrap_or(&name);
+                    let path = body["path"].as_str().unwrap_or_default();
+                    match body["previous"]
+                        .as_str()
+                        .filter(|p| !p.is_empty() && *p != named)
+                    {
+                        Some(previous) => {
+                            eprintln!("Renamed {path}: \"{previous}\" -> \"{named}\".")
+                        }
+                        None => eprintln!("Renamed {path} to \"{named}\"."),
+                    }
+                    if json {
+                        println!("{body}");
+                    }
+                    0
+                }
+                Err(refusal) if refusal.code.as_deref() == Some(NO_ANSWER) => {
+                    eprintln!("veld: no answer from the daemon — try again in a moment");
+                    1
                 }
                 Err(refusal) => {
                     eprintln!("veld: {}", refusal.message);
@@ -411,6 +488,8 @@ mod tests {
             .is_ok()
         );
         assert!(Cli::try_parse_from(["veld", "groups", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["veld", "name", "Fix login timeout", "--json"]).is_ok());
+        assert!(Cli::try_parse_from(["veld", "name"]).is_err());
     }
 
     #[test]
