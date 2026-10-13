@@ -2215,7 +2215,11 @@ export function updateTab(
  * depending on what an older build wrote into storage, and it is the one place
  * tab naming lives.
  */
-export function paneTabLabel(layout: PaneLayout, tab: PaneTab, termTitle?: string): string {
+export function paneTabLabel(
+  layout: PaneLayout,
+  tab: PaneTab,
+  termTitle?: AdoptedTermTitle,
+): string {
   switch (tab.kind) {
     case "terminal":
       // A config-declared pane is named by its spec, not numbered among the

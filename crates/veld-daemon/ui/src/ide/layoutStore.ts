@@ -276,10 +276,9 @@ export function writeLayout(worktreeId: number, layout: PaneLayout): void {
   // A terminal renaming itself is not a layout change, and structurally cannot
   // be: the title lives in `panes/termTitles.ts`, not on the tab. (The app's
   // `[layouts]` effects, including the `keep` frame, no longer run for it either.)
-  const persistable = layout;
-  const serialized = JSON.stringify(persistable);
+  const serialized = JSON.stringify(layout);
   if (written.get(worktreeId) === serialized) return;
-  queued.set(worktreeId, persistable);
+  queued.set(worktreeId, layout);
   const existing = timers.get(worktreeId);
   if (existing) clearTimeout(existing);
   timers.set(
