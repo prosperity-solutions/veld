@@ -155,7 +155,7 @@ fn write_pi_extension_file(cli: &Path, session: &str) -> i32 {
 /// installer, with nothing to change in the daemon, the wire, or the UI — which is the
 /// whole claim the "one generic receiving end" design makes. It also keeps a
 /// third-party schema out of a long-lived process.
-pub async fn state(
+pub fn state(
     tool: Option<String>,
     session: Option<String>,
     launched: bool,
@@ -205,34 +205,123 @@ pub async fn state(
     if reported == agent::State::Unknown {
         return 0;
     }
-    report(&session, tool, reported).await
+    report(&session, tool, reported)
 }
 
-async fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
-    let base = veld_core::instance::daemon_base();
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_millis(
-            agent::HOOK_REQUEST_TIMEOUT_MS,
-        ))
-        .build()
+/// Tell the daemon, over one plain-HTTP request on a blocking socket.
+///
+/// **No HTTP client and no async runtime, on purpose.** This runs inside a blocking
+/// Claude Code hook, at least twice a turn, and the previous version started a
+/// multi-thread tokio runtime and built a rustls `reqwest::Client` to send one POST to
+/// `127.0.0.1`. [`veld_core::instance::daemon_base`] is always plain `http://` on
+/// loopback, so there is no TLS, redirect or proxy case a client would have bought.
+/// `main` dispatches here before any runtime exists.
+///
+/// Exit code is the whole contract: 0 for a 2xx, 1 for everything else, nothing printed.
+fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
+    let port = veld_core::instance::daemon_port();
+    let Some(request) = agent_state_request(&format!("127.0.0.1:{port}"), session, tool, reported)
     else {
         return 1;
     };
-    let sent = client
-        .post(format!("{base}/api/pty/sessions/{session}/agent-state"))
-        .header("X-Veld-Request", "1")
-        .json(&serde_json::json!({
-            "tool": tool.as_str(),
-            "state": reported.as_str(),
-        }))
-        .send()
-        .await;
-    match sent {
-        Ok(resp) if resp.status().is_success() => 0,
-        // Silent on both arms. A daemon that is down, busy or a different version is
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let timeout = std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS);
+    match post_status(addr, &request, timeout) {
+        // Silent on every failure. A daemon that is down, busy or a different version is
         // not something to interrupt an agent about.
+        Some(status) if (200..300).contains(&status) => 0,
         _ => 1,
     }
+}
+
+/// Session ids as the daemon accepts them (`valid_session_id` in `veld-daemon`'s
+/// `pty.rs`): ASCII letters, digits, `-` and `_`, at most 64 characters.
+///
+/// Checked here because the id is interpolated into the request line. `--session` and
+/// `$VELD_PTY_SESSION` are caller-controlled, and a `\r\n` in one would let it inject
+/// headers (or a second request) into the stream. Real ids are `Uuid::simple()` hex.
+fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
+/// The exact bytes of the agent-state POST, or `None` for a session id that must not
+/// go on the wire.
+///
+/// Headers the daemon needs: `Content-Type: application/json` (axum's `Json` extractor
+/// rejects anything else), `X-Veld-Request` (`check_csrf`) and `Content-Length`.
+/// `Connection: close` lets the daemon end the exchange rather than hold a keep-alive
+/// socket open for a process that exits straight away. The body is the same
+/// `serde_json` object the `reqwest` version sent.
+fn agent_state_request(
+    host: &str,
+    session: &str,
+    tool: AgentTool,
+    reported: agent::State,
+) -> Option<Vec<u8>> {
+    if !valid_session_id(session) {
+        return None;
+    }
+    let body = serde_json::to_vec(&serde_json::json!({
+        "tool": tool.as_str(),
+        "state": reported.as_str(),
+    }))
+    .ok()?;
+    let mut request = format!(
+        "POST /api/pty/sessions/{session}/agent-state HTTP/1.1\r\n\
+         Host: {host}\r\n\
+         Content-Type: application/json\r\n\
+         X-Veld-Request: 1\r\n\
+         Accept: */*\r\n\
+         Content-Length: {}\r\n\
+         Connection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&body);
+    Some(request)
+}
+
+/// Send `request` to `addr` and return the response's status code, or `None` for
+/// anything that went wrong.
+///
+/// `timeout` bounds the whole exchange, as the `reqwest` client's did: the connect gets
+/// all of it, and each later read or write gets whatever is left of the deadline. Only
+/// the status line is read; the response body is irrelevant and the socket is dropped.
+fn post_status(
+    addr: std::net::SocketAddr,
+    request: &[u8],
+    timeout: std::time::Duration,
+) -> Option<u16> {
+    use std::io::{Read, Write};
+    use std::time::Instant;
+
+    let deadline = Instant::now() + timeout;
+    let remaining = || {
+        deadline
+            .checked_duration_since(Instant::now())
+            .filter(|d| !d.is_zero())
+    };
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, timeout).ok()?;
+    let _ = stream.set_nodelay(true);
+    stream.set_write_timeout(Some(remaining()?)).ok()?;
+    stream.write_all(request).ok()?;
+
+    // "HTTP/1.1 202 Accepted\r\n": the status is the first 12 bytes at most.
+    let mut head = [0u8; 12];
+    let mut filled = 0;
+    while filled < head.len() {
+        stream.set_read_timeout(Some(remaining()?)).ok()?;
+        match stream.read(&mut head[filled..]) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => filled += n,
+        }
+    }
+    let head = std::str::from_utf8(&head).ok()?;
+    head.strip_prefix("HTTP/1.")?.get(2..5)?.parse::<u16>().ok()
 }
 
 /// `veld agent-prompt --take <PATH>`: print a launch prompt and remove it, or fail.
@@ -432,6 +521,196 @@ mod tests {
         assert_eq!(parse_tool(Some("codex")), Some(AgentTool::Codex));
         assert_eq!(parse_tool(Some("pi")), Some(AgentTool::Pi));
         assert_eq!(parse_tool(Some("cursor")), None);
+    }
+
+    #[test]
+    fn the_request_bytes_carry_everything_the_daemon_checks() {
+        let bytes = agent_state_request(
+            "127.0.0.1:19001",
+            "0123abcd-_Z",
+            AgentTool::Claude,
+            agent::State::Blocked,
+        )
+        .unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let (head, body) = text.split_once("\r\n\r\n").unwrap();
+        let mut lines = head.split("\r\n");
+        assert_eq!(
+            lines.next(),
+            Some("POST /api/pty/sessions/0123abcd-_Z/agent-state HTTP/1.1")
+        );
+        let headers: Vec<String> = lines.map(str::to_ascii_lowercase).collect();
+        for want in [
+            "host: 127.0.0.1:19001",
+            // axum's `Json` extractor rejects a request without it.
+            "content-type: application/json",
+            // `check_csrf`.
+            "x-veld-request: 1",
+            "connection: close",
+        ] {
+            assert!(
+                headers.iter().any(|h| h == want),
+                "missing {want}: {headers:?}"
+            );
+        }
+        assert!(
+            headers
+                .iter()
+                .any(|h| *h == format!("content-length: {}", body.len())),
+            "content-length must match the body: {headers:?}"
+        );
+        let json: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"tool": "claude", "state": "blocked"})
+        );
+    }
+
+    #[test]
+    fn a_session_id_that_could_inject_into_the_request_is_refused() {
+        for bad in [
+            "",
+            "a\r\nX-Evil: 1",
+            "a b",
+            "a/../b",
+            "a?x=1",
+            "a\nb",
+            "caf\u{e9}",
+            &"a".repeat(65),
+        ] {
+            assert!(!valid_session_id(bad), "{bad:?}");
+            assert!(
+                agent_state_request("h", bad, AgentTool::Claude, agent::State::Ready).is_none(),
+                "{bad:?}"
+            );
+        }
+        for good in [
+            "abc",
+            "A-b_9",
+            &"a".repeat(64),
+            "9f1c2d3e4a5b46778899aabbccddeeff",
+        ] {
+            assert!(valid_session_id(good), "{good:?}");
+        }
+    }
+
+    /// One-shot local server: reads the request head and body, hands the raw bytes to
+    /// the test, then answers with `reply` (or never does, for the timeout case).
+    fn serve_once(
+        reply: Option<&'static str>,
+    ) -> (
+        std::net::SocketAddr,
+        std::sync::mpsc::Receiver<Vec<u8>>,
+        std::thread::JoinHandle<()>,
+    ) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = sock.read(&mut buf).unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                got.extend_from_slice(&buf[..n]);
+                if let Some(split) = got.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&got[..split]).to_ascii_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length: "))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if got.len() >= split + 4 + len {
+                        break;
+                    }
+                }
+            }
+            tx.send(got).unwrap();
+            match reply {
+                Some(r) => {
+                    let _ = sock.write_all(r.as_bytes());
+                }
+                // Hold the connection open and silent until the client gives up.
+                None => {
+                    let _ = sock.read(&mut buf);
+                }
+            }
+        });
+        (addr, rx, handle)
+    }
+
+    fn sample_request() -> Vec<u8> {
+        agent_state_request("h", "abc", AgentTool::Claude, agent::State::Ready).unwrap()
+    }
+
+    #[test]
+    fn a_2xx_is_ok_and_the_server_sees_exactly_the_request_sent() {
+        let (addr, rx, handle) =
+            serve_once(Some("HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n"));
+        let request = sample_request();
+        let status = post_status(addr, &request, std::time::Duration::from_secs(2));
+        assert_eq!(status, Some(202));
+        assert_eq!(rx.recv().unwrap(), request);
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_non_2xx_is_reported_as_its_status() {
+        let (addr, _rx, handle) = serve_once(Some(
+            "HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\n\r\n",
+        ));
+        assert_eq!(
+            post_status(addr, &sample_request(), std::time::Duration::from_secs(2)),
+            Some(500)
+        );
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_silent_server_times_out_instead_of_hanging_the_hook() {
+        let (addr, _rx, handle) = serve_once(None);
+        let started = std::time::Instant::now();
+        assert_eq!(
+            post_status(
+                addr,
+                &sample_request(),
+                std::time::Duration::from_millis(200)
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        handle.join().unwrap();
+    }
+
+    #[test]
+    fn a_refused_connection_is_an_error() {
+        // Bind then drop: the port is free, so the connect is refused.
+        let addr = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap();
+        assert_eq!(
+            post_status(
+                addr,
+                &sample_request(),
+                std::time::Duration::from_millis(500)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn garbage_instead_of_a_status_line_is_an_error() {
+        let (addr, _rx, handle) = serve_once(Some("not http at all\r\n\r\n"));
+        assert_eq!(
+            post_status(addr, &sample_request(), std::time::Duration::from_secs(2)),
+            None
+        );
+        handle.join().unwrap();
     }
 
     /// The sweep is bounded by age, and never touches a file that is still current.
