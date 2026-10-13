@@ -44,7 +44,10 @@ hardened runtime, macOS strips every `DYLD_*` variable from the environment of a
 signed process's children. These two start the user's own dev servers, and a
 toolchain that depends on `DYLD_LIBRARY_PATH` (Oracle Instant Client, some Python
 and Ruby builds) would break with no error message. The PR smoke job
-(`tests/macos-signing-smoke.sh`) asserts both halves of this rule on every PR.
+(`tests/macos-signing-smoke.sh`) asserts on every PR that `DYLD_*` survives a
+`--no-runtime` parent. GitHub's runners have System Integrity Protection off, and
+dyld strips only while it is on, so there the job checks the hardened half by
+its signature flag; with SIP on it checks the stripping itself.
 
 **Why the CLI binaries are not notarized.** Gatekeeper checks notarization only
 for files that carry `com.apple.quarantine`. The installer fetches them with curl,

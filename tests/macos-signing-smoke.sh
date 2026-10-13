@@ -101,8 +101,24 @@ done
 # --no-runtime exception in release.yml can be revisited.
 got=$(DYLD_FALLBACK_LIBRARY_PATH=/veld-smoke "$work/parent-arm64" "$work/child")
 [ "$got" = /veld-smoke ] || fail "DYLD_* did not survive a --no-runtime parent (got '$got')"
-got=$(DYLD_FALLBACK_LIBRARY_PATH=/veld-smoke "$work/hardened-arm64" "$work/child")
-[ "$got" = "(stripped)" ] || fail "the hardened runtime no longer strips DYLD_* (got '$got')"
+#
+# dyld only prunes DYLD_* for a hardened process while System Integrity
+# Protection is on, and GitHub's hosted macOS runners run with it off. There
+# the behaviour cannot be observed, so assert the flag that causes it instead
+# (on a user's Mac, SIP is on).
+if csrutil status | grep 'status: enabled' >/dev/null; then
+  got=$(DYLD_FALLBACK_LIBRARY_PATH=/veld-smoke "$work/hardened-arm64" "$work/child")
+  [ "$got" = "(stripped)" ] || fail "the hardened runtime no longer strips DYLD_* (got '$got')"
+else
+  echo "$(csrutil status) — checking the runtime flag instead of DYLD_* stripping"
+  for arch in arm64 x86_64; do
+    codesign -dv "$work/hardened-$arch" 2>&1 | grep -E '^CodeDirectory .*flags=0x[0-9a-f]*\(([a-z-]+,)*runtime' >/dev/null \
+      || fail "hardened-$arch is not signed with the hardened runtime"
+    if codesign -dv "$work/parent-$arch" 2>&1 | grep -E '^CodeDirectory .*\(([a-z-]+,)*runtime' >/dev/null; then
+      fail "parent-$arch carries the hardened runtime despite --no-runtime"
+    fi
+  done
+fi
 
 # A disk image, as the desktop job signs one.
 mkdir "$work/dmg-src"
