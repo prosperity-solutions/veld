@@ -1149,6 +1149,14 @@ button.lane-empty {
    button, and shaped like one on purpose — no 17px box, no hover — since a
    section speaks for several worktrees and a click here could only pick one of
    them silently. */
+/* A hand-off whose agent has not started yet. Muted rather than coloured: it is
+   not a problem, and the row's marker stays the only identity colour. */
+.wt-handoff {
+  flex: none;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+}
 .lane-alert {
   flex: none;
   display: flex;
@@ -2206,6 +2214,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    families on ONE element — never both at once — so listing both here costs
    nothing and keeps whichever one wins correct. */
 .wt-row:not(.slim) > .run-count,
+.wt-row:not(.slim) > .wt-handoff,
 .wt-row:not(.slim) > .wt-alert,
 .wt-row:not(.slim) > .wt-git,
 .wt-row:not(.slim) > .wt-inbox,
@@ -2215,6 +2224,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   margin-left: auto;
 }
 .wt-row:not(.slim) > .run-count ~ *,
+.wt-row:not(.slim) > .wt-handoff ~ *,
 .wt-row:not(.slim) > .wt-alert ~ *,
 .wt-row:not(.slim) > .wt-git ~ *,
 .wt-row:not(.slim) > .wt-inbox ~ *,

@@ -924,6 +924,13 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            Self::WorktreeReviewHandoffs => toggle(
+                "Review prompts handed off by agents",
+                "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
+                 opening it shows the agent's prompt first, to edit, start, or move to the trash. Off: \
+                 opening it starts the agent with the prompt as the agent wrote it.",
+                Git,
+            ),
             Self::GitCreateFrom => Spec {
                 title: "Create worktrees from",
                 help: "Origin (recommended): fetching the remote and cutting the new branch from \
@@ -1233,7 +1240,9 @@ impl SettingKey {
                 "Tell coding agents how to show you files",
                 "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
                  in a Veld terminal: that `veld ide open` puts a file or a page next to that \
-                 terminal. Nothing of yours is edited, and the text is the same every time. \
+                 terminal, and that separate work they come across can be offered to you as a \
+                 new worktree (`veld ide worktree new`). Nothing of yours is edited, and the text \
+                 is the same every time. \
                  Independent of the row above. Takes effect for new agents.",
                 Activity,
                 NOTICING,

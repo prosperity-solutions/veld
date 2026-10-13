@@ -44,6 +44,7 @@ import {
   FOCUS_SUPPRESS_BELL,
   FOCUS_SUPPRESS_TOASTS,
   FOCUS_SUPPRESS_OS_NOTIFICATIONS,
+  worktreeReviewHandoffs,
 } from "./shared/settings";
 import { pruneRunHistory } from "./shared/runHistory";
 import { recallLastAgent, rememberLastAgent } from "./ide/lastAgent";
@@ -107,7 +108,9 @@ import {
   DELETING_LANE,
   isDetached,
   isDiscovered,
+  isHandedOff,
   DISCOVERED_LANE,
+  HANDOFF_LANE,
   TRASH_LANE,
   UNGROUPED_LANE,
   TRASH_PREVIEW,
@@ -116,6 +119,7 @@ import {
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
+  withWorktreeRestored,
   type PendingAction,
   type RailGroup,
   type LaneRows,
@@ -170,6 +174,7 @@ import {
   IconDotsVertical,
   IconFolderPlus,
   IconHistory,
+  IconHourglassEmpty,
   IconKeyboard,
   IconMoon,
   IconPlayerPlayFilled,
@@ -236,6 +241,8 @@ import {
   browserTab,
   closeTab,
   configPaneTab,
+  handoffAgent,
+  handoffPaneTab,
   defaultLayout,
   diagTab,
   dockOf,
@@ -370,6 +377,7 @@ import {
   TrashLaneWorktreesDialog,
   TrashWorktreeDialog,
   UpdateMainDirtyDialog,
+  HandoffReviewDialog,
 } from "./components/dialogs";
 
 import {
@@ -988,6 +996,16 @@ type DialogState =
    * cancel) instead of the daemon's refusal landing as a bare toast.
    */
   | { kind: "update-main-dirty"; root: string; status: WorktreeGitStatus }
+  /** A handed-off worktree's prompt, held for review before its agent starts. */
+  | {
+      kind: "handoff-review";
+      worktreeId: number;
+      worktree: string;
+      sessionId: string;
+      spec: PaneSpec;
+      prompt: string;
+      substitutedFor?: string;
+    }
   | { kind: "marker"; worktree: Worktree }
   /** `worktree` set means "create it, then move this one into it". */
   | { kind: "new-lane"; worktree?: Worktree }
@@ -1860,6 +1878,9 @@ function AppInner(props: {
     // a restore that selects what it restored. A discovered checkout is opened
     // only once it is adopted.
     if (isDiscovered(w)) return false;
+    // Already on screen with a hand-off still waiting: the user put it off with
+    // **Not now** and is asking for it again.
+    if (w.id === shownId && w.handoff) setHandoffAsk((n) => n + 1);
     // A detached window shows one dock of a worktree its origin owns; it is a
     // satellite of that claim and never makes one of its own.
     if (chromeless) {
@@ -3049,7 +3070,13 @@ function AppInner(props: {
         key: "spin-off",
         title: "Spin off…",
         onClick: () =>
-          setDialog({ kind: "new-worktree", lane: w.lane ?? "", spinOffFrom: w }),
+          // Except out of "Waiting for you", which nothing can be created into: a
+          // spin-off of a handed-off row goes where any new worktree goes.
+          setDialog({
+            kind: "new-worktree",
+            lane: w.lane === HANDOFF_LANE ? "" : (w.lane ?? ""),
+            spinOffFrom: w,
+          }),
       },
       // Lane assignment as a submenu of the *existing* lanes, plus "New lane…".
       // A free-text field here would let two rows sit in "review" and "Review"
@@ -3862,6 +3889,13 @@ function AppInner(props: {
    * claim and makes none of its own.
    */
   const [shownId, setShownId] = useState<number | null>(null);
+  /**
+   * Bumped to ask about a waiting hand-off again for the worktree already on
+   * screen. The seed effect asks when the shown worktree *changes*; a click on
+   * the row that is already shown changes nothing, so after **Not now** that
+   * click needs its own trigger.
+   */
+  const [handoffAsk, setHandoffAsk] = useState(0);
   /** …and through a ref, for the reconnect handler, which is registered once. */
   const shownRef = useRef<number | null>(null);
   shownRef.current = shownId;
@@ -4001,6 +4035,27 @@ function AppInner(props: {
    * over their shells. On boot with a second client up, that is the common case
    * rather than a race.
    */
+  /**
+   * Start a handed-off worktree's agent pane: the tab under the session id the
+   * daemon recorded, the prompt queued for its first launch, the tab seeded into
+   * that worktree's layout. Idempotent through `hasTab` — the same session id is
+   * the same tab, which is what a reload before the agent started relies on.
+   */
+  const startHandoff = (worktreeId: number, spec: PaneSpec, sessionId: string, prompt: string) => {
+    const tab = handoffPaneTab(spec, sessionId);
+    queueInitialPrompt(tab.id, prompt, spec.label);
+    setLayouts((prev) => {
+      // A worktree this window has no layout for is one it no longer holds (it
+      // was yielded or removed while the review was open): starting there would
+      // persist a default layout over the real one, so it is left alone.
+      const base = prev[worktreeId];
+      if (base === undefined || hasTab(base, tab.id)) return prev;
+      return { ...prev, [worktreeId]: seedPane(base, tab) };
+    });
+  };
+  const startHandoffRef = useRef(startHandoff);
+  startHandoffRef.current = startHandoff;
+
   useEffect(() => {
     const id = shownId;
     if (id === null) return;
@@ -4031,7 +4086,16 @@ function AppInner(props: {
     // discarded the pane silently, which is the whole class of bug this
     // hand-off keeps producing.
     const alreadyHere = layoutsRef.current[id] !== undefined;
-    if (alreadyHere && wanted === null) return;
+    // An agent pane `veld ide worktree new` left waiting here. The same hand-off as
+    // `wanted`, except that it was made by another process and outlives this
+    // window: it is the daemon's until the session it names has spawned, so a
+    // window that reloads before then reaches it again — and since the tab
+    // carries that session id, seeding it again is a no-op for the layout.
+    const handed =
+      wanted === null
+        ? allWorktreesRef.current.find((w) => w.id === id && w.handoff)
+        : undefined;
+    if (alreadyHere && wanted === null && handed === undefined) return;
     let cancelled = false;
     void (async () => {
       let stored: PaneLayout | null = null;
@@ -4056,6 +4120,73 @@ function AppInner(props: {
       // (`markPaneCreated`), and an updater React may call twice would spend
       // both twice.
       let agentTab: PaneTab | null = null;
+      if (handed?.handoff) {
+        let prompt: string | null = null;
+        try {
+          prompt = (await api.worktreeHandoff(id)).prompt;
+        } catch {
+          // Gone (another window started it a moment ago) or unreachable; either
+          // way there is nothing to start, and a later show will look again.
+        }
+        if (cancelled) return;
+        const spec =
+          prompt === null
+            ? null
+            : handoffAgent(
+                handed.ide.panes,
+                handed.handoff.pane,
+                recallLastAgent(window.localStorage, handed.repo_root),
+              );
+        if (prompt !== null && spec === null) {
+          // Given up on only when the checkout declares no agent pane at all —
+          // then nothing could ever start it, and keeping it would repeat this
+          // toast on every show. One that is merely unavailable right now (a
+          // `requires_bin` missing, a config mid-edit) stays pending for the
+          // next show, and the toast still carries the prompt.
+          const declaresAgent = handed.ide.panes.some((p) =>
+            paneTakesPrompt({ ...p, available: true }),
+          );
+          notifyError(
+            `Could not start the agent in ${worktreeLabel(handed)}`,
+            new Error(
+              (declaresAgent
+                ? "no agent pane this checkout declares can start right now — it will be tried again next time you open it. The prompt is: "
+                : "this checkout declares no agent pane that can take a prompt — its prompt was: ") +
+                prompt,
+            ),
+          );
+          if (!declaresAgent) void api.deleteWorktreeHandoff(id).catch(() => {});
+        } else if (prompt !== null && spec !== null) {
+          const wanted = handed.handoff.pane;
+          const substituted = wanted !== "" && spec.id !== wanted;
+          const sessionId = handed.handoff.session_id;
+          // Already in the layout means it was already approved here — a reload
+          // between Start and the agent spawning — so it is not asked again.
+          const approved = hasTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
+          if (!approved && worktreeReviewHandoffs(settingsRef.current ?? {})) {
+            // Held for review instead of started. Never over another dialog:
+            // the next open of this worktree asks again.
+            const review: DialogState = {
+              kind: "handoff-review",
+              worktreeId: id,
+              worktree: worktreeLabel(handed),
+              sessionId,
+              spec,
+              prompt,
+              substitutedFor: substituted ? wanted : undefined,
+            };
+            setDialog((d) => (d.kind === DIALOG_NONE ? review : d));
+          } else {
+            if (substituted) {
+              notifyRedirect(
+                `The "${wanted}" pane the hand-off asked for can't start in ${worktreeLabel(handed)} — started ${spec.label} instead`,
+              );
+            }
+            agentTab = handoffPaneTab(spec, sessionId);
+            queueInitialPrompt(agentTab.id, prompt, spec.label);
+          }
+        }
+      }
       if (wanted !== null && pendingAgentRef.current === wanted) {
         pendingAgentRef.current = null;
         agentTab = configPaneTab(wanted.spec);
@@ -4088,7 +4219,7 @@ function AppInner(props: {
     return () => {
       cancelled = true;
     };
-  }, [shownId, chromeless]);
+  }, [shownId, chromeless, handoffAsk]);
 
   /**
    * Let go of one worktree's panes, because another window is taking it.
@@ -5747,12 +5878,21 @@ function AppInner(props: {
     if (!repo) return;
     const root = repo.root;
     const moved = worktrees.find((w) => w.path === path);
-    // Dragging a discovered worktree into a section adopts it, so the move is
-    // computed over the rail as it will be once it has been.
+    // Dragging a discovered worktree into a section adopts it, and dragging one
+    // out of "Waiting for you" files it, so the move is computed over the rail as it
+    // will be once that has happened — `moveWorktree` places only rows that are
+    // already in an orderable section. The lane written is still compared with
+    // the row as it is, so leaving "Waiting for you" for the ungrouped section is a
+    // lane change and gets its PATCH.
     const adopting = moved !== undefined && isDiscovered(moved);
+    const filing = moved !== undefined && isHandedOff(moved);
     const adopt = (list: Worktree[]) =>
-      adopting
-        ? list.map((w) => (w.path === path ? { ...w, adopted: true } : w))
+      adopting || filing
+        ? list.map((w) =>
+            w.path !== path
+              ? w
+              : { ...w, ...(adopting ? { adopted: true } : {}), ...(filing ? { lane: "" } : {}) },
+          )
         : list;
     const move = moveWorktree(
       railGroups(adopt(worktrees), laneRows),
@@ -5918,26 +6058,48 @@ function AppInner(props: {
   };
 
   /** Resolves to whether the worktree came back, after the list has refreshed. */
+  /** Worktrees whose restore is on its way, so a second click is not a second request. */
+  const restoringRef = useRef(new Set<number>());
   const restoreWorktree = async (w: Worktree): Promise<boolean> => {
+    if (restoringRef.current.has(w.id)) return false;
+    restoringRef.current.add(w.id);
     let restored = false;
+    // Out of the trash on screen at once, as binning is: the restore itself is a
+    // few milliseconds, but the listing that confirms it can take a second on a
+    // big rail, and a row that sits in the trash that long reads as a click that
+    // did nothing — and invites the next one.
+    const write = async () => {
+      try {
+        await api.restoreWorktree(w.id);
+        notifyDone(`Restored ${worktreeLabel(w)}`);
+        restored = true;
+      } catch (e) {
+        // 404 is the expected failure — the worker got there first — and saying so
+        // is better than a generic error for a race the design admits to. Anything
+        // else (a 500, a dead daemon) must NOT claim the worktree was removed,
+        // because it is still there and the user would stop looking for it.
+        const gone = e instanceof Error && /not found|already removed/i.test(e.message);
+        notifyError(
+          gone
+            ? `${worktreeLabel(w)} has already been deleted`
+            : `Could not restore ${worktreeLabel(w)}`,
+          e,
+        );
+      }
+    };
     try {
-      await api.restoreWorktree(w.id);
-      notifyDone(`Restored ${worktreeLabel(w)}`);
-      restored = true;
-    } catch (e) {
-      // 404 is the expected failure — the worker got there first — and saying so is
-      // better than a generic error for a race the design admits to. Anything else
-      // (a 500, a dead daemon) must NOT claim the worktree was removed, because it
-      // is still there and the user would stop looking for it.
-      const gone = e instanceof Error && /not found|already removed/i.test(e.message);
-      notifyError(
-        gone
-          ? `${worktreeLabel(w)} has already been deleted`
-          : `Could not restore ${worktreeLabel(w)}`,
-        e,
+      // The refresh `optimisticRepos` ends with is the daemon's word, so a refused
+      // restore puts the row back in the trash by itself.
+      await optimisticRepos(
+        patchRepo(w.repo_root, (r) => ({
+          ...r,
+          worktrees: withWorktreeRestored(r.worktrees, w.path),
+        })),
+        write,
       );
+    } finally {
+      restoringRef.current.delete(w.id);
     }
-    await refresh();
     return restored;
   };
 
@@ -8072,6 +8234,46 @@ function AppInner(props: {
           }}
         />
       )}
+      {dialog.kind === "handoff-review" && (
+        <HandoffReviewDialog
+          key={dialog.sessionId}
+          worktree={dialog.worktree}
+          agent={dialog.spec.label}
+          substitutedFor={dialog.substitutedFor}
+          prompt={dialog.prompt}
+          onClose={closeDialog}
+          onStart={(prompt, always) => {
+            if (always) {
+              saveSettingsRef
+                .current({ "worktree.reviewHandoffs": false })
+                .catch((e) => notifyError("Could not save the setting", e));
+            }
+            const { worktreeId, spec, sessionId } = dialog;
+            const start = () => startHandoffRef.current(worktreeId, spec, sessionId, prompt);
+            closeDialog();
+            // An edit is stored first, so a window that reloads before the agent
+            // spawns sends it rather than the agent's original. If storing it
+            // fails the agent still starts with the edit; only that reload case
+            // would fall back to the original.
+            if (prompt.trim() === dialog.prompt.trim()) {
+              start();
+            } else {
+              void api
+                .updateWorktreeHandoff(worktreeId, sessionId, prompt)
+                .catch((e) => notifyError("Could not save the edited prompt", e))
+                .finally(start);
+            }
+          }}
+          onDiscard={async () => {
+            // To the trash, with the hand-off still attached: restoring the
+            // worktree brings back its prompt and its review. Deleting it from
+            // the trash is what drops the hand-off (the row cascades).
+            const w = allWorktreesRef.current.find((x) => x.id === dialog.worktreeId);
+            closeDialog();
+            if (w) await trashWorktree(w.path);
+          }}
+        />
+      )}
       {dialog.kind === "update-main-dirty" && (
         <UpdateMainDirtyDialog
           status={dialog.status}
@@ -9381,6 +9583,21 @@ function ProjectColumn(props: {
   );
 }
 
+/**
+ * What opening a row with a waiting hand-off does, for its hover text: the agent
+ * that will start, named by its label when the hand-off named one this checkout
+ * declares, else "your usual agent" (`handoffAgent` resolves it the same way).
+ */
+function handoffNote(w: Worktree, review: boolean): string {
+  const named = w.handoff?.pane
+    ? w.ide.panes.find((p) => p.id === w.handoff?.pane && paneTakesPrompt(p))?.label
+    : undefined;
+  const agent = named ?? "your usual agent";
+  return review
+    ? `waiting for you: opening it shows the task an agent handed off, to start ${agent} on`
+    : `waiting for you: opening it starts ${agent} on the task an agent handed off`;
+}
+
 function Rail(props: {
   worktrees: Worktree[];
   /** The daemon's lane rows **as sent** — the repo's groups plus the reserved
@@ -10294,7 +10511,16 @@ function Rail(props: {
                     )}
                   </button>
                 </Tooltip>
-                <span className="lane-name">{group.label}</span>
+                <span
+                  className="lane-name"
+                  title={
+                    group.key === HANDOFF_LANE
+                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. Opening one marked with an hourglass shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
+                      : undefined
+                  }
+                >
+                  {group.label}
+                </span>
                 {/* How many rows are behind the header, and only while there are
                     rows behind it. A count on an open section restated what the
                     rows immediately below it already say — which is why the header
@@ -10561,12 +10787,13 @@ function Rail(props: {
                  row visibly snaps back to the top of its group, a drag that
                  appears to do nothing. It leads its lane instead, which is the
                  same rule it follows ungrouped. */
-              // The Discovered section is pinned but its rows are not stuck:
-              // dragging one into a section is how it is adopted there.
+              // The Discovered and Waiting for you sections are pinned but their rows
+              // are not stuck: dragging one into a section is how it is adopted,
+              // or filed, there.
               const rowDraggable =
                 canDrag &&
                 !trashed &&
-                (!group.pinned || discoveredRow) &&
+                (!group.pinned || discoveredRow || group.key === HANDOFF_LANE) &&
                 !w.is_main;
               return (
                 /* A Fragment so the carets are the row's SIBLINGS. Drawn on the row
@@ -10615,6 +10842,8 @@ function Rail(props: {
                         ? `${worktreeLabel(w)} — in the trash, still on disk`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
+                          : w.handoff
+                          ? `${worktreeLabel(w)} — ${w.branch} · ${handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}`
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
@@ -10753,6 +10982,18 @@ function Rail(props: {
                       to be seen while you are looking somewhere else. Trashed rows
                       are excluded — their panes are gone, and a state nobody can act
                       on is noise beside restore and delete. */}
+                  {/* An agent waiting to be started here — `veld ide worktree new`
+                      left it, and opening the row is what starts it. On the row
+                      rather than the section, because a hand-off filed straight
+                      into one of the user's groups (`--group`) is waiting too.
+                      Gone once the agent has started (the daemon retires it).
+                      Wide-only: the collapsed row's grid has no slot for it, and
+                      its hover text carries the same note there. */}
+                  {props.wide && !trashed && w.handoff && (
+                    <span className="wt-handoff" aria-hidden title={handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}>
+                      <IconHourglassEmpty size={12} />
+                    </span>
+                  )}
                   {!trashed && (
                     <RowStateIcon
                       summary={inboxSummary}

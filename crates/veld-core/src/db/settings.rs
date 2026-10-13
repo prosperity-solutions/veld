@@ -719,6 +719,9 @@ pub enum SettingKey {
     WorktreeMarkerStyle,
     /// Which half of the New worktree dialog opens: `ask`, `prompt` or `manual`.
     WorktreeNewMode,
+    /// Whether a prompt handed off by an agent (`veld ide worktree new`) is shown for
+    /// review before its agent starts.
+    WorktreeReviewHandoffs,
     WorktreeTrashRetention,
     RunsHistoryDays,
     LogsTimeZone,
@@ -805,6 +808,7 @@ impl SettingKey {
         Self::BackupDir,
         // ── Git ──────────────────────────────────────────────────────────────
         Self::WorktreeNewMode,
+        Self::WorktreeReviewHandoffs,
         Self::GitCreateFrom,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
@@ -925,6 +929,7 @@ impl SettingKey {
             Self::ActivityNotifyAgentFinished => "activity.notifyAgentFinished",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeNewMode => "worktree.newMode",
+            Self::WorktreeReviewHandoffs => "worktree.reviewHandoffs",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
             Self::LogsTimeZone => "logs.timeZone",
@@ -1008,6 +1013,7 @@ impl SettingKey {
             "activity.notifyAgentFinished" => Self::ActivityNotifyAgentFinished,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.newMode" => Self::WorktreeNewMode,
+            "worktree.reviewHandoffs" => Self::WorktreeReviewHandoffs,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
             "logs.timeZone" => Self::LogsTimeZone,
@@ -1151,6 +1157,7 @@ impl SettingKey {
             | Self::TerminalShellIntegration
             | Self::TerminalAgentIntegration
             | Self::TerminalAgentContext
+            | Self::WorktreeReviewHandoffs
             | Self::ExtensionsAutoRefresh
             | Self::ActivityShowWorking
             | Self::ActivityNotifyCommandFinished
@@ -1852,6 +1859,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // `ask` rather than a mode: the first open is the one chance to explain the
         // two, and defaulting to either would spend it.
         (SettingKey::WorktreeNewMode, Value::from("ask")),
+        (SettingKey::WorktreeReviewHandoffs, Value::from(true)),
         // Both quick switches ship **on**. Whether two more buttons belong in a
         // pane's chrome for everyone is a real question — the bar already carries
         // most of a browser's toolbar and has to read at 300px — but the alternative is
@@ -2925,6 +2933,9 @@ mod tests {
         assert_eq!(s["terminal.fontSize"], Value::from(12));
         assert_eq!(s["terminal.scrollback"], Value::from(DEFAULT_SCROLLBACK));
         assert_eq!(s["worktree.markerStyle"], Value::from("color"));
+        // A prompt one agent wrote is never started unread by default: turning the
+        // review off is the user's call, made in the dialog or in Settings.
+        assert_eq!(s["worktree.reviewHandoffs"], Value::from(true));
         // Every declared key is present, so a client never has to supply one.
         // Counted against the variant list rather than against `defaults()` itself,
         // which would compare a value with itself.

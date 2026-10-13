@@ -40,6 +40,8 @@ import {
   configPaneTab,
   takePendingAdopt,
   paneTakesPrompt,
+  handoffAgent,
+  handoffPaneTab,
   type PromptStep,
   promptStep,
   seedPane,
@@ -2565,6 +2567,36 @@ describe("seedPane", () => {
     const tab = configPaneTab({ id: "claude", label: "Claude" });
     const seeded = seedPane(layout, tab);
     expect(seeded.docks[0].tabs.map((t) => t.id)).toEqual(["t1", tab.id]);
+  });
+});
+
+describe("handoffAgent", () => {
+  const pane = (id: string, over: { agent?: boolean; available?: boolean } = {}) => ({
+    id,
+    kind: "terminal",
+    available: over.available ?? true,
+    agent: over.agent,
+    can_resume: true,
+  });
+  const panes = [pane("shell", { agent: false }), pane("claude"), pane("codex")];
+
+  it("takes the pane the hand-off named, then this user's usual one, then the first", () => {
+    expect(handoffAgent(panes, "codex", "claude")?.id).toBe("codex");
+    expect(handoffAgent(panes, "", "codex")?.id).toBe("codex");
+    expect(handoffAgent(panes, "", "")?.id).toBe("claude");
+  });
+
+  it("never picks a pane that cannot take a prompt, by name or by memory", () => {
+    expect(handoffAgent(panes, "shell", "shell")?.id).toBe("claude");
+    expect(handoffAgent([pane("claude", { available: false })], "claude", "")).toBeNull();
+  });
+});
+
+describe("handoffPaneTab", () => {
+  it("runs under the daemon's session id and is consented to as a fresh start", () => {
+    const tab = handoffPaneTab({ id: "claude", label: "Claude" }, "0b8c5d7e-handoff");
+    expect(tab).toEqual({ id: "0b8c5d7e-handoff", kind: "terminal", title: "Claude", spec: "claude" });
+    expect(takePendingStart(tab.id)).toBe(true);
   });
 });
 

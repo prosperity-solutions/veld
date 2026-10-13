@@ -23,6 +23,7 @@ import {
   withLaneOrder,
   withWorktreeMoved,
   withWorktreeTrashed,
+  withWorktreeRestored,
   needsAttention,
   parsePendingKey,
   pendingKey,
@@ -47,6 +48,7 @@ import {
   worstStatus,
   DELETING_LANE,
   DISCOVERED_LANE,
+  HANDOFF_LANE,
   TRASH_LANE,
   TRASH_PREVIEW,
   trashPreview,
@@ -908,6 +910,36 @@ describe("railGroups", () => {
     expect(groups.at(-1)?.worktrees.map((w) => w.path)).toEqual(["/wts/old"]);
   });
 
+  it("puts handed-off worktrees in a Waiting for you section under main, only while there are any", () => {
+    const groups = railGroups(
+      [
+        rw("/repo", { is_main: true }),
+        rw("/wts/a"),
+        rw("/wts/from-agent", { lane: HANDOFF_LANE }),
+        rw("/wts/binned", { lane: HANDOFF_LANE, trashed_at: "2026-01-02T00:00:00.000000Z" }),
+      ],
+      [lane("review", 0)],
+    );
+    expect(groups.map((g) => g.key)).toEqual([
+      MAIN_LANE,
+      HANDOFF_LANE,
+      "",
+      "review",
+      TRASH_LANE,
+    ]);
+    const section = groups.find((g) => g.key === HANDOFF_LANE);
+    expect(section).toMatchObject({ pinned: true, addable: false, editable: false });
+    expect(section?.worktrees.map((w) => w.path)).toEqual(["/wts/from-agent"]);
+    // Not counted as ungrouped as well, which an unknown lane otherwise would be.
+    expect(groups.find((g) => g.key === "")?.worktrees.map((w) => w.path)).toEqual(["/wts/a"]);
+    expect(railGroups([rw("/wts/a")]).some((g) => g.key === HANDOFF_LANE)).toBe(false);
+  });
+
+  it("refuses a drop into Waiting for you, which only the daemon files into", () => {
+    const groups = railGroups([rw("/wts/a"), rw("/wts/b", { lane: HANDOFF_LANE })]);
+    expect(moveWorktree(groups, "/wts/a", HANDOFF_LANE, 0)).toBeNull();
+  });
+
   it("draws no Discovered section when nothing is unadopted", () => {
     // A daemon older than the field sends no `adopted` at all.
     const groups = railGroups([rw("/wts/a"), rw("/wts/b", { adopted: true })]);
@@ -1665,6 +1697,23 @@ describe("repoFetchVerdict", () => {
   });
 });
 
+
+describe("withWorktreeRestored", () => {
+  it("takes the row out of the trash at once, and only that row", () => {
+    const binned = [
+      rw("/wts/a", { trashed_at: "2026-01-02T00:00:00.000000Z", trash_error: "busy" }),
+      rw("/wts/b", { trashed_at: "2026-01-02T00:00:00.000000Z" }),
+    ];
+    const next = withWorktreeRestored(binned, "/wts/a");
+    expect(next.map((w) => [w.path, w.trashed_at, w.trash_error])).toEqual([
+      ["/wts/a", "", ""],
+      ["/wts/b", "2026-01-02T00:00:00.000000Z", ""],
+    ]);
+    // Replayed over a poll that already restored it: nothing changes.
+    expect(withWorktreeRestored(next, "/wts/a")).toEqual(next);
+  });
+});
+
 describe("optimistic rail drops", () => {
   const rows = () => [
     rw("/repo", { is_main: true }),
@@ -1829,6 +1878,9 @@ describe("the reserved ungrouped name", () => {
     // uses, so editing the constant alone fails this, and `the_ungrouped_name_is_
     // the_bytes_the_ui_sends` is the twin that fails on the other side.
     expect(UNGROUPED_LANE).toBe(String.fromCharCode(0) + "ungrouped");
+    // Same arrangement for the "Waiting for you" section's stored lane; the twin is
+    // `the_handoff_lane_is_the_bytes_the_ui_reads` in `db/handoffs.rs`.
+    expect(HANDOFF_LANE).toBe(String.fromCharCode(0) + "handoff");
     expect(UNGROUPED_LANE).toHaveLength(10);
     expect(UNGROUPED_LANE.charCodeAt(0)).toBe(0);
   });

@@ -71,3 +71,13 @@ if (typeof globalThis.ResizeObserver === "undefined") {
     disconnect() {}
   } as unknown as typeof ResizeObserver;
 }
+
+// jsdom has no `document.fonts`, and an autosizing Mantine `Textarea` listens on
+// it for webfonts finishing loading. It lived in `NewWorktreeDialog.test.tsx`
+// while that was the only test rendering one; the hand-off review dialog is the
+// second.
+if (!("fonts" in document)) {
+  Object.defineProperty(document, "fonts", {
+    value: { addEventListener() {}, removeEventListener() {} },
+  });
+}

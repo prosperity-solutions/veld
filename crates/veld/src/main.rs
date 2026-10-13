@@ -195,7 +195,8 @@ enum Command {
     /// Show detailed CPU/memory stats, per subprocess and over time.
     Stats(commands::stats::StatsArgs),
 
-    /// Work with the Veld IDE window from a terminal: `veld ide open`.
+    /// Work with the Veld IDE window from a terminal: `veld ide open`, and hand a
+    /// task to the human as a new worktree with `veld ide worktree new`.
     Ide {
         #[command(subcommand)]
         command: commands::ide::IdeCommand,

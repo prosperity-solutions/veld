@@ -37,6 +37,7 @@ const OPEN_KINDS_SET: Record<Exclude<DialogKind, typeof DIALOG_NONE>, true> = {
   trash: true,
   "confirm-delete": true,
   "update-main-dirty": true,
+  "handoff-review": true,
   marker: true,
   "new-lane": true,
   "rename-lane": true,
