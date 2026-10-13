@@ -4223,6 +4223,32 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   .qr-shield {
     transition: none;
   }
+  /* The same rule applied to the infinite animations, which the block above used
+     to leave running. Two kinds, and they get different answers:
+
+     - `pulse` is emphasis on top of a state that already says what it is in
+       colour and glyph (amber / red / the run's green), so it goes: a state that
+       flashes forever is the motion this preference exists to remove, and the
+       steady colour is still the information.
+     - `spin` *is* the information — a loader that stops moving reads as hung, and
+       "working" is the one state with no colour of its own — so it is slowed, not
+       stopped. A slow turn still says "alive" without the busy rotation.
+     (The `.project-sq-badge` pulses are covered by a block of their own beside
+     their rules: they sit later in the file and this one would lose the tie.) */
+  .lane-alert.recovering,
+  .dot.running,
+  .dot.recovering,
+  .wt-alert.recovering,
+  .wt-inbox.attention,
+  .wt-inbox.failed,
+  .pane-tab-activity.attention,
+  .pane-tab-activity.failed {
+    animation: none;
+  }
+  .wt-inbox.working svg,
+  .pane-tab-activity.working svg {
+    animation-duration: 4s;
+  }
 }
 .share-row.pending {
   border-color: var(--warn);
@@ -5495,6 +5521,15 @@ body[data-theme="light"] .project-sq.active {
 .project-sq-badge.failed {
   background: var(--danger);
   animation: pulse 1.6s infinite;
+}
+/* See the `prefers-reduced-motion` block by `.qr-shield`: the colour carries the
+   state, the pulse is only emphasis. Here rather than there because these rules
+   come later in the file and would win the tie against that block. */
+@media (prefers-reduced-motion: reduce) {
+  .project-sq-badge.attention,
+  .project-sq-badge.failed {
+    animation: none;
+  }
 }
 .project-sq-badge.finished {
   background: var(--accent);
