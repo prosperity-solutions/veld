@@ -1767,6 +1767,23 @@ pub const HOOK_TIMEOUT_SECS: u64 = 2;
 /// notification could not be delivered.
 pub const HOOK_REQUEST_TIMEOUT_MS: u64 = 1_000;
 
+/// A session id the daemon accepts: ASCII letters, digits, `-` and `_`, at most 64
+/// characters. Real ids are `Uuid::simple()` hex.
+///
+/// One rule for both sides: the daemon checks client-chosen ids with it before using
+/// one as a map key or in a log line, and the `agent-state` hook checks with it before
+/// interpolating one into a raw HTTP request line, where a `\r\n` would inject
+/// headers. Two copies could drift, and a hook whose id the daemon would accept but it
+/// refuses fails silently.
+#[must_use]
+pub fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+}
+
 /// Where a session's ephemeral settings file lives, inside this daemon's shim
 /// directory.
 ///

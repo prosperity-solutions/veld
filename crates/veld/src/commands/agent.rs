@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use veld_core::agent::{self, AgentTool};
+use veld_core::agent::{self, AgentTool, valid_session_id};
 
 /// `veld agent-settings [--tool claude|codex] [--session <id>]`
 ///
@@ -232,20 +232,6 @@ fn report(session: &str, tool: AgentTool, reported: agent::State) -> i32 {
         Some(status) if (200..300).contains(&status) => 0,
         _ => 1,
     }
-}
-
-/// Session ids as the daemon accepts them (`valid_session_id` in `veld-daemon`'s
-/// `pty.rs`): ASCII letters, digits, `-` and `_`, at most 64 characters.
-///
-/// Checked here because the id is interpolated into the request line. `--session` and
-/// `$VELD_PTY_SESSION` are caller-controlled, and a `\r\n` in one would let it inject
-/// headers (or a second request) into the stream. Real ids are `Uuid::simple()` hex.
-fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
 
 /// The exact bytes of the agent-state POST, or `None` for a session id that must not

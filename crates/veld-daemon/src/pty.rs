@@ -114,6 +114,7 @@ use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
+use veld_core::agent::valid_session_id;
 
 use super::management::{check_csrf, open_db};
 use wire::HolderConfig;
@@ -856,16 +857,6 @@ impl Drop for SessionSlot {
     fn drop(&mut self) {
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
-}
-
-/// Session ids are client-chosen, so they are checked before being used as a
-/// map key or printed into a log line.
-fn valid_session_id(id: &str) -> bool {
-    !id.is_empty()
-        && id.len() <= 64
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// End a session: take it out of the registry and ask its holder to hang the

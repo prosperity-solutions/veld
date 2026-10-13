@@ -869,8 +869,8 @@ async fn run_single_liveness_check(
 /// on, the next probe would race the server's close, pick up a dead socket and
 /// report a spurious liveness failure — which the monitor answers with a
 /// recovery restart. Every probe therefore opens a fresh connection, exactly as
-/// the per-probe client it replaces did. The per-probe timeout is set on each
-/// request, not here. Only a built client is kept: a build that fails is retried
+/// the per-probe client it replaces did. Each request sets its own timeout; the
+/// client-wide one is a backstop for a caller that forgets. Only a built client is kept: a build that fails is retried
 /// by the next probe, as it was when every probe built its own.
 fn liveness_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
@@ -879,6 +879,7 @@ fn liveness_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
     }
     let built = reqwest::Client::builder()
         .pool_max_idle_per_host(0)
+        .timeout(Duration::from_secs(5))
         .build()?;
     Ok(CLIENT.get_or_init(|| built))
 }

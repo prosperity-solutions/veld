@@ -516,7 +516,9 @@ mod tests {
 
         // And the live functions agree with that shape for whatever instance this test
         // process is: the host always starts `files.` or `files-<port>.`, and the route
-        // id always carries this instance's port.
+        // id always carries this instance's port. Under the process-state lock: a
+        // sibling test rewrites `VELD_DAEMON_PORT` between these reads otherwise.
+        let _guard = crate::test_support::process_state_guard();
         let host = files_host();
         assert!(
             host.starts_with("files.") || host.starts_with("files-"),
@@ -551,6 +553,8 @@ mod tests {
 
             std::env::set_var("VELD_DAEMON_PORT", "19898");
             assert_eq!(daemon_port(), 19898);
+            // `veld agent-state` writes its request by hand to `127.0.0.1:<daemon_port>`
+            // on this assumption: plain http, loopback, this port.
             assert_eq!(daemon_base(), "http://127.0.0.1:19898");
             assert_eq!(daemon_upstream(), "localhost:19898");
 
