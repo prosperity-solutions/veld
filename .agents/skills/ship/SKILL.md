@@ -116,6 +116,14 @@ and judgement, not tooling, and you can do all of them.
 
 ## Step 0 — Kickoff: evidence first, then the questionnaire
 
+### 0.0 Check the lock
+
+Run `scripts/dev/lock.sh status` before anything else. Non-zero means the
+maintainer has locked the repository and you are not an owner: stop here, tell
+the person you are working with the reason it prints, and change nothing.
+While the lock is on, only the maintainer can merge to `main`, so a run started
+under it cannot land.
+
 ### 0.1 If the task is a fix, find the evidence before you ask anything
 
 Two kinds of request arrive here. *Build X* states a goal. *Fix Y* states a

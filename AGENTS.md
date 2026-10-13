@@ -4,6 +4,8 @@ veld is a Rust-based local development environment orchestrator for monorepos. T
 
 ## Before you change anything
 
+**First, check the lock.** Run `scripts/dev/lock.sh status`. If it exits non-zero, the maintainer has locked this repository — it prints why: do not start any change — no edits, no branches, no pull requests — and tell the person you are working with that veld is locked. Questions are still fine. While it is on, only the maintainer can merge to `main`, so work started under it cannot land anyway.
+
 There are exactly two kinds of task in this repository.
 
 **1. A question.** *Where is X? How does Y work? What calls Z?* — answer it. Read whatever you need. Nothing below applies.
