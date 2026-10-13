@@ -1589,13 +1589,15 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 ///
 /// Claude Code reloads a plugin folder it watches on any write, and veld rewrites these
 /// files when it is upgraded. A reload runs `session.start` again with the module's
-/// variables gone, so whether the session already started is kept in `$.state`, which
+/// variables gone, so the two that are the session's own — the context still owed to
+/// the next prompt, and whether a dialog is on screen — are kept in `$.state`, which
 /// survives it and which `types/index.d.ts` declares, as `claude plugin validate`
-/// requires: a reload neither reports `ready` over a running turn nor adds the context
-/// a second time. Measured on Claude Code 2.1.296, which also reloads once at startup
+/// requires. Finding them kept is how a reload knows the session had started: it
+/// neither reports `ready` over a running turn nor adds the context a second time, and
+/// a reload before the first prompt still owes it. Measured on Claude Code 2.1.296, which also reloads once at startup
 /// when it applies managed settings — one `ready`, not two.
 ///
-/// # Every hook passes the event on
+/// # Every gating hook passes the event on
 ///
 /// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`) catch
 /// their own failure by passing the event on unchanged, and each report is bounded by
@@ -1610,6 +1612,7 @@ pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String);
         "version": env!("CARGO_PKG_VERSION"),
         "description": "Tells Veld when Claude Code is working or waiting, and tells Claude how to show you a file.",
         "types": "./types/index.d.ts",
+        "author": { "name": "Veld" },
     });
     let hooks = serde_json::json!({ "modules": ["./register.ts"] });
     let module = MODULE
@@ -1696,10 +1699,17 @@ pub async fn claude_mod_support(mod_dir: &Path, path: &str, shim_dir: &Path) -> 
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             );
-            // Its findings are the lines marked `❯`; the last line is only the verdict.
+            // Its findings are the lines marked `❯`, in sections: warnings and what the
+            // module hooks come first, the errors under a `✘ Found N error` header, and the
+            // last line is only the verdict.
             let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty());
+            fn finding(line: &str) -> Option<&str> {
+                line.strip_prefix('❯').map(str::trim)
+            }
             let reason = lines()
-                .find_map(|line| line.strip_prefix('❯').map(str::trim))
+                .skip_while(|line| !line.starts_with("✘ Found"))
+                .find_map(finding)
+                .or_else(|| lines().find_map(finding))
                 .or_else(|| lines().next_back())
                 .unwrap_or("it exited without saying why")
                 .to_owned();
@@ -1862,10 +1872,25 @@ mod tests {
             .find(|(path, _)| *path == "types/index.d.ts")
             .unwrap()
             .1;
-        assert!(
-            contract.contains("veld: { started: boolean }"),
-            "{contract}"
-        );
+        let module = &files
+            .iter()
+            .find(|(path, _)| *path == "hooks/register.ts")
+            .unwrap()
+            .1;
+        let keys: Vec<&str> = module
+            .match_indices("{ plugin: 'veld', key: '")
+            .map(|(at, found)| {
+                let rest = &module[at + found.len()..];
+                &rest[..rest.find('\'').unwrap()]
+            })
+            .collect();
+        assert!(!keys.is_empty(), "the reload marker is a `$.state` key");
+        for key in keys {
+            assert!(
+                contract.contains(&format!("{key}: ")),
+                "{key} is not declared: {contract}"
+            );
+        }
         assert_eq!(files.last().unwrap().0, ".claude-plugin/plugin.json");
     }
 
@@ -1949,7 +1974,7 @@ mod tests {
         script(
             &old,
             r#"[ "$1" = --version ] && { echo "1.0.0 (Claude Code)"; exit 0; }
-printf '\n✘ Found 1 error:\n\n  ❯ hooks: modules is not a known key\n\n✘ Validation failed\n'; exit 1"#,
+printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n✘ Found 1 error:\n\n  ❯ hooks: modules is not a known key\n\n✘ Validation failed\n'; exit 1"#,
         );
         let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap().into_string().unwrap();
 

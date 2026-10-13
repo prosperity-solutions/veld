@@ -1263,8 +1263,9 @@ impl SettingKey {
                        with any Claude Code. The mod is a Claude Code plugin Veld keeps in its \
                        own folder and names in the terminal's environment, so `claude` itself \
                        runs untouched; it needs a Claude Code recent enough to load mods, and \
-                       `veld doctor` says whether yours does. Neither edits your Claude \
-                       settings. Codex CLI and Pi always use their wrappers. Takes effect for \
+                       `veld doctor` says whether yours does. Under an organization's Claude \
+                       Code policy (Team and Enterprise plans) it does not see a question an \
+                       MCP server asks. Neither edits your Claude settings. Codex CLI and Pi always use their wrappers. Takes effect for \
                        new terminals.",
                 group: Activity,
                 section: NOTICING,
@@ -1933,12 +1934,6 @@ mod tests {
         );
     }
 
-    /// The choice lists the catalog offers are the ones the validator accepts.
-    ///
-    /// Not an agreement test between two lists — they are one list, and this
-    /// asserts that sharing it actually took, from the outside, through
-    /// `validate`. A regression here means somebody reintroduced a hand-written
-    /// allow-list beside the shared slice.
     /// The daemon reads the stored value through `ClaudeIntegration::parse`, which
     /// falls back to the wrapper for anything it does not know: a choice offered here
     /// under another spelling would be accepted, saved, and quietly do nothing.
@@ -1955,6 +1950,12 @@ mod tests {
         assert_eq!(offered, known);
     }
 
+    /// The choice lists the catalog offers are the ones the validator accepts.
+    ///
+    /// Not an agreement test between two lists — they are one list, and this
+    /// asserts that sharing it actually took, from the outside, through
+    /// `validate`. A regression here means somebody reintroduced a hand-written
+    /// allow-list beside the shared slice.
     #[test]
     fn every_offered_choice_validates() {
         for entry in catalog() {
