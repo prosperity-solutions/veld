@@ -35,8 +35,8 @@
 //! plus a brief uncontended lock on [`RateShed`] only around a shed burst.
 //!
 //! Foreground ingest (`veld_core::process`'s `LineAssembler`/`LogTarget`, used by `veld
-//! start` without `--detach` and by one-shot runs) is **not** covered; it has the same
-//! shape of problem but a human watching it.
+//! start --attach` from a terminal and by a `--oneshot` run's own node) is **not**
+//! covered; it has the same shape of problem but a human watching it.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

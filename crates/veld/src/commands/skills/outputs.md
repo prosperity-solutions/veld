@@ -184,12 +184,15 @@ Log sources, and where each kind of output lands:
   a gap in a node's log as explained only when this line is present. Two wordings:
   *the database was not keeping up* is a full write queue; *rate limit* means the
   node printed more than **200 lines/s** after a **2,000-line burst**, which is
-  the ingest budget of a detached run (`veld start --detach`, or one started from
-  the IDE) — it exists so one crash-looping process cannot write millions of rows
-  an hour. A rate-limit notice is followed by the **last 50 dropped lines** with
-  their original timestamps, so the error a crash loop ends on is still there.
-  A foreground `veld start` is not rate limited. Both notices carry no node, and
-  `--node` hides the `internal` stream, so read them without `--node`.
+  the ingest budget of a detached run (a plain `veld start`, one started from
+  the IDE, or a `--oneshot` run's dependencies) — it exists so one crash-looping
+  process cannot write millions of rows an hour. A rate-limit notice is followed
+  by the **last 50 dropped lines** with their original timestamps, so the error a
+  crash loop ends on is still there. Only foreground output is not rate limited:
+  `veld start --attach` from a terminal, and a `--oneshot` run's own node.
+  Without a terminal `--attach` is ignored and the run is detached, so budgeted.
+  Both notices carry no node, and `--node` hides the `internal` stream, so read
+  them without `--node`.
 - `database reports as damaged — skipping log retention and page reclaim` from
   `veld gc`, and the matching daemon warning. While the database reads as damaged
   Veld deliberately stops pruning logs, reclaiming pages and emptying the worktree
