@@ -3396,7 +3396,8 @@ fn arm_naming(session: &str) {
 /// conversation of its own — a fresh one is nudged, a `--resume` settles at its first
 /// prompt. A terminal that was never armed stays out, and one already reminded is
 /// left as it is: the wrapper's launch report is not awaited, so it can land after the
-/// first prompt it preceded.
+/// first prompt it preceded. Accepted cost of that race: a relaunch whose first prompt
+/// beats its report is not nudged, and leaves the terminal armed for a later `/clear`.
 fn rearm_naming(session: &str) {
     if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session)
         && *state == Naming::Settled
@@ -3409,7 +3410,12 @@ fn rearm_naming(session: &str) {
 /// nothing more to nudge about there. Only when that terminal is in that worktree —
 /// an agent that renamed some other checkout has not named its own.
 pub(super) async fn settle_naming(session: &str, renamed: i64) {
-    if session_worktree(session).await == Some(renamed) {
+    settle_naming_in(session, session_worktree(session).await, renamed);
+}
+
+/// [`settle_naming`] once the terminal's own worktree, `found`, is known.
+fn settle_naming_in(session: &str, found: Option<i64>, renamed: i64) {
+    if found == Some(renamed) {
         settle_session_naming(session);
     }
 }
@@ -5869,6 +5875,16 @@ mod tests {
         assert_eq!(naming_verdict("nudge-c", Prompt { fresh: false }), None);
         assert_eq!(naming_verdict("nudge-c", stop), None);
 
+        // An interrupted first turn gets no stop; its next prompt settles it.
+        arm_naming("nudge-h");
+        assert_eq!(
+            naming_verdict("nudge-h", fresh),
+            Some(NamingVerdict::Remind)
+        );
+        assert_eq!(naming_verdict("nudge-h", Prompt { fresh: false }), None);
+        assert_eq!(naming_verdict("nudge-h", stop), None);
+        forget_naming("nudge-h");
+
         // A stop before any prompt (an interrupted launch) refuses nothing.
         arm_naming("nudge-d");
         assert_eq!(naming_verdict("nudge-d", stop), None);
@@ -5904,8 +5920,8 @@ mod tests {
         }
     }
 
-    /// Every naming turn Veld's Claude Code mod sends parses as a [`NamingTurn`], at the
-    /// route this router serves — the mod swallows every error, so a rename on either
+    /// Every naming turn Veld's Claude Code mod sends parses as a [`NamingTurn`], to the
+    /// path [`routes`] serves it on — the mod swallows every error, so a rename on either
     /// side would otherwise fail silently. Each `askNaming($, { … })` literal is read
     /// as JSON with its quoted values kept and every expression taken as a boolean.
     #[test]
@@ -5940,16 +5956,19 @@ mod tests {
         assert!(turns.iter().any(|t| matches!(t, NamingTurn::Stop { .. })));
     }
 
-    /// The name route settles only the terminal whose own worktree it renamed: one
-    /// this daemon does not know is not settled by naming some worktree.
+    /// The name route settles only the terminal whose own worktree it renamed: not one
+    /// in another worktree, and not one this daemon does not know.
     #[tokio::test]
     async fn naming_another_worktree_does_not_settle_the_terminal() {
-        arm_naming("nudge-f");
+        let stop = NamingTurn::Stop { continued: false };
+        for (found, settles) in [(Some(2), false), (None, false), (Some(1), true)] {
+            arm_naming("nudge-f");
+            naming_verdict("nudge-f", NamingTurn::Prompt { fresh: true });
+            settle_naming_in("nudge-f", found, 1);
+            let blocked = naming_verdict("nudge-f", stop) == Some(NamingVerdict::Block);
+            assert_eq!(blocked, !settles, "{found:?}");
+        }
         settle_naming("nudge-f", 1).await;
-        assert_eq!(
-            naming_verdict("nudge-f", NamingTurn::Prompt { fresh: true }),
-            Some(NamingVerdict::Remind)
-        );
         forget_naming("nudge-f");
     }
 

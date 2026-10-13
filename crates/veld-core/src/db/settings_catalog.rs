@@ -1243,7 +1243,8 @@ impl SettingKey {
                  waiting for you, or finished, without touching any of your own agent config. \
                  With the row below on too, Claude Code is held to naming its worktree on its \
                  first turn: a reminder on the first prompt, and its first stop refused once \
-                 if it has not. Takes effect for new terminals.",
+                 if it has not (on the mod, not where Claude Code's built-in policy mod is \
+                 seated). Takes effect for new terminals.",
                 Activity,
                 NOTICING,
             ),

@@ -182,8 +182,8 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
 - **In Claude Code this is enforced once**, when *Notice when a coding agent is
   waiting for you* is on as well. Veld adds a reminder to the first
   prompt of a new conversation, and refuses that turn's stop once if the worktree
-  is still unnamed (except on Veld's Claude mod under an organization's policy,
-  where a stop cannot be refused). Naming it first means you never see either.
+  is still unnamed (except on Veld's Claude mod where Claude Code's built-in
+  policy mod is seated, typical on a Team plan: there a stop cannot be refused). Naming it first means you never see either.
   A `/clear` in the same terminal is not nudged again; a new `claude` launch is.
 - It retitles the worktree containing your working directory (or, when that
   cannot be read, the one your terminal runs in). Only the label changes — never
