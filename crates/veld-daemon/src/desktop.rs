@@ -24,6 +24,8 @@ use veld_core::db::{
 };
 use veld_core::user_path::cached_user_path;
 
+use super::repo_fingerprint;
+
 use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, validate_run_name};
 
 /// Build an axum [`Router`] for the desktop APIs (mounted into the daemon's
@@ -1210,9 +1212,20 @@ static DIRTY: std::sync::LazyLock<std::sync::Mutex<DirtyCache>> =
 /// "how does each checked-out branch stand" on every poll. Merging them would make
 /// the picker pay for tracking information it does not render, and this pay for
 /// rows it discards.
+///
+/// Only the tests call this form now; the poll uses the checked one.
+#[cfg(test)]
 async fn repo_upstreams(
     repo_root: &FsPath,
 ) -> std::collections::HashMap<String, WorktreeGitSignals> {
+    repo_upstreams_checked(repo_root).await.unwrap_or_default()
+}
+
+/// [`repo_upstreams`], telling a git failure (`None`) from a repo with nothing to
+/// report (`Some` of an empty map) — the poll's memo must not remember the first.
+async fn repo_upstreams_checked(
+    repo_root: &FsPath,
+) -> Option<std::collections::HashMap<String, WorktreeGitSignals>> {
     let mut out = std::collections::HashMap::new();
     let Ok(raw) = git(
         repo_root,
@@ -1224,7 +1237,7 @@ async fn repo_upstreams(
     )
     .await
     else {
-        return out;
+        return None;
     };
     for record in raw.split('\0') {
         let record = record.trim_start_matches('\n');
@@ -1242,7 +1255,7 @@ async fn repo_upstreams(
         }
         out.insert(path.to_owned(), parse_upstream_track(upstream, track));
     }
-    out
+    Some(out)
 }
 
 /// Turn `%(upstream:short)` + `%(upstream:track,nobracket)` into the signal fields.
@@ -1329,8 +1342,28 @@ fn parse_upstream_track(upstream: &str, track: &str) -> WorktreeGitSignals {
 ///
 /// The path stored beside each value is what makes a stale entry inert rather than
 /// wrong on the paths that never call this — see [`UPSTREAMS`].
-async fn refresh_upstreams(repo_root: &FsPath, worktrees: &[WorktreeRecord]) {
-    let by_path = repo_upstreams(repo_root).await;
+///
+/// The `for-each-ref` behind it is skipped while `fingerprint` still matches the
+/// one the last answer was computed under (see [`repo_fingerprint`]); the apply
+/// below is a map update and still runs every poll.
+async fn refresh_upstreams(
+    repo_root: &FsPath,
+    worktrees: &[WorktreeRecord],
+    fingerprint: &Option<repo_fingerprint::RepoFingerprint>,
+) {
+    let by_path = match memo_get(repo_root, fingerprint, |m| m.upstreams.clone()) {
+        Some(hit) => hit,
+        None => match repo_upstreams_checked(repo_root).await {
+            Some(fresh) => {
+                memo_put(repo_root, fingerprint, |m| {
+                    m.upstreams = Some(fresh.clone())
+                });
+                fresh
+            }
+            // A failure is applied (as before: the signals clear) but not kept.
+            None => std::collections::HashMap::new(),
+        },
+    };
     let mut cache = UPSTREAMS.lock().expect("upstream cache mutex poisoned");
     for wt in worktrees {
         match by_path.get(&wt.path) {
@@ -1686,6 +1719,114 @@ async fn discover_worktrees(
     ))
 }
 
+/// [`discover_worktrees`] through the poll's memo: while `fingerprint` matches the
+/// one the last answer was computed under, the previous listing is reused and no
+/// `git worktree list` is spawned. Only successes are kept, so a repo that stops
+/// answering reaches git on the very next poll.
+async fn discover_worktrees_cached(
+    repo_root: &FsPath,
+    fingerprint: &Option<repo_fingerprint::RepoFingerprint>,
+) -> Result<(Vec<DiscoveredWorktree>, Vec<String>), ApiError> {
+    if let Some(hit) = memo_get(repo_root, fingerprint, |m| m.discovered.clone()) {
+        return Ok(hit);
+    }
+    let found = discover_worktrees(repo_root).await?;
+    memo_put(repo_root, fingerprint, |m| {
+        m.discovered = Some(found.clone())
+    });
+    Ok(found)
+}
+
+/// What [`refresh_repos`] remembers per repo between polls, valid only while the
+/// repo's [`repo_fingerprint::RepoFingerprint`] is unchanged.
+///
+/// **What the fingerprint covers**, and so what may live here: `git worktree
+/// list` (worktrees dir, each linked `HEAD`/`gitdir`, checkout existence, refs),
+/// `for-each-ref refs/heads` with `upstream:track` (refs, `packed-refs`, `config`
+/// — where upstreams are configured — and the HEADs that decide `worktreepath`),
+/// and `rev-list --count` / `log -1` over `<default>..origin/<default>` (refs).
+///
+/// **What it does not cover**, and so what stays on its own clock: the dirty
+/// sweep's `git status` (working-tree contents, no fingerprint exists for them),
+/// and git config outside the repo (`~/.gitconfig`, `/etc/gitconfig`). The second
+/// is why an entry also expires after [`REPO_GIT_MEMO_MAX_AGE`] whatever the
+/// stamps say.
+struct RepoGitMemo {
+    fingerprint: repo_fingerprint::RepoFingerprint,
+    /// When this fingerprint's answers started being collected.
+    at: std::time::Instant,
+    discovered: Option<(Vec<DiscoveredWorktree>, Vec<String>)>,
+    upstreams: Option<std::collections::HashMap<String, WorktreeGitSignals>>,
+    /// The default branch the status was computed for, with the status.
+    status: Option<(String, RepoGitStatus)>,
+}
+
+/// The longest a memoized git answer is reused with an unchanged fingerprint.
+/// A backstop for inputs the fingerprint does not stat (see [`RepoGitMemo`]).
+const REPO_GIT_MEMO_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(600);
+
+static REPO_GIT_MEMO: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, RepoGitMemo>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Take `pick` from this repo's entry — only when there is a fingerprint, it
+/// equals the entry's, and the entry is younger than [`REPO_GIT_MEMO_MAX_AGE`].
+fn memo_get<T>(
+    repo_root: &FsPath,
+    fingerprint: &Option<repo_fingerprint::RepoFingerprint>,
+    pick: impl FnOnce(&RepoGitMemo) -> Option<T>,
+) -> Option<T> {
+    let fingerprint = fingerprint.as_ref()?;
+    let memo = REPO_GIT_MEMO.lock().expect("repo git memo poisoned");
+    let entry = memo.get(repo_root)?;
+    (&entry.fingerprint == fingerprint && entry.at.elapsed() < REPO_GIT_MEMO_MAX_AGE)
+        .then(|| pick(entry))
+        .flatten()
+}
+
+/// Record an answer under `fingerprint`. A different fingerprint, or an expired
+/// entry, discards everything held for the repo first: answers computed under
+/// two different fingerprints must never sit side by side. No fingerprint, no
+/// record.
+fn memo_put(
+    repo_root: &FsPath,
+    fingerprint: &Option<repo_fingerprint::RepoFingerprint>,
+    store: impl FnOnce(&mut RepoGitMemo),
+) {
+    let Some(fingerprint) = fingerprint else {
+        return;
+    };
+    let mut memo = REPO_GIT_MEMO.lock().expect("repo git memo poisoned");
+    let stale = memo
+        .get(repo_root)
+        .is_none_or(|e| &e.fingerprint != fingerprint || e.at.elapsed() >= REPO_GIT_MEMO_MAX_AGE);
+    if stale {
+        memo.insert(
+            repo_root.to_path_buf(),
+            RepoGitMemo {
+                fingerprint: fingerprint.clone(),
+                at: std::time::Instant::now(),
+                discovered: None,
+                upstreams: None,
+                status: None,
+            },
+        );
+    }
+    if let Some(entry) = memo.get_mut(repo_root) {
+        store(entry);
+    }
+}
+
+/// [`repo_fingerprint::fingerprint`] off the async worker: a stat walk, but of a
+/// tree whose size the repo decides, so not inline on the poll's task.
+async fn repo_fingerprint_of(repo_root: &FsPath) -> Option<repo_fingerprint::RepoFingerprint> {
+    let root = repo_root.to_path_buf();
+    tokio::task::spawn_blocking(move || repo_fingerprint::fingerprint(&root))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// One local branch of a repo, as the create dialog's source picker needs it.
 ///
 /// `checked_out_in` is the load-bearing field: git refuses `git worktree add`
@@ -1973,8 +2114,8 @@ fn parse_remote_branches(out: &str, local: &[LocalBranchView]) -> Vec<RemoteBran
 /// A GET, and side-effect-free like every other GET on this router — in
 /// particular **it does not fetch**. The remote-tracking refs it reports are as
 /// fresh as the last fetch, which `refresh_repos` already performs at most once
-/// a minute per repo while an IDE window is open (see `maybe_fetch`), so a
-/// remote branch pushed in the last minute may not be listed yet. That is the
+/// five minutes per repo while an IDE window is open (see `maybe_fetch`), so a
+/// remote branch pushed in the last few minutes may not be listed yet. That is the
 /// deliberate trade: a picker that fetched on open would spawn a network
 /// operation from a read, and would do it again on every re-render.
 async fn list_branches(Query(q): Query<RepoQuery>) -> Result<Json<BranchesView>, ApiError> {
@@ -2582,7 +2723,7 @@ struct RepoView {
 }
 
 /// Git-derived staleness for one repo's main checkout.
-#[derive(Serialize, Default)]
+#[derive(Serialize, Default, Clone)]
 struct RepoGitStatus {
     /// The default branch — the main checkout's branch. This is what the IDE
     /// means by "main" even when the project calls its default branch something
@@ -3408,17 +3549,22 @@ fn repo_view_blocking(
 
 /// Fetch a repo's remote, at most once per [`FETCH_INTERVAL`] per repo, so the
 /// staleness signal tracks the remote without hammering it (and only while the
-/// IDE is open — this runs on the UI's poll). Failures are swallowed: offline,
+/// IDE is open — this runs on the UI's poll). Five minutes rather than the one
+/// it used to be: each fetch is a network round trip and a spawn per repo, and
+/// "behind origin" is a slow-moving fact — the cost of the longer interval is
+/// that a push by someone else shows on the rail up to five minutes later.
+/// Returns whether a fetch ran, so the caller knows the refs may have moved.
+/// Failures are swallowed: offline,
 /// or a repo with no remote, leaves the last successful fetch's refs in place
 /// and `behind` still computes against them. A fetch is deliberately **not** a
 /// fast-forward — it never touches a working tree — which is the line that keeps
 /// a background fetch safe where the auto-update the maintainer rejected is not.
-const FETCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+const FETCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
 static LAST_FETCH: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
-async fn maybe_fetch(repo_root: &FsPath) {
+async fn maybe_fetch(repo_root: &FsPath) -> bool {
     let key = repo_root.to_string_lossy().into_owned();
     // The guard is dropped before the await: a `std::sync::MutexGuard` is not
     // `Send`, and holding one across an await would make this future non-Send,
@@ -3436,6 +3582,7 @@ async fn maybe_fetch(repo_root: &FsPath) {
             .expect("last-fetch mutex poisoned")
             .insert(key, std::time::Instant::now());
     }
+    due
 }
 
 /// How far a repo's main checkout is behind `origin/<default>`, computed by the
@@ -3446,13 +3593,50 @@ async fn maybe_fetch(repo_root: &FsPath) {
 /// [`refresh_repos`]), because a GET here would spawn git and this helper is
 /// also reachable from paths that must not.
 async fn repo_git_status(db: &Db, repo_root: &FsPath) -> RepoGitStatus {
-    let default_branch = db
-        .list_worktrees(repo_root)
-        .ok()
-        .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.branch));
-    let Some(default_branch) = default_branch else {
+    let Some(default_branch) = default_branch_of(db, repo_root) else {
         return RepoGitStatus::default();
     };
+    git_status_against_origin(repo_root, default_branch).await
+}
+
+/// The branch the DB records for the repo's main checkout.
+fn default_branch_of(db: &Db, repo_root: &FsPath) -> Option<String> {
+    db.list_worktrees(repo_root)
+        .ok()
+        .and_then(|wts| wts.into_iter().find(|w| w.is_main).map(|w| w.branch))
+}
+
+/// [`repo_git_status`] for the poll: the two spawns are skipped while the repo's
+/// fingerprint is unchanged and the default branch is the one the kept answer was
+/// computed for. The other callers (the update-main paths) use the uncached one —
+/// they run after the user acted, and must see git as it is.
+async fn repo_git_status_cached(
+    db: &Db,
+    repo_root: &FsPath,
+    fingerprint: &Option<repo_fingerprint::RepoFingerprint>,
+) -> RepoGitStatus {
+    let Some(default_branch) = default_branch_of(db, repo_root) else {
+        return RepoGitStatus::default();
+    };
+    let hit = memo_get(repo_root, fingerprint, |m| {
+        m.status
+            .as_ref()
+            .filter(|(branch, _)| *branch == default_branch)
+            .map(|(_, status)| status.clone())
+    });
+    if let Some(hit) = hit {
+        return hit;
+    }
+    let fresh = git_status_against_origin(repo_root, default_branch.clone()).await;
+    memo_put(repo_root, fingerprint, |m| {
+        m.status = Some((default_branch, fresh.clone()))
+    });
+    fresh
+}
+
+/// The spawning half of [`repo_git_status`]: how far `origin/<default_branch>` is
+/// ahead of the local one.
+async fn git_status_against_origin(repo_root: &FsPath, default_branch: String) -> RepoGitStatus {
     // Commits in origin/<default> not in local <default> — how far *behind* the
     // main checkout is. (The other direction, `<default>..origin/<default>`,
     // would be how far ahead.) Fails — `None` — when `origin/<default>` does
@@ -3923,6 +4107,12 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
     let mut sweep_targets = Vec::new();
     for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
+        // Taken first, before any git runs: a change that lands while the
+        // answers below are being computed then differs from what they are filed
+        // under, and the next poll recomputes — never the other way round. `None`
+        // (unreadable, vanished, or changed a moment ago) means every question
+        // goes to git, which is also how a repo that vanished gets reported.
+        let mut fingerprint = repo_fingerprint_of(&root).await;
         let available = match &memo {
             // Repo imported inside the debounce window: not in the memo yet —
             // its rows were just written by import, dir-exists is fine.
@@ -3944,7 +4134,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
                 // into `true` needs no coordinated rollout, where a renamed or
                 // retyped field would read as `undefined`, hence falsy, hence
                 // the incident made permanent in every stale tab.
-                match discover_worktrees(&root).await {
+                match discover_worktrees_cached(&root, &fingerprint).await {
                     Ok((discovered, prunable)) => {
                         if let Err(e) = db.sync_worktrees_listing(&root, &discovered, &prunable) {
                             crate::dbhealth::note_error(&e);
@@ -3966,12 +4156,17 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
         };
         availability.insert(repo.root.clone(), available);
         // Keep the remote-tracking refs fresh enough that the staleness signal
-        // tracks the remote, without hammering it: fetch at most once a minute
-        // per repo, and only while the IDE is open (this is the UI's poll). A
+        // tracks the remote, without hammering it: fetch at most every
+        // [`FETCH_INTERVAL`] (five minutes) per repo, and only while the IDE is
+        // open (this is the UI's poll). A
         // fetch is non-destructive — it only updates remote-tracking refs, it
         // never touches a working tree — which is what makes a background fetch
         // safe where a background *fast-forward* is not.
-        maybe_fetch(root.as_path()).await;
+        if maybe_fetch(root.as_path()).await {
+            // New remote-tracking refs: re-stamp, so the answers below are filed
+            // under the post-fetch state.
+            fingerprint = repo_fingerprint_of(&root).await;
+        }
         // The rows this repo's rail will show, read once and used twice: the
         // upstream refresh needs them to key its answers by worktree id, and the
         // dirty sweep needs their paths. `repo_view` reads them again from SQLite
@@ -3992,7 +4187,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
         };
         // Synchronous: one `for-each-ref` for the whole repo, so the "not pushed"
         // and "upstream gone" halves of the glyph are as fresh as the poll itself.
-        refresh_upstreams(root.as_path(), &rows).await;
+        refresh_upstreams(root.as_path(), &rows, &fingerprint).await;
         sweep_targets.extend(
             rows.iter()
                 // A trashed row shows restore/delete controls rather than state,
@@ -4001,7 +4196,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
                 .filter(|wt| wt.trashed_at.is_empty())
                 .map(|wt| (wt.id, wt.path.clone())),
         );
-        let git = repo_git_status(&db, &root).await;
+        let git = repo_git_status_cached(&db, &root, &fingerprint).await;
         repos.push(repo_view(&db, repo, available, Some(git)).await?);
     }
     // After the loop, and after the response is built: the `dirty` half costs a

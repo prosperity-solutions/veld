@@ -55,6 +55,9 @@ mod config_vars;
 #[path = "config_cache.rs"]
 pub(crate) mod config_cache;
 
+#[path = "repo_fingerprint.rs"]
+mod repo_fingerprint;
+
 #[path = "promotions.rs"]
 mod promotions;
 
