@@ -13,8 +13,14 @@ on:
   pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
+
+# No `push` trigger: while locked only owners can update `main`, so a push-time
+# check could never fail. A PR that went green before `lock.sh on` stays green —
+# the ruleset is what stops its merge — and `lock.sh off` re-runs the red ones.
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 permissions: {}
 

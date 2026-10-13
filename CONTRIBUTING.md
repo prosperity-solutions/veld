@@ -10,6 +10,8 @@ Why? Because that's how this project was built, and it's how we believe modern s
 
 ## How to contribute
 
+**First, check whether the repo is locked.** When the maintainer locks it, a pinned issue titled "🔒 veld is locked" says why, and only the maintainer can merge until it is lifted. `scripts/dev/lock.sh status` tells you too.
+
 1. **Fork the repo** and create a branch from `main`.
 2. **Use an AI coding agent** to implement your changes — and let it follow [`docs/ship.md`](docs/ship.md), this repo's required workflow for any change. Most agents pick it up unprompted, because it is announced in the first lines of `AGENTS.md` and `CLAUDE.md`, and `.gemini/settings.json` points Gemini CLI at the same file; say it out loud if yours does not. **CI's `ship` check goes red for a pull request that did not come through it**, so this is not a style preference — skipping it produces a PR a maintainer has to wave through by hand.
 3. **Follow conventional commits** — we use [Conventional Commits](https://www.conventionalcommits.org/) for semantic versioning. Prefix your commit messages with `feat:`, `fix:`, `docs:`, `chore:`, etc.
