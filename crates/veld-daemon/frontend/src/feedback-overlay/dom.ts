@@ -34,6 +34,12 @@ export function buildDOM(): void {
   // as an inset, bordered/shadowed "photo card" — never edge-to-edge — so a
   // capture whose content happens to match the live page 1:1 still reads
   // unmistakably as "you're looking at a frozen image now", not the page.
+  //
+  // The glow is a sibling *before* the image (so the image paints over it): an
+  // `<img>` cannot carry a pseudo-element, and animating the image's own
+  // box-shadow repainted it every frame. See `screenshot-frame-glow` in styles.ts.
+  refs.screenshotFrameGlow = mkEl("div", "screenshot-frame-glow");
+  appendGuarded(refs.lightRoot, refs.screenshotFrameGlow);
   refs.screenshotFrame = mkEl("img", "screenshot-frame") as HTMLImageElement;
   appendGuarded(refs.lightRoot, refs.screenshotFrame);
 

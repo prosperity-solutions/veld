@@ -71,6 +71,11 @@ export function repositionFrozenFrame(): void {
   refs.screenshotFrame.style.top = frame.y + "px";
   refs.screenshotFrame.style.width = frame.w + "px";
   refs.screenshotFrame.style.height = frame.h + "px";
+  const glow = refs.screenshotFrameGlow.style;
+  glow.left = frame.x + "px";
+  glow.top = frame.y + "px";
+  glow.width = frame.w + "px";
+  glow.height = frame.h + "px";
 }
 
 /** Clamp a selection rectangle (viewport CSS px) to the displayed frame's
@@ -217,6 +222,7 @@ function showFrozenFrame(bitmap: ImageBitmap): void {
 
   refs.screenshotFrame.src = canvas.toDataURL("image/png");
   refs.screenshotFrame.classList.add(PREFIX + "screenshot-frame-show");
+  refs.screenshotFrameGlow.classList.add(PREFIX + "screenshot-frame-glow-show");
 
   // Activate (display:block) the overlay BEFORE positioning the frame:
   // repositionFrozenFrame() measures refs.overlay.getBoundingClientRect(),
@@ -233,6 +239,7 @@ function showFrozenFrame(bitmap: ImageBitmap): void {
 /** Reset the frozen-frame backdrop and release the bitmap. */
 export function clearFrozenFrame(): void {
   refs.screenshotFrame.classList.remove(PREFIX + "screenshot-frame-show");
+  refs.screenshotFrameGlow.classList.remove(PREFIX + "screenshot-frame-glow-show");
   refs.screenshotFrame.src = "";
   refs.overlay.classList.remove(PREFIX + "overlay-frame");
   refs.screenshotBanner.classList.remove(PREFIX + "screenshot-banner-show");

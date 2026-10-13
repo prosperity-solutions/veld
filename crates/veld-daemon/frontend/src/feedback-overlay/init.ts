@@ -6,7 +6,7 @@ import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
 import { onKeyDown } from "./keyboard";
 import { pollEvents, pollListenStatus, loadThreads, primeEventSeq } from "./polling";
-import { pollShareStatus } from "./sharing";
+import { pollShareStatus, startSharePolling } from "./sharing";
 import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass, applyPanelLayout, restoreSession } from "./panel";
 import { setMode } from "./modes";
 import { toggleToolbar } from "./toolbar";
@@ -76,7 +76,7 @@ export function init(): void {
   pollShareStatus(); // prime share status so the Sharing dot is right when the menu first opens
   setInterval(pollEvents, 3000);
   setInterval(pollListenStatus, 5000);
-  setInterval(pollShareStatus, 5000);
+  startSharePolling(); // 5 s, visible tabs only; pollEvents / pollListenStatus above stay ungated
 
   if ("Notification" in window && Notification.permission === "default") {
     Notification.requestPermission();

@@ -218,12 +218,23 @@
   pointer-events: none;
 }
 .veld-feedback-fab-icon svg { width: 20px; height: 20px; }
-.veld-feedback-fab-pulse {
+/* "Agent is listening" ring. An expanding, fading ring on a pseudo-element:
+   transform + opacity only, which the compositor animates without repainting.
+   It used to animate the FAB's own box-shadow, which repaints every frame for as
+   long as an agent listens — i.e. nearly always. The FAB is 40px, so scaling by
+   1.5 reaches the same 10px halo the shadow spread did. */
+.veld-feedback-fab-pulse::after {
+  content: "";
+  position: absolute; inset: 0;
+  box-sizing: border-box;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--vf-accent) 50%, transparent);
+  pointer-events: none;
   animation: veld-feedback-fab-glow 2s ease-in-out infinite;
 }
 @keyframes veld-feedback-fab-glow {
-  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--vf-accent) 50%, transparent); }
-  50% { box-shadow: 0 0 0 10px transparent; }
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0; transform: scale(1.5); }
 }
 
 /* FAB unread badge. */
@@ -370,20 +381,34 @@
   border: 1px solid var(--vf-border);
   box-shadow: var(--vf-shadow);
   font: 13px/1.5 var(--vf-font);
-  overflow: hidden;
-  animation: veld-feedback-fadeIn .15s ease, veld-feedback-popover-glow 1.4s ease-in-out infinite;
+  /* Not `overflow: hidden`: the glow below is a pseudo-element drawn *outside*
+     the box, and an overflow clip would cut it. The rounded corners the clip used
+     to give the header rows are restored by the first-child rule after this. */
+  animation: veld-feedback-fadeIn .15s ease;
+}
+/* The glow lives on a pseudo-element and animates opacity only (compositor), where
+   the popover's own box-shadow used to be re-painted every frame while a
+   composer was open. Drawn at its strongest and faded down to ~70%, which is
+   where the old 42%-to-58% pulse of the shadow spent its time. */
+.veld-feedback-popover::after {
+  content: "";
+  position: absolute; inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 18px 3px color-mix(in srgb, var(--vf-accent) 58%, transparent);
+  animation: veld-feedback-popover-glow 1.4s ease-in-out infinite;
+}
+.veld-feedback-popover > :first-child {
+  border-top-left-radius: calc(var(--vf-radius) - 1px);
+  border-top-right-radius: calc(var(--vf-radius) - 1px);
 }
 @keyframes veld-feedback-fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
 }
 @keyframes veld-feedback-popover-glow {
-  0%, 100% {
-    box-shadow: var(--vf-shadow), 0 0 10px 1px color-mix(in srgb, var(--vf-accent) 42%, transparent);
-  }
-  50% {
-    box-shadow: var(--vf-shadow), 0 0 18px 3px color-mix(in srgb, var(--vf-accent) 58%, transparent);
-  }
+  0%, 100% { opacity: .7; }
+  50% { opacity: 1; }
 }
 
 .veld-feedback-popover-header {

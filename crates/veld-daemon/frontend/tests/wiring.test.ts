@@ -59,6 +59,7 @@ function setupState() {
   refs.toolBtnHide = document.createElement("div");
   refs.screenshotRect = document.createElement("div");
   refs.screenshotFrame = document.createElement("img");
+  refs.screenshotFrameGlow = document.createElement("div");
   refs.screenshotBanner = document.createElement("div");
   refs.screenshotFullBtn = document.createElement("button");
   registerDeps(makeFakeDeps());
