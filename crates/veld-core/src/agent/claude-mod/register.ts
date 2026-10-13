@@ -35,7 +35,7 @@ let launchedAt = 0
 let namingPrompt = false
 let namingStop = false
 // Veld rewrites these files when it is upgraded, which reloads them in every running
-// session and resets the variables above. The two that are the session's own, not read
+// session and resets the variables above. The ones that are the session's own, not read
 // from its environment, are kept where a reload does not reach; that they are kept at
 // all is how a reloaded `session.start` knows the session had already started.
 const KEPT = { plugin: 'veld', key: 'session' } as const
@@ -91,15 +91,15 @@ export const register: Register = (on) => {
     const result = await next(e)
     await setBlocked($, false)
     if (hooks) await report($, 'working')
-    // The context on this prompt was the reminder; this tells Veld the stop may need
-    // refusing.
     // A first turn interrupted (Esc) gets no stop: this one is a later turn, which is
-    // never nudged.
+    // never nudged, so Veld is told to settle.
     if (hooks && context && namingPrompt && !namingStop) {
       namingStop = true
       await keep($)
       await askNaming($, { turn: 'prompt', fresh: false })
     }
+    // The context on this first prompt was the reminder; this tells Veld the stop may
+    // need refusing.
     if (hooks && context && !namingPrompt) {
       namingPrompt = true
       await keep($)
@@ -127,7 +127,7 @@ export const register: Register = (on) => {
     const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active === true })
     if (verdict !== 'block') return result
     // The turn goes on to name the worktree; `turn.complete`'s report comes when it ends.
-    if (hooks) await report($, 'working')
+    await report($, 'working')
     return { ...result, block: NAMING }
   }).catch(passThrough)
 

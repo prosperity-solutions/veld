@@ -3361,12 +3361,14 @@ enum NamingVerdict {
 /// Where one terminal's agent is with naming its worktree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Naming {
-    /// Spawned with the agent context on; no prompt seen yet.
+    /// Spawned (not resumed) with agent integration and the agent context on, or
+    /// re-armed by a new agent launch in it; no prompt seen yet.
     Armed,
     /// Reminded on its first prompt and has not named it yet.
     Reminded,
-    /// Done with: named, blocked once already, or a resumed conversation. Kept
-    /// rather than removed so a `/clear` in the same terminal is not nudged again.
+    /// Done with: named, blocked once already, a resumed conversation, or a second
+    /// prompt after an interrupted first turn. Kept rather than removed so a `/clear`
+    /// in the same terminal is not nudged again.
     Settled,
 }
 
@@ -3376,8 +3378,8 @@ enum Naming {
 /// the ones that can add to a prompt and refuse a stop. Codex and Pi are told the rule
 /// in their context and nothing holds them to it.
 ///
-/// **Only sessions this daemon spawned with agent integration and the agent context
-/// both on are ever in here** ([`arm_naming`]), so turning either setting off — or
+/// **Only sessions this daemon spawned fresh (not resumed) with agent integration and
+/// the agent context both on are ever in here** ([`arm_naming`]), so turning either setting off — or
 /// a shell adopted across a daemon restart — means no nudge at all rather than one
 /// for an agent that was never told the rule. In memory on purpose: it only has
 /// to outlive one conversation's first turn.
