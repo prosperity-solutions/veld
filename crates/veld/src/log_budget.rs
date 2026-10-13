@@ -172,7 +172,9 @@ impl RateShed {
     /// Written back now, the tail would get row ids after that newer line, and every
     /// log reader orders by id: the stale burst would read as the most recent output.
     /// Its lines stay counted in the drop notice. Called from the reader thread, only
-    /// for the first admitted line after a shed one.
+    /// for the first admitted line after a shed one. A tail the notice writer already
+    /// claimed is past saving: that needs [`SHED_QUIET`] to pass between the shed line
+    /// and the admitted one, so the tail can still land after it in that window.
     pub fn discard_tail(&self) {
         self.lock().tail.clear();
     }

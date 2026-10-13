@@ -520,6 +520,7 @@ mod tests {
             .expect("git runs");
         if !init.status.success() {
             // git older than 2.45 has no reftable backend; nothing to pin there.
+            eprintln!("skipped: this git has no reftable backend (needs 2.45+)");
             return;
         }
         git(&work, &["commit", "-q", "--allow-empty", "-m", "one"]);
