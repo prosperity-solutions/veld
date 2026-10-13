@@ -49,6 +49,11 @@
 //! - a resolution that learned nothing (a stall, a failed spawn) is retried on
 //!   the next tick, exactly as before.
 //!
+//! Unlike the daemon's repo fingerprint there is no settle window: the stamp is
+//! taken before the shell runs, which catches an edit landing mid-resolution on
+//! APFS/ext4's nanosecond mtimes. On a filesystem with whole-second mtimes, a
+//! same-length edit within the second of the stamp waits for [`PATH_MAX_AGE`].
+//!
 //! Only `PATH` is inherited — not the rest of the login shell's environment
 //! (exported variables, aliases, functions). On a headless host with no user
 //! shell config (the gateway container), the login shell contributes nothing

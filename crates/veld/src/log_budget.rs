@@ -230,25 +230,27 @@ impl RateShed {
     /// [`SHED_NOTICE_INTERVAL`] has passed since the first unreported drop, or when
     /// `finishing`. The tail is handed out only when the burst is over or `finishing`:
     /// writing it back while lines are still being shed would hand the budget straight
-    /// back to the process that exceeded it.
-    pub fn claim(&self, now: Instant, finishing: bool) -> Option<ShedClaim> {
+    /// back to the process that exceeded it. And only once `queue_drained` (or
+    /// `finishing`, when the reader is gone and the queue empty): lines admitted before
+    /// the shed burst may still be queued, and the tail written ahead of them would get
+    /// the lower row ids — the burst's last line would no longer read as the last.
+    pub fn claim(&self, now: Instant, finishing: bool, queue_drained: bool) -> Option<ShedClaim> {
         let mut s = self.lock();
-        if s.dropped == 0 && s.tail.is_empty() {
-            return None;
-        }
         let over = finishing
             || s.last_drop
                 .is_none_or(|t| now.saturating_duration_since(t) >= SHED_QUIET);
+        let release_tail = !s.tail.is_empty() && (finishing || (over && queue_drained));
         let notice_due = s.dropped > 0
-            && s.unreported_since
-                .is_some_and(|t| now.saturating_duration_since(t) >= SHED_NOTICE_INTERVAL);
-        if !(over || notice_due) {
+            && (over
+                || s.unreported_since
+                    .is_some_and(|t| now.saturating_duration_since(t) >= SHED_NOTICE_INTERVAL));
+        if !(notice_due || release_tail) {
             return None;
         }
         let claim = ShedClaim {
             dropped: std::mem::take(&mut s.dropped),
             unreported_since: s.unreported_since.take(),
-            tail: over.then(|| s.tail.drain(..).collect()),
+            tail: release_tail.then(|| s.tail.drain(..).collect()),
             tail_epoch: s.tail_epoch,
         };
         Some(claim)
@@ -347,7 +349,7 @@ mod tests {
             shed.record(t0, line(i));
         }
         let claim = shed
-            .claim(t0 + SHED_QUIET, false)
+            .claim(t0 + SHED_QUIET, false, true)
             .expect("quiet, so claimable");
         assert_eq!(claim.dropped as usize, SHED_TAIL_LINES + 25);
         let tail = claim.tail.expect("burst over, so the tail comes with it");
@@ -381,7 +383,7 @@ mod tests {
         let later = t0 + Duration::from_millis(100);
         assert!(gate.offer(later, line(99), &shed).is_some());
         let claim = shed
-            .claim(later + SHED_QUIET, false)
+            .claim(later + SHED_QUIET, false, true)
             .expect("drops to report");
         assert_eq!(claim.dropped, 5);
         assert!(claim.tail.is_none_or(|t| t.is_empty()));
@@ -396,7 +398,9 @@ mod tests {
         for i in 0..5 {
             assert!(gate.offer(t0, line(i), &shed).is_none());
         }
-        let claim = shed.claim(t0 + SHED_QUIET, false).expect("burst is over");
+        let claim = shed
+            .claim(t0 + SHED_QUIET, false, true)
+            .expect("burst is over");
         assert_eq!(claim.tail.map(|t| t.len()), Some(5));
     }
 
@@ -408,14 +412,37 @@ mod tests {
         assert!(gate.offer(t0, line(0), &shed).is_none());
         // The writer claims the tail; before its failed write is restored, a newer
         // line is admitted.
-        let claim = shed.claim(t0 + SHED_QUIET, false).expect("burst is over");
+        let claim = shed
+            .claim(t0 + SHED_QUIET, false, true)
+            .expect("burst is over");
         assert!(gate.offer(t0 + SHED_QUIET, line(1), &shed).is_some());
         shed.restore(claim);
         let again = shed
-            .claim(t0 + SHED_QUIET * 2, false)
+            .claim(t0 + SHED_QUIET * 2, false, true)
             .expect("count restored");
         assert_eq!(again.dropped, 1);
         assert!(again.tail.is_none_or(|t| t.is_empty()));
+    }
+
+    #[test]
+    fn a_tail_waits_for_the_queue_to_drain_but_its_notice_does_not() {
+        let shed = RateShed::default();
+        let t0 = Instant::now();
+        shed.record(t0, line(0));
+        // The burst is over, but lines admitted before it may still be queued: the
+        // tail written now would land ahead of them.
+        let notice = shed
+            .claim(t0 + SHED_QUIET, false, false)
+            .expect("the count is reported");
+        assert_eq!(notice.dropped, 1);
+        assert!(notice.tail.is_none(), "tail held until the queue drains");
+        assert!(shed.pending());
+        assert!(shed.claim(t0 + SHED_QUIET, false, false).is_none());
+        let tail = shed
+            .claim(t0 + SHED_QUIET, false, true)
+            .expect("drained releases the tail");
+        assert_eq!(tail.dropped, 0);
+        assert_eq!(tail.tail.map(|t| t.len()), Some(1));
     }
 
     #[test]
@@ -425,11 +452,11 @@ mod tests {
         shed.record(t0, line(0));
         assert!(shed.pending());
         // Still inside the quiet window and well inside the notice interval.
-        assert!(shed.claim(t0 + SHED_QUIET / 2, false).is_none());
+        assert!(shed.claim(t0 + SHED_QUIET / 2, false, true).is_none());
         // Shedding continues, so the quiet clock restarts.
         shed.record(t0 + SHED_QUIET, line(1));
-        assert!(shed.claim(t0 + SHED_QUIET * 3 / 2, false).is_none());
-        assert!(shed.claim(t0 + SHED_QUIET * 2, false).is_some());
+        assert!(shed.claim(t0 + SHED_QUIET * 3 / 2, false, true).is_none());
+        assert!(shed.claim(t0 + SHED_QUIET * 2, false, true).is_some());
     }
 
     #[test]
@@ -442,7 +469,7 @@ mod tests {
             shed.record(now, line(0));
             now += Duration::from_millis(100);
         }
-        let claim = shed.claim(now, false).expect("a notice is due");
+        let claim = shed.claim(now, false, true).expect("a notice is due");
         assert!(claim.dropped > 0);
         assert!(
             claim.tail.is_none(),
@@ -450,7 +477,9 @@ mod tests {
         );
         // The held-back lines are still there for the end of the burst.
         assert!(shed.pending());
-        let end = shed.claim(now, true).expect("finishing releases the tail");
+        let end = shed
+            .claim(now, true, true)
+            .expect("finishing releases the tail");
         assert_eq!(end.dropped, 0);
         assert_eq!(end.tail.map(|t| t.len()), Some(SHED_TAIL_LINES));
     }
@@ -460,10 +489,10 @@ mod tests {
         let shed = RateShed::default();
         let t0 = Instant::now();
         shed.record(t0, line(0));
-        let claim = shed.claim(t0, true).expect("finishing always claims");
+        let claim = shed.claim(t0, true, true).expect("finishing always claims");
         assert_eq!(claim.dropped, 1);
         assert_eq!(claim.tail.map(|t| t.len()), Some(1));
-        assert!(shed.claim(t0, true).is_none(), "claimed exactly once");
+        assert!(shed.claim(t0, true, true).is_none(), "claimed exactly once");
     }
 
     #[test]
@@ -472,11 +501,11 @@ mod tests {
         let t0 = Instant::now();
         shed.record(t0, line(1));
         shed.record(t0, line(2));
-        let claim = shed.claim(t0, true).unwrap();
+        let claim = shed.claim(t0, true, true).unwrap();
         // A new line is shed while the (failed) write was in flight.
         shed.record(t0, line(3));
         shed.restore(claim);
-        let again = shed.claim(t0, true).unwrap();
+        let again = shed.claim(t0, true, true).unwrap();
         assert_eq!(again.dropped, 3);
         let texts: Vec<String> = again.tail.unwrap().into_iter().map(|l| l.1).collect();
         assert_eq!(texts, ["line 1", "line 2", "line 3"]);

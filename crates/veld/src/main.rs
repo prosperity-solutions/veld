@@ -2010,14 +2010,15 @@ fn log_pump_writer(
     // What the ingest budget refused (`log_budget`), as opposed to what the queue
     // refused. Called between batches and on the way out; `finishing` releases the
     // kept tail even though the burst has not been quiet for long, because there is
-    // no later pass.
+    // no later pass. `drained` says the queue was seen empty, so no line admitted
+    // before the burst is still waiting to be written after its tail.
     //
     // Order is the point: the notice goes in first, on the `internal` stream, and the
     // kept tail follows as ordinary lines with their original timestamps and stream.
     // A failed notice hands the claim back untouched, and the tail is not written
     // without its notice.
-    let report_shed = |finishing: bool| {
-        let Some(claim) = shed.claim(std::time::Instant::now(), finishing) else {
+    let report_shed = |finishing: bool, drained: bool| {
+        let Some(claim) = shed.claim(std::time::Instant::now(), finishing, drained) else {
             return;
         };
         let kept = claim.tail.as_ref().map_or(0, Vec::len);
@@ -2071,7 +2072,7 @@ fn log_pump_writer(
             match rx.recv_timeout(LOG_SHED_POLL) {
                 Ok(item) => item,
                 Err(RecvTimeoutError::Timeout) => {
-                    report_shed(false);
+                    report_shed(false, true);
                     continue;
                 }
                 Err(RecvTimeoutError::Disconnected) => break,
@@ -2089,6 +2090,9 @@ fn log_pump_writer(
         // documents why a per-line deadline is the bug to avoid.
         let deadline = std::time::Instant::now() + veld_core::logging::LOG_BATCH_FLUSH;
         let mut closed = false;
+        // Whether the batch ended because the queue ran dry, not because it was full
+        // or out of time.
+        let mut drained = false;
         while batch.len() < veld_core::logging::LOG_BATCH_MAX_LINES {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             if left.is_zero() {
@@ -2096,9 +2100,13 @@ fn log_pump_writer(
             }
             match rx.recv_timeout(left) {
                 Ok(item) => batch.push(item),
-                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    drained = true;
+                    break;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
                     closed = true;
+                    drained = true;
                     break;
                 }
             }
@@ -2114,7 +2122,7 @@ fn log_pump_writer(
         if !report_drops(claimed) {
             dropped.fetch_add(claimed, Ordering::Relaxed);
         }
-        report_shed(false);
+        report_shed(false, drained);
 
         if closed {
             break;
@@ -2140,7 +2148,7 @@ fn log_pump_writer(
             "veld _log: dropped {claimed} line(s) from {node}:{variant} and could not record it"
         );
     }
-    report_shed(true);
+    report_shed(true, true);
 }
 
 // ---------------------------------------------------------------------------
