@@ -870,19 +870,17 @@ async fn run_single_liveness_check(
 /// report a spurious liveness failure — which the monitor answers with a
 /// recovery restart. Every probe therefore opens a fresh connection, exactly as
 /// the per-probe client it replaces did. The per-probe timeout is set on each
-/// request, not here.
-fn liveness_http_client() -> Result<&'static reqwest::Client, &'static str> {
-    static CLIENT: std::sync::OnceLock<Result<reqwest::Client, String>> =
-        std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .pool_max_idle_per_host(0)
-                .build()
-                .map_err(|e| e.to_string())
-        })
-        .as_ref()
-        .map_err(String::as_str)
+/// request, not here. Only a built client is kept: a build that fails is retried
+/// by the next probe, as it was when every probe built its own.
+fn liveness_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client);
+    }
+    let built = reqwest::Client::builder()
+        .pool_max_idle_per_host(0)
+        .build()?;
+    Ok(CLIENT.get_or_init(|| built))
 }
 
 /// Load the VeldConfig for a project root, if a root config exists.
