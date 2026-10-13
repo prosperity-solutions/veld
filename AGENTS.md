@@ -711,8 +711,10 @@ run, while a plain terminal in the same app works perfectly.
   are worth re-taking before changing it (Claude Code 2.1.294, Team plan): the built-in
   `cc-plugin-sec-default` mod answers every `classic.*` event and `prompt.compose`
   ahead of a user's mods, so the mod maps **native** events itself and puts the
-  context on the first prompt — its one `classic.Notification` hook only adds the
-  dialogs no native event shows, where an organization has unseated that mod; and an `env.CLAUDE_CODE_PLUGIN_DIRS` in the user's
+  context on the first prompt — its two classic hooks only add what no native event
+  can, where an organization has unseated that mod: `classic.Notification` for the
+  dialogs no native event shows, and `classic.Stop` for the one refused stop that
+  holds Claude to naming its worktree; and an `env.CLAUDE_CODE_PLUGIN_DIRS` in the user's
   Claude settings **replaces** the terminal's value, which `veld doctor` reports
   rather than fixes. The mod's files are rewritten only when their bytes change,
   because Claude reloads a watched plugin folder on any write.

@@ -29,9 +29,9 @@ let contextPending = false
 // starting.
 let blocked = false
 // A resumed conversation named its worktree the first time round; Veld nudges only a
-// new one to name it. Settled once this session's first prompt and first stop have
-// both been put to the daemon, which keeps the rest of the count.
-let resumed = false
+// new one to name it. The first prompt and the first stop are each put to the daemon
+// once, and it keeps the rest of the count. `launchedAt` is this process's start.
+let launchedAt = 0
 let namingPrompt = false
 let namingStop = false
 // Veld rewrites these files when it is upgraded, which reloads them in every running
@@ -55,18 +55,17 @@ export const register: Register = (on) => {
     if (kept) {
       contextPending = kept.contextPending
       blocked = kept.blocked
-      resumed = kept.resumed ?? true
+      // Kept by a mod from before the naming nudge: nothing left to ask.
+      launchedAt = kept.launchedAt ?? Number.POSITIVE_INFINITY
+      namingPrompt = kept.namingPrompt ?? true
+      namingStop = kept.namingStop ?? true
       return result
     }
     contextPending = context
     blocked = false
-    // A resumed session's figures count from its first launch, so a start well before
-    // this one's is a conversation that already had its first turn. Unknown counts as
-    // resumed: a missed nudge costs less than one that renames a named worktree.
-    const launched = await $.clock.now()
-    resumed = await $.session
-      .usage()
-      .then((u) => u.startedAt < launched - 60_000, () => true)
+    launchedAt = await $.clock.now()
+    namingPrompt = false
+    namingStop = false
     await keep($)
     if (hooks) await report($, 'ready')
     return result
@@ -96,6 +95,15 @@ export const register: Register = (on) => {
     // refusing.
     if (hooks && context && !namingPrompt) {
       namingPrompt = true
+      await keep($)
+      // Asked here, not at `session.start`, because `/resume` inside a running session
+      // starts no new one. A resumed conversation's figures count from its first
+      // launch, so a start well before this process's is one that already had its
+      // first turn. Unknown counts as resumed: a missed nudge costs less than one that
+      // renames a worktree its agent already named.
+      const resumed = await $.session
+        .usage()
+        .then((u) => u.startedAt < launchedAt - 60_000, () => true)
       await askNaming($, { turn: 'prompt', fresh: !resumed })
     }
     return result
@@ -108,6 +116,7 @@ export const register: Register = (on) => {
     const result = await next(e)
     if (!hooks || !context || !namingPrompt || namingStop) return result
     namingStop = true
+    await keep($)
     const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active })
     return verdict === 'block' ? { ...result, block: NAMING } : result
   }).catch(passThrough)
@@ -205,7 +214,7 @@ const passThrough = (_$: unknown, e: any, next: (e: any) => any) => next(e)
 
 async function keep($: EngineInterface): Promise<void> {
   try {
-    await $.state.set(KEPT, { contextPending, blocked, resumed })
+    await $.state.set(KEPT, { contextPending, blocked, launchedAt, namingPrompt, namingStop })
   } catch {}
 }
 

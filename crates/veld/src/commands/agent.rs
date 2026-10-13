@@ -253,21 +253,29 @@ async fn report(
     else {
         return 1;
     };
-    let sent = client
-        .post(format!("{base}/api/pty/sessions/{session}/agent-state"))
-        .header("X-Veld-Request", "1")
-        .json(&{
-            let mut body = serde_json::json!({
-                "tool": tool.as_str(),
-                "state": reported.as_str(),
-            });
-            if let Some(naming) = naming {
-                body["naming"] = naming;
-            }
-            body
-        })
-        .send()
-        .await;
+    let url = format!("{base}/api/pty/sessions/{session}/agent-state");
+    let post = |naming: Option<&serde_json::Value>| {
+        let mut body = serde_json::json!({
+            "tool": tool.as_str(),
+            "state": reported.as_str(),
+        });
+        if let Some(naming) = naming {
+            body["naming"] = naming.clone();
+        }
+        client
+            .post(&url)
+            .header("X-Veld-Request", "1")
+            .json(&body)
+            .send()
+    };
+    let mut sent = post(naming.as_ref()).await;
+    // A daemon older than this CLI refuses the unknown `naming` field outright; the
+    // state is still worth reporting without it.
+    if naming.is_some()
+        && matches!(&sent, Ok(resp) if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY)
+    {
+        sent = post(None).await;
+    }
     match sent {
         Ok(resp) if resp.status().is_success() => {
             // Claude reads a hook's stdout as its answer: the reminder, or the stop

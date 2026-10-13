@@ -179,9 +179,10 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
   what a PR, issue or link is actually about — shows the first name was off.
   After that, leave it alone unless the human asks; they may have renamed it
   themselves, and a title that keeps changing is no landmark.
-- **In Claude Code this is enforced once.** Veld's hooks add a one-line reminder
-  to the first prompt of a new conversation, and refuse that turn's stop once if
-  the worktree is still unnamed. Naming it first means you never see either.
+- **In Claude Code this is enforced once.** Veld adds a reminder to the first
+  prompt of a new conversation, and refuses that turn's stop once if the worktree
+  is still unnamed (except on Veld's Claude mod under an organization's policy,
+  where a stop cannot be refused). Naming it first means you never see either.
 - It retitles the worktree containing your working directory (or, when that
   cannot be read, the one your terminal runs in). Only the label changes — never
   the branch, the directory, or the run's hostname.

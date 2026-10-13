@@ -3383,8 +3383,25 @@ fn arm_naming(session: &str) {
         .insert(session.to_owned(), Naming::Armed);
 }
 
-/// `veld ide worktree name` ran in this terminal: nothing more to nudge about.
-pub(super) fn settle_naming(session: &str) {
+/// An agent launched in a terminal that was armed: whatever it is, it starts a
+/// conversation of its own — a fresh one is nudged, a `--resume` settles at its first
+/// prompt. A terminal that was never armed stays out.
+fn rearm_naming(session: &str) {
+    if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session) {
+        *state = Naming::Armed;
+    }
+}
+
+/// `veld ide worktree name` renamed worktree `renamed` from terminal `session`:
+/// nothing more to nudge about there. Only when that terminal is in that worktree —
+/// an agent that renamed some other checkout has not named its own.
+pub(super) async fn settle_naming(session: &str, renamed: i64) {
+    if session_worktree(session).await == Some(renamed) {
+        settle_session_naming(session);
+    }
+}
+
+fn settle_session_naming(session: &str) {
     if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session) {
         *state = Naming::Settled;
     }
@@ -3392,6 +3409,20 @@ pub(super) fn settle_naming(session: &str) {
 
 fn forget_naming(session: &str) {
     NAMING.lock().expect("naming poisoned").remove(session);
+}
+
+/// The state to broadcast for a report the nudge answered. A refused stop is not the
+/// turn ending: the agent goes straight on to name the worktree, and no prompt follows
+/// to say it is working again.
+fn reported_state(
+    state: veld_core::agent::State,
+    naming: Option<NamingVerdict>,
+) -> veld_core::agent::State {
+    if naming == Some(NamingVerdict::Block) {
+        veld_core::agent::State::Working
+    } else {
+        state
+    }
 }
 
 /// The nudge for one hook turn, advancing `session`'s state.
@@ -3471,9 +3502,13 @@ async fn agent_state(
     };
 
     debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
+    if state == veld_core::agent::State::Ready {
+        rearm_naming(&id);
+    }
+    let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
+    let state = reported_state(state, naming);
     let held = body.held && state == veld_core::agent::State::Blocked;
     super::ide::broadcast_agent_state(worktree_id, &id, tool, state, held);
-    let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
     // 202: the event has been handed to the clients that are connected, which is not
     // the same as a badge appearing. The body is only ever the naming nudge, for the
     // hook to hand back to the agent; a CLI that predates it ignores it.
@@ -5813,7 +5848,7 @@ mod tests {
             naming_verdict("nudge-b", fresh),
             Some(NamingVerdict::Remind)
         );
-        settle_naming("nudge-b");
+        settle_session_naming("nudge-b");
         assert_eq!(naming_verdict("nudge-b", stop), None);
 
         // A resumed conversation named its worktree the first time round.
@@ -5827,7 +5862,17 @@ mod tests {
 
         // Never armed: agent context or integration off, or an adopted shell.
         assert_eq!(naming_verdict("nudge-e", fresh), None);
-        settle_naming("nudge-e");
+        settle_session_naming("nudge-e");
+        assert_eq!(naming_verdict("nudge-e", fresh), None);
+
+        // A new launch in an armed terminal is a new conversation; one never armed
+        // stays out.
+        rearm_naming("nudge-a");
+        assert_eq!(
+            naming_verdict("nudge-a", fresh),
+            Some(NamingVerdict::Remind)
+        );
+        rearm_naming("nudge-e");
         assert_eq!(naming_verdict("nudge-e", fresh), None);
 
         forget_naming("nudge-a");
@@ -5835,6 +5880,70 @@ mod tests {
         for s in ["nudge-b", "nudge-c", "nudge-d"] {
             forget_naming(s);
         }
+    }
+
+    /// Every naming turn Veld's Claude Code mod sends parses as a [`NamingTurn`], at the
+    /// route this router serves — the mod swallows every error, so a rename on either
+    /// side would otherwise fail silently. Each `askNaming($, { … })` literal is read
+    /// as JSON with its quoted values kept and every expression taken as a boolean.
+    #[test]
+    fn the_claude_mod_asks_naming_in_the_shape_the_daemon_takes() {
+        let files = veld_core::agent::claude_mod_files("d", "c", "n");
+        let module = &files
+            .iter()
+            .find(|(p, _)| *p == "hooks/register.ts")
+            .unwrap()
+            .1;
+        assert!(module.contains("/api/pty/sessions/${encodeURIComponent(session)}/naming`"));
+        assert!(module.contains("block: NAMING"));
+        let turns: Vec<NamingTurn> = module
+            .match_indices("askNaming($, {")
+            .map(|(at, _)| {
+                let rest = &module[at + "askNaming($, {".len()..];
+                let literal = &rest[..rest.find('}').unwrap()];
+                let mut body = serde_json::Map::new();
+                for field in literal.split(',') {
+                    let (key, value) = field.split_once(':').unwrap();
+                    let value = value.trim();
+                    let value = match value.strip_prefix('\'') {
+                        Some(quoted) => quoted.trim_end_matches('\'').into(),
+                        None => true.into(),
+                    };
+                    body.insert(key.trim().to_owned(), value);
+                }
+                serde_json::from_value(body.into()).unwrap()
+            })
+            .collect();
+        assert!(turns.iter().any(|t| matches!(t, NamingTurn::Prompt { .. })));
+        assert!(turns.iter().any(|t| matches!(t, NamingTurn::Stop { .. })));
+    }
+
+    /// The name route settles only the terminal whose own worktree it renamed: one
+    /// this daemon does not know is not settled by naming some worktree.
+    #[tokio::test]
+    async fn naming_another_worktree_does_not_settle_the_terminal() {
+        arm_naming("nudge-f");
+        settle_naming("nudge-f", 1).await;
+        assert_eq!(
+            naming_verdict("nudge-f", NamingTurn::Prompt { fresh: true }),
+            Some(NamingVerdict::Remind)
+        );
+        forget_naming("nudge-f");
+    }
+
+    /// A stop the nudge refused is broadcast as working, never as the turn's end.
+    #[test]
+    fn a_refused_stop_reads_as_working() {
+        use veld_core::agent::State;
+        assert_eq!(
+            reported_state(State::Idle, Some(NamingVerdict::Block)),
+            State::Working
+        );
+        assert_eq!(reported_state(State::Idle, None), State::Idle);
+        assert_eq!(
+            reported_state(State::Working, Some(NamingVerdict::Remind)),
+            State::Working
+        );
     }
 
     /// The wire shape the CLI sends for a turn, and what an unknown one costs.

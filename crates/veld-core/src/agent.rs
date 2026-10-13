@@ -1639,8 +1639,10 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// reminder, and an approved tool call clears "waiting" without waiting for the turn
 /// to end.
 ///
-/// One `classic.*` event is hooked anyway: `classic.Notification`, for the dialogs no
-/// native event shows. It reaches the mod only where the policy mod is not seated —
+/// Two `classic.*` events are hooked anyway: `classic.Notification`, for the dialogs no
+/// native event shows, and `classic.Stop`, for the naming nudge's one refused stop
+/// (`claude_naming_output` is the wrapper's form of it). They reach the mod only where
+/// the policy mod is not seated —
 /// an organization whose managed `prependPlugins` leaves out `sec-default@builtin`,
 /// or a machine with no managed settings on a personal plan — and where it is, the hook
 /// never runs and the table above is all there is. Measured on Claude Code 2.1.296 with
@@ -1682,7 +1684,7 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// # Every gating hook passes the event on
 ///
 /// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`,
-/// `session.compact`, `classic.Notification`) catch their own failure by passing the
+/// `session.compact`, `classic.Notification`, `classic.Stop`) catch their own failure by passing the
 /// event on unchanged, and each report is bounded by [`HOOK_REQUEST_TIMEOUT_MS`] and
 /// swallows its errors: a daemon that is down or slow costs a badge, never the
 /// person's prompt or tool call.

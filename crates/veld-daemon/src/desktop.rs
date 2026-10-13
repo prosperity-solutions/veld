@@ -5271,6 +5271,7 @@ async fn name_caller_worktree(
         )
     })?;
     let id = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
+    let renamed = id;
     let named = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
         let before = db
@@ -5303,7 +5304,7 @@ async fn name_caller_worktree(
     .await?;
     // The terminal that asked has done what the naming nudge is for.
     if let Some(session) = body.session_id.as_deref() {
-        super::pty::settle_naming(session);
+        super::pty::settle_naming(session, renamed).await;
     }
     Ok(named)
 }
