@@ -218,7 +218,15 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                 Ok(body) => {
                     let named = body["name"].as_str().unwrap_or(&name);
                     let path = body["path"].as_str().unwrap_or_default();
-                    eprintln!("Renamed {path} to \"{named}\".");
+                    match body["previous"]
+                        .as_str()
+                        .filter(|p| !p.is_empty() && *p != named)
+                    {
+                        Some(previous) => {
+                            eprintln!("Renamed {path}: \"{previous}\" -> \"{named}\".")
+                        }
+                        None => eprintln!("Renamed {path} to \"{named}\"."),
+                    }
                     if json {
                         println!("{body}");
                     }

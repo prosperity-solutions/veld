@@ -1370,8 +1370,8 @@ pub fn agent_context(cli: &str) -> String {
 pub fn naming_line(cli: &str) -> String {
     format!(
         "Veld: name this worktree now, before anything else — run `{cli} ide worktree name \
-         \"<2-4 words>\"` (at most 18 columns) saying what was asked. The renaming rules are \
-         in your instructions."
+         \"<2-4 words>\"` (at most 18 columns) saying what was asked. Rename it again only if \
+         what you learn next shows the name was off, and never after that unless asked."
     )
 }
 
@@ -1384,8 +1384,9 @@ pub fn naming_line(cli: &str) -> String {
 /// Otherwise it is that turn's stop, refused once with the same line as the reason —
 /// the daemon decides which and guarantees "once" (`naming_verdict`).
 ///
-/// Short, and it defers to the system prompt for the renaming rules: restating
-/// them here would only be a second copy to drift.
+/// Short, but whole: it states the renaming rule as well, because an agent can get
+/// this without the context — the wrapper leaves the context out when the user passed
+/// a system-prompt flag of their own, and keeps the hooks.
 #[must_use]
 pub fn claude_naming_output(cli: &str, remind: bool) -> serde_json::Value {
     let line = naming_line(cli);

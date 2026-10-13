@@ -93,6 +93,13 @@ export const register: Register = (on) => {
     if (hooks) await report($, 'working')
     // The context on this prompt was the reminder; this tells Veld the stop may need
     // refusing.
+    // A first turn interrupted (Esc) gets no stop: this one is a later turn, which is
+    // never nudged.
+    if (hooks && context && namingPrompt && !namingStop) {
+      namingStop = true
+      await keep($)
+      await askNaming($, { turn: 'prompt', fresh: false })
+    }
     if (hooks && context && !namingPrompt) {
       namingPrompt = true
       await keep($)
@@ -117,8 +124,11 @@ export const register: Register = (on) => {
     if (!hooks || !context || !namingPrompt || namingStop) return result
     namingStop = true
     await keep($)
-    const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active })
-    return verdict === 'block' ? { ...result, block: NAMING } : result
+    const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active === true })
+    if (verdict !== 'block') return result
+    // The turn goes on to name the worktree; `turn.complete`'s report comes when it ends.
+    if (hooks) await report($, 'working')
+    return { ...result, block: NAMING }
   }).catch(passThrough)
 
   on('turn.complete', async ($, e, next) => {

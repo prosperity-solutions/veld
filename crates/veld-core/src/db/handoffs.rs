@@ -47,10 +47,7 @@ pub const MAX_HANDOFF_NAME_COLUMNS: usize = 18;
 pub fn check_handoff_name(name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err(
-            "give the worktree a title with --name — a few words saying what the task is"
-                .to_owned(),
-        );
+        return Err("give the worktree a title — a few words saying what the task is".to_owned());
     }
     let width = unicode_width::UnicodeWidthStr::width(name);
     if width > MAX_HANDOFF_NAME_COLUMNS {

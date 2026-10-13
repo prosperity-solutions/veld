@@ -183,6 +183,7 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
   prompt of a new conversation, and refuses that turn's stop once if the worktree
   is still unnamed (except on Veld's Claude mod under an organization's policy,
   where a stop cannot be refused). Naming it first means you never see either.
+  A `/clear` in the same terminal is not nudged again; a new `claude` launch is.
 - It retitles the worktree containing your working directory (or, when that
   cannot be read, the one your terminal runs in). Only the label changes — never
   the branch, the directory, or the run's hostname.

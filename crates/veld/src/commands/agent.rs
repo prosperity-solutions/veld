@@ -231,6 +231,13 @@ fn naming_turn(payload: &agent::HookPayload) -> Option<serde_json::Value> {
     }
 }
 
+/// Whether a report refused with `status` is worth sending again without its naming
+/// turn: a daemon older than this CLI refuses the unknown field outright (422), and the
+/// state is still worth reporting without it.
+fn resend_without_naming(had_naming: bool, status: reqwest::StatusCode) -> bool {
+    had_naming && status == reqwest::StatusCode::UNPROCESSABLE_ENTITY
+}
+
 /// How the naming nudge spells the CLI — the same word [`agent::agent_context`]
 /// used, so the two instructions name one command.
 fn naming_cli_word() -> String {
@@ -268,14 +275,21 @@ async fn report(
             .json(&body)
             .send()
     };
-    let mut sent = post(naming.as_ref()).await;
-    // A daemon older than this CLI refuses the unknown `naming` field outright; the
-    // state is still worth reporting without it.
-    if naming.is_some()
-        && matches!(&sent, Ok(resp) if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY)
-    {
-        sent = post(None).await;
-    }
+    // One budget for both requests: the hook's own `timeout` is barely more than one.
+    let sent = tokio::time::timeout(
+        std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS),
+        async {
+            let sent = post(naming.as_ref()).await;
+            match &sent {
+                Ok(resp) if resend_without_naming(naming.is_some(), resp.status()) => {
+                    post(None).await
+                }
+                _ => sent,
+            }
+        },
+    )
+    .await;
+    let Ok(sent) = sent else { return 1 };
     match sent {
         Ok(resp) if resp.status().is_success() => {
             // Claude reads a hook's stdout as its answer: the reminder, or the stop
@@ -438,6 +452,23 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CLI newer than its daemon keeps reporting states: only a 422 to a report
+    /// that carried a naming turn is sent again, without it.
+    #[test]
+    fn an_older_daemon_still_gets_the_state() {
+        use reqwest::StatusCode;
+        assert!(resend_without_naming(
+            true,
+            StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!resend_without_naming(
+            false,
+            StatusCode::UNPROCESSABLE_ENTITY
+        ));
+        assert!(!resend_without_naming(true, StatusCode::BAD_REQUEST));
+        assert!(!resend_without_naming(true, StatusCode::ACCEPTED));
+    }
 
     /// Only Claude's prompt and stop carry a naming turn; a prompt in a resumed
     /// transcript says so.

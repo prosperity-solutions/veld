@@ -3341,8 +3341,11 @@ enum NamingTurn {
     /// false for a resumed one, which named its worktree the first time round.
     Prompt { fresh: bool },
     /// `Stop`. `continued` is Claude's `stop_hook_active`: this turn already exists
-    /// because a stop hook blocked the last one.
-    Stop { continued: bool },
+    /// because a stop hook blocked the last one. Absent reads as not continued.
+    Stop {
+        #[serde(default)]
+        continued: bool,
+    },
 }
 
 /// What the hook should hand back to the agent.
@@ -3369,6 +3372,10 @@ enum Naming {
 
 /// The naming nudge's state, per terminal session.
 ///
+/// Claude only: its hooks (the wrapper's `veld agent-state`, the mod's `/naming`) are
+/// the ones that can add to a prompt and refuse a stop. Codex and Pi are told the rule
+/// in their context and nothing holds them to it.
+///
 /// **Only sessions this daemon spawned with agent integration and the agent context
 /// both on are ever in here** ([`arm_naming`]), so turning either setting off — or
 /// a shell adopted across a daemon restart — means no nudge at all rather than one
@@ -3385,9 +3392,13 @@ fn arm_naming(session: &str) {
 
 /// An agent launched in a terminal that was armed: whatever it is, it starts a
 /// conversation of its own — a fresh one is nudged, a `--resume` settles at its first
-/// prompt. A terminal that was never armed stays out.
+/// prompt. A terminal that was never armed stays out, and one already reminded is
+/// left as it is: the wrapper's launch report is not awaited, so it can land after the
+/// first prompt it preceded.
 fn rearm_naming(session: &str) {
-    if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session) {
+    if let Some(state) = NAMING.lock().expect("naming poisoned").get_mut(session)
+        && *state == Naming::Settled
+    {
         *state = Naming::Armed;
     }
 }
@@ -5874,6 +5885,15 @@ mod tests {
         );
         rearm_naming("nudge-e");
         assert_eq!(naming_verdict("nudge-e", fresh), None);
+        // A launch report that lands after the first prompt does not undo the reminder.
+        arm_naming("nudge-g");
+        assert_eq!(
+            naming_verdict("nudge-g", fresh),
+            Some(NamingVerdict::Remind)
+        );
+        rearm_naming("nudge-g");
+        assert_eq!(naming_verdict("nudge-g", stop), Some(NamingVerdict::Block));
+        forget_naming("nudge-g");
 
         forget_naming("nudge-a");
         assert_eq!(naming_verdict("nudge-a", fresh), None);
@@ -5957,6 +5977,8 @@ mod tests {
                 .unwrap();
         assert_eq!(stop, NamingTurn::Stop { continued: false });
         assert!(serde_json::from_value::<NamingTurn>(serde_json::json!({"turn": "x"})).is_err());
+        let bare: NamingTurn = serde_json::from_value(serde_json::json!({"turn": "stop"})).unwrap();
+        assert_eq!(bare, NamingTurn::Stop { continued: false });
     }
 
     /// An `argv` pane runs inside the user's login+interactive shell — the
