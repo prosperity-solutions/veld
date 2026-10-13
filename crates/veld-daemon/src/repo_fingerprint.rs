@@ -18,7 +18,8 @@
 //!   delete and update, and the file's inode moves on update. Both are stamped
 //!   because a loose ref that is rewritten may keep its length and, on a
 //!   coarse-grained filesystem, its mtime.
-//! - `reftable/`, for repos on the reftable backend.
+//! - `reftable/`, for repos on the reftable backend — the common dir's, and each
+//!   linked worktree's own (its `HEAD` file there is a stub that never moves).
 //! - The `worktrees/` directory (moves when a linked worktree is added or
 //!   pruned) and, for each linked worktree, its `HEAD`, `gitdir`, `locked` and
 //!   `commondir` — plus **whether the checkout that `gitdir` points at still
@@ -107,6 +108,10 @@ fn fingerprint_at(repo_root: &Path, now: SystemTime) -> Option<RepoFingerprint> 
 
     out.tree(&common.join("refs"), true)?;
     out.tree(&common.join("reftable"), false)?;
+    if gitdir != common {
+        // A linked worktree used as the root keeps its own stack on reftable.
+        out.tree(&gitdir.join("reftable"), false)?;
+    }
 
     // Linked worktrees.
     let worktrees = common.join("worktrees");
@@ -118,6 +123,9 @@ fn fingerprint_at(repo_root: &Path, now: SystemTime) -> Option<RepoFingerprint> 
                 for name in ["HEAD", "gitdir", "locked", "commondir"] {
                     out.file(&dir.join(name), false)?;
                 }
+                // On reftable, `HEAD` above is a fixed `refs/heads/.invalid` stub
+                // and the worktree's real HEAD lives in its own stack.
+                out.tree(&dir.join("reftable"), false)?;
                 // Whether the checkout is still there is the one fact about a
                 // linked worktree that lives outside the git dir.
                 // A relative target (`worktree.useRelativePaths`) is relative to
@@ -498,6 +506,36 @@ mod tests {
         git(&wt, &["add", "."]);
         git(&wt, &["commit", "-q", "-m", "in worktree"]);
         assert_ne!(before, fp(&f.work), "refs/heads/wtb moved");
+    }
+
+    /// On the reftable backend a linked worktree's `HEAD` file is a fixed stub and a
+    /// `git switch` there touches only the worktree's own `reftable/` stack.
+    #[test]
+    fn switching_branch_in_a_reftable_linked_worktree_moves_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let work = base.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let init = Command::new("git")
+            .current_dir(&work)
+            .args(["init", "-q", "--ref-format=reftable"])
+            .output()
+            .expect("git runs");
+        if !init.status.success() {
+            // git older than 2.45 has no reftable backend; nothing to pin there.
+            return;
+        }
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(&work, &["branch", "other"]);
+        let wt = base.join("wt");
+        git(
+            &work,
+            &["worktree", "add", "-q", "-b", "wtb", wt.to_str().unwrap()],
+        );
+        let (main_before, wt_before) = (fp(&work), fp(&wt));
+        git(&wt, &["switch", "-q", "other"]);
+        assert_ne!(main_before, fp(&work), "seen from the main checkout");
+        assert_ne!(wt_before, fp(&wt), "seen from the linked worktree");
     }
 
     #[test]
