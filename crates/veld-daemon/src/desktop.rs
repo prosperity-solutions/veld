@@ -6408,6 +6408,7 @@ mod tests {
             can_resume,
             has_sessions: false,
             agent,
+            agent_tool: None,
             auto_resume: false,
             close_on_exit: true,
             fixed_label: false,
