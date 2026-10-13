@@ -25,9 +25,26 @@ let context = false
 // first after a /clear, which ends the conversation without a new `session.start`.
 let contextPending = false
 // A tool-approval dialog or a question is on screen. Cleared by the next tool call
-// that runs, an MCP server's question being answered, the turn ending, or a new one
-// starting.
+// that starts, the last one running returning, an MCP server's question being
+// answered, the turn ending, or a new one starting.
 let blocked = false
+// The one on screen is a question the mod sees answered (`AskUserQuestion`,
+// `ExitPlanMode`, an MCP server's question), reported held: only that answer, the turn
+// ending or a new one starting clears it, never another call, a subagent's included,
+// starting or returning beside it.
+let held = false
+// Tool calls under way, subagents' included: one returning while another still waits
+// on a dialog does not answer that dialog.
+let running = 0
+// Whether Claude's classic hook events reach this mod, which they do only where no
+// organization guard sits in front of them. Where they do, `permission_prompt` says an
+// approval dialog is on screen; where they do not, a `tool.check` ask is the only sign
+// left, and it fires for every call the auto-mode classifier then approves unseen.
+// Kept across sessions, and settled again by each turn that ends with or without its
+// `classic.Stop`.
+let classic = false
+let stopSeen = false
+const CLASSIC = 'classicEvents'
 // A resumed conversation named its worktree the first time round; Veld nudges only a
 // new one to name it. The first prompt and the first stop are each put to the daemon
 // once, and it keeps the rest of the count. `launchedAt` is this process's start.
@@ -50,11 +67,13 @@ export const register: Register = (on) => {
     const mine = interactive && session !== '' && (await $.env.get('VELD_CLAUDE_INTEGRATION')) === 'mod'
     hooks = mine && !!(await $.env.get('VELD_AGENT_HOOKS'))
     context = mine && !!(await $.env.get('VELD_AGENT_CONTEXT'))
+    classic = (await $.store.get(CLASSIC).catch(() => undefined)) === true
     // A reload mid-session: the session is wherever it was, and owes what it owed.
     const kept = await $.state.get(KEPT).then((read) => read.value, () => undefined)
     if (kept) {
       contextPending = kept.contextPending
       blocked = kept.blocked
+      held = kept.held ?? false
       // Kept by a mod from before the naming nudge: nothing left to ask.
       launchedAt = kept.launchedAt ?? Number.POSITIVE_INFINITY
       namingPrompt = kept.namingPrompt ?? true
@@ -63,6 +82,7 @@ export const register: Register = (on) => {
     }
     contextPending = context
     blocked = false
+    held = false
     launchedAt = await $.clock.now()
     namingPrompt = false
     namingStop = false
@@ -89,6 +109,7 @@ export const register: Register = (on) => {
   // Subagents raise no `turn.start`: this is always the session's own turn.
   on('turn.start', async ($, e, next) => {
     const result = await next(e)
+    stopSeen = false
     await setBlocked($, false)
     if (hooks) await report($, 'working')
     // A first turn interrupted (Esc) gets no stop: this one is a later turn, which is
@@ -121,6 +142,8 @@ export const register: Register = (on) => {
   // guard sits in front of it; where one does, the context alone asks.
   on('classic.Stop', async ($, e, next) => {
     const result = await next(e)
+    stopSeen = true
+    if (hooks) await setClassic($, true)
     if (!hooks || !context || !namingPrompt || namingStop) return result
     namingStop = true
     await keep($)
@@ -141,6 +164,9 @@ export const register: Register = (on) => {
     } else if (e.reason === 'error') {
       await report($, 'blocked')
     } else {
+      // A turn that ended on an answer passed `classic.Stop`, which runs before the
+      // turn completes, on its way out, if it reaches this mod at all.
+      if (e.reason === 'answer') await setClassic($, stopSeen)
       // Background agents still running will wake the session again by themselves,
       // so the end of this turn is not the session finishing.
       const agents = await $.agent.list()
@@ -150,11 +176,15 @@ export const register: Register = (on) => {
     return result
   })
 
+  // An ask is put to the mode's decider, which is the dialog or, in auto mode, a
+  // classifier that shows nothing. So it stands in for `permission_prompt` only where
+  // classic events do not reach this mod, and is not held: nothing says when it is
+  // answered, and the person answering it is looking at the pane, which reads it.
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
-    if (hooks && verdict.decision === 'ask') {
+    if (hooks && !classic && !blocked && verdict.decision === 'ask') {
       await setBlocked($, true)
-      await report($, 'blocked', true)
+      await report($, 'blocked')
     }
     return verdict
   }).catch(passThrough)
@@ -162,32 +192,53 @@ export const register: Register = (on) => {
   on('tool.call', async ($, e, next) => {
     if (!hooks) return next(e)
     if (e.tool === 'AskUserQuestion' || e.tool === 'ExitPlanMode') {
-      await setBlocked($, true)
+      await setBlocked($, true, true)
       await report($, 'blocked', true)
       const result = await next(e)
       await setBlocked($, false)
       await report($, 'working')
       return result
     }
-    if (blocked) {
+    if (blocked && !held) {
       await setBlocked($, false)
       await report($, 'working')
     }
-    return next(e)
+    // `next` holds the approval dialog as well as the run, so a dialog answered while
+    // this call waited on it is over by the time it returns.
+    running++
+    try {
+      return await next(e)
+    } finally {
+      running--
+      if (blocked && !held && running === 0) {
+        await setBlocked($, false)
+        await report($, 'working')
+      }
+    }
   }).catch(passThrough)
 
-  // Claude's own `Notification` hook event, the one dialog the mod events do not show:
-  // an MCP server asking through Claude, and a subagent asking for input. It reaches a
+  // Claude's own `Notification` hook event, for the dialogs the mod events do not show:
+  // the approval dialog, an MCP server asking through Claude, and a subagent asking for
+  // input. It reaches a
   // mod only where no organization guard sits in front of it, and where one does this
-  // never runs. The approval dialog is a `Notification` too, and `tool.check` already
-  // reported it.
+  // never runs. The approval dialog is a `Notification` too: `permission_prompt`, sent
+  // only once a dialog is on screen, never for a call the auto-mode classifier decides.
   on('classic.Notification', async ($, e, next) => {
     const result = await next(e)
     if (!hooks) return result
+    await setClassic($, true)
     switch (e.notification_type) {
+      // Not held, for the reason `tool.check`'s stand-in is not. A question already on
+      // screen is the one being asked, and keeps its hold.
+      case 'permission_prompt':
+        if (!blocked) {
+          await setBlocked($, true)
+          await report($, 'blocked')
+        }
+        break
       case 'elicitation_dialog':
       case 'elicitation_url_dialog':
-        await setBlocked($, true)
+        await setBlocked($, true, true)
         await report($, 'blocked', true)
         break
       case 'elicitation_response':
@@ -200,8 +251,10 @@ export const register: Register = (on) => {
       // Answered in the subagent, which tells this session nothing when it is: held,
       // it would stay "waiting" until the session's own next state.
       case 'agent_needs_input':
-        await setBlocked($, true)
-        await report($, 'blocked')
+        if (!held) {
+          await setBlocked($, true)
+          await report($, 'blocked')
+        }
         break
     }
     return result
@@ -224,7 +277,7 @@ const passThrough = (_$: unknown, e: any, next: (e: any) => any) => next(e)
 
 async function keep($: EngineInterface): Promise<void> {
   try {
-    await $.state.set(KEPT, { contextPending, blocked, launchedAt, namingPrompt, namingStop })
+    await $.state.set(KEPT, { contextPending, blocked, held, launchedAt, namingPrompt, namingStop })
   } catch {}
 }
 
@@ -234,9 +287,18 @@ async function setPending($: EngineInterface, value: boolean): Promise<void> {
   await keep($)
 }
 
-async function setBlocked($: EngineInterface, value: boolean): Promise<void> {
-  if (blocked === value) return
+async function setClassic($: EngineInterface, value: boolean): Promise<void> {
+  if (classic === value) return
+  classic = value
+  try {
+    await $.store.set(CLASSIC, value)
+  } catch {}
+}
+
+async function setBlocked($: EngineInterface, value: boolean, asked = false): Promise<void> {
+  if (blocked === value && held === (value && asked)) return
   blocked = value
+  held = value && asked
   await keep($)
 }
 
@@ -245,8 +307,7 @@ let sending: Promise<unknown> = Promise.resolve()
 
 // Bounded, and never fails the hook: a daemon that is down or slow costs a badge,
 // not the person's session. `held` marks a "waiting for you" the window keeps until
-// this mod reports the next state, which for a question or a permission prompt is the
-// moment it is answered.
+// this mod reports the next state, which for a question is the moment it is answered.
 //
 // Sent one after another, because a fetch cannot be abandoned: a report that outlived
 // its hook's wait would otherwise land after the next one, and a late held "waiting"

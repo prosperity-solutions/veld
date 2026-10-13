@@ -1625,9 +1625,10 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// |---|---|
 /// | `session.start`, the session's first (a reload of the mod raises it again) | [`State::Ready`] |
 /// | `turn.start` (the session's own; a subagent raises none) | [`State::Working`] |
-/// | `tool.check` answering `ask` — the approval dialog | [`State::Blocked`] |
-/// | `tool.call` of `AskUserQuestion`/`ExitPlanMode`, while it runs | [`State::Blocked`] |
-/// | the next tool call after either | [`State::Working`] |
+/// | `tool.check` answering `ask`, only where `classic.*` events do not reach the mod | [`State::Blocked`] |
+/// | `tool.call` of `AskUserQuestion`/`ExitPlanMode`, while it runs | [`State::Blocked`], held |
+/// | the question's own call returning | [`State::Working`] |
+/// | after a `blocked` not held: the next tool call, or the last one running returning | [`State::Working`] |
 /// | `turn.complete`, `answer`/`refusal`, a background agent still running | [`State::Delegated`] |
 /// | `turn.complete`, `answer`/`refusal`, otherwise | [`State::Idle`] |
 /// | `turn.complete`, `aborted` (Esc) | [`State::Settled`] |
@@ -1640,8 +1641,17 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// reminder, and an approved tool call clears "waiting" without waiting for the turn
 /// to end.
 ///
+/// `tool.check`'s `ask` is not the approval dialog. It puts the call to the mode's
+/// decider, which in auto mode is a classifier that shows nothing and approves most
+/// calls, and it fires inside `tool.call`'s `next`, so the tool runs before anything
+/// after it hears. Reported as a held "waiting" it badged and notified on nearly every
+/// Bash call under auto mode and stayed for the whole run. Where `classic.*` events
+/// reach the mod, `permission_prompt` is the dialog itself and the only sign used;
+/// whether they do is kept in `$.store`, settled true by any classic event and false by
+/// a turn that ends on an answer without its `classic.Stop`.
+///
 /// Two `classic.*` events are hooked anyway: `classic.Notification`, for the dialogs no
-/// native event shows, and `classic.Stop`, for the naming nudge's one refused stop
+/// native event shows (the approval dialog among them), and `classic.Stop`, for the naming nudge's one refused stop
 /// (`claude_naming_output` is the wrapper's form of it). They reach the mod only where
 /// the policy mod is not seated —
 /// an organization whose managed `prependPlugins` leaves out `sec-default@builtin`,
@@ -1654,11 +1664,12 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// |---|---|
 /// | `elicitation_dialog`, `elicitation_url_dialog` — an MCP server asking | [`State::Blocked`], held |
 /// | `elicitation_response`, `elicitation_complete`, after one of those | [`State::Working`] |
+/// | `permission_prompt` — the approval dialog, on screen | [`State::Blocked`] |
 /// | `agent_needs_input` — a subagent asking | [`State::Blocked`] |
 ///
-/// The approval dialog's `permission_prompt` is left to `tool.check`, which reports it
-/// first, and a subagent's question is not held: answering it raises nothing in this
-/// session, so held it would stay "waiting" until the session's own next state.
+/// Neither the approval dialog nor a subagent's question is held: answering either
+/// raises nothing the mod sees, so held they would stay "waiting" through the run of
+/// the tool they approved, or until the session's own next state.
 ///
 /// # The context rides the first prompt, not the system prompt
 ///
