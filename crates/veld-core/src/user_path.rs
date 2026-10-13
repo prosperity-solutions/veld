@@ -27,6 +27,27 @@
 //! the daemon. (Commands spawned by the `veld` CLI itself — orchestrator
 //! steps, actions — already inherit the terminal's `PATH` and need neither.)
 //!
+//! **How fresh the published value is.** Resolving spawns an interactive login
+//! shell (0.8-1.5 s of wall time and a burst of CPU on a machine with a
+//! version-manager rc file), so the daemon does not do it on a fixed timer. The
+//! warm loop ticks every [`PATH_WARM_INTERVAL`] but only spawns when something
+//! says the answer may have changed: a shell startup file's mtime or length
+//! moved ([`startup_files`]), the shell being asked changed, or
+//! [`PATH_MAX_AGE`] has passed since the last helpful answer. The per-directory
+//! entries are held for [`DIR_PATH_TTL`] under the same startup-file rule.
+//! The resulting staleness bounds:
+//!
+//! - an edit to a listed startup file, or a change of the configured shell, is
+//!   picked up within one tick (20 s) for the global value, and on the next
+//!   request for a project directory's (served stale-while-revalidate, so no
+//!   caller waits on it);
+//! - anything a `stat` of those files cannot see — a file *sourced by* an rc
+//!   file, a `brew shellenv` change, an `.nvmrc` edit, a version manager's new
+//!   default — is picked up within [`PATH_MAX_AGE`] (5 min) for the global value
+//!   and [`DIR_PATH_TTL`] (2 min) for a project directory's;
+//! - a resolution that learned nothing (a stall, a failed spawn) is retried on
+//!   the next tick, exactly as before.
+//!
 //! Only `PATH` is inherited — not the rest of the login shell's environment
 //! (exported variables, aliases, functions). On a headless host with no user
 //! shell config (the gateway container), the login shell contributes nothing
@@ -176,10 +197,118 @@ fn process_path_fallback() -> String {
     }
 }
 
-/// How often [`refresh_user_path_cache`] re-resolves on a live daemon. The
-/// published value is therefore at most this old, which is what lets a request
-/// handler read it and never wait on a login shell.
+/// How often the warm loop *looks* at whether a re-resolution is due — a handful
+/// of `stat`s, not a login shell. A startup-file edit is therefore seen within
+/// this long; see [`resolve_due`] for when it actually spawns.
 const PATH_WARM_INTERVAL: Duration = Duration::from_secs(20);
+
+/// The longest the global published value goes without a re-resolution, whatever
+/// the startup files say. Backstop for changes a `stat` cannot see: a file an rc
+/// file sources, a version manager's default, `brew shellenv` output.
+const PATH_MAX_AGE: Duration = Duration::from_secs(300);
+
+/// How long a per-directory entry is served as fresh before the next hit starts
+/// a background refresh. Longer than the global tick because the monitor asks
+/// for every live run's directory every 5 s and each stale hit costs a login
+/// shell; a startup-file change still invalidates it at once.
+const DIR_PATH_TTL: Duration = Duration::from_secs(120);
+
+/// The timing and inputs that decide whether a cached `PATH` is still believed.
+///
+/// A value rather than constants so the tests can run the real decision logic
+/// with a zero TTL and a fixture startup file instead of subtracting from
+/// `Instant::now()` — which panics on a host booted less than that long ago.
+#[derive(Debug, Clone)]
+struct Policy {
+    /// See [`PATH_MAX_AGE`].
+    max_age: Duration,
+    /// See [`DIR_PATH_TTL`].
+    dir_ttl: Duration,
+    /// The files whose change means the answer may differ.
+    startup_files: Vec<std::path::PathBuf>,
+}
+
+impl Policy {
+    /// The production policy: real durations, the real user's startup files.
+    fn live() -> Self {
+        Self {
+            max_age: PATH_MAX_AGE,
+            dir_ttl: DIR_PATH_TTL,
+            startup_files: startup_files(
+                dirs::home_dir().as_deref(),
+                std::env::var_os("ZDOTDIR")
+                    .filter(|v| !v.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .as_deref(),
+            ),
+        }
+    }
+
+    /// What the inputs look like now, for comparison with what a resolution saw.
+    /// A few `stat`s; fine on the async path, same as the other small
+    /// filesystem reads this module's callers already do.
+    fn fingerprint(&self, shell: &str) -> Fingerprint {
+        Fingerprint {
+            shell: shell.to_owned(),
+            files: self
+                .startup_files
+                .iter()
+                .map(|p| {
+                    std::fs::metadata(p)
+                        .ok()
+                        .map(|m| (m.modified().ok(), m.len()))
+                })
+                .collect(),
+        }
+    }
+}
+
+/// The shell startup files a login+interactive shell may read, for zsh, bash and
+/// fish. `zdotdir` (when set) replaces `$HOME` for zsh's four user files, as it
+/// does for zsh itself. Missing files are listed too: creating one is a change.
+fn startup_files(
+    home: Option<&std::path::Path>,
+    zdotdir: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Some(zdot) = zdotdir.or(home) {
+        for f in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            out.push(zdot.join(f));
+        }
+    }
+    if let Some(home) = home {
+        for f in [".bashrc", ".bash_profile", ".profile", ".bash_login"] {
+            out.push(home.join(f));
+        }
+        out.push(home.join(".config/fish/config.fish"));
+    }
+    for f in ["/etc/zprofile", "/etc/zshrc", "/etc/profile", "/etc/bashrc"] {
+        out.push(std::path::PathBuf::from(f));
+    }
+    out
+}
+
+/// What a resolution's inputs looked like: the shell it was asked and each
+/// startup file's `(mtime, length)`, `None` for absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Fingerprint {
+    shell: String,
+    files: Vec<Option<(Option<std::time::SystemTime>, u64)>>,
+}
+
+/// Whether the global warm loop should spawn a login shell this tick: nothing
+/// helpful resolved yet, the inputs changed, or the answer is `max_age` old.
+fn resolve_due(
+    last: Option<(std::time::Instant, &Fingerprint)>,
+    now: std::time::Instant,
+    current: &Fingerprint,
+    max_age: Duration,
+) -> bool {
+    match last {
+        None => true,
+        Some((at, seen)) => seen != current || now.saturating_duration_since(at) >= max_age,
+    }
+}
 
 /// The most recently published `PATH`. `None` until the first resolution.
 ///
@@ -273,7 +402,8 @@ pub async fn cached_user_path() -> String {
 /// hook (`.nvmrc` + `.zshrc`, fnm's directory hook) would pick in a real
 /// terminal sitting in that project.
 ///
-/// Cached per directory for [`PATH_WARM_INTERVAL`], with no per-directory
+/// Cached per directory for [`DIR_PATH_TTL`] (or until a shell startup file
+/// changes), with no per-directory
 /// timer: the set of project directories a daemon serves is every worktree it
 /// knows about, and proactively refreshing all of them on a schedule would
 /// multiply the login-shell spawns the cache exists to bound. Instead, a
@@ -301,6 +431,15 @@ pub async fn cached_user_path_for(project_root: &std::path::Path) -> String {
 /// [`cached_user_path_for`] with the resolution shell handed in — see
 /// [`resolve_with_fallback`] for why that is a parameter and not a global read.
 async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::Path) -> String {
+    cached_user_path_for_with(shell, project_root, &Policy::live()).await
+}
+
+/// [`cached_user_path_for_with_shell`] with the [`Policy`] handed in.
+async fn cached_user_path_for_with(
+    shell: &str,
+    project_root: &std::path::Path,
+    policy: &Policy,
+) -> String {
     // Normalized so distinct spellings of the same physical directory
     // (`./x` vs `x`, a trailing slash, a symlink) don't fragment the cache
     // into separate entries that each pay their own login-shell cost. Falls
@@ -311,6 +450,7 @@ async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_owned());
     let now = std::time::Instant::now();
+    let fingerprint = policy.fingerprint(shell);
 
     // What to do about the current entry, decided entirely inside this block
     // — `guard`'s lexical scope ends at the closing brace, before any
@@ -329,18 +469,24 @@ async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::
         let Ok(mut guard) = dir_cell().lock() else {
             break 'block Decision::LockPoisoned;
         };
-        match guard
-            .get(&key)
-            .map(|e| (e.value.clone(), e.at, e.refreshing))
-        {
+        match guard.get(&key).map(|e| {
+            (
+                e.value.clone(),
+                e.at,
+                e.refreshing,
+                e.fingerprint == fingerprint,
+            )
+        }) {
             None => Decision::ResolveColdInline,
-            Some((value, at, _)) if now.duration_since(at) < PATH_WARM_INTERVAL => {
+            // Fresh: inside the TTL *and* resolved against the startup files
+            // as they are now.
+            Some((value, at, _, true)) if now.saturating_duration_since(at) < policy.dir_ttl => {
                 Decision::UseCachedValue(value)
             }
             // Already being refreshed by another caller — serve the stale
             // value rather than piling on a second concurrent login shell.
-            Some((value, _, true)) => Decision::UseCachedValue(value),
-            Some((value, _, false)) => match tokio::runtime::Handle::try_current() {
+            Some((value, _, true, _)) => Decision::UseCachedValue(value),
+            Some((value, _, false, _)) => match tokio::runtime::Handle::try_current() {
                 Ok(handle) => {
                     if let Some(e) = guard.get_mut(&key) {
                         e.refreshing = true;
@@ -367,12 +513,13 @@ async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::
         Decision::StartBackgroundRefresh(value, handle) => {
             let dir = key.clone();
             let shell = shell.to_owned();
+            let policy = policy.clone();
             handle.spawn(async move {
-                refresh_dir_cache(&shell, &dir).await;
+                refresh_dir_cache(&shell, &dir, &policy).await;
             });
             value
         }
-        Decision::ResolveColdInline => refresh_dir_cache(shell, &key).await,
+        Decision::ResolveColdInline => refresh_dir_cache(shell, &key, policy).await,
     }
 }
 
@@ -383,7 +530,11 @@ async fn cached_user_path_for_with_shell(shell: &str, project_root: &std::path::
 /// [`DirEntry::refreshing`], whether or not this call set it — a cold call
 /// (no prior entry) has nothing to clear, and that's fine. Returns the value
 /// now published (the fresh resolution, or the preserved existing one).
-async fn refresh_dir_cache(shell: &str, project_root: &std::path::Path) -> String {
+async fn refresh_dir_cache(shell: &str, project_root: &std::path::Path, policy: &Policy) -> String {
+    // Fingerprinted *before* the shell runs: an edit landing while it is
+    // resolving then differs from what is recorded and triggers one more
+    // refresh, rather than being papered over.
+    let fingerprint = policy.fingerprint(shell);
     let resolved = resolve_with_fallback(shell, Some(project_root)).await;
     if let Some(path) = &resolved {
         info!(path = %path, dir = %project_root.display(), "resolved project-directory user PATH from login shell");
@@ -412,6 +563,7 @@ async fn refresh_dir_cache(shell: &str, project_root: &std::path::Path) -> Strin
         DirEntry {
             value: value.clone(),
             at: std::time::Instant::now(),
+            fingerprint,
             refreshing: false,
         },
     );
@@ -423,6 +575,9 @@ async fn refresh_dir_cache(shell: &str, project_root: &std::path::Path) -> Strin
 struct DirEntry {
     value: String,
     at: std::time::Instant,
+    /// The shell and startup files this value was resolved against; a mismatch
+    /// with the current ones makes the entry stale whatever its age.
+    fingerprint: Fingerprint,
     /// Set while a background refresh for this directory is in flight, so a
     /// second stale hit serves the current value instead of spawning a
     /// second login shell for the same directory. Cleared unconditionally
@@ -441,8 +596,11 @@ fn dir_cell() -> &'static std::sync::Mutex<std::collections::HashMap<std::path::
     CELL.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-/// Re-resolve and publish per [`publish_value`].
-async fn refresh_user_path_cache() {
+/// Re-resolve and publish per [`publish_value`]. Returns whether the shell
+/// produced a helpful answer (one that differs from the process `PATH`) — the
+/// warm loop only treats the value as freshly resolved, and so waits out
+/// [`PATH_MAX_AGE`], when it did.
+async fn refresh_user_path_cache() -> bool {
     let resolved = resolve_with_fallback(&resolution_shell(), None).await;
     if let Some(path) = &resolved {
         info!(path = %path, "resolved user PATH from login shell");
@@ -451,8 +609,11 @@ async fn refresh_user_path_cache() {
     // Poisoned mutex: nothing to publish into and nothing to serve from, so the
     // caller falls back. Never panics the warm loop.
     let Ok(mut guard) = cell().lock() else {
-        return;
+        return false;
     };
+    let helpful = resolved
+        .as_deref()
+        .is_some_and(|p| p != process_path_fallback());
     let decided = publish_value(guard.as_deref(), resolved);
     // Warn only when the cell is *left* holding an unhelpful value — i.e. this
     // resolution seeded the fallback, or it learned nothing and there was
@@ -470,6 +631,7 @@ async fn refresh_user_path_cache() {
     if let Some(path) = decided {
         *guard = Some(path);
     }
+    helpful
 }
 
 /// At most one "PATH resolution learned nothing" warning per
@@ -505,15 +667,33 @@ fn warn_unhelpful_path() {
 /// loop awaits per-node liveness probes (30s each) and `veld restart` recovery
 /// (up to 300s), so it cannot be relied on to refresh anything on a cadence.
 /// Spawn once at daemon start; never returns. The first tick fires immediately,
-/// so the cell is populated within one resolution of boot.
+/// so the cell is populated within one resolution of boot. It ticks every
+/// [`PATH_WARM_INTERVAL`] but only spawns a login shell when [`resolve_due`] says
+/// so — see the module docs for the staleness bounds.
 pub async fn warm_user_path_cache() {
+    let mut last: Option<(std::time::Instant, Fingerprint)> = None;
     let mut interval = tokio::time::interval(PATH_WARM_INTERVAL);
     // A daemon host that slept overnight must not wake to a queue of missed
     // ticks, each spawning a login shell.
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         interval.tick().await;
-        refresh_user_path_cache().await;
+        let policy = Policy::live();
+        let fingerprint = policy.fingerprint(&resolution_shell());
+        let now = std::time::Instant::now();
+        if resolve_due(
+            last.as_ref().map(|(at, fp)| (*at, fp)),
+            now,
+            &fingerprint,
+            policy.max_age,
+        ) {
+            // A resolution that learned nothing is not remembered, so it is
+            // retried next tick as it always was: a stall right after a wake must
+            // not leave the bare service `PATH` in place for five minutes.
+            last = refresh_user_path_cache()
+                .await
+                .then_some((now, fingerprint));
+        }
     }
 }
 
@@ -546,7 +726,7 @@ async fn login_shell_path(shell: &str, cwd: Option<&std::path::Path>) -> Option<
     // foreground process group, then exits without restoring it — leaving
     // Ctrl-C signalling a dead group. When the daemon runs foreground on a
     // tty (`just dev-daemon`), that killed Ctrl-C for the whole session,
-    // re-broken by every 60s PATH re-resolution. setsid() detaches the child
+    // re-broken by every PATH re-resolution. setsid() detaches the child
     // from the session so /dev/tty does not resolve to the user's terminal.
     // (Verified by reproducing the foreground-group theft under a pty.)
     #[cfg(unix)]
@@ -769,30 +949,23 @@ mod tests {
         write_shell("/old/bin");
         let stub = shell.to_str().unwrap().to_owned();
 
-        let first = cached_user_path_for_with_shell(&stub, &dir).await;
+        // A zero TTL makes every entry stale on its next hit — the policy is
+        // injected, so nothing here subtracts from `Instant::now()` (which
+        // panics on a host booted less than that long ago).
+        let policy = Policy {
+            max_age: Duration::ZERO,
+            dir_ttl: Duration::ZERO,
+            startup_files: Vec::new(),
+        };
+
+        let first = cached_user_path_for_with(&stub, &dir, &policy).await;
         assert_eq!(first, "/old/bin");
 
-        // Force the entry stale (simulating `PATH_WARM_INTERVAL` elapsing)
-        // and change what the shell would now answer.
-        {
-            let mut guard = dir_cell().lock().unwrap();
-            let entry = guard.get_mut(&dir).expect("seeded above");
-            // `checked_sub`, not bare subtraction: `Instant` is monotonic
-            // from an arbitrary (often boot-relative) origin, so on a host
-            // with under ~21s of uptime a plain `now - 21s` panics on
-            // arithmetic overflow instead of the property this test means to
-            // check.
-            entry.at = std::time::Instant::now()
-                .checked_sub(PATH_WARM_INTERVAL + Duration::from_secs(1))
-                .expect(
-                    "host uptime under ~21s — this test needs an `Instant` further in the past \
-                     than the monotonic clock's origin allows",
-                );
-        }
+        // Change what the shell would now answer.
         write_shell("/new/bin");
 
         // A stale hit returns the OLD value with no wait — the whole point.
-        let second = cached_user_path_for_with_shell(&stub, &dir).await;
+        let second = cached_user_path_for_with(&stub, &dir, &policy).await;
         assert_eq!(second, "/old/bin");
 
         // The background refresh it triggered eventually publishes the new
@@ -815,6 +988,175 @@ mod tests {
         // about it leaked into the process-global shell (issue #310).
         assert_eq!(resolution_shell(), crate::shell::auto_shell());
         assert_eq!(refreshed.flatten(), Some("/new/bin".to_owned()));
+    }
+
+    #[test]
+    fn startup_files_cover_zsh_bash_fish_and_system_files() {
+        let home = std::path::Path::new("/h");
+        let files = startup_files(Some(home), None);
+        for want in [
+            "/h/.zshenv",
+            "/h/.zprofile",
+            "/h/.zshrc",
+            "/h/.zlogin",
+            "/h/.bashrc",
+            "/h/.bash_profile",
+            "/h/.profile",
+            "/h/.bash_login",
+            "/h/.config/fish/config.fish",
+            "/etc/zprofile",
+            "/etc/zshrc",
+            "/etc/profile",
+            "/etc/bashrc",
+        ] {
+            assert!(
+                files.contains(&want.into()),
+                "{want} missing from {files:?}"
+            );
+        }
+        // ZDOTDIR replaces $HOME for zsh's files only.
+        let files = startup_files(Some(home), Some(std::path::Path::new("/z")));
+        assert!(files.contains(&"/z/.zshrc".into()));
+        assert!(!files.contains(&"/h/.zshrc".into()));
+        assert!(files.contains(&"/h/.bashrc".into()));
+    }
+
+    #[test]
+    fn fingerprint_moves_with_the_files_and_the_shell_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join(".zshrc");
+        let policy = Policy {
+            max_age: PATH_MAX_AGE,
+            dir_ttl: DIR_PATH_TTL,
+            startup_files: vec![rc.clone()],
+        };
+        let absent = policy.fingerprint("zsh");
+        assert_eq!(
+            absent,
+            policy.fingerprint("zsh"),
+            "stable when nothing moved"
+        );
+
+        std::fs::write(&rc, "export A=1\n").unwrap();
+        let created = policy.fingerprint("zsh");
+        assert_ne!(absent, created, "creating a startup file is a change");
+        assert_eq!(created, policy.fingerprint("zsh"));
+
+        // A different length changes the fingerprint even on a filesystem whose
+        // mtime would not have moved.
+        std::fs::write(&rc, "export A=11\n").unwrap();
+        assert_ne!(created, policy.fingerprint("zsh"));
+
+        assert_ne!(
+            policy.fingerprint("zsh"),
+            policy.fingerprint("bash"),
+            "a different shell answers a different question"
+        );
+    }
+
+    #[test]
+    fn the_warm_loop_spawns_on_first_change_or_age_only() {
+        let policy = Policy {
+            max_age: Duration::from_secs(300),
+            dir_ttl: DIR_PATH_TTL,
+            startup_files: Vec::new(),
+        };
+        let fp = policy.fingerprint("zsh");
+        let other = policy.fingerprint("bash");
+        let t0 = std::time::Instant::now();
+        let later = |secs| t0 + Duration::from_secs(secs);
+
+        // Nothing helpful resolved yet — including after a failed attempt.
+        assert!(resolve_due(None, t0, &fp, policy.max_age));
+        // Same inputs, inside max_age: the 20 s tick must not spawn.
+        assert!(!resolve_due(
+            Some((t0, &fp)),
+            later(20),
+            &fp,
+            policy.max_age
+        ));
+        assert!(!resolve_due(
+            Some((t0, &fp)),
+            later(299),
+            &fp,
+            policy.max_age
+        ));
+        // Max age reached.
+        assert!(resolve_due(
+            Some((t0, &fp)),
+            later(300),
+            &fp,
+            policy.max_age
+        ));
+        // Inputs changed, however recent.
+        assert!(resolve_due(
+            Some((t0, &fp)),
+            later(1),
+            &other,
+            policy.max_age
+        ));
+    }
+
+    // A fresh directory entry is served without a refresh no matter how many
+    // times it is asked for — the saving this reshape exists for — until a
+    // startup file changes, which makes it stale at once (served old, refreshed
+    // in the background) even though its TTL has hours left.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_directory_entry_is_fresh_until_a_startup_file_changes() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serialised = cache_test_lock().lock().await;
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().canonicalize().unwrap();
+        let rc = dir.join(".zshrc");
+        std::fs::write(&rc, "# v1\n").unwrap();
+        let shell = dir.join("stub-shell");
+        let write_shell = |stdout: &str| {
+            std::fs::write(&shell, format!("#!/bin/sh\necho 'PATH={stdout}'\n")).unwrap();
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        write_shell("/old/bin");
+        let stub = shell.to_str().unwrap().to_owned();
+        let policy = Policy {
+            max_age: Duration::from_secs(3600),
+            dir_ttl: Duration::from_secs(3600),
+            startup_files: vec![rc.clone()],
+        };
+
+        assert_eq!(
+            cached_user_path_for_with(&stub, &dir, &policy).await,
+            "/old/bin"
+        );
+
+        // The shell would now answer differently, but nothing it reads moved:
+        // no refresh may start, so the old answer must keep coming back.
+        write_shell("/new/bin");
+        for _ in 0..3 {
+            assert_eq!(
+                cached_user_path_for_with(&stub, &dir, &policy).await,
+                "/old/bin"
+            );
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        assert_eq!(published_dir_path(&dir).as_deref(), Some("/old/bin"));
+
+        // Now a startup file changes: this hit still returns instantly with the
+        // old value, and kicks a refresh that publishes the new one.
+        std::fs::write(&rc, "# v2 — longer\n").unwrap();
+        assert_eq!(
+            cached_user_path_for_with(&stub, &dir, &policy).await,
+            "/old/bin"
+        );
+        let mut seen = None;
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            seen = published_dir_path(&dir);
+            if seen.as_deref() == Some("/new/bin") {
+                break;
+            }
+        }
+        assert_eq!(seen.as_deref(), Some("/new/bin"));
     }
 
     fn published_dir_path(dir: &std::path::Path) -> Option<String> {
