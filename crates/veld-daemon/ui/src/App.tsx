@@ -391,6 +391,7 @@ import {
   windowRestored,
   windowSeed,
 } from "./shell";
+import { keepIfEqual } from "./shared/keepIfEqual";
 import { POLL_MS, pollDue, pollOnShow } from "./shared/pollCadence";
 
 /**
@@ -1279,9 +1280,15 @@ function AppInner(props: {
         if (verdict === "refetch") continue;
         if (verdict === "apply") {
           repoApplied.current = ticket;
-          setRepoList(repoPatches.current.reduce((list, patch) => patch(list), repos));
+          // Patches first, then compare: a queued local patch that changes the
+          // list must not be mistaken for "the daemon said nothing new".
+          const patched = repoPatches.current.reduce((list, patch) => patch(list), repos);
+          setRepoList((cur) => keepIfEqual(cur, patched));
         }
-        setEnvs(pruneRunHistory(environments, historyDays, new Date()));
+        // Compare the pruned value: the cut-off moves with the clock, so the raw
+        // response can be unchanged while what is stored is not (and vice versa).
+        const pruned = pruneRunHistory(environments, historyDays, new Date());
+        setEnvs((cur) => keepIfEqual(cur, pruned));
         break;
       }
       setOffline(false);
@@ -1289,7 +1296,8 @@ function AppInner(props: {
       setOffline(true);
     }
     try {
-      setDbHealth(await healthRequest);
+      const health = await healthRequest;
+      setDbHealth((cur) => keepIfEqual(cur, health));
     } catch {
       // Deliberately silent. The offline notice already covers a daemon that is
       // not answering at all, and a daemon too old for this endpoint is not a
@@ -1297,12 +1305,18 @@ function AppInner(props: {
     }
     if (!extras) return;
     const [sharesResult, statsResult] = await extras;
-    if (sharesResult.status === "fulfilled") setShares(sharesResult.value);
+    if (sharesResult.status === "fulfilled") {
+      const next = sharesResult.value;
+      setShares((cur) => keepIfEqual(cur, next));
+    }
     // Tracked, unlike stats: shares drive a *control* surface, and a panel that
     // says "nothing shared" from a read that never landed invites the user to
     // start a second share of a run that already has one.
     setSharesStale(sharesResult.status !== "fulfilled");
-    if (statsResult.status === "fulfilled") setStats(statsResult.value);
+    if (statsResult.status === "fulfilled") {
+      const next = statsResult.value;
+      setStats((cur) => keepIfEqual(cur, next));
+    }
   }, [wantRunState, historyDays]);
 
   // Tick counter, bumped per poll. Effects that must re-evaluate on a
