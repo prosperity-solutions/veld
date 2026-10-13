@@ -286,6 +286,134 @@ describe("reconnecting", () => {
   });
 });
 
+/**
+ * `holds` and `keep` are state replacements the daemon keeps as sets, and the
+ * app calls both from effects that run on every layout change. A call that
+ * changes nothing must not cost a frame.
+ */
+describe("repeating a set the daemon already has", () => {
+  const ofType = (s: FakeSocket, type: string) => s.frames().filter((f) => f.type === type);
+
+  it("sends keep once for an unchanged set, in any order", async () => {
+    const channel = await freshChannel();
+    const socket = await connect(channel);
+    socket.open();
+    channel.keep(["a", "b"]);
+    channel.keep(["a", "b"]);
+    channel.keep(["b", "a"]);
+    channel.keep(["a", "b", "a"]);
+    expect(ofType(socket, "keep")).toEqual([{ type: "keep", session_ids: ["a", "b"] }]);
+    // A real change still goes out, and so does a return to the earlier set.
+    channel.keep(["a"]);
+    channel.keep(["a", "b"]);
+    expect(ofType(socket, "keep")).toHaveLength(3);
+    // Closing the last pane is a change too.
+    channel.keep([]);
+    expect(ofType(socket, "keep").at(-1)).toEqual({ type: "keep", session_ids: [] });
+  });
+
+  it("sends holds once for an unchanged set, in any order", async () => {
+    const channel = await freshChannel();
+    const socket = await connect(channel);
+    socket.open();
+    channel.holds([7, 9]);
+    channel.holds([9, 7]);
+    channel.holds([7, 9]);
+    expect(ofType(socket, "holds")).toHaveLength(1);
+    channel.holds([7]);
+    expect(ofType(socket, "holds")).toHaveLength(2);
+  });
+
+  it("treats an empty set after the handshake as already known", async () => {
+    // A fresh daemon-side client starts empty,
+    // so an empty call after connect is a repeat, and a non-empty one is not.
+    const channel = await freshChannel();
+    const socket = await connect(channel);
+    socket.open();
+    channel.keep([]);
+    channel.holds([]);
+    expect(ofType(socket, "keep")).toHaveLength(0);
+    expect(ofType(socket, "holds")).toHaveLength(0);
+    channel.keep(["a"]);
+    expect(ofType(socket, "keep")).toHaveLength(1);
+  });
+
+  it("does not record a frame it could not send", async () => {
+    const channel = await freshChannel();
+    const socket = await connect(channel);
+    // Not open yet: the call is remembered for the handshake, not sent.
+    channel.keep(["a"]);
+    channel.holds([7]);
+    expect(socket.frames()).toEqual([]);
+    socket.open();
+    // The handshake resent them once; asking again is a repeat.
+    expect(ofType(socket, "keep")).toHaveLength(1);
+    expect(ofType(socket, "holds")).toHaveLength(1);
+    channel.keep(["a"]);
+    channel.holds([7]);
+    expect(ofType(socket, "keep")).toHaveLength(1);
+    expect(ofType(socket, "holds")).toHaveLength(1);
+  });
+
+  it("still re-sends everything after a reconnect, then dedupes again", async () => {
+    const channel = await freshChannel();
+    const first = await connect(channel);
+    first.open();
+    channel.keep(["a", "b"]);
+    channel.holds([7]);
+    first.drop();
+    // While the socket is down a repeat is swallowed (the handshake covers it)…
+    channel.keep(["a", "b"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.instances.at(-1) as FakeSocket;
+    second.open();
+    expect(ofType(second, "keep")).toEqual([{ type: "keep", session_ids: ["a", "b"] }]);
+    expect(ofType(second, "holds")).toEqual([{ type: "holds", worktree_ids: [7] }]);
+    // …and the new socket's copy is known, so the next repeat is quiet.
+    channel.keep(["b", "a"]);
+    channel.holds([7]);
+    expect(ofType(second, "keep")).toHaveLength(1);
+    expect(ofType(second, "holds")).toHaveLength(1);
+  });
+
+  it("sends a set that changed while the socket was down, once, at the handshake", async () => {
+    const channel = await freshChannel();
+    const first = await connect(channel);
+    first.open();
+    channel.keep(["a"]);
+    first.drop();
+    channel.keep(["a", "b"]);
+    await vi.advanceTimersByTimeAsync(1000);
+    const second = FakeSocket.instances.at(-1) as FakeSocket;
+    second.open();
+    expect(ofType(second, "keep")).toEqual([{ type: "keep", session_ids: ["a", "b"] }]);
+  });
+
+  it("re-sends holds after a forget, which the daemon may not have followed", async () => {
+    const channel = await freshChannel();
+    const socket = await connect(channel);
+    socket.open();
+    channel.holds([7, 9]);
+    channel.forget([9]);
+    // The daemon drops only ids it verifies are gone; this one may still be held
+    // there, so the identical set must be said again rather than assumed.
+    channel.holds([7]);
+    expect(ofType(socket, "holds")).toEqual([
+      { type: "holds", worktree_ids: [7, 9] },
+      { type: "holds", worktree_ids: [7] },
+    ]);
+    // After which it is known again, and a repeat is quiet.
+    channel.holds([7]);
+    expect(ofType(socket, "holds")).toHaveLength(2);
+    // And a reconnect resends what forget left, not the forgotten id.
+    socket.drop();
+    await vi.advanceTimersByTimeAsync(1000);
+    const next = FakeSocket.instances.at(-1) as FakeSocket;
+    next.open();
+    expect(ofType(next, "holds")).toEqual([{ type: "holds", worktree_ids: [7] }]);
+  });
+});
+
 describe("frames from the daemon", () => {
   it("routes a yield with an acknowledgement bound to its id", async () => {
     const acks: number[] = [];
