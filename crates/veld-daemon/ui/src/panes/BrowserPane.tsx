@@ -171,6 +171,7 @@ import {
   userChoice,
 } from "./permissions";
 import { api, type Quicklink, type ViewableFile } from "../api";
+import { gatedInterval } from "../shared/gatedInterval";
 import type { QuickSwitchPrefs } from "../shared/settings";
 
 /**
@@ -1043,15 +1044,20 @@ export function BrowserPane(props: {
     // anchored it at effect-setup time instead, and the two could then fire a
     // millisecond apart — twice the rate the comment above claims to bound.
     const wait = Math.max(0, FILE_WATCH_INTERVAL_MS - (Date.now() - lastPoll.current));
-    let timer = 0;
+
+    // The interval is gated on visibility like the main poll: nobody watches a
+    // hidden window's page reload, and the mtime baseline lives in `browserHost`,
+    // so a rewrite during the quiet stretch is still noticed by the catch-up poll
+    // on show. The gate only ever slows the rate, so the bound above still holds.
+    let stop: (() => void) | null = null;
     const first = window.setTimeout(() => {
       void check();
-      timer = window.setInterval(check, FILE_WATCH_INTERVAL_MS);
+      stop = gatedInterval(() => void check(), FILE_WATCH_INTERVAL_MS);
     }, wait);
     return () => {
       cancelled = true;
       window.clearTimeout(first);
-      window.clearInterval(timer);
+      stop?.();
     };
   }, [watching, file, props.worktreeId, id]);
 
