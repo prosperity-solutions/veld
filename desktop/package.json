@@ -8,7 +8,7 @@
   "main": "src/main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test src/*.test.js",
+    "test": "node --test src/*.test.js scripts/*.test.js",
     "lint": "biome lint src scripts",
     "package": "electron-builder --publish never",
     "package:mac": "electron-builder --mac --publish never",

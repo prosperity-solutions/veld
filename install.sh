@@ -401,10 +401,10 @@ verify_checksum() {
 
 # --- Veld Desktop (macOS) ---
 #
-# Why the CLI installs the app at all: a build downloaded in a browser carries
-# `com.apple.quarantine`, which is what makes Gatekeeper refuse the first launch
-# of a build that is not notarized. curl does not set that attribute, so an app
-# delivered through this script simply opens — no dialog, no Developer ID needed.
+# A build downloaded in a browser carries `com.apple.quarantine`, which is what
+# makes Gatekeeper check notarization on first launch. curl does not set that
+# attribute, so an app delivered through this script opens without that check
+# (release builds are notarized anyway; older ad-hoc ones relied on this).
 # The trust boundary is unchanged: you are already running this script from the
 # same origin, and the archive is checksum-verified like the tarball.
 #
@@ -415,10 +415,11 @@ verify_checksum() {
 # XProtect assessment and Apple's revocation check permanently, including for the
 # signed build this is a bridge to.
 #
-# Deliberately NOT re-signed after unpacking, unlike the binaries: the bundle
-# arrives with a valid signature of its own, and `codesign --force --sign -`
-# would replace a real Developer ID signature with an ad-hoc one the day releases
-# are signed.
+# Deliberately NOT re-signed after unpacking: release bundles carry a Developer
+# ID signature (notarized and stapled), and `codesign --force --sign -` would
+# replace it with an ad-hoc one — a different code identity, so every TCC grant
+# and Login Item tied to the app would treat it as a stranger. See
+# docs/macos-signing.md.
 
 # Where an existing Veld.app is, if there is one. Sets DESKTOP_APP (empty when
 # there is none).
@@ -704,12 +705,12 @@ remove_desktop_app_via_cli() {
 # `com.apple.ResourceFork` + `com.apple.FinderInfo`, and `codesign --verify
 # --strict` then rejects the binary ("resource fork, Finder information, or
 # similar detritus not allowed", exit 1). Plain `codesign --verify` still passes,
-# the ad-hoc signature is intact, and the binaries execute and are spawned by
-# launchd normally. Nothing in veld runs a strict verify on its own binaries, and
-# Gatekeeper does not assess a locally ad-hoc-signed executable at all — but the
-# day these binaries carry a Developer ID, this step is the reason a strict
-# verification of them would fail, so it is here in writing. `VELD_BINARY_ICONS=0`
-# opts out.
+# the signature is intact, and the binaries execute and are spawned by launchd
+# normally. Nothing in veld runs a strict verify on its own binaries, and
+# Gatekeeper does not assess an executable that arrived without a quarantine flag
+# — but release binaries carry a Developer ID, and this step is the reason a
+# strict verification of them fails, so it is here in writing.
+# `VELD_BINARY_ICONS=0` opts out.
 #
 # Runs AFTER `install_bin` has handled each binary: `xattr -cr` there would strip
 # the icon straight back off. `osascript -l JavaScript` rather than the
@@ -1158,8 +1159,10 @@ $NEED_SUDO mkdir -p "$LIB_DIR"
 # freshly-copied-but-not-yet-signed binary into a Gatekeeper kill/throttle loop.
 #
 # **Only re-signed when the signature it arrived with does not verify.** Release
-# binaries are ad-hoc signed in CI, and the helper's org `.sig` covers exactly
-# those bytes. `codesign --force` is not byte-idempotent across macOS releases:
+# binaries are Developer ID signed in CI (docs/macos-signing.md), and the helper's
+# org `.sig` covers exactly those bytes. Re-signing one would also swap its code
+# identity for an ad-hoc one, which is what makes macOS forget its TCC grants and
+# Login Items — the stable identity is the reason release signing exists. `codesign --force` is not byte-idempotent across macOS releases:
 # macOS 27's codesign reserves less space for the signature than CI's runner did
 # and truncates the file (by 18000 bytes on v16.74.0), so re-signing a perfectly
 # good release helper made the `.sig` beside it fail on every update. The running
@@ -1173,7 +1176,7 @@ install_bin() {
   # once the old bytes have run (the CLI driving `veld update`, a live helper or
   # daemon) every later exec of the new bytes is SIGKILLed. The unconditional
   # re-sign this function used to do hid that by writing a new file itself.
-  local dst="$2" link stage hops=0
+  local dst="$2" link stage hops=0 team
   # `cp` wrote through a symlink, so the rename lands where its bytes did rather
   # than silently swapping a dev's link for a real file. Bounded, because `cp`
   # failed on a loop with ELOOP and an unbounded walk would hang `veld update`.
@@ -1205,12 +1208,18 @@ install_bin() {
     # under a restrictive umask is unreadable to the user, and a verify that
     # fails on EACCES would re-sign a perfectly good binary.
     if ! $NEED_SUDO codesign --verify "$stage/${dst##*/}" >/dev/null 2>&1; then
+      # Read before the re-sign below replaces it: a Team ID here means CI's
+      # Developer ID signature is what this macOS just rejected.
+      team=$(codesign -dv "$1" 2>&1 | sed -n 's/^TeamIdentifier=\([A-Z0-9]\{10\}\)$/\1/p' || true)
       $NEED_SUDO codesign --force --sign - "$stage/${dst##*/}" 2>/dev/null || true
       # A release binary always verifies, so reaching here with a `.sig` beside
       # the source means this macOS rejects CI's signature, and the re-sign just
       # broke the org signature. Every remedy veld prints says "re-run the
       # installer", which would do this again — so say that it will not help.
       # Loud, even when embedded.
+      if [ -n "$team" ] && [ ! -f "$1.sig" ]; then
+        echo "  warning: $2 arrived Developer ID signed (team $team) but failed 'codesign --verify', so it was re-signed ad-hoc. macOS will treat it as a new program: permissions granted to it (Full Disk Access, Login Items) have to be granted again. Please report it with the output of: codesign -dvv \"$1\"; sw_vers" >&2
+      fi
       if [ -f "$1.sig" ]; then
         INSTALL_BIN_SIG_BROKEN="1"
         echo "  warning: $2 failed 'codesign --verify' and had to be re-signed, so its org signature no longer matches it and the helper will not restart onto it. Re-running the installer will not fix this; please report it with the output of: shasum -a 256 \"$2\"; sw_vers" >&2
@@ -1226,8 +1235,8 @@ install_bin() {
 install_bin "${TMP_DIR}/veld" "${INSTALL_DIR}/veld" sign
 
 # Helper and daemon go to LIB_DIR (bundled in the release tarball) and are
-# re-signed only if their signature does not verify. Caddy is a Go binary
-# shipped signed upstream, so it is not re-signed.
+# re-signed only if their signature does not verify. Caddy is Developer ID
+# signed in release CI like the rest, and never re-signed here.
 for bin in veld-helper veld-daemon; do
   if [ -f "${TMP_DIR}/${bin}" ]; then
     install_bin "${TMP_DIR}/${bin}" "${LIB_DIR}/${bin}" sign

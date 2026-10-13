@@ -449,7 +449,7 @@ shellcheck:
     bash -n tests/validate-install-contract.sh
     bash -n tests/validate-ship-stamp.sh
     if command -v shellcheck >/dev/null 2>&1; then
-      shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh scripts/dev/*.sh
+      shellcheck --severity=warning install.sh tests/validate-install-contract.sh tests/validate-ship-stamp.sh tests/macos-signing-smoke.sh scripts/dev/*.sh scripts/release/*.sh
     else
       echo "shellcheck not installed — skipping (brew install shellcheck). CI runs it."
     fi
@@ -692,8 +692,9 @@ desktop-icons:
 #
 # The same commands release CI runs, minus the version injection — a local build
 # is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
-# artifacts are ad-hoc signed only (no Developer ID yet), so a build handed to
-# someone else needs `xattr -dr com.apple.quarantine` on the other end. On Linux
+# artifacts are ad-hoc signed only (only release CI holds the Developer ID — see
+# docs/macos-signing.md), so a build handed to someone else needs
+# `xattr -dr com.apple.quarantine` on the other end. On Linux
 # everything lands in desktop/dist/, including the .deb — which is built by a
 # second invocation into desktop/dist-deb/ and moved, for the reason in
 # desktop/electron-builder.yml.
