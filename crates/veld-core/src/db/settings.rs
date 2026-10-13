@@ -37,8 +37,8 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::Value;
 
 use super::settings_catalog::{
-    CURSOR_STYLES, Choice, DOCK_BADGE_STYLES, GIT_CREATE_SOURCES, MARKER_STYLES,
-    UPDATE_FREQUENCIES, WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
+    CLAUDE_INTEGRATIONS, CURSOR_STYLES, Choice, DOCK_BADGE_STYLES, GIT_CREATE_SOURCES,
+    MARKER_STYLES, UPDATE_FREQUENCIES, WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
 };
 use super::{Db, DbError, now_str};
 
@@ -700,6 +700,7 @@ pub enum SettingKey {
     TerminalShellIntegration,
     TerminalAgentIntegration,
     TerminalAgentContext,
+    TerminalClaudeIntegration,
     KeepAwakeSharingOnPower,
     KeepAwakeSharingOnPowerMinutes,
     KeepAwakeSharingOnBattery,
@@ -838,6 +839,7 @@ impl SettingKey {
         Self::TerminalShellIntegration,
         Self::TerminalAgentIntegration,
         Self::TerminalAgentContext,
+        Self::TerminalClaudeIntegration,
         Self::ActivityShowWorking,
         // ── Activity › Notifying ─────────────────────────────────────────────
         Self::ActivityNotifyCommandFinished,
@@ -918,6 +920,7 @@ impl SettingKey {
             Self::TerminalShellIntegration => "terminal.shellIntegration",
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
             Self::TerminalAgentContext => "terminal.agentContext",
+            Self::TerminalClaudeIntegration => "terminal.claudeIntegration",
             Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
             Self::ExtensionsSource => "extensions.source",
             Self::NewsSource => "news.source",
@@ -1002,6 +1005,7 @@ impl SettingKey {
             "terminal.shellIntegration" => Self::TerminalShellIntegration,
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
             "terminal.agentContext" => Self::TerminalAgentContext,
+            "terminal.claudeIntegration" => Self::TerminalClaudeIntegration,
             "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
             "extensions.source" => Self::ExtensionsSource,
             "news.source" => Self::NewsSource,
@@ -1438,6 +1442,9 @@ impl SettingKey {
                 Value::Array(out)
             }
             Self::TerminalCursorStyle => one_of(value, CURSOR_STYLES).ok_or_else(bad)?,
+            Self::TerminalClaudeIntegration => {
+                one_of(value, CLAUDE_INTEGRATIONS).ok_or_else(bad)?
+            }
             // Which shell a terminal opens. Validated by **shape** — `"auto"` or an
             // absolute path — and never by existence, which is
             // `veld_core::shell::resolve`'s job at spawn time: a value must be
@@ -1919,6 +1926,13 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // agent so it knows `veld ide open` exists. Someone who wants the badge but
         // not a word added to their agent's prompt — or the reverse — gets that.
         (SettingKey::TerminalAgentContext, Value::from(true)),
+        // The wrapper, because it works on every Claude Code this integration has ever
+        // supported and the mod needs one recent enough to load function hooks. The
+        // mod is offered once, from the IDE, just before the first Claude pane starts.
+        (
+            SettingKey::TerminalClaudeIntegration,
+            Value::from("wrapper"),
+        ),
         // On: a project that declares badges declared them to be seen, and the
         // switch exists for the machine that wants none rather than as a gate
         // everybody steps through. See `Db::extensions_auto_refresh`.
@@ -2498,6 +2512,18 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
+    }
+
+    /// How Claude Code is given both halves above: the `claude` wrapper on `PATH`, or
+    /// veld's Claude Code mod named in the session's `CLAUDE_CODE_PLUGIN_DIRS`.
+    ///
+    /// Codex and Pi have no equivalent and stay on their wrappers whatever this says.
+    pub fn terminal_claude_integration(&self) -> crate::agent::ClaudeIntegration {
+        self.setting(&SettingKey::TerminalClaudeIntegration)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().and_then(crate::agent::ClaudeIntegration::parse))
+            .unwrap_or_default()
     }
 
     /// Whether the daemon may evaluate a project's `ide.extensions` status badges

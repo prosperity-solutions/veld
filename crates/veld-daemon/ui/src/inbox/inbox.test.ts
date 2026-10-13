@@ -1499,3 +1499,71 @@ describe("a file opened for you", () => {
     expect(after.unseen("file-1")?.kind).toBe("opened");
   });
 });
+
+describe("a held 'waiting for you'", () => {
+  const held: Signal = { type: "agent", state: "blocked", source: "hook", held: true };
+
+  it("stays on the rail until the agent says it was answered, however often it is looked at", () => {
+    const box = createInbox();
+    box.report("t1", WT, agent("working"), NOW);
+    box.report("t1", WT, held, NOW + 1);
+    expect(rowState(box, WT)).toBe("attention");
+    // Looking at the pane, and marking the worktree read, are not answers.
+    box.setWatching("t1");
+    expect(rowState(box, WT)).toBe("attention");
+    box.markWorktreeRead(WT);
+    expect(rowState(box, WT)).toBe("attention");
+    // And nothing offers a "mark read" that would do nothing.
+    expect(box.hasUnread(WT)).toBe(false);
+    // The answer: the tool ran, the agent is working again.
+    box.report("t1", WT, agent("working"), NOW + 2);
+    expect(rowState(box, WT, false)).toBe(null);
+  });
+
+  it("is filed even in the pane being watched, without a banner", () => {
+    const box = createInbox();
+    const events: string[] = [];
+    box.onEvent((e) => events.push(e.unseen.detail));
+    box.setWatching("t1");
+    box.report("t1", WT, held, NOW);
+    expect(rowState(box, WT)).toBe("attention");
+    expect(events).toEqual([]);
+    // Elsewhere it still raises one.
+    box.report("t2", WT, held, NOW);
+    expect(events).toHaveLength(1);
+  });
+
+  it("can be read once the agent is gone", () => {
+    const box = createInbox();
+    box.report("t1", WT, agent("working"), NOW);
+    box.report("t1", WT, held, NOW + 1);
+    box.report("t1", WT, { type: "exit", code: 137 }, NOW + 2);
+    expect(box.hasUnread(WT)).toBe(true);
+    box.markWorktreeRead(WT);
+    expect(rowState(box, WT, false)).toBe(null);
+  });
+
+  it("is seen once released in the pane being watched", () => {
+    const box = createInbox();
+    box.setWatching("t1");
+    box.report("t1", WT, held, NOW);
+    // An interrupted question: no answer, but the person was right there.
+    box.report("t1", WT, agent("settled"), NOW + 1);
+    expect(rowState(box, WT, false)).toBe(null);
+  });
+
+  it("is an ordinary one, read by looking, without the flag", () => {
+    const box = createInbox();
+    box.report("t1", WT, agent("blocked"), NOW);
+    expect(rowState(box, WT)).toBe("attention");
+    box.setWatching("t1");
+    expect(rowState(box, WT, false)).toBe(null);
+  });
+
+  it("ends with a restart", () => {
+    const box = createInbox();
+    box.report("t1", WT, held, NOW);
+    box.restarted("t1");
+    expect(rowState(box, WT, false)).toBe(null);
+  });
+});

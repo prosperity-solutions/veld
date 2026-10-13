@@ -2853,6 +2853,12 @@ struct PaneView {
     /// that the project had declared something it did not.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent: Option<bool>,
+    /// The agent the pane's `argv` runs directly (`claude`, `codex`, `pi`), read
+    /// from its first word; absent for a `shell` spec or anything else. Lets the
+    /// client ask its Claude Code question before such a pane starts, rather than
+    /// after the agent has already launched one way.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_tool: Option<&'static str>,
     /// Whether a restored pane whose shell is gone may resume without a click.
     auto_resume: bool,
     /// Whether a clean exit closes the pane.
@@ -3172,6 +3178,13 @@ fn worktree_view_with(
                         can_resume: terminal.resume.is_some(),
                         has_sessions: session_panes.contains(&p.id),
                         agent: terminal.agent,
+                        agent_tool: match &terminal.launch {
+                            veld_core::config::CommandSpec::Argv(argv) => argv
+                                .first()
+                                .and_then(|program| veld_core::agent::agent_tool_of(program))
+                                .map(veld_core::agent::AgentTool::as_str),
+                            veld_core::config::CommandSpec::Shell(_) => None,
+                        },
                         auto_resume: terminal.auto_resume,
                         close_on_exit: terminal.close_on_exit,
                         fixed_label: terminal.fixed_label,
@@ -6395,6 +6408,7 @@ mod tests {
             can_resume,
             has_sessions: false,
             agent,
+            agent_tool: None,
             auto_resume: false,
             close_on_exit: true,
             fixed_label: false,

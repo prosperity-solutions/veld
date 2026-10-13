@@ -702,6 +702,20 @@ run, while a plain terminal in the same app works perfectly.
   this** — a `veld.json` that could name a binary to wrap and a command to run on its
   lifecycle events is repo-supplied remote code execution, which the hooks rule below
   already forbids.
+  **Claude Code has a second route, behind `terminal.claudeIntegration`**: a Claude
+  Code mod (`agent::claude_mod_files`) written beside the wrappers and named in the
+  session's `CLAUDE_CODE_PLUGIN_DIRS`, with the `claude` wrapper passing straight
+  through. It keeps every invariant above — the variable loads a folder for one
+  process, so it is not a config merge; **never `claude plugin install`**, which
+  writes `enabledPlugins` into the user's settings. Two measurements constrain it and
+  are worth re-taking before changing it (Claude Code 2.1.294, Team plan): the built-in
+  `cc-plugin-sec-default` mod answers every `classic.*` event and `prompt.compose`
+  ahead of a user's mods, so the mod maps **native** events itself and puts the
+  context on the first prompt — its one `classic.Notification` hook only adds the
+  dialogs no native event shows, where an organization has unseated that mod; and an `env.CLAUDE_CODE_PLUGIN_DIRS` in the user's
+  Claude settings **replaces** the terminal's value, which `veld doctor` reports
+  rather than fixes. The mod's files are rewritten only when their bytes change,
+  because Claude reloads a watched plugin folder on any write.
   The same wrapper also carries **what the agent is told** (`agent_context`, gated on
   `VELD_AGENT_CONTEXT` / `terminal.agentContext`, independent of the hooks): text
   appended through each tool's own *append* mechanism, under the same invariants.

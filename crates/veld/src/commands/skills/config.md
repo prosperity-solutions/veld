@@ -859,7 +859,11 @@ terminal reports when a command started and how it ended, which marks a
 worktree in the rail), `terminal.agentIntegration` (an agent wrapper —
 `claude`, `codex`, `pi` — installs lifecycle hooks so an agent waiting on the user
 reaches the same glyph) and `terminal.agentContext` (the same wrapper tells the
-agent that `veld ide open` exists — see `veld skills ide`). All three sit under
+agent that `veld ide open` exists — see `veld skills ide`). A fourth,
+`terminal.claudeIntegration` (`wrapper` or `mod`), picks how the last two reach
+Claude Code: the wrapper's flags, or a Claude Code mod Veld names in the
+terminal's `CLAUDE_CODE_PLUGIN_DIRS` while the wrapper passes straight through;
+`veld doctor` says whether your `claude` loads the mod. All of them sit under
 *Settings → Activity* with
 `activity.showWorking`, the
 four `activity.notify*` rows, and the *Focus mode* block that can silence

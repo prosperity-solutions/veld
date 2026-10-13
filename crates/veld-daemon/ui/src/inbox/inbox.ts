@@ -123,8 +123,12 @@ export type Signal =
   | { type: "exit"; code: number | null }
   /** An OSC 9 / 777 / kitty 99 notification. Lowest authority — see {@link Source}. */
   | { type: "notify"; message: string }
-  /** A coding agent said what it is doing. */
-  | { type: "agent"; state: AgentState; source: Source }
+  /**
+   * A coding agent said what it is doing. `held` marks a `blocked` that stays until the
+   * agent says it moved on, rather than until somebody looks — sent only by a producer
+   * that reports the moment it was answered (Veld's Claude Code mod).
+   */
+  | { type: "agent"; state: AgentState; source: Source; held?: boolean }
   /** Something opened a file for you to read, and asked that you be told. `detail`
    *  names the file ("Agent opened plan.md"). */
   | { type: "opened"; detail: string };
@@ -262,6 +266,12 @@ interface SessionState {
    * something newer.
    */
   delegated: boolean;
+  /**
+   * A "waiting for you" that only the agent can clear: looking at the pane does not
+   * read it, and neither does marking the worktree read — it is still true. Cleared by
+   * the agent's next state, which for the producer that sends it is the answer.
+   */
+  held: boolean;
   unseen: Unseen | null;
 }
 
@@ -356,6 +366,7 @@ class WorktreeInbox {
       agentCommand: false,
       reportedExit: false,
       delegated: false,
+      held: false,
       unseen: null,
     });
   }
@@ -378,20 +389,27 @@ class WorktreeInbox {
 
     const before = session.unseen;
     const wasRunning = running(session);
+    const wasHeld = session.held;
     const event = this.classify(session, signal, now);
     const nowRunning = running(session);
 
     if (event !== undefined) {
-      // The watched pane's events are seen as they happen. Still classified above,
-      // because the state machine has to track the `C` even when its `D` will be
-      // discarded — otherwise switching to a pane mid-command loses the next event.
-      session.unseen = sessionId === this.watching ? null : event;
+      // The watched pane's events are seen as they happen — except a held one, which
+      // stays until it is answered wherever the person is looking. Still classified
+      // above, because the state machine has to track the `C` even when its `D` will
+      // be discarded — otherwise switching to a pane mid-command loses the next event.
+      session.unseen = sessionId === this.watching && !session.held ? null : event;
+    } else if (wasHeld && !session.held && sessionId === this.watching) {
+      // Released while being watched (an interrupted question, say): it has been seen.
+      if (session.unseen?.kind === "attention") session.unseen = null;
     }
     if (session.unseen !== before) {
       this.notify();
       // Only a genuinely new event, and only one that stuck. A read, a retraction, or
       // an event in the pane the user is watching must not raise a banner.
-      if (session.unseen !== null && session.unseen === event) {
+      // A held event in the watched pane is filed, so it outlasts the looking, but is
+      // in front of the person already and raises nothing.
+      if (session.unseen !== null && session.unseen === event && sessionId !== this.watching) {
         const payload: InboxEvent = { sessionId, worktreeId, unseen: session.unseen };
         for (const fn of this.eventListeners) fn(payload);
       }
@@ -448,6 +466,8 @@ class WorktreeInbox {
           session.agentCommand = false;
           session.agentSource = null;
           session.agentWorking = false;
+          // Nobody is left to answer a held question, or to say it was answered.
+          session.held = false;
           return undefined;
         }
         // And separately: an unread "needs you" from a hook is never buried by a command
@@ -489,6 +509,9 @@ class WorktreeInbox {
         session.agentSource = null;
         session.agentCommand = false;
         session.delegated = false;
+        // A held question dies with the agent: the report that would release it never
+        // comes, and held it could not be read or marked read at all.
+        session.held = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -563,6 +586,8 @@ class WorktreeInbox {
         // unrecognised state *permanently muted* the shell's `working` and every OSC 9 in
         // that pane, rather than being the no-op the wire contract promises.
         if (!KNOWN_AGENT_STATES.includes(signal.state)) return undefined;
+        // Any state the agent reports ends a hold, and only a held `blocked` starts one.
+        session.held = signal.state === "blocked" && signal.held === true;
         // A reminder with no agent holding the pane is a late one, from an agent that has
         // already quit — the idle reminder is fire-and-forget. Claiming here would hand
         // the *next* shell command to an agent that is gone, swallowing its result.
@@ -652,7 +677,7 @@ class WorktreeInbox {
   /** Read a session's unseen event. Whether there was one. */
   read(sessionId: string): boolean {
     const session = this.sessions.get(sessionId);
-    if (!session?.unseen) return false;
+    if (!session?.unseen || session.held) return false;
     session.unseen = null;
     this.notify();
     return true;
@@ -681,6 +706,7 @@ class WorktreeInbox {
     session.agentSource = null;
     session.agentCommand = false;
     session.delegated = false;
+    session.held = false;
     // The event goes too. Restart is reachable from an *inactive* tab's strip, so
     // restarting without having read is an ordinary gesture — and a badge left over from
     // the previous run then asserts a failure the current run has not had, with no fresh
@@ -692,12 +718,11 @@ class WorktreeInbox {
   /**
    * Read everything in a worktree.
    *
-   * The explicit gesture, and it clears the lot. There are no producer-held events a
-   * user is not entitled to dismiss — every event here is a notification about
-   * something that already happened, so "I have seen it" is always the user's to say.
-   * When a producer that *holds* an event arrives (a share request that must be
-   * answered rather than noticed), it will need its own acknowledgement mode; it must
-   * not silently make this gesture a lie in the meantime.
+   * The explicit gesture, and it clears every event that is a notification about
+   * something that already happened, where "I have seen it" is the user's to say. A
+   * **held** "waiting for you" is not one: it is still true until the agent is answered,
+   * so it stays, and {@link hasUnread} does not count it — a "mark read" offered for it
+   * would be a gesture that does nothing.
    *
    * It does not, and must not, stop anything that is **running**: `working` is not an
    * event and there is nothing about it to have seen.
@@ -705,7 +730,7 @@ class WorktreeInbox {
   markWorktreeRead(worktreeId: number): void {
     let changed = false;
     for (const session of this.sessions.values()) {
-      if (session.worktreeId === worktreeId && session.unseen) {
+      if (session.worktreeId === worktreeId && session.unseen && !session.held) {
         session.unseen = null;
         changed = true;
       }
@@ -716,7 +741,7 @@ class WorktreeInbox {
   /** Whether a worktree has anything a user could mark read. */
   hasUnread(worktreeId: number): boolean {
     for (const session of this.sessions.values()) {
-      if (session.worktreeId === worktreeId && session.unseen) return true;
+      if (session.worktreeId === worktreeId && session.unseen && !session.held) return true;
     }
     return false;
   }

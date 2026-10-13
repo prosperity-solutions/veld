@@ -1014,6 +1014,92 @@ impl Diagnostics {
         // machine with no `veld` beside the daemon, or a `~/.veld` it cannot write,
         // has terminal URL opening switched off with nothing anywhere to say so.
         self.checks.push(self.terminal_shims_check().await);
+        // Only for someone who chose the mod: on the wrapper there is nothing to ask
+        // Claude Code, and a row about a feature that is off is noise.
+        if let Some(check) = self.claude_mod_check().await {
+            self.checks.push(check);
+        }
+    }
+
+    /// Whether the Claude Code on `PATH` loads veld's mod, for a machine on
+    /// `terminal.claudeIntegration = mod`.
+    ///
+    /// A refusal fails the row: with the mod selected the wrapper steps aside, so a
+    /// Claude Code that cannot load it reports nothing at all, silently. A question
+    /// that could not be asked (no `claude`, a timeout) passes with what was not
+    /// learned, like the other rows that learned nothing.
+    async fn claude_mod_check(&self) -> Option<Check> {
+        use veld_core::agent::{ClaudeIntegration, ClaudeModSupport};
+        // Skipped under sudo for the reasons `terminal_shims_check` gives: the
+        // database and the shim directory are both `HOME`-derived.
+        if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+            return None;
+        }
+        let db = veld_core::db::Db::open().ok()?;
+        if db.terminal_claude_integration() != ClaudeIntegration::Mod {
+            return None;
+        }
+        if !db.terminal_agent_integration() && !db.terminal_agent_context() {
+            return Some(Check {
+                pass: true,
+                label: "Claude Code mod selected, with nothing to do: terminal.agentIntegration \
+                        and terminal.agentContext are both off"
+                    .to_owned(),
+            });
+        }
+        let shim_dir = veld_core::instance::shim_dir();
+        let mod_dir = veld_core::agent::claude_mod_dir(&shim_dir);
+        let back =
+            "or go back to the wrapper: veld settings set terminal.claudeIntegration wrapper";
+        let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
+        if let Some(theirs) = config_dir
+            .as_deref()
+            .and_then(veld_core::agent::claude_settings_plugin_dirs)
+            && !std::env::split_paths(&theirs).any(|dir| dir == mod_dir)
+        {
+            return Some(Check {
+                pass: false,
+                label: format!(
+                    "Claude Code never loads Veld's mod: your Claude settings set \
+                     CLAUDE_CODE_PLUGIN_DIRS in their env block, which replaces the one a Veld \
+                     terminal sets. Add {} to it, {back}",
+                    mod_dir.display()
+                ),
+            });
+        }
+        let path = std::env::var("PATH").unwrap_or_default();
+        let label = match veld_core::agent::claude_mod_support(&mod_dir, &path, &shim_dir).await {
+            ClaudeModSupport::Loads { version } => {
+                return Some(Check {
+                    pass: true,
+                    label: format!(
+                        "Claude Code{} loads Veld's mod ({})",
+                        version.map(|v| format!(" {v}")).unwrap_or_default(),
+                        tilde_path(&mod_dir)
+                    ),
+                });
+            }
+            ClaudeModSupport::Refused { version, reason } => format!(
+                "Claude Code{} cannot load Veld's mod, so Claude reports nothing to Veld: \
+                 {reason}. Update it with `claude update`, {back}",
+                version.map(|v| format!(" {v}")).unwrap_or_default(),
+            ),
+            ClaudeModSupport::NoClaude => {
+                return Some(Check {
+                    pass: true,
+                    label: "Claude Code mod selected, but no `claude` is on PATH".to_owned(),
+                });
+            }
+            ClaudeModSupport::Unknown { reason } => {
+                return Some(Check {
+                    pass: true,
+                    label: format!("Could not ask Claude Code about Veld's mod: {reason}"),
+                });
+            }
+        };
+        Some(Check { pass: false, label })
     }
 
     /// Which generated file catches `open`/`xdg-open` for this shell, and what to

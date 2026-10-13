@@ -36,6 +36,7 @@ import {
 import {
   api,
   MAX_LANE_NAME_LEN,
+  type ClaudeModCheck,
   type CreateWorktreeSource,
   type DbHealth,
   type DirtyFile,
@@ -3215,6 +3216,114 @@ export function HandoffReviewDialog(props: {
           </Tooltip>
         </Group>
         <ErrorText error={discard.error} />
+      </Stack>
+    </Modal>
+  );
+}
+
+/**
+ * The one-time offer to run Claude Code on Veld's mod instead of its wrapper —
+ * `terminal.claudeIntegration`, asked just before a Claude pane starts, which
+ * waits for the answer. See `ide/claudeModOffer.ts`.
+ *
+ * It asks the daemon first whether the person's Claude Code can load the mod, and
+ * offers the switch only when nothing it found says the switch would leave Claude
+ * reporting nothing: a Claude Code that refuses the mod, or a plugin-folder list in
+ * their Claude settings that would replace the terminal's.
+ */
+export function ClaudeModOfferDialog(props: {
+  /** Closed without choosing. Still an answer: it is not asked again. */
+  onClose: () => void;
+  onKeep: () => void;
+  /** Saves `terminal.claudeIntegration = mod`. */
+  onSwitch: () => Promise<void>;
+}) {
+  const [check, setCheck] = useState<ClaudeModCheck | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .claudeModCheck()
+      .then((result) => {
+        if (live) setCheck(result);
+      })
+      .catch((err: unknown) => {
+        if (live) setCheckError(err instanceof Error ? err.message : String(err));
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+  const switching = useSubmit(props.onSwitch);
+  const version = check?.version ? ` ${check.version}` : "";
+  const blocked =
+    check !== null && (check.support === "refused" || check.settings_plugin_dirs !== null);
+  return (
+    <Modal title="Claude Code in Veld terminals" onClose={props.onClose}>
+      <Stack gap="md">
+        <Text size="sm">
+          Veld can now hear from Claude Code through a Claude Code mod, instead of
+          through a wrapper script in front of <code>claude</code>. An interrupted turn
+          stops spinning straight away, and a permission prompt you have answered stops
+          reading as waiting. Nothing in your Claude settings changes. On a Team or
+          Enterprise plan, a question from an MCP server is the one thing it does not
+          see, unless your organization allows it.
+        </Text>
+        {check === null && checkError === null && (
+          <Group gap="xs">
+            <Loader size="xs" />
+            <Text size="sm" c="dimmed">
+              Checking whether your Claude Code can load it…
+            </Text>
+          </Group>
+        )}
+        {check?.settings_plugin_dirs != null && (
+          <Alert color="yellow" variant="light" p="sm">
+            <Text size="sm">
+              Your Claude settings set <code>CLAUDE_CODE_PLUGIN_DIRS</code>, which takes
+              the place of the one a Veld terminal sets, so the mod would never load. Add{" "}
+              <code>{check.mod_dir}</code> to it first.
+            </Text>
+          </Alert>
+        )}
+        {check?.support === "refused" && (
+          <Alert color="yellow" variant="light" p="sm">
+            <Text size="sm">
+              Your Claude Code{version} cannot load it yet: {check.reason}. Run{" "}
+              <code>claude update</code>, then switch under Settings → Activity; this pane starts
+              on the wrapper.
+            </Text>
+          </Alert>
+        )}
+        {check?.support === "loads" && check.settings_plugin_dirs === null && (
+          <Text size="sm" c="dimmed">
+            Your Claude Code{version} can load it.
+          </Text>
+        )}
+        {(check?.support === "no_claude" || check?.support === "unknown" || checkError) && (
+          <Text size="sm" c="dimmed">
+            Veld could not check your Claude Code
+            {check?.reason ? ` (${check.reason})` : checkError ? ` (${checkError})` : ""}. You
+            can still switch; <code>veld doctor</code> says whether it took.
+          </Text>
+        )}
+        <Text size="xs" c="dimmed">
+          The Claude pane you are opening starts the way you choose here. Codex CLI and Pi keep
+          their wrappers. Change it any time under Settings → Activity.
+        </Text>
+        <Group>
+          <Button
+            loading={switching.busy}
+            disabled={blocked || (check === null && checkError === null)}
+            onClick={(e) => void switching.submit(e)}
+          >
+            Switch to the mod
+          </Button>
+          <Button variant="default" onClick={props.onKeep}>
+            Keep the wrapper
+          </Button>
+        </Group>
+        <ErrorText error={switching.error} />
       </Stack>
     </Modal>
   );

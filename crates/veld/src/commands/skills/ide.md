@@ -237,7 +237,9 @@ deal with it.
 
 Veld tells Claude Code, Codex CLI and Pi about this command when they start in a
 Veld terminal — a few lines appended to the system prompt (Claude's
-`--append-system-prompt`, Codex's `-c developer_instructions`, a Pi extension).
+`--append-system-prompt`, Codex's `-c developer_instructions`, a Pi extension), or,
+for Claude on Veld's mod (`terminal.claudeIntegration`), the same lines attached to
+the first prompt of each conversation.
 The user can turn that off (`terminal.agentContext`, *Settings → Activity*); the
 command works either way.
 

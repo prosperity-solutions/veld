@@ -409,6 +409,15 @@ pub fn catalog_groups() -> Vec<CatalogGroup> {
 // than two that agree today.
 // ---------------------------------------------------------------------------
 
+/// How Claude Code is given veld's agent hooks and agent context.
+///
+/// The stored spellings are `crate::agent::ClaudeIntegration::as_str`'s, which
+/// a test holds to this list.
+pub(super) const CLAUDE_INTEGRATIONS: &[Choice] = &[
+    choice("wrapper", "Wrapper on PATH"),
+    choice("mod", "Claude Code mod"),
+];
+
 pub(super) const CURSOR_STYLES: &[Choice] = &[
     choice("block", "Block"),
     choice("underline", "Underline"),
@@ -1247,6 +1256,25 @@ impl SettingKey {
                 Activity,
                 NOTICING,
             ),
+            Self::TerminalClaudeIntegration => Spec {
+                title: "How Claude Code is told",
+                help: "How the two rows above reach Claude Code. The wrapper puts a `claude` \
+                       script in front of the real one and passes it flags at launch; it works \
+                       with any Claude Code. The mod is a Claude Code plugin Veld keeps in its \
+                       own folder and names in the terminal's environment, so `claude` itself \
+                       runs untouched; it needs a Claude Code recent enough to load mods, and \
+                       `veld doctor` says whether yours does. Under an organization's Claude \
+                       Code policy (Team and Enterprise plans) it does not see a question an \
+                       MCP server asks. Neither edits your Claude settings. Codex CLI and Pi always use their wrappers. Takes effect for \
+                       new terminals.",
+                group: Activity,
+                section: NOTICING,
+                shape: ValueShape::Text,
+                choices: Choices::Static {
+                    options: CLAUDE_INTEGRATIONS,
+                },
+                requires: None,
+            },
             Self::ActivityShowWorking => toggle_in(
                 "Show what is working",
                 "A spinner for any worktree with something running. Accuracy varies by \
@@ -1904,6 +1932,22 @@ mod tests {
             seen_groups, groups,
             "the order settings appear in must match the published group order"
         );
+    }
+
+    /// The daemon reads the stored value through `ClaudeIntegration::parse`, which
+    /// falls back to the wrapper for anything it does not know: a choice offered here
+    /// under another spelling would be accepted, saved, and quietly do nothing.
+    #[test]
+    fn every_claude_integration_choice_is_one_the_daemon_reads() {
+        let offered: Vec<&str> = CLAUDE_INTEGRATIONS.iter().map(|c| c.value).collect();
+        let known: Vec<&str> = [
+            crate::agent::ClaudeIntegration::Wrapper,
+            crate::agent::ClaudeIntegration::Mod,
+        ]
+        .iter()
+        .map(|c| c.as_str())
+        .collect();
+        assert_eq!(offered, known);
     }
 
     /// The choice lists the catalog offers are the ones the validator accepts.

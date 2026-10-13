@@ -71,6 +71,19 @@
 //! the same invariants: plain interactive launch only, the user's own colliding flag
 //! wins, nothing of theirs is edited.
 //!
+//! # Claude Code without the wrapper
+//!
+//! `terminal.claudeIntegration = mod` ([`ClaudeIntegration`]) hands Claude both halves
+//! through a Claude Code mod instead — [`claude_mod_files`], a plugin of function hooks
+//! written into the shim directory once per daemon and named in the session's
+//! [`CLAUDE_PLUGIN_DIRS_ENV`]. The wrapper stays on `PATH` and passes straight through
+//! while that variable still names the folder, and reports itself when it does not.
+//! The invariants above all hold: nothing of the user's is written (the variable loads
+//! the folder for one process, as `--plugin-dir` would), the mod does nothing outside a
+//! Veld session or without a terminal to draw on (`claude -p`), and none of its hooks
+//! can block the person — each that can gate an event passes it on when it fails. See
+//! [`claude_mod_files`] for which events it uses, and why not the `classic.*` ones.
+//!
 //! # Adding another agent
 //!
 //! Everything downstream of this module is **already generic** — the daemon endpoint
@@ -422,6 +435,55 @@ impl AgentTool {
             Self::Codex | Self::Pi => "",
         }
     }
+}
+
+/// The agent a command line runs directly, from its first word: `claude`,
+/// `/opt/homebrew/bin/claude`. A script that runs one somewhere inside (`claude-yolo`,
+/// `npx …`) is not recognised — nothing here guesses at what a command does.
+#[must_use]
+pub fn agent_tool_of(program: &str) -> Option<AgentTool> {
+    let name = Path::new(program).file_name()?.to_str()?;
+    AgentTool::ALL
+        .iter()
+        .copied()
+        .find(|tool| tool.shim_name() == name)
+}
+
+/// Whether `args` — a command line's arguments after the agent's own name — can have a
+/// launch prompt appended as `-- <prompt>`.
+///
+/// The wrapper's rules (`agent_script`'s prompt block), for the daemon to apply to a
+/// pane's argv itself when no wrapper is in the way: an interactive launch (no
+/// subcommand), no print mode, no `--`, and no bare word that is not the value of a
+/// flag in [`AgentTool::launch_prompt_value_flags`] — the agent keeps the first
+/// positional and would silently drop a second. False for a tool that takes none.
+#[must_use]
+pub fn args_take_launch_prompt(tool: AgentTool, args: &[String]) -> bool {
+    if !tool.takes_launch_prompt() {
+        return false;
+    }
+    if args
+        .first()
+        .is_some_and(|first| !first.is_empty() && !first.starts_with('-'))
+    {
+        return false;
+    }
+    let value_flags: Vec<&str> = tool
+        .launch_prompt_value_flags()
+        .split('|')
+        .map(str::trim)
+        .collect();
+    let mut prev: Option<&str> = None;
+    for arg in args {
+        if arg.starts_with("-p") || arg == "--print" || arg == "--" {
+            return false;
+        }
+        if !arg.starts_with('-') && !prev.is_some_and(|p| value_flags.contains(&p)) {
+            return false;
+        }
+        prev = Some(arg);
+    }
+    true
 }
 
 /// The variable that tells an agent wrapper where its launch prompt is waiting.
@@ -1408,6 +1470,288 @@ pub fn context_extension_path(shim_dir: &Path) -> PathBuf {
     shim_dir.join("context").join("pi-veld-context.ts")
 }
 
+/// How Claude Code is given the hooks and the context (`terminal.claudeIntegration`).
+///
+/// Codex and Pi have no counterpart: they are always wrapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ClaudeIntegration {
+    /// The `claude` wrapper on `PATH`, passing `--settings` and
+    /// `--append-system-prompt` at launch. Works with any Claude Code.
+    #[default]
+    Wrapper,
+    /// Veld's Claude Code mod ([`claude_mod_files`]), named in the session's
+    /// [`CLAUDE_PLUGIN_DIRS_ENV`]. The `claude` wrapper steps aside entirely while Claude
+    /// will still load it.
+    Mod,
+}
+
+impl ClaudeIntegration {
+    /// The stored setting value, and the value of [`CLAUDE_INTEGRATION_ENV`].
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Wrapper => "wrapper",
+            Self::Mod => "mod",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        [Self::Wrapper, Self::Mod]
+            .into_iter()
+            .find(|c| c.as_str() == s)
+    }
+}
+
+/// Set to `mod` in a session whose Claude Code runs veld's mod: the `claude` wrapper
+/// then `exec`s the real binary untouched while [`CLAUDE_PLUGIN_DIRS_ENV`] still names the
+/// mod, and the mod is active only where it sees it.
+pub const CLAUDE_INTEGRATION_ENV: &str = "VELD_CLAUDE_INTEGRATION";
+
+/// Claude Code's own variable naming plugin folders to load for one process, each
+/// exactly as `--plugin-dir` would: no install, nothing written to `~/.claude`.
+pub const CLAUDE_PLUGIN_DIRS_ENV: &str = "CLAUDE_CODE_PLUGIN_DIRS";
+
+/// Where [`claude_mod_files`] are written, inside this daemon's shim directory, so an
+/// installed daemon and a dev one each name their own.
+///
+/// Not under `agent/`, which `veld agent-settings` sweeps by age, for the reason
+/// [`context_extension_path`] gives. Claude Code writes type declarations into
+/// `.claude-plugin/types/` here when it loads the mod; they are its own and harmless.
+#[must_use]
+pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
+    shim_dir.join("claude-mod")
+}
+
+/// The files of veld's Claude Code mod, as `(path relative to [`claude_mod_dir`],
+/// contents)`.
+///
+/// `daemon` is this daemon's base URL (the module posts each state to the same
+/// `agent-state` endpoint `veld agent-state` does) and `context` the text
+/// [`agent_context`] produced for this daemon. Both are baked in, so the files are
+/// static per daemon instance and per version, like the wrappers.
+///
+/// # Native events, not `classic.*`
+///
+/// A mod can observe the settings hooks' own events as `classic.Stop` and the rest,
+/// with the very payloads [`claude_state`] reads, which would have let the daemon map
+/// them unchanged. **It cannot rely on them.** Measured on Claude Code 2.1.294 under a
+/// Team plan: the built-in `cc-plugin-sec-default` mod, which loads first wherever an
+/// organization's policy applies, answers every `classic.*` event above user-tier mods
+/// (`classic.UserPromptSubmit bypassed by cc-plugin-sec-default (tier user)` in the
+/// debug log), and `prompt.compose` the same way. `session.start`, `turn.start`,
+/// `turn.complete`, `tool.check`, `tool.call`, `prompt.submit` and `session.end` all
+/// reached the mod. So the module maps those to a [`State`] itself:
+///
+/// | Event | State |
+/// |---|---|
+/// | `session.start`, the session's first (a reload of the mod raises it again) | [`State::Ready`] |
+/// | `turn.start` (the session's own; a subagent raises none) | [`State::Working`] |
+/// | `tool.check` answering `ask` — the approval dialog | [`State::Blocked`] |
+/// | `tool.call` of `AskUserQuestion`/`ExitPlanMode`, while it runs | [`State::Blocked`] |
+/// | the next tool call after either | [`State::Working`] |
+/// | `turn.complete`, `answer`/`refusal`, a background agent still running | [`State::Delegated`] |
+/// | `turn.complete`, `answer`/`refusal`, otherwise | [`State::Idle`] |
+/// | `turn.complete`, `aborted` (Esc) | [`State::Settled`] |
+/// | `turn.complete`, `error` | [`State::Blocked`] |
+/// | `session.end`, except `clear` and `resume` | [`State::Done`] |
+///
+/// A subagent's `turn.complete` carries its `agentId` and reports nothing, which is
+/// [`claude_state`]'s "a subagent's turn is not the session's turn". Unlike the wrapper,
+/// an interrupted turn ends its spinner at once rather than at Claude's `idle_prompt`
+/// reminder, and an approved tool call clears "waiting" without waiting for the turn
+/// to end.
+///
+/// One `classic.*` event is hooked anyway: `classic.Notification`, for the dialogs no
+/// native event shows. It reaches the mod only where the policy mod is not seated —
+/// an organization whose managed `prependPlugins` leaves out `sec-default@builtin`,
+/// or a machine with no managed settings on a personal plan — and where it is, the hook
+/// never runs and the table above is all there is. Measured on Claude Code 2.1.296 with
+/// a stdio MCP server that elicits: `elicitation_dialog` arrives about six seconds after
+/// the request and `elicitation_response` the moment it is answered.
+///
+/// | `Notification` type | State |
+/// |---|---|
+/// | `elicitation_dialog`, `elicitation_url_dialog` — an MCP server asking | [`State::Blocked`], held |
+/// | `elicitation_response`, `elicitation_complete`, after one of those | [`State::Working`] |
+/// | `agent_needs_input` — a subagent asking | [`State::Blocked`] |
+///
+/// The approval dialog's `permission_prompt` is left to `tool.check`, which reports it
+/// first, and a subagent's question is not held: answering it raises nothing in this
+/// session, so held it would stay "waiting" until the session's own next state.
+///
+/// # The context rides the first prompt, not the system prompt
+///
+/// `prompt.compose` is the mod's way to add a system-prompt section, and the same
+/// policy mod answers it, so the text goes in as `context` on the first `prompt.submit`
+/// of each conversation instead — once per session, and again after a `/clear` or a
+/// compaction, whose summary need not keep it. It is still a fixed string at a fixed
+/// place, so it caches the way the appended system prompt did. A `--continue` or
+/// `--resume` is a new process with nothing kept, so the resumed conversation gets it
+/// once more, on its next prompt: a few static sentences per relaunch, accepted.
+///
+/// # A rewrite reloads the mod in every running session
+///
+/// Claude Code reloads a plugin folder it watches on any write, and veld rewrites these
+/// files when it is upgraded. A reload runs `session.start` again with the module's
+/// variables gone, so the two that are the session's own — the context still owed to
+/// the next prompt, and whether a dialog is on screen — are kept in `$.state`, which
+/// survives it and which `types/index.d.ts` declares, as `claude plugin validate`
+/// requires. Finding them kept is how a reload knows the session had started: it
+/// neither reports `ready` over a running turn nor adds the context a second time, and
+/// a reload before the first prompt still owes it. Measured on Claude Code 2.1.296, which also reloads once at startup
+/// when it applies managed settings — one `ready`, not two.
+///
+/// # Every gating hook passes the event on
+///
+/// The hooks that can gate an event (`prompt.submit`, `tool.check`, `tool.call`,
+/// `session.compact`, `classic.Notification`) catch their own failure by passing the
+/// event on unchanged, and each report is bounded by [`HOOK_REQUEST_TIMEOUT_MS`] and
+/// swallows its errors: a daemon that is down or slow costs a badge, never the
+/// person's prompt or tool call.
+#[must_use]
+pub fn claude_mod_files(daemon: &str, context: &str) -> [(&'static str, String); 4] {
+    const MODULE: &str = include_str!("agent/claude-mod/register.ts");
+    const CONTRACT: &str = include_str!("agent/claude-mod/types.d.ts");
+    let manifest = serde_json::json!({
+        "name": "veld",
+        "version": env!("CARGO_PKG_VERSION"),
+        "description": "Tells Veld when Claude Code is working or waiting, and tells Claude how to show you a file.",
+        "types": "./types/index.d.ts",
+        "author": { "name": "Veld" },
+    });
+    let hooks = serde_json::json!({ "modules": ["./register.ts"] });
+    let module = MODULE
+        .replace("__VELD_DAEMON__", &json_string(daemon))
+        .replace("__VELD_CONTEXT__", &json_string(context))
+        .replace("__VELD_TIMEOUT_MS__", &HOOK_REQUEST_TIMEOUT_MS.to_string());
+    // In the order they are written, the manifest last: a write reloads the mod, and a
+    // manifest naming a file not there yet would fail that load.
+    [
+        ("types/index.d.ts", CONTRACT.to_owned()),
+        ("hooks/hooks.json", format!("{hooks:#}\n")),
+        ("hooks/register.ts", module),
+        (".claude-plugin/plugin.json", format!("{manifest:#}\n")),
+    ]
+}
+
+/// Whether the Claude Code on a `PATH` loads veld's mod, as Claude Code itself says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClaudeModSupport {
+    /// No `claude` on that `PATH` outside veld's own shim directory.
+    NoClaude,
+    /// `claude plugin validate` accepted the mod's folder.
+    Loads { version: Option<String> },
+    /// It refused it — a Claude Code too old for function hooks, most likely — with
+    /// its first finding.
+    Refused {
+        version: Option<String>,
+        reason: String,
+    },
+    /// The question could not be asked: the folder is not there, or `claude` failed
+    /// to run or did not answer in time. Learned nothing, so says nothing either way.
+    Unknown { reason: String },
+}
+
+/// How long `claude plugin validate` may take. It reads the module and answers in
+/// about a second; a first run after an update can take longer.
+const VALIDATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Ask the `claude` found on `path` (skipping `shim_dir`, whose `claude` is veld's
+/// wrapper) whether it loads the mod in `mod_dir`.
+///
+/// `claude plugin validate` reads a plugin the way a session will, so a pass answers
+/// both halves at once: this Claude Code loads function hooks, and this module is one
+/// it accepts.
+pub async fn claude_mod_support(mod_dir: &Path, path: &str, shim_dir: &Path) -> ClaudeModSupport {
+    use std::os::unix::fs::PermissionsExt as _;
+    if !mod_dir.join(".claude-plugin/plugin.json").is_file() {
+        return ClaudeModSupport::Unknown {
+            reason: format!("the mod has not been written to {}", mod_dir.display()),
+        };
+    }
+    let shim_dir = std::fs::canonicalize(shim_dir).unwrap_or_else(|_| shim_dir.to_owned());
+    let claude = std::env::split_paths(path)
+        .filter(|dir| std::fs::canonicalize(dir).unwrap_or_else(|_| dir.clone()) != shim_dir)
+        .map(|dir| dir.join(AgentTool::Claude.shim_name()))
+        .find(|candidate| {
+            std::fs::metadata(candidate)
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        });
+    let Some(claude) = claude else {
+        return ClaudeModSupport::NoClaude;
+    };
+    let run = |args: Vec<std::ffi::OsString>| {
+        let mut cmd = tokio::process::Command::new(&claude);
+        cmd.args(args)
+            .env("PATH", path)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true);
+        tokio::time::timeout(VALIDATE_TIMEOUT, cmd.output())
+    };
+    let version = match run(vec!["--version".into()]).await {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .find(|word| word.contains('.'))
+            .map(str::to_owned),
+        _ => None,
+    };
+    let validated = run(vec!["plugin".into(), "validate".into(), mod_dir.into()]).await;
+    match validated {
+        Ok(Ok(out)) if out.status.success() => ClaudeModSupport::Loads { version },
+        Ok(Ok(out)) => {
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            // Its findings are the lines marked `❯`, in sections: warnings and what the
+            // module hooks come first, the errors under a `✘ Found N error` header, and the
+            // last line is only the verdict.
+            let lines = || text.lines().map(str::trim).filter(|line| !line.is_empty());
+            fn finding(line: &str) -> Option<&str> {
+                line.strip_prefix('❯').map(str::trim)
+            }
+            let reason = lines()
+                .skip_while(|line| !line.starts_with("✘ Found"))
+                .find_map(finding)
+                .or_else(|| lines().find_map(finding))
+                .or_else(|| lines().next_back())
+                .unwrap_or("it exited without saying why")
+                .to_owned();
+            ClaudeModSupport::Refused { version, reason }
+        }
+        Ok(Err(e)) => ClaudeModSupport::Unknown {
+            reason: format!("could not run {}: {e}", claude.display()),
+        },
+        Err(_) => ClaudeModSupport::Unknown {
+            reason: format!(
+                "`claude plugin validate` did not answer within {}s",
+                VALIDATE_TIMEOUT.as_secs()
+            ),
+        },
+    }
+}
+
+/// The `CLAUDE_CODE_PLUGIN_DIRS` the person's own Claude Code settings set in their
+/// `env` block, if any, read from `config_dir/settings.json` (`$CLAUDE_CONFIG_DIR`,
+/// else `~/.claude`).
+///
+/// It matters because it **wins**: measured on Claude Code 2.1.294, a value in that
+/// block replaces the one in the process environment rather than joining it, so the
+/// folder a Veld terminal names is never loaded and the mod is silently absent. Read,
+/// never written — the fix is the person's to make, by adding Veld's folder to their
+/// list.
+#[must_use]
+pub fn claude_settings_plugin_dirs(config_dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(config_dir.join("settings.json")).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
+    doc.get("env")?
+        .get(CLAUDE_PLUGIN_DIRS_ENV)?
+        .as_str()
+        .map(str::to_owned)
+}
+
 /// What each generated hook is allowed to take, in seconds.
 ///
 /// Two, not zero: the request itself is to `127.0.0.1` and answers in single-digit
@@ -1490,6 +1834,217 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every placeholder is filled, and a value that needs escaping cannot break out
+    /// of its string literal: the context is a fixed text today, but the daemon URL
+    /// and the CLI it names come from the machine.
+    #[test]
+    fn the_claude_mod_bakes_in_its_values_as_literals() {
+        let context = "Say \"hi\"\nthen `veld ide open`\u{7f}";
+        let files = claude_mod_files("http://127.0.0.1:2999", context);
+        let module = &files
+            .iter()
+            .find(|(path, _)| *path == "hooks/register.ts")
+            .expect("the hooks module")
+            .1;
+        assert!(!module.contains("__VELD_"), "{module}");
+        assert!(module.contains(r#"const DAEMON = "http://127.0.0.1:2999""#));
+        assert!(module.contains(&format!("const CONTEXT = {}", json_string(context))));
+        assert!(module.contains(&format!("const TIMEOUT_MS = {HOOK_REQUEST_TIMEOUT_MS}")));
+    }
+
+    /// The manifest and the hooks list are what Claude Code reads first, and a typo in
+    /// either loads nothing, silently, in every session.
+    #[test]
+    fn the_claude_mod_manifest_names_its_module() {
+        let files = claude_mod_files("http://127.0.0.1:2999", "x");
+        let read = |name: &str| -> serde_json::Value {
+            let text = &files.iter().find(|(path, _)| *path == name).unwrap().1;
+            serde_json::from_str(text).unwrap()
+        };
+        assert_eq!(read(".claude-plugin/plugin.json")["name"], "veld");
+        assert_eq!(
+            read("hooks/hooks.json")["modules"],
+            serde_json::json!(["./register.ts"])
+        );
+        assert!(files.iter().any(|(path, _)| *path == "hooks/register.ts"));
+        // `claude plugin validate` refuses a `$.state` key no contract declares.
+        assert_eq!(
+            read(".claude-plugin/plugin.json")["types"],
+            "./types/index.d.ts"
+        );
+        let contract = &files
+            .iter()
+            .find(|(path, _)| *path == "types/index.d.ts")
+            .unwrap()
+            .1;
+        let module = &files
+            .iter()
+            .find(|(path, _)| *path == "hooks/register.ts")
+            .unwrap()
+            .1;
+        let keys: Vec<&str> = module
+            .match_indices("{ plugin: 'veld', key: '")
+            .map(|(at, found)| {
+                let rest = &module[at + found.len()..];
+                &rest[..rest.find('\'').unwrap()]
+            })
+            .collect();
+        assert!(!keys.is_empty(), "the reload marker is a `$.state` key");
+        for key in keys {
+            assert!(
+                contract.contains(&format!("{key}: ")),
+                "{key} is not declared: {contract}"
+            );
+        }
+        assert_eq!(files.last().unwrap().0, ".claude-plugin/plugin.json");
+    }
+
+    /// The module reports with the same wire spellings `veld agent-state` uses, so the
+    /// daemon cannot tell the two apart — and a state renamed here fails this test
+    /// rather than a badge.
+    #[test]
+    fn the_claude_mod_reports_only_states_the_daemon_accepts() {
+        let files = claude_mod_files("d", "c");
+        let module = &files
+            .iter()
+            .find(|(p, _)| *p == "hooks/register.ts")
+            .unwrap()
+            .1;
+        let reported: Vec<&str> = module
+            .match_indices("report($, ")
+            .filter_map(|(at, _)| {
+                let rest = &module[at + "report($, ".len()..];
+                rest.strip_prefix('\'').and_then(|r| r.split('\'').next())
+            })
+            .collect();
+        assert!(reported.len() >= 7, "{reported:?}");
+        for state in reported {
+            assert!(
+                State::parse(state).is_some_and(|s| s != State::Unknown),
+                "{state} is not a state the daemon takes"
+            );
+        }
+    }
+
+    /// The same cases the wrapper's own prompt block is tested against, so the daemon
+    /// and the wrapper agree on which launches take a prompt.
+    #[test]
+    fn a_launch_prompt_is_appended_only_where_the_wrapper_would() {
+        let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        let takes = |a: &[&str]| args_take_launch_prompt(AgentTool::Claude, &args(a));
+        assert!(takes(&[]));
+        assert!(takes(&["--dangerously-skip-permissions"]));
+        assert!(takes(&["--model", "opus", "--add-dir", "/tmp"]));
+        assert!(!takes(&["mcp", "list"]), "a subcommand");
+        assert!(!takes(&["-p", "hi"]), "print mode");
+        assert!(!takes(&["--print"]));
+        assert!(!takes(&["--", "already"]), "after --");
+        assert!(
+            !takes(&["--dangerously-skip-permissions", "Read AGENTS.md"]),
+            "a standing prompt"
+        );
+        assert!(
+            !takes(&["--resume", "abc"]),
+            "an optional value reads as a prompt"
+        );
+        assert!(!args_take_launch_prompt(AgentTool::Codex, &[]));
+    }
+
+    /// Whatever `claude plugin validate` says decides the answer, veld's own wrapper
+    /// is never the `claude` asked, and a refusal names its first finding.
+    #[tokio::test]
+    async fn claude_mod_support_asks_the_real_claude() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mod_dir = tmp.path().join("mod");
+        for (name, body) in claude_mod_files("http://127.0.0.1:1", "x") {
+            let path = mod_dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+        let script = |dir: &Path, body: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            let path = dir.join("claude");
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+        let shims = tmp.path().join("shims");
+        script(&shims, "echo 'the wrapper must not be asked'; exit 9");
+        let new = tmp.path().join("new");
+        script(
+            &new,
+            r#"[ "$1" = --version ] && { echo "2.1.294 (Claude Code)"; exit 0; }; exit 0"#,
+        );
+        let old = tmp.path().join("old");
+        script(
+            &old,
+            r#"[ "$1" = --version ] && { echo "1.0.0 (Claude Code)"; exit 0; }
+printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n✘ Found 1 error:\n\n  ❯ hooks: modules is not a known key\n\n✘ Validation failed\n'; exit 1"#,
+        );
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).unwrap().into_string().unwrap();
+
+        assert_eq!(
+            claude_mod_support(&mod_dir, &path(&[&shims, &new]), &shims).await,
+            ClaudeModSupport::Loads {
+                version: Some("2.1.294".to_owned())
+            }
+        );
+        assert_eq!(
+            claude_mod_support(&mod_dir, &path(&[&shims, &old]), &shims).await,
+            ClaudeModSupport::Refused {
+                version: Some("1.0.0".to_owned()),
+                reason: "hooks: modules is not a known key".to_owned()
+            }
+        );
+        assert_eq!(
+            claude_mod_support(&mod_dir, &path(&[&shims]), &shims).await,
+            ClaudeModSupport::NoClaude
+        );
+        assert!(matches!(
+            claude_mod_support(&tmp.path().join("absent"), &path(&[&new]), &shims).await,
+            ClaudeModSupport::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn a_plugin_dirs_value_in_claude_settings_is_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(claude_settings_plugin_dirs(tmp.path()), None);
+        std::fs::write(tmp.path().join("settings.json"), r#"{"env":{"OTHER":"1"}}"#).unwrap();
+        assert_eq!(claude_settings_plugin_dirs(tmp.path()), None);
+        std::fs::write(
+            tmp.path().join("settings.json"),
+            r#"{"env":{"CLAUDE_CODE_PLUGIN_DIRS":"/a:/b"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            claude_settings_plugin_dirs(tmp.path()).as_deref(),
+            Some("/a:/b")
+        );
+    }
+
+    #[test]
+    fn an_agent_is_recognised_by_its_command_name_only() {
+        assert_eq!(agent_tool_of("claude"), Some(AgentTool::Claude));
+        assert_eq!(
+            agent_tool_of("/opt/homebrew/bin/claude"),
+            Some(AgentTool::Claude)
+        );
+        assert_eq!(agent_tool_of("codex"), Some(AgentTool::Codex));
+        assert_eq!(agent_tool_of("claude-yolo"), None);
+        assert_eq!(agent_tool_of("npx"), None);
+        assert_eq!(agent_tool_of(""), None);
+    }
+
+    #[test]
+    fn claude_integration_round_trips() {
+        for c in [ClaudeIntegration::Wrapper, ClaudeIntegration::Mod] {
+            assert_eq!(ClaudeIntegration::parse(c.as_str()), Some(c));
+        }
+        assert_eq!(ClaudeIntegration::parse("plugin"), None);
+        assert_eq!(ClaudeIntegration::default(), ClaudeIntegration::Wrapper);
+    }
 
     fn payload(event: &str, notification: Option<&str>, tool: Option<&str>) -> HookPayload {
         HookPayload {

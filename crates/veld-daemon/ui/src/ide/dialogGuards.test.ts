@@ -44,6 +44,7 @@ const OPEN_KINDS_SET: Record<Exclude<DialogKind, typeof DIALOG_NONE>, true> = {
   "move-lane-worktrees": true,
   "trash-lane-worktrees": true,
   settings: true,
+  "claude-mod-offer": true,
   shortcuts: true,
   "remove-repo": true,
   "db-health": true,

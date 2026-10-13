@@ -389,6 +389,7 @@ class Channel {
         inbox.report(msg.session_id, msg.worktree_id, {
           type: "agent",
           state: msg.state as AgentState,
+          held: msg.held === true,
           // A hook is the only producer of this message today, and the authority is the
           // daemon's claim about *how it learned*, not a field the wire carries — there
           // is nothing on the other end that could report at a lower one.

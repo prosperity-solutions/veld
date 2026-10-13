@@ -275,6 +275,7 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
+import { CLAUDE_MOD_OFFER_ID, setClaudeModAsker, wantsClaudeModOffer } from "./ide/claudeModOffer";
 import {
   DIALOG_NONE,
   escapeClosesDialog,
@@ -378,6 +379,7 @@ import {
   TrashWorktreeDialog,
   UpdateMainDirtyDialog,
   HandoffReviewDialog,
+  ClaudeModOfferDialog,
 } from "./components/dialogs";
 
 import {
@@ -1024,6 +1026,8 @@ type DialogState =
   | { kind: "move-lane-worktrees"; lane: string }
   | { kind: "trash-lane-worktrees"; lane: string }
   | { kind: "settings" }
+  /** Asked once, just before a Claude pane first starts — `ide/claudeModOffer.ts`. */
+  | { kind: "claude-mod-offer" }
   | { kind: "shortcuts" }
   | { kind: "remove-repo"; repo: Repo }
   /** Veld's own database: what is wrong with it, and putting a backup back. */
@@ -4545,6 +4549,33 @@ function AppInner(props: {
   const promotionsOpenRef = useRef(false);
   promotionsOpenRef.current = promotions.open !== null;
 
+  // The one-time offer to move Claude Code onto Veld's mod, asked by a Claude pane
+  // before it starts (see `ide/claudeModOffer.ts`), which waits on the answer so it
+  // starts the way the answer says. Never over another dialog: the pane starts as it
+  // is, and the next one asks again.
+  const claudeOfferAnswered = useRef<(() => void) | null>(null);
+  useEffect(
+    () =>
+      setClaudeModAsker(async () => {
+        if (dialogRef.current.kind !== DIALOG_NONE || promotionsOpenRef.current) return;
+        const { states } = await api.promotionState();
+        if (!wantsClaudeModOffer(settingsRef.current, states)) return;
+        if (dialogRef.current.kind !== DIALOG_NONE) return;
+        await new Promise<void>((resolve) => {
+          claudeOfferAnswered.current = resolve;
+          setDialog({ kind: "claude-mod-offer" });
+        });
+      }),
+    [],
+  );
+  // However the dialog went away — answered, closed, or replaced by another — the
+  // panes waiting on it start.
+  useEffect(() => {
+    if (dialog.kind === "claude-mod-offer") return;
+    claudeOfferAnswered.current?.();
+    claudeOfferAnswered.current = null;
+  }, [dialog.kind]);
+
   const setLayout = useCallback(
     (next: PaneLayoutUpdate) => {
       if (!worktree) return;
@@ -7041,6 +7072,25 @@ function AppInner(props: {
    * belongs to worktree mode's own surfaces; this is the one that is reachable from
    * both, so this is the one that has to be hoisted.
    */
+  /** Hoisted like `settingsDialog`: a Claude session can start in either mode. */
+  const claudeModOfferDialog = dialog.kind === "claude-mod-offer" && (
+    <ClaudeModOfferDialog
+      onClose={() => {
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "dismissed").catch(() => {});
+        closeDialog();
+      }}
+      onKeep={() => {
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "read").catch(() => {});
+        closeDialog();
+      }}
+      onSwitch={async () => {
+        await saveSettings({ "terminal.claudeIntegration": "mod" });
+        void api.markPromotions([CLAUDE_MOD_OFFER_ID], "read").catch(() => {});
+        closeDialog();
+      }}
+    />
+  );
+
   const settingsDialog = dialog.kind === "settings" && (
     <SettingsDialog
       settings={settings}
@@ -7400,6 +7450,7 @@ function AppInner(props: {
           logsTz={logsTz}
         />
         {settingsDialog}
+        {claudeModOfferDialog}
         {configVarsDialog}
         {whatsNewDialog}
         {shortcutsDialog}
@@ -8348,6 +8399,7 @@ function AppInner(props: {
       {moveLaneWorktreesDialog}
       {trashLaneWorktreesDialog}
       {settingsDialog}
+      {claudeModOfferDialog}
       {configVarsDialog}
       {whatsNewDialog}
       {shortcutsDialog}

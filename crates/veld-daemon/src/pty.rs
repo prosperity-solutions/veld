@@ -1559,6 +1559,10 @@ struct PaneLaunch {
     /// The interpolated command. A `shell` spec is already wrapped as
     /// `["sh", "-c", …]` here so the holder only ever deals with an argv.
     argv: Vec<String>,
+    /// The `argv` spec's own words before the login shell wrapped them, so the
+    /// daemon can still append to the command; `None` for a `shell` spec, whose
+    /// string it will not parse.
+    direct_argv: Option<Vec<String>>,
     env: Vec<(String, String)>,
     /// The token this launch runs under.
     token: String,
@@ -1865,7 +1869,7 @@ async fn resolve_pane(
     // `JAVA_HOME`) that a directly-spawned `argv` on the daemon's bare service
     // environment never saw. The shell runs the command and exits with its
     // status, so `close_on_exit` and exit reporting are unchanged.
-    let argv = match resolved {
+    let (argv, direct_argv) = match resolved {
         veld_core::config::CommandSpec::Argv(argv) => {
             if argv.is_empty() || argv[0].is_empty() {
                 return Err(err(
@@ -1873,7 +1877,7 @@ async fn resolve_pane(
                     format!("the {} pane's command is empty", pane.label),
                 ));
             }
-            login_shell_command(shell, shell_flags, &argv)
+            (login_shell_command(shell, shell_flags, &argv), Some(argv))
         }
         // A `shell` spec is already a command string, so it is handed to the
         // login shell as-is — no re-quoting, and `shell` keeps meaning exactly
@@ -1881,7 +1885,7 @@ async fn resolve_pane(
         // runs under the user's shell now, like a terminal command, instead of
         // a bare `sh` with no rc files.
         veld_core::config::CommandSpec::Shell(script) => {
-            login_shell_script(shell, shell_flags, script)
+            (login_shell_script(shell, shell_flags, script), None)
         }
     };
 
@@ -1889,6 +1893,7 @@ async fn resolve_pane(
         spec_id: spec_id.to_owned(),
         label: pane.label.clone(),
         argv,
+        direct_argv,
         env: vec![
             // A floor, not the answer: the login shell computes the user's own
             // PATH (and the rc files typically refine it), but a shell with no
@@ -2392,6 +2397,7 @@ async fn mint_ticket(
         shell_integration: db.terminal_shell_integration(),
         agent_integration: db.terminal_agent_integration(),
         agent_context: db.terminal_agent_context(),
+        claude_integration: db.terminal_claude_integration(),
         // Filled in below: it is the one field that is not a setting.
         bash_handoff: false,
     };
@@ -2471,8 +2477,21 @@ async fn mint_ticket(
         _ => None,
     };
     let prompt_at_launch = match (body.prompt.as_deref(), pane.as_mut()) {
-        (Some(prompt), Some(launch)) if launch_takes_prompt(resumed, body.mode, &shim_env) => {
-            stage_launch_prompt(&body.session_id, prompt, launch).await
+        (Some(prompt), Some(launch)) => {
+            let tool = launch
+                .direct_argv
+                .as_deref()
+                .and_then(|argv| veld_core::agent::agent_tool_of(&argv[0]));
+            match launch_prompt_route(resumed, body.mode, &shim_env, tool) {
+                LaunchPromptRoute::Wrapper => {
+                    stage_launch_prompt(&body.session_id, prompt, launch).await
+                }
+                LaunchPromptRoute::Argv => {
+                    launch_prompt_in_argv(&body.session_id, prompt, launch, &shell, &shell_flags)
+                        .await
+                }
+                LaunchPromptRoute::Window => false,
+            }
         }
         _ => false,
     };
@@ -2551,21 +2570,49 @@ async fn mint_ticket(
 static LAUNCH_PROMPTS: LazyLock<Mutex<HashMap<String, PathBuf>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// Whether a pane launch can be handed its first message.
+/// Who hands a pane launch its first message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LaunchPromptRoute {
+    /// The agent wrapper, which claims the staged file at launch.
+    Wrapper,
+    /// The daemon, appending it to the pane's own argv — for Claude on veld's mod,
+    /// where the wrapper steps aside.
+    Argv,
+    /// Nobody at launch: the window types it once the agent's input opens.
+    Window,
+}
+
+/// Who hands a pane launch its first message.
 ///
 /// Only a fresh start: a resumed or adopted conversation already has one, and a
-/// reattach spawns nothing. And only through the agent wrapper, which is not on
-/// PATH — and would not look — without `VELD_AGENT_HOOKS`, i.e. with agent
-/// integration off. Every "no" means the window types it, which is what it did
-/// before this existed.
-fn launch_takes_prompt(
+/// reattach spawns nothing. Then the wrapper, which is not on PATH — and would not
+/// look — without `VELD_AGENT_HOOKS`, i.e. with agent integration off; unless the
+/// pane's own command is `claude` (`tool`) and Claude is on the mod, where the wrapper
+/// passes straight through and the daemon does the wrapper's part itself. Codex and Pi
+/// keep their wrappers on the mod, and so does their route. Every
+/// [`LaunchPromptRoute::Window`] means the window types it, which is what it did before
+/// either existed.
+fn launch_prompt_route(
     resumed: bool,
     mode: Option<PaneMode>,
     shim_env: &BTreeMap<String, String>,
-) -> bool {
-    !resumed
-        && mode.unwrap_or(PaneMode::Fresh) == PaneMode::Fresh
-        && shim_env.contains_key("VELD_AGENT_HOOKS")
+    tool: Option<veld_core::agent::AgentTool>,
+) -> LaunchPromptRoute {
+    if resumed || mode.unwrap_or(PaneMode::Fresh) != PaneMode::Fresh {
+        return LaunchPromptRoute::Window;
+    }
+    if tool == Some(veld_core::agent::AgentTool::Claude)
+        && shim_env
+            .get(veld_core::agent::CLAUDE_INTEGRATION_ENV)
+            .map(String::as_str)
+            == Some(veld_core::agent::ClaudeIntegration::Mod.as_str())
+    {
+        return LaunchPromptRoute::Argv;
+    }
+    if shim_env.contains_key("VELD_AGENT_HOOKS") {
+        return LaunchPromptRoute::Wrapper;
+    }
+    LaunchPromptRoute::Window
 }
 
 /// Write a launch prompt for `launch` to run with, and say whether it was.
@@ -2591,11 +2638,81 @@ fn launch_takes_prompt(
 /// message that is never typed. The file keeps it out of the *environment* of
 /// everything the agent starts; it does not keep it out of the process table.
 async fn stage_launch_prompt(session_id: &str, prompt: &str, launch: &mut PaneLaunch) -> bool {
-    use veld_core::agent::{LAUNCH_PROMPT_ENV, MAX_LAUNCH_PROMPT_BYTES, launch_prompt_file_name};
+    let Some(path) = write_launch_prompt(session_id, prompt).await else {
+        return false;
+    };
+    launch.env.push((
+        veld_core::agent::LAUNCH_PROMPT_ENV.to_owned(),
+        path.display().to_string(),
+    ));
+    true
+}
+
+/// [`stage_launch_prompt`]'s counterpart for Claude on veld's mod: the daemon is the
+/// claimant the wrapper would have been, and appends the prompt as `-- <prompt>` to a
+/// pane whose `argv` runs `claude` directly and would take one
+/// ([`veld_core::agent::args_take_launch_prompt`]).
+///
+/// The file is still written and then claimed here, rather than skipped, so the
+/// window's protocol is unchanged: its `take` finds the file gone and knows the agent
+/// has the message. A pane that is not such a command — a `shell` spec, a script that
+/// runs `claude` somewhere inside — answers `false`, and the window types it.
+///
+/// So does a login shell other than zsh or bash, the same gate as
+/// [`login_shell_script`]'s. The prompt becomes text that shell parses, quoted the
+/// POSIX way, and it is text anyone can paste: in fish `\'` ends a single-quoted
+/// string, so a prompt could run a command before Claude starts, and csh breaks on
+/// the newline any longer prompt has.
+async fn launch_prompt_in_argv(
+    session_id: &str,
+    prompt: &str,
+    launch: &mut PaneLaunch,
+    shell: &str,
+    shell_flags: &[String],
+) -> bool {
+    if !matches!(
+        veld_core::shell::kind(shell),
+        veld_core::shell::Kind::Zsh | veld_core::shell::Kind::Bash
+    ) {
+        return false;
+    }
+    let Some(direct) = launch.direct_argv.as_deref() else {
+        return false;
+    };
+    let runs_claude =
+        veld_core::agent::agent_tool_of(&direct[0]) == Some(veld_core::agent::AgentTool::Claude);
+    if !runs_claude
+        || !veld_core::agent::args_take_launch_prompt(
+            veld_core::agent::AgentTool::Claude,
+            &direct[1..],
+        )
+    {
+        return false;
+    }
+    let Some(path) = write_launch_prompt(session_id, prompt).await else {
+        return false;
+    };
+    let taken =
+        tokio::task::spawn_blocking(move || veld_core::agent::take_launch_prompt(&path)).await;
+    // Not taken means the file is still there for the window to claim and type, so
+    // the answer is still "ask before typing".
+    if let Ok(Ok(Some(text))) = taken {
+        let mut argv = direct.to_vec();
+        argv.push("--".to_owned());
+        argv.push(text);
+        launch.argv = login_shell_command(shell, shell_flags, &argv);
+    }
+    true
+}
+
+/// Write `prompt` to a one-shot file and record it for the window's claim. `None`
+/// when it is not one to hand over at launch, or the write failed.
+async fn write_launch_prompt(session_id: &str, prompt: &str) -> Option<PathBuf> {
+    use veld_core::agent::{MAX_LAUNCH_PROMPT_BYTES, launch_prompt_file_name};
     // Refused for launch rather than for the request: the window can still type
     // what the wrapper cannot pass, and an argv cannot hold a NUL at all.
     if prompt.trim().is_empty() || prompt.len() > MAX_LAUNCH_PROMPT_BYTES || prompt.contains('\0') {
-        return false;
+        return None;
     }
     let body = prompt.to_owned();
     // Off the async worker, like every paste-directory write.
@@ -2611,26 +2728,23 @@ async fn stage_launch_prompt(session_id: &str, prompt: &str, launch: &mut PaneLa
         Ok(Ok(path)) => path,
         Ok(Err(e)) => {
             warn!("launch prompt not staged, the window will type it: {e}");
-            return false;
+            return None;
         }
         Err(e) => {
             warn!("launch prompt write panicked, the window will type it: {e}");
-            return false;
+            return None;
         }
     };
-    launch
-        .env
-        .push((LAUNCH_PROMPT_ENV.to_owned(), path.display().to_string()));
     let replaced = LAUNCH_PROMPTS
         .lock()
         .expect("launch prompts poisoned")
-        .insert(session_id.to_owned(), path);
+        .insert(session_id.to_owned(), path.clone());
     // A second mint for the same pane — a connect retried after its ticket went
     // unredeemed — supersedes the first, whose file nothing will ever claim now.
     if let Some(old) = replaced {
         discard_launch_prompt(old);
     }
-    true
+    Some(path)
 }
 
 /// Delete a launch prompt nobody will claim now, rather than leave the text on
@@ -3202,6 +3316,11 @@ struct AgentStateRequest {
     /// send that one, because "we were told something we do not understand" is not a
     /// state worth storing at hook authority.
     state: String,
+    /// A `blocked` that stays until the agent reports its next state, rather than until
+    /// somebody looks at the pane. Sent by Veld's Claude Code mod, which reports the
+    /// moment it was answered; the wrapper's hooks cannot, so they never send it.
+    #[serde(default)]
+    held: bool,
 }
 
 /// Report that a coding agent in this terminal is working, waiting on the user, or
@@ -3251,7 +3370,8 @@ async fn agent_state(
     };
 
     debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
-    super::ide::broadcast_agent_state(worktree_id, &id, tool, state);
+    let held = body.held && state == veld_core::agent::State::Blocked;
+    super::ide::broadcast_agent_state(worktree_id, &id, tool, state, held);
     // 202: the event has been handed to the clients that are connected, which is not
     // the same as a badge appearing. Nothing the caller could do with a richer answer —
     // it is a hook, and its own contract is to exit and get out of the way.
@@ -6584,6 +6704,8 @@ mod tests {
             r#"{"tool":"claude","state":"blocked","surface":"pane-1"}"#,
             r#"{"tool":"claude"}"#,
             r#"not json"#,
+            // `held` is a flag, not anything truthy.
+            r#"{"tool":"claude","state":"blocked","held":"yes"}"#,
         ] {
             assert!(
                 post("/api/pty/sessions/abc/agent-state", body)
@@ -6592,6 +6714,16 @@ mod tests {
                 "{body}"
             );
         }
+        // `held` is part of the shape: a held report gets past the parse to the session
+        // lookup, which is a 404 here because no terminal is registered.
+        assert_eq!(
+            post(
+                "/api/pty/sessions/abc/agent-state",
+                r#"{"tool":"claude","state":"blocked","held":true}"#
+            )
+            .await,
+            StatusCode::NOT_FOUND
+        );
         // An invalid session id never reaches the registry.
         assert_eq!(
             post(
@@ -6793,6 +6925,7 @@ mod tests {
                         spec_id: "probe".to_owned(),
                         label: "Probe".to_owned(),
                         argv,
+                        direct_argv: None,
                         env: vec![("VELD_PANE_TOKEN".to_owned(), "tok-123".to_owned())],
                         token: "tok-123".to_owned(),
                         record_token: true,
@@ -7034,6 +7167,7 @@ mod tests {
                 spec_id: "claude".to_owned(),
                 label: "Claude".to_owned(),
                 argv: vec!["claude".to_owned()],
+                direct_argv: Some(vec!["claude".to_owned()]),
                 env: Vec::new(),
                 token: "tok".to_owned(),
                 record_token: true,
@@ -7116,6 +7250,66 @@ mod tests {
             held.remove(&lapsed);
         }
 
+        /// Claude on the mod: the daemon appends the prompt to the pane's own command
+        /// and claims the file, so the window learns it was sent and types nothing.
+        #[tokio::test]
+        async fn on_the_claude_mod_the_daemon_puts_the_prompt_in_argv() {
+            isolate_paste_dir();
+            let addr = serve().await;
+            let prompt = "Fix the header.\n\n@\"/tmp/shot.png\"";
+
+            let sid = session_id();
+            let mut launch = agent_launch();
+            assert!(launch_prompt_in_argv(&sid, prompt, &mut launch, TEST_SHELL, &[]).await);
+            let expected = login_shell_command(
+                TEST_SHELL,
+                &[],
+                &["claude".to_owned(), "--".to_owned(), prompt.to_owned()],
+            );
+            assert_eq!(launch.argv, expected);
+            assert!(
+                launch.env.is_empty(),
+                "no wrapper is there to read a variable"
+            );
+            let res = post_route(addr, &sid, "launch-prompt/take", true).await;
+            let body = res.json::<serde_json::Value>().await.unwrap();
+            assert_eq!(body["claimed"], false);
+            assert_eq!(body["staged"], true);
+
+            // A command that already carries a prompt, or is not `claude` itself, is
+            // left alone, and the window types it as before.
+            for direct in [
+                vec!["claude", "--dangerously-skip-permissions", "Read AGENTS.md"],
+                vec!["claude-yolo"],
+                vec!["claude", "-p"],
+            ] {
+                let mut launch = agent_launch();
+                launch.direct_argv = Some(direct.iter().map(|s| (*s).to_owned()).collect());
+                let before = launch.argv.clone();
+                assert!(
+                    !launch_prompt_in_argv(&session_id(), prompt, &mut launch, TEST_SHELL, &[])
+                        .await
+                );
+                assert_eq!(launch.argv, before, "{direct:?}");
+            }
+            let mut shell_spec = agent_launch();
+            shell_spec.direct_argv = None;
+            assert!(
+                !launch_prompt_in_argv(&session_id(), prompt, &mut shell_spec, TEST_SHELL, &[])
+                    .await
+            );
+
+            // Nor under a shell that would not parse POSIX quoting as written.
+            for shell in ["/opt/homebrew/bin/fish", "/bin/tcsh", "/usr/bin/nu"] {
+                let mut launch = agent_launch();
+                let before = launch.argv.clone();
+                assert!(
+                    !launch_prompt_in_argv(&session_id(), prompt, &mut launch, shell, &[]).await
+                );
+                assert_eq!(launch.argv, before, "{shell}");
+            }
+        }
+
         #[tokio::test]
         async fn a_launch_prompt_goes_to_whoever_claims_it_first_and_only_to_them() {
             isolate_paste_dir();
@@ -7179,16 +7373,51 @@ mod tests {
 
         #[test]
         fn only_a_fresh_launch_with_agent_integration_takes_a_prompt() {
+            use LaunchPromptRoute::{Argv, Window, Wrapper};
+            const CLAUDE: Option<veld_core::agent::AgentTool> =
+                Some(veld_core::agent::AgentTool::Claude);
             let on: BTreeMap<String, String> =
                 [("VELD_AGENT_HOOKS".to_owned(), "1".to_owned())].into();
             let off = BTreeMap::new();
-            assert!(launch_takes_prompt(false, None, &on));
-            assert!(launch_takes_prompt(false, Some(PaneMode::Fresh), &on));
-            // Each "no" is the window typing it in instead.
-            assert!(!launch_takes_prompt(false, Some(PaneMode::Fresh), &off));
-            assert!(!launch_takes_prompt(true, Some(PaneMode::Fresh), &on));
-            assert!(!launch_takes_prompt(false, Some(PaneMode::Resume), &on));
-            assert!(!launch_takes_prompt(false, Some(PaneMode::Adopt), &on));
+            let on_mod: BTreeMap<String, String> = [
+                ("VELD_AGENT_HOOKS".to_owned(), "1".to_owned()),
+                ("VELD_CLAUDE_INTEGRATION".to_owned(), "mod".to_owned()),
+            ]
+            .into();
+            assert_eq!(launch_prompt_route(false, None, &on, CLAUDE), Wrapper);
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Fresh), &on, CLAUDE),
+                Wrapper
+            );
+            // On the mod the wrapper steps aside, so the daemon is the one to pass it.
+            assert_eq!(launch_prompt_route(false, None, &on_mod, CLAUDE), Argv);
+            // Codex and Pi keep their wrappers on the mod, and a command that is not
+            // `claude` itself (a `shell` spec) leaves it to the wrapper's file as well.
+            for tool in [
+                Some(veld_core::agent::AgentTool::Codex),
+                Some(veld_core::agent::AgentTool::Pi),
+                None,
+            ] {
+                assert_eq!(launch_prompt_route(false, None, &on_mod, tool), Wrapper);
+            }
+            // Each `Window` is the window typing it in instead.
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Fresh), &off, CLAUDE),
+                Window
+            );
+            assert_eq!(
+                launch_prompt_route(true, Some(PaneMode::Fresh), &on, CLAUDE),
+                Window
+            );
+            assert_eq!(launch_prompt_route(true, None, &on_mod, CLAUDE), Window);
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Resume), &on, CLAUDE),
+                Window
+            );
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Adopt), &on_mod, CLAUDE),
+                Window
+            );
         }
 
         #[tokio::test]

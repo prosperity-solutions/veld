@@ -151,6 +151,7 @@ import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
 import { tabKeyAction } from "./tabKeys";
 import { TAB_MIME } from "./terminalPaste";
+import { askBeforeClaude, asksBeforeStarting } from "../ide/claudeModOffer";
 
 
 /** Where a tab dragged from *another* window would land in this one: at a caret
@@ -3116,7 +3117,22 @@ function TerminalPane(props: {
   // worktree, and indefinitely if that request hangs. Read once per instance, so
   // it stays a constant and cannot reintroduce a remount.
   const [existed] = useState(() => terminalStatus(id).state !== "absent");
-  const ready = !specId || panesKnown || existed;
+  // A pane that runs Claude asks the one-time Claude Code question *before* its
+  // session starts, because the answer decides how that session is started — see
+  // `ide/claudeModOffer.ts`. Waits only for the dialog, never for good.
+  const asks = asksBeforeStarting(spec, existed);
+  const [asked, setAsked] = useState(false);
+  useEffect(() => {
+    if (!asks || asked) return;
+    let live = true;
+    void askBeforeClaude().then(() => {
+      if (live) setAsked(true);
+    });
+    return () => {
+      live = false;
+    };
+  }, [asks, asked]);
+  const ready = (!specId || panesKnown || existed) && (!asks || asked);
   const slot = useRef<HTMLDivElement>(null);
   const [, bump] = useReducer((n: number) => n + 1, 0);
   // Read through a ref so the mount effect below sees the value this pane had

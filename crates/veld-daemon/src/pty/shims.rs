@@ -16,6 +16,8 @@
 //! | `VELD_SHELL_INTEGRATION` | `terminal.shellIntegration`: the handoff's OSC 133 half registers its hooks only when this is set. |
 //! | `VELD_AGENT_HOOKS` | `terminal.agentIntegration`: an agent wrapper injects its ephemeral hook configuration only when this is set, and is a bare `exec` otherwise. |
 //! | `VELD_AGENT_CONTEXT` | `terminal.agentContext`: an agent wrapper hands the agent [`veld_core::agent::agent_context`] only when this is set. Independent of `VELD_AGENT_HOOKS` — either half runs without the other. |
+//! | `VELD_CLAUDE_INTEGRATION` | `terminal.claudeIntegration = mod`, set beside `CLAUDE_CODE_PLUGIN_DIRS` and never without it: the `claude` wrapper passes straight through while `CLAUDE_CODE_PLUGIN_DIRS` still names the mod, and veld's Claude Code mod does both halves above from inside Claude. |
+//! | `CLAUDE_CODE_PLUGIN_DIRS` | Claude Code's own: the folder of veld's mod ([`veld_core::agent::claude_mod_dir`]), loaded for that process as `--plugin-dir` would. |
 //! | `VELD_SHIM_BROWSER` | The same path as `BROWSER`, kept under its own name so the `veld_browser` hook can re-assert it after an rc file exports a `$BROWSER` of its own. |
 //! | `VELD_BROWSER_ORIGINAL` | Whatever `$BROWSER` was before veld took it over, so the fall-through path can restore it instead of handing a child the shim again. |
 //!
@@ -98,6 +100,9 @@ pub struct SessionOptions {
     /// `terminal.agentContext`. Rides the same wrappers as `agent_integration`, so
     /// either one wants them on `PATH`.
     pub agent_context: bool,
+    /// `terminal.claudeIntegration`: which of the two above Claude Code is handed —
+    /// the wrapper's flags or veld's mod. Changes nothing for Codex or Pi.
+    pub claude_integration: veld_core::agent::ClaudeIntegration,
     /// Whether this bash was **probed** to honour the `--posix`/`$ENV` handoff.
     ///
     /// Passed in rather than probed here because probing spawns a process and this
@@ -127,6 +132,7 @@ impl SessionOptions {
             shell_integration: true,
             agent_integration: true,
             agent_context: true,
+            claude_integration: veld_core::agent::ClaudeIntegration::Wrapper,
             bash_handoff: true,
         }
     }
@@ -209,6 +215,7 @@ fn session_env_in(
         shell_integration,
         agent_integration,
         agent_context,
+        claude_integration,
         bash_handoff,
     } = opts;
     let mut env = BTreeMap::new();
@@ -270,6 +277,28 @@ fn session_env_in(
     // the text out without this variable.
     if context {
         env.insert("VELD_AGENT_CONTEXT".to_owned(), "1".to_owned());
+    }
+    // Claude Code on the mod: the variable the `claude` wrapper steps aside for, and the
+    // folder Claude loads the mod from. Both or neither — the wrapper stepping aside with
+    // no mod to load would leave Claude reporting nothing. The two halves above stay
+    // the mod's gates, read by the mod itself, so either switch still works alone.
+    //
+    // `CLAUDE_CODE_PLUGIN_DIRS` replaces any value the daemon was started with; an rc
+    // file that exports its own replaces this one in turn: the mod does not load, and the
+    // wrapper, finding its folder missing from the variable, reports instead.
+    let mod_manifest = veld_core::agent::claude_mod_dir(dir).join(".claude-plugin/plugin.json");
+    if (agent || context)
+        && claude_integration == veld_core::agent::ClaudeIntegration::Mod
+        && mod_manifest.is_file()
+    {
+        env.insert(
+            veld_core::agent::CLAUDE_INTEGRATION_ENV.to_owned(),
+            claude_integration.as_str().to_owned(),
+        );
+        env.insert(
+            veld_core::agent::CLAUDE_PLUGIN_DIRS_ENV.to_owned(),
+            veld_core::agent::claude_mod_dir(dir).display().to_string(),
+        );
     }
     let wants_handoff = wants_path || shell_integration;
     // The handoff is only safe while the file that performs it exists. `ZDOTDIR`
@@ -864,6 +893,33 @@ pub(super) fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     std::fs::write(&tmp, veld_core::agent::pi_context_extension_doc(&context))?;
     set_mode(&tmp, 0o600)?;
     std::fs::rename(&tmp, &context_file)?;
+    // Veld's Claude Code mod, for sessions on `terminal.claudeIntegration = mod`.
+    // Written whatever the setting says, like the wrappers, so switching it needs no
+    // restart. **Only a file whose bytes changed is written**: Claude Code watches a
+    // plugin folder named in `CLAUDE_CODE_PLUGIN_DIRS` and reloads the mod on any write,
+    // and a reload fires `session.start` again in every running session — which would
+    // report a mid-turn session as "ready" on every daemon restart.
+    let mod_dir = veld_core::agent::claude_mod_dir(dir);
+    create_private_dir(&mod_dir)?;
+    for (name, body) in
+        veld_core::agent::claude_mod_files(&veld_core::instance::daemon_base(), &context)
+    {
+        let path = mod_dir.join(name);
+        if std::fs::read(&path).is_ok_and(|on_disk| on_disk == body.as_bytes()) {
+            continue;
+        }
+        let parent = path.parent().expect("a mod file has a parent");
+        create_private_dir(parent)?;
+        let tmp = parent.join(format!(
+            ".{}.new",
+            path.file_name()
+                .expect("a mod file has a name")
+                .to_string_lossy()
+        ));
+        std::fs::write(&tmp, body)?;
+        set_mode(&tmp, 0o600)?;
+        std::fs::rename(&tmp, &path)?;
+    }
     // The `ZDOTDIR` handoff. Written unconditionally — whether a session *uses* it
     // is `session_env`'s call, per shell and per setting — and by the same
     // write-then-rename, since a shell may be starting while the daemon restarts.
@@ -887,6 +943,13 @@ pub(super) fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     set_mode(&tmp, 0o600)?;
     std::fs::rename(&tmp, &handoff)?;
     Ok(())
+}
+
+/// `create_dir_all`, then 0700 — applied afterwards because `create_dir_all` honours
+/// the umask.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    set_mode(path, 0o700)
 }
 
 #[cfg(unix)]
@@ -1141,6 +1204,22 @@ unset veld_prompt veld_prompt_file
             "if [ -n \"$veld_context\" ]; then\n  for veld_arg in \"$@\"; do\n    case \"$veld_arg\" in\n      {context_flag_patterns}) veld_context= ; break ;;\n    esac\n  done\n  unset veld_arg\nfi\n"
         ));
     }
+    // `terminal.claudeIntegration = mod`: the mod does both halves from inside Claude, so
+    // this wrapper adds nothing at all — no flag, no `ready` report, no launch prompt —
+    // and the variable is only ever set beside the folder the mod loads from.
+    let mod_passthrough = if tool == veld_core::agent::AgentTool::Claude {
+        format!(
+            "\n# `terminal.claudeIntegration` = mod: Veld's Claude Code mod reports from inside\n# Claude, so pass straight through — while Claude will still load it. An rc file that\n# exported its own {dirs} replaced Veld's, and then this wrapper reports instead.\nif [ \"${{{env}-}}\" = {value} ]; then\n  case \":${{{dirs}-}}:\" in\n    *:{mod_dir}:*)\n      unset VELD_LAUNCH_PROMPT\n      exec \"$veld_real\" \"$@\" ;;\n  esac\nfi\n",
+            env = veld_core::agent::CLAUDE_INTEGRATION_ENV,
+            value = veld_core::agent::ClaudeIntegration::Mod.as_str(),
+            dirs = veld_core::agent::CLAUDE_PLUGIN_DIRS_ENV,
+            mod_dir = veld_core::console::quote(
+                &veld_core::agent::claude_mod_dir(dir).display().to_string()
+            ),
+        )
+    } else {
+        String::new()
+    };
     let context_prepend = match tool.context_injection(context) {
         veld_core::agent::ContextInjection::Argv {
             flag,
@@ -1252,7 +1331,7 @@ if [ "$veld_real" = "$veld_self_dir/{name}" ]; then
   echo "veld: refusing to run {name}: the shim resolved itself" >&2
   exit 127
 fi
-
+{mod_passthrough}
 # Rules 1 and 2. A bare first word is a subcommand and is never touched, except for
 # a short, named list of this tool's own subcommands that are themselves interactive
 # (Codex's `resume`/`fork` — see `AgentTool::extra_interactive_first_words`).
@@ -1323,6 +1402,7 @@ exec "$veld_real" "$@"
         prompt_block = prompt_block,
         context_guard = context_guard,
         context_prepend = context_prepend,
+        mod_passthrough = mod_passthrough,
     )
 }
 
@@ -1580,6 +1660,7 @@ mod tests {
                 shell_integration: false,
                 agent_integration: false,
                 agent_context: false,
+                claude_integration: veld_core::agent::ClaudeIntegration::Mod,
                 bash_handoff: false,
             },
         );
@@ -1853,6 +1934,128 @@ mod tests {
         assert!(
             stdout.contains("original=firefox"),
             "the user's own browser must be kept for the passthrough: {stdout:?}"
+        );
+    }
+
+    /// `terminal.claudeIntegration = mod`: the mod is written, a session names it with
+    /// both variables or neither, and the `claude` wrapper becomes a bare `exec` while
+    /// Claude will load the mod — while Codex's wrapper is untouched.
+    #[test]
+    fn on_the_claude_mod_the_wrapper_steps_aside_and_the_session_names_the_mod() {
+        use veld_core::agent::{CLAUDE_INTEGRATION_ENV, CLAUDE_PLUGIN_DIRS_ENV, ClaudeIntegration};
+        let tmp = tempfile::TempDir::new().unwrap();
+        let shims = tmp.path().join("shims");
+        let real_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&real_dir).unwrap();
+        // A `veld` that fails the test loudly if the wrapper ever reaches it.
+        let fake_cli = tmp.path().join("veld");
+        std::fs::write(&fake_cli, "#!/bin/sh\necho CALLED-VELD\nexit 3\n").unwrap();
+        set_mode(&fake_cli, 0o755).unwrap();
+        prepare_in(&shims, &fake_cli).unwrap();
+
+        let mod_dir = veld_core::agent::claude_mod_dir(&shims);
+        for (name, body) in veld_core::agent::claude_mod_files(
+            &veld_core::instance::daemon_base(),
+            &context_text(&fake_cli),
+        ) {
+            assert_eq!(std::fs::read_to_string(mod_dir.join(name)).unwrap(), body);
+        }
+        // A daemon restart with nothing changed writes nothing: Claude Code reloads the
+        // mod on any write to its folder, in every running session.
+        let module = mod_dir.join("hooks/register.ts");
+        let before = std::fs::metadata(&module).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        prepare_in(&shims, &fake_cli).unwrap();
+        assert_eq!(
+            std::fs::metadata(&module).unwrap().modified().unwrap(),
+            before
+        );
+
+        let env = |opts| session_env_in(Some(&shims), "s", "/bin/zsh", opts);
+        let on_mod = SessionOptions {
+            claude_integration: ClaudeIntegration::Mod,
+            ..SessionOptions::all_on()
+        };
+        let modded = env(on_mod);
+        assert_eq!(
+            modded.get(CLAUDE_INTEGRATION_ENV).map(String::as_str),
+            Some("mod")
+        );
+        assert_eq!(
+            modded.get(CLAUDE_PLUGIN_DIRS_ENV).map(String::as_str),
+            Some(mod_dir.to_str().unwrap())
+        );
+        // Codex and Pi still need the hooks variable and the shim directory.
+        assert!(modded.contains_key("VELD_AGENT_HOOKS"));
+        assert!(modded.contains_key("VELD_SHIM_DIR"));
+        // The wrapper default names no mod.
+        let wrapped = env(SessionOptions::all_on());
+        assert!(!wrapped.contains_key(CLAUDE_INTEGRATION_ENV));
+        assert!(!wrapped.contains_key(CLAUDE_PLUGIN_DIRS_ENV));
+        // Both agent halves off: nothing to load the mod for.
+        let neither = env(SessionOptions {
+            agent_integration: false,
+            agent_context: false,
+            ..on_mod
+        });
+        assert!(!neither.contains_key(CLAUDE_INTEGRATION_ENV));
+        assert!(!neither.contains_key(CLAUDE_PLUGIN_DIRS_ENV));
+        // Either half alone is enough: the mod reads each one itself.
+        let context_only = env(SessionOptions {
+            agent_integration: false,
+            ..on_mod
+        });
+        assert!(context_only.contains_key(CLAUDE_PLUGIN_DIRS_ENV));
+        // A mod folder that has gone missing (a swept `/tmp`) leaves the wrapper in
+        // charge rather than stepping it aside for nothing.
+        std::fs::remove_dir_all(&mod_dir).unwrap();
+        let swept = env(on_mod);
+        assert!(!swept.contains_key(CLAUDE_INTEGRATION_ENV));
+        assert!(!swept.contains_key(CLAUDE_PLUGIN_DIRS_ENV));
+
+        for tool in ["claude", "codex"] {
+            let real = real_dir.join(tool);
+            std::fs::write(&real, "#!/bin/sh\necho \"REAL $*\"\n").unwrap();
+            set_mode(&real, 0o755).unwrap();
+        }
+        let path = format!("{}:{}", shims.display(), real_dir.display());
+        let named = format!("/elsewhere:{}", mod_dir.display());
+        let run_with = |tool: &str, plugin_dirs: &str| -> String {
+            let out = std::process::Command::new(shims.join(tool))
+                .env_clear()
+                .env("PATH", &path)
+                .env("VELD_PTY_SESSION", "pane-1")
+                .env("VELD_AGENT_HOOKS", "1")
+                .env("VELD_AGENT_CONTEXT", "1")
+                .env("VELD_LAUNCH_PROMPT", "/nonexistent")
+                .env(CLAUDE_INTEGRATION_ENV, "mod")
+                .env(CLAUDE_PLUGIN_DIRS_ENV, plugin_dirs)
+                .output()
+                .expect("run the shim");
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            )
+        };
+        let run = |tool: &str| run_with(tool, &named);
+        assert_eq!(
+            run("claude").trim(),
+            "REAL",
+            "no flag, no report, no prompt"
+        );
+        // An rc file's own value replaced Veld's, so Claude will not load the mod: the
+        // wrapper reports as it would without the setting.
+        let replaced = run_with("claude", "/elsewhere");
+        assert!(
+            replaced.starts_with("REAL --append-system-prompt"),
+            "{replaced}"
+        );
+        // Codex's wrapper is untouched by the Claude setting: it still adds its context.
+        let codex = run("codex");
+        assert!(
+            codex.starts_with("REAL -c developer_instructions="),
+            "{codex}"
         );
     }
 
