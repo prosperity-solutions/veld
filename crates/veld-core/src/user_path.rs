@@ -43,8 +43,9 @@
 //!   caller waits on it);
 //! - anything a `stat` of those files cannot see — a file *sourced by* an rc
 //!   file, a `brew shellenv` change, an `.nvmrc` edit, a version manager's new
-//!   default — is picked up within [`PATH_MAX_AGE`] (5 min) for the global value
-//!   and [`DIR_PATH_TTL`] (2 min) for a project directory's;
+//!   default — is picked up within [`PATH_MAX_AGE`] (5 min, plus up to one
+//!   tick) for the global value and [`DIR_PATH_TTL`] (2 min) for a project
+//!   directory's;
 //! - a resolution that learned nothing (a stall, a failed spawn) is retried on
 //!   the next tick, exactly as before.
 //!

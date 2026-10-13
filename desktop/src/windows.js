@@ -661,16 +661,17 @@ function boundsOnScreen(bounds) {
  * window restored on a per-origin remembered zoom never fires anything. A short
  * poll that repositions when the factor *moved* is the one mechanism that
  * catches all of them. `getZoomFactor()` is a synchronous read of a cached
- * value — a few hundred per second across every window is noise next to the
- * 16ms cursor poll this file already runs.
+ * value, and the poll runs only while its window is focused (`focusGatedInterval`),
+ * so it is ten reads a second at most — noise next to the 16ms cursor poll this
+ * file already runs.
  */
 const ZOOM_POLL_MS = 100;
 // The rate: Chromium animates wheel zoom over roughly a couple of frames, so
 // 100ms repositions the lights mid-gesture instead of snapping at the end,
-// while staying cheap enough to run for the lifetime of the window. There is
+// while staying cheap enough to run whenever the window is focused. There is
 // nothing more to it than that — it is a latency/cheapness balance, not a
 // measured value.
-//
+
 // Returns whether the factor moved since the last sync.
 function syncTrafficLights(record) {
   const win = record.win;

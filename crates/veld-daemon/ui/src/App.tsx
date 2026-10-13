@@ -5753,7 +5753,7 @@ function AppInner(props: {
     const onDisk = readSessionRegistry(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
     const next = pruneSessionSets(onDisk, allWorktrees.map((w) => w.id));
     if (next !== onDisk) setSessionsRaw(serializeSessionRegistry(next));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs per poll result
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- runs when the repo list changes (a poll with the same answer keeps its identity)
   }, [repoList]);
   const inUseEverywhere = () => sessionsInUse(Object.values(layouts));
   const retired = useMemo(

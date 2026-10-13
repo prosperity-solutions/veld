@@ -44,9 +44,9 @@ use std::time::{Duration, Instant};
 
 /// Sustained lines per second one `veld _log` process stores.
 ///
-/// Well above anything a healthy server prints (the #332 incident's mean was 4 rows/s
-/// and its busiest hour 17.5 rows/s) and two orders of magnitude below the 300 rows/s
-/// the runaway worker produced.
+/// An order of magnitude above anything a healthy server prints (the #332 incident's
+/// mean was 4 rows/s and its busiest hour 17.5 rows/s), and below the 300 rows/s the
+/// runaway worker produced — which, sustained, is the case it exists for.
 pub const LOG_RATE_PER_SEC: f64 = 200.0;
 
 /// Lines that may be stored in a burst before the sustained rate applies.

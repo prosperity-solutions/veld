@@ -11,8 +11,8 @@
 //! **What is stamped, and why each one is there:**
 //!
 //! - `HEAD` of the checkout and of the common dir, `config` (branch upstreams
-//!   live there — `git branch --set-upstream-to` touches nothing else) and
-//!   `packed-refs`.
+//!   live there — `git branch --set-upstream-to` touches nothing else), the
+//!   checkout's `config.worktree` and `packed-refs`.
 //! - Every directory and every loose ref file under `refs/`. A ref is written as
 //!   `x.lock` and renamed over `x`, so the directory's mtime moves on create,
 //!   delete and update, and the file's inode moves on update. Both are stamped
@@ -143,12 +143,9 @@ fn fingerprint_at(repo_root: &Path, now: SystemTime) -> Option<RepoFingerprint> 
     if out.stamps.len() > MAX_ENTRIES {
         return None;
     }
-    // Inputs that changed inside the settle window (or claim to have changed in
-    // the future) are not trusted yet.
-    if out
-        .newest
-        .is_some_and(|newest| newest + SETTLE > now || newest > now)
-    {
+    // Inputs that changed inside the settle window are not trusted yet — which
+    // includes any that claim to have changed in the future.
+    if out.newest.is_some_and(|newest| newest + SETTLE > now) {
         return None;
     }
     Some(RepoFingerprint(out.stamps))

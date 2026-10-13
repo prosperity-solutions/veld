@@ -3547,6 +3547,12 @@ fn repo_view_blocking(
     })
 }
 
+/// How often [`maybe_fetch`] fetches one repo's remote.
+const FETCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
+static LAST_FETCH: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
 /// Fetch a repo's remote, at most once per [`FETCH_INTERVAL`] per repo, so the
 /// staleness signal tracks the remote without hammering it (and only while the
 /// IDE is open — this runs on the UI's poll). Five minutes rather than the one
@@ -3559,11 +3565,6 @@ fn repo_view_blocking(
 /// and `behind` still computes against them. A fetch is deliberately **not** a
 /// fast-forward — it never touches a working tree — which is the line that keeps
 /// a background fetch safe where the auto-update the maintainer rejected is not.
-const FETCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(300);
-static LAST_FETCH: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-
 async fn maybe_fetch(repo_root: &FsPath) -> bool {
     let key = repo_root.to_string_lossy().into_owned();
     // The guard is dropped before the await: a `std::sync::MutexGuard` is not

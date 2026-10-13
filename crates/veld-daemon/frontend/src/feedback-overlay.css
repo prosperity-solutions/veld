@@ -865,7 +865,19 @@
   max-height: calc(100vh - 40px);
   display: flex; flex-direction: column;
   overflow-y: auto;
-  /* Glow animation is inherited from the shared .veld-feedback-popover base. */
+  /* The scroll container would clip the shared `::after` glow, which is drawn
+     outside the box, so this variant pulses its own box-shadow instead. That
+     repaints, but only while a screenshot is being described. */
+  animation: veld-feedback-fadeIn .15s ease, veld-feedback-popover-screenshot-glow 1.4s ease-in-out infinite;
+}
+.veld-feedback-popover-screenshot::after { content: none; }
+@keyframes veld-feedback-popover-screenshot-glow {
+  0%, 100% {
+    box-shadow: var(--vf-shadow), 0 0 10px 1px color-mix(in srgb, var(--vf-accent) 42%, transparent);
+  }
+  50% {
+    box-shadow: var(--vf-shadow), 0 0 18px 3px color-mix(in srgb, var(--vf-accent) 58%, transparent);
+  }
 }
 
 /* Screenshot preview in popover */

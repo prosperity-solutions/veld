@@ -11,7 +11,7 @@ import {
 } from "@mantine/core";
 import { api, type HistoryEntry, type LogResponse, type RunRef } from "../api";
 import { gatedInterval } from "./gatedInterval";
-import { extractMsg,extractTs, fmtTs, fmtTsFull, fmtWhen, nodeColor } from "./util";
+import { extractMsg, extractTs, fmtTs, fmtTsFull, fmtWhen, nodeColor } from "./util";
 import type { LogTimeZone } from "./settings";
 import { ansiCss, markAnsiSpans, parseAnsi, type AnsiSpan } from "./ansi";
 
