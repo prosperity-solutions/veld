@@ -264,8 +264,15 @@ impl Policy {
 }
 
 /// The shell startup files a login+interactive shell may read, for zsh, bash and
-/// fish. `zdotdir` (when set) replaces `$HOME` for zsh's four user files, as it
-/// does for zsh itself. Missing files are listed too: creating one is a change.
+/// fish, plus macOS `path_helper`'s inputs. `zdotdir` (when set) replaces `$HOME`
+/// for zsh's four user files, as it does for zsh itself. Missing files are listed
+/// too: creating one is a change. Two directories are stamped as directories
+/// (fish's `conf.d/`, `/etc/paths.d/`), which sees a file added or removed there
+/// but not one edited in place.
+///
+/// Known misses, which fall back to [`PATH_MAX_AGE`]: a `ZDOTDIR` set only inside
+/// `~/.zshenv` (the daemon's own environment does not carry it, so the files under
+/// it are not the ones listed), and fish under a non-default `XDG_CONFIG_HOME`.
 fn startup_files(
     home: Option<&std::path::Path>,
     zdotdir: Option<&std::path::Path>,
@@ -281,8 +288,17 @@ fn startup_files(
             out.push(home.join(f));
         }
         out.push(home.join(".config/fish/config.fish"));
+        out.push(home.join(".config/fish/conf.d"));
     }
-    for f in ["/etc/zprofile", "/etc/zshrc", "/etc/profile", "/etc/bashrc"] {
+    for f in [
+        "/etc/zshenv",
+        "/etc/zprofile",
+        "/etc/zshrc",
+        "/etc/profile",
+        "/etc/bashrc",
+        "/etc/paths",
+        "/etc/paths.d",
+    ] {
         out.push(std::path::PathBuf::from(f));
     }
     out
@@ -1004,10 +1020,14 @@ mod tests {
             "/h/.profile",
             "/h/.bash_login",
             "/h/.config/fish/config.fish",
+            "/h/.config/fish/conf.d",
+            "/etc/zshenv",
             "/etc/zprofile",
             "/etc/zshrc",
             "/etc/profile",
             "/etc/bashrc",
+            "/etc/paths",
+            "/etc/paths.d",
         ] {
             assert!(
                 files.contains(&want.into()),
