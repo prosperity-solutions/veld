@@ -435,6 +435,20 @@ fi
 ## …derive text/tone/href from $payload and print one JSON object.
 ```
 
+**Count only the newest run of each workflow.** `statusCheckRollup` lists every
+check on the head commit, including runs a newer one superseded — marking a draft
+ready, or a concurrency group cancelling in progress, leaves the old run's jobs
+there as `CANCELLED` and an `if: always()` gate job as `FAILURE`. Fold them in
+and a healthy pull request reads as failing. Take the run id from each check's
+`detailsUrl` (`/actions/runs/<id>/`), keep the largest per `workflowName`, and
+only then roll up. A job the old run reached and the new one has not yet — a
+gate that `needs:` everything appears last — counts as pending while the new
+run still has a job in flight, or the badge goes green before the gate has run.
+Once the new run has finished, a name it never produced (a renamed job, a
+reshaped matrix) is dropped rather than left pending forever. The maintained script also gives a
+cancelled current run its own state, *checks cancelled*, rather than calling it
+failed.
+
 **For GitLab**, the declaration is unchanged — swap `gh` for `glab` inside the
 script. That is the point of the contract.
 
