@@ -417,6 +417,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn frames_split_across_buffered_reads_parse_in_order() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        // The reader is a `BufReader` far smaller than the frames, fed by a
+        // writer that trickles bytes in awkward pieces, so header and payload
+        // boundaries fall mid-read-ahead in every combination. One buffer for the
+        // whole stream, as the pumps use it.
+        let mut wire_bytes = Vec::new();
+        let big: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+        write_frame(&mut wire_bytes, OUTPUT, b"a").await.unwrap();
+        write_frame(&mut wire_bytes, HANGUP, b"").await.unwrap();
+        write_frame(&mut wire_bytes, OUTPUT, &big).await.unwrap();
+        write_frame(&mut wire_bytes, EXIT, &9u32.to_be_bytes())
+            .await
+            .unwrap();
+
+        let (mut tx, rx) = tokio::io::duplex(64);
+        let feed = tokio::spawn(async move {
+            for piece in wire_bytes.chunks(7) {
+                tx.write_all(piece).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            // Dropping `tx` is the clean end of stream.
+        });
+
+        let mut r = BufReader::with_capacity(16, rx);
+        let f = read_frame(&mut r).await.unwrap().unwrap();
+        assert_eq!((f.kind, f.payload.as_slice()), (OUTPUT, &b"a"[..]));
+        let f = read_frame(&mut r).await.unwrap().unwrap();
+        assert_eq!(f.kind, HANGUP);
+        assert!(f.payload.is_empty());
+        let f = read_frame(&mut r).await.unwrap().unwrap();
+        assert_eq!((f.kind, f.payload), (OUTPUT, big));
+        let f = read_frame(&mut r).await.unwrap().unwrap();
+        assert_eq!(decode_exit(&f.payload), Some(9));
+        assert!(read_frame(&mut r).await.unwrap().is_none());
+        feed.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_buffer_made_after_the_handshake_loses_nothing_read_ahead_of_it() {
+        use tokio::io::{AsyncWriteExt, BufReader};
+
+        // The handshake reads unbuffered; the pump's `BufReader` is created on the
+        // same stream afterwards. Frames the peer wrote right behind the last
+        // handshake frame must be there for it, not swallowed.
+        let (mut tx, mut rx) = tokio::io::duplex(1024);
+        let mut all = Vec::new();
+        write_frame(&mut all, HELLO, b"hello").await.unwrap();
+        write_frame(&mut all, SCROLLBACK, b"history").await.unwrap();
+        write_frame(&mut all, OUTPUT, b"first live chunk")
+            .await
+            .unwrap();
+        tx.write_all(&all).await.unwrap();
+
+        assert_eq!(read_frame(&mut rx).await.unwrap().unwrap().kind, HELLO);
+        assert_eq!(read_frame(&mut rx).await.unwrap().unwrap().kind, SCROLLBACK);
+        let mut r = BufReader::with_capacity(16 * 1024, rx);
+        let f = read_frame(&mut r).await.unwrap().unwrap();
+        assert_eq!(
+            (f.kind, f.payload.as_slice()),
+            (OUTPUT, &b"first live chunk"[..])
+        );
+    }
+
+    /// An `AsyncRead` over a byte slice that counts how many times it was asked
+    /// for data — each is a `read(2)` on a real socket.
+    struct CountingReader<'a> {
+        data: &'a [u8],
+        reads: usize,
+    }
+
+    impl tokio::io::AsyncRead for CountingReader<'_> {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let n = self.data.len().min(buf.remaining());
+            let (head, rest) = self.data.split_at(n);
+            buf.put_slice(head);
+            self.data = rest;
+            self.reads += 1;
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn buffering_the_reader_cuts_read_calls_per_frame() {
+        use tokio::io::BufReader;
+
+        let mut bytes = Vec::new();
+        for _ in 0..200 {
+            write_frame(&mut bytes, OUTPUT, &[b'x'; 300]).await.unwrap();
+        }
+
+        let mut raw = CountingReader {
+            data: &bytes,
+            reads: 0,
+        };
+        while read_frame(&mut raw).await.unwrap().is_some() {}
+        // Two `read_exact`s per frame, plus the final EOF probe.
+        assert!(raw.reads >= 400, "unbuffered: {} reads", raw.reads);
+
+        let mut counting = BufReader::with_capacity(
+            16 * 1024,
+            CountingReader {
+                data: &bytes,
+                reads: 0,
+            },
+        );
+        let mut frames = 0;
+        while read_frame(&mut counting).await.unwrap().is_some() {
+            frames += 1;
+        }
+        assert_eq!(frames, 200);
+        let buffered = counting.get_ref().reads;
+        // 200 frames x 305 bytes = ~60 KB: a handful of 16 KiB fills.
+        assert!(buffered <= 8, "buffered: {buffered} reads");
+        eprintln!(
+            "read calls for 200 frames: unbuffered {}, buffered {buffered}",
+            raw.reads
+        );
+    }
+
+    #[tokio::test]
     async fn a_binary_payload_survives_framing() {
         // PTY output is arbitrary bytes: escape sequences, invalid UTF-8 from a
         // `cat` of a binary file, and NULs. Nothing may be re-encoded.
