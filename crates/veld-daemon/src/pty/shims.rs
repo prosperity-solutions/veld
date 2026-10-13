@@ -901,9 +901,11 @@ pub(super) fn prepare_in(dir: &Path, cli: &Path) -> std::io::Result<()> {
     // report a mid-turn session as "ready" on every daemon restart.
     let mod_dir = veld_core::agent::claude_mod_dir(dir);
     create_private_dir(&mod_dir)?;
-    for (name, body) in
-        veld_core::agent::claude_mod_files(&veld_core::instance::daemon_base(), &context)
-    {
+    for (name, body) in veld_core::agent::claude_mod_files(
+        &veld_core::instance::daemon_base(),
+        &context,
+        &naming_text(cli),
+    ) {
         let path = mod_dir.join(name);
         if std::fs::read(&path).is_ok_and(|on_disk| on_disk == body.as_bytes()) {
             continue;
@@ -1414,6 +1416,14 @@ exec "$veld_real" "$@"
 /// [`veld_core::agent::context_cli_word`].
 fn context_text(cli: &Path) -> String {
     veld_core::agent::agent_context(&veld_core::agent::context_cli_word(
+        cli,
+        veld_core::db::Db::uses_installed_database(),
+    ))
+}
+
+/// The mod's naming line, naming the same CLI [`context_text`] does.
+fn naming_text(cli: &Path) -> String {
+    veld_core::agent::naming_line(&veld_core::agent::context_cli_word(
         cli,
         veld_core::db::Db::uses_installed_database(),
     ))
@@ -1957,6 +1967,7 @@ mod tests {
         for (name, body) in veld_core::agent::claude_mod_files(
             &veld_core::instance::daemon_base(),
             &context_text(&fake_cli),
+            &naming_text(&fake_cli),
         ) {
             assert_eq!(std::fs::read_to_string(mod_dir.join(name)).unwrap(), body);
         }

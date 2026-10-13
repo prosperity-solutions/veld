@@ -61,8 +61,8 @@ pub enum IdeCommand {
     },
 
     /// Hand a task to the human as a new worktree of this project, with an agent
-    /// waiting to start in it on a prompt (`new`), and list the groups it can be
-    /// filed into (`groups`).
+    /// waiting to start in it on a prompt (`new`), list the groups it can be
+    /// filed into (`groups`), and retitle the worktree this runs in (`name`).
     Worktree {
         #[command(subcommand)]
         command: super::worktree::WorktreeCommand,

@@ -7977,12 +7977,6 @@ function AppInner(props: {
           agents={(worktree?.ide.panes ?? []).filter(paneTakesPrompt)}
           newMode={worktreeNewMode(settings ?? {})}
           onNewModeChange={(mode) => void saveSettings({ "worktree.newMode": mode })}
-          // From the checkout being looked at, the same proxy the pane list
-          // uses: the new one does not exist yet, and `ide.worktreeName` comes
-          // from the repo's own `veld.json`. Wrong only for a branch that
-          // changes that file, where the cost is a prompt sent to a daemon that
-          // then finds no command and leaves the dialog's own name in place.
-          generatesNames={worktree?.ide.generates_names ?? false}
           // Per project, from this client's own storage — see `ide/lastAgent.ts`
           // for why there is no server-side home for it.
           rememberedAgent={recallLastAgent(window.localStorage, repo.root)}

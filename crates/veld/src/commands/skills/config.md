@@ -1116,21 +1116,10 @@ with the reason on that second line.
 | `fixed_label` | Default `false`. Pins the tab to `label`, ignoring the terminal title (OSC 0/2) the process sets. Left unset, a pane adopts that title like a plain terminal always has — for a coding agent it names the task, which is what tells four agent panes apart. Set it where `label` is the landmark (`Claude (skip permissions)` must not become a task name). Replaced `allow_terminal_renaming`, whose default was the opposite; the old key is now an unknown-key lint warning and the pane keeps working. |
 
 
-**`ide.worktreeName` names a new worktree from its prompt.** One command, exactly
-one of `argv`/`shell`, e.g. `{"argv":["claude","-p","Reply with a 2-4 word title
-and nothing else"]}`. **The prompt arrives on stdin**, never in the argument list
-— that is how `claude -p` and `codex exec` take one, and it keeps the user's prose
-out of the process table; there is no `${veld.prompt}`. It runs *after* the
-checkout exists, so nothing waits on it: the dialog already named the worktree
-from the prompt's first clause and this replaces that label on the next poll if
-it answers. Every failure is silent (no command, unparseable config, 60s timeout,
-non-zero exit, unusable output) — the dialog's name stands, because the worktree
-is already created. It sets **`display_name` only**, never the alias (which chose
-the checkout's directory and defaults its run name and hostname) and never the
-branch. First non-blank line of stdout, bullets/headings/quotes stripped, capped
-at 48 chars, discarded if it contains a control character or a direction
-override. Scope: the extension set (`worktree`, `root`, `branch`, `branch_raw`
-argv-only, `project`, `username`).
+**Worktrees are named by their agent, not by config.** `veld ide worktree name
+"<title>"` (at most 18 columns) sets the rail label of the worktree the cwd or
+`$VELD_PTY_SESSION` is in. `ide.worktreeName` is no longer read — `veld lint`
+reports it so it can be deleted.
 
 **`${veld.pane.token}` is the whole trick.** Veld mints a UUID the first time a
 pane launches, remembers it against that pane in its database, and interpolates

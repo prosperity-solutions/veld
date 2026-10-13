@@ -13,6 +13,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 const DAEMON = __VELD_DAEMON__
 const CONTEXT = __VELD_CONTEXT__
+const NAMING = __VELD_NAMING__
 const TIMEOUT_MS = __VELD_TIMEOUT_MS__
 
 // Read once per load: `session.start` runs before any other event, and a reload runs
@@ -27,8 +28,14 @@ let contextPending = false
 // that runs, an MCP server's question being answered, the turn ending, or a new one
 // starting.
 let blocked = false
+// A resumed conversation named its worktree the first time round; Veld nudges only a
+// new one to name it. The first prompt and the first stop are each put to the daemon
+// once, and it keeps the rest of the count. `launchedAt` is this process's start.
+let launchedAt = 0
+let namingPrompt = false
+let namingStop = false
 // Veld rewrites these files when it is upgraded, which reloads them in every running
-// session and resets the variables above. The two that are the session's own, not read
+// session and resets the variables above. The ones that are the session's own, not read
 // from its environment, are kept where a reload does not reach; that they are kept at
 // all is how a reloaded `session.start` knows the session had already started.
 const KEPT = { plugin: 'veld', key: 'session' } as const
@@ -48,10 +55,17 @@ export const register: Register = (on) => {
     if (kept) {
       contextPending = kept.contextPending
       blocked = kept.blocked
+      // Kept by a mod from before the naming nudge: nothing left to ask.
+      launchedAt = kept.launchedAt ?? Number.POSITIVE_INFINITY
+      namingPrompt = kept.namingPrompt ?? true
+      namingStop = kept.namingStop ?? true
       return result
     }
     contextPending = context
     blocked = false
+    launchedAt = await $.clock.now()
+    namingPrompt = false
+    namingStop = false
     await keep($)
     if (hooks) await report($, 'ready')
     return result
@@ -77,8 +91,45 @@ export const register: Register = (on) => {
     const result = await next(e)
     await setBlocked($, false)
     if (hooks) await report($, 'working')
+    // A first turn interrupted (Esc) gets no stop: this one is a later turn, which is
+    // never nudged, so Veld is told to settle.
+    if (hooks && context && namingPrompt && !namingStop) {
+      namingStop = true
+      await keep($)
+      await askNaming($, { turn: 'prompt', fresh: false })
+    }
+    // The context on this first prompt was the reminder; this tells Veld the stop may
+    // need refusing.
+    if (hooks && context && !namingPrompt) {
+      namingPrompt = true
+      await keep($)
+      // Asked here, not at `session.start`, because `/resume` inside a running session
+      // starts no new one. A resumed conversation's figures count from its first
+      // launch, so a start well before this process's is one that already had its
+      // first turn. Unknown counts as resumed: a missed nudge costs less than one that
+      // renames a worktree its agent already named.
+      const resumed = await $.session
+        .usage()
+        .then((u) => u.startedAt < launchedAt - 60_000, () => true)
+      await askNaming($, { turn: 'prompt', fresh: !resumed })
+    }
     return result
   })
+
+  // A first turn that ends with the worktree still unnamed is refused once. Classic,
+  // like `classic.Notification` below, so it reaches a mod only where no organization
+  // guard sits in front of it; where one does, the context alone asks.
+  on('classic.Stop', async ($, e, next) => {
+    const result = await next(e)
+    if (!hooks || !context || !namingPrompt || namingStop) return result
+    namingStop = true
+    await keep($)
+    const verdict = await askNaming($, { turn: 'stop', continued: e.stop_hook_active === true })
+    if (verdict !== 'block') return result
+    // The turn goes on to name the worktree; `turn.complete`'s report comes when it ends.
+    await report($, 'working')
+    return { ...result, block: NAMING }
+  }).catch(passThrough)
 
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
@@ -173,7 +224,7 @@ const passThrough = (_$: unknown, e: any, next: (e: any) => any) => next(e)
 
 async function keep($: EngineInterface): Promise<void> {
   try {
-    await $.state.set(KEPT, { contextPending, blocked })
+    await $.state.set(KEPT, { contextPending, blocked, launchedAt, namingPrompt, namingStop })
   } catch {}
 }
 
@@ -216,4 +267,24 @@ async function report($: EngineInterface, state: string, held = false): Promise<
     .catch(() => {})
   sending = send
   await Promise.race([send, $.clock.sleep(TIMEOUT_MS)]).catch(() => {})
+}
+
+// Put one naming turn to the daemon and read its answer: `remind`, `block`, or nothing.
+// Bounded like a report, and nothing on any failure.
+async function askNaming($: EngineInterface, turn: object): Promise<string | undefined> {
+  try {
+    const res = await Promise.race([
+      $.http.fetch(`${DAEMON}/api/pty/sessions/${encodeURIComponent(session)}/naming`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-veld-request': '1' },
+        body: JSON.stringify(turn),
+      }),
+      $.clock.sleep(TIMEOUT_MS).then(() => undefined),
+    ])
+    if (!res || !res.ok) return undefined
+    const answer = JSON.parse(res.text).naming
+    return typeof answer === 'string' ? answer : undefined
+  } catch {
+    return undefined
+  }
 }
