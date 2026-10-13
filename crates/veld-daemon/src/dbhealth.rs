@@ -442,7 +442,11 @@ pub async fn run_probe() {
 /// Housekeeping's gate ([`verified_not_corrupt`]) only asks whether a verdict
 /// has *ever* been reached and that none of them is corruption, never how old it
 /// is, so the longer cadence does not starve the GC; it is re-closed within one
-/// probe tick of a corrupt observation either way.
+/// probe tick of a corrupt observation either way. The other side of that: damage
+/// in a table nothing reads can now sit under a clean verdict for up to an hour
+/// (it was five minutes), and housekeeping prunes and reclaims under it. Damage a
+/// statement *does* hit is recorded at once by [`note_error`] and closes the gate
+/// regardless of the cadence.
 fn quick_check_due(
     last_ok_at: Option<DateTime<Utc>>,
     fault: Option<DbFault>,

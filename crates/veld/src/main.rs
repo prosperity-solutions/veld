@@ -2029,14 +2029,14 @@ fn log_pump_writer(
         let message = match (claim.dropped, kept) {
             (0, k) => format!(
                 "[log] rate limit: re-adding the last {k} dropped line(s) from {node}:{variant} \
-                 below, with their original timestamps"
+                 at their original timestamps"
             ),
             (n, 0) => {
                 format!("[log] rate limit: dropped {n} line(s) from {node}:{variant} — {limit}")
             }
             (n, k) => format!(
                 "[log] rate limit: dropped {n} line(s) from {node}:{variant} — {limit}; the \
-                 last {k} dropped line(s) are re-added below with their original timestamps"
+                 last {k} dropped line(s) are re-added at their original timestamps"
             ),
         };
         let written = db

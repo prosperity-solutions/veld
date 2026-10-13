@@ -1756,7 +1756,7 @@ export function NewWorktreeDialog(props: {
           disabled={!branches}
           // Rendered-count cap, as above.
           limit={200}
-          description="As of the last fetch. origin refreshes about once a minute; another remote's branches appear once you have fetched it. The checkout itself always fetches first."
+          description="As of the last fetch. origin refreshes about every five minutes; another remote's branches appear once you have fetched it. The checkout itself always fetches first."
           data={(branches?.remote ?? []).map((b) => ({
             value: b.name,
             label: b.has_local ? `${b.name} — local branch exists` : b.name,
@@ -2488,7 +2488,7 @@ function useThumbnail(attachment: PromptAttachment): { url: string; broke: () =>
  * spawn git for nothing.
  *
  * **Freshness is `origin`'s only.** The repo poll's throttled fetch
- * (`maybe_fetch`, once a minute per repo) runs `git fetch origin` and nothing
+ * (`maybe_fetch`, every five minutes per repo) runs `git fetch origin` and nothing
  * else, while the endpoint lists every remote — so a second remote's branches
  * are as fresh as the last time somebody fetched it by hand. The *create* path
  * fetches whichever remote the chosen ref belongs to, so the checkout is
