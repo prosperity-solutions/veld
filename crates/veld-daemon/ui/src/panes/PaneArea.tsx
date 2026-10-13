@@ -124,7 +124,6 @@ import {
   newTabId,
   openFileTab,
   paneTabLabel,
-  tabForTransport,
   parseTransferTabs,
   replaceTab,
   paneAnswerFor,
@@ -197,6 +196,7 @@ import {
   terminalStatus,
   unmountTerminal,
 } from "./terminalHost";
+import { useTermTitle } from "./termTitles";
 
 /** A tab whose restart is waiting on the user's confirmation. */
 interface PendingRestart {
@@ -995,10 +995,7 @@ export function PaneArea(props: {
         worktreeId: props.worktreeId,
         repoRoot: props.repoRoot,
         ratio: layout.ratio,
-        // `tabForTransport`, not the live tabs: an adopted terminal title never
-        // leaves the page it was adopted on, and the receiving renderer would
-        // drop it anyway. See its doc comment for what carrying it costs.
-        tabs: tabs.map(tabForTransport),
+        tabs,
       });
       if (!result?.moved && !result?.opened) {
         notifyError(
@@ -1027,8 +1024,7 @@ export function PaneArea(props: {
         worktreeId: props.worktreeId,
         repoRoot: props.repoRoot,
         ratio: layout.ratio,
-        // See `dropOutTabs` above: stripped, not live.
-        tabs: tabs.map(tabForTransport),
+        tabs,
       });
       if (!result?.opened) {
         notifyError(
@@ -1786,7 +1782,7 @@ function DockView(props: {
           <TabButton
             key={tab.id}
             tab={tab}
-            label={paneTabLabel(layout, tab)}
+            layout={layout}
             icon={tabIcon(tab, props.panes, props.sessionRegistry)}
             session={
               tab.kind === "browser"
@@ -2900,7 +2896,9 @@ function paneActivity(id: string, showWorking: boolean): RowState | null {
 
 function TabButton(props: {
   tab: PaneTab;
-  label: string;
+  /** For the label's fallback numbering ("Terminal 2"); the live title is not
+   *  here — see `useTermTitle`. */
+  layout: PaneLayout;
   /** The kind's glyph, so a strip of tabs is readable without their titles. */
   icon: React.ReactNode;
   /** `browser` only: the session's name, which the tinted glyph's tooltip says.
@@ -2935,6 +2933,11 @@ function TabButton(props: {
 }) {
   const [dragging, setDragging] = useState(false);
   const box = useRef<HTMLSpanElement>(null);
+  // The one place a terminal's live title is read for the strip. A working
+  // Claude Code retitles itself ~10 times a second; subscribing here re-renders
+  // this tab alone instead of the whole app (the title is not in the layout).
+  const termTitle = useTermTitle(props.tab.kind === "terminal" ? props.tab.id : null);
+  const label = paneTabLabel(props.layout, props.tab, termTitle);
 
   // A strip full of tabs scrolls, and a tab can become the active one without
   // being clicked — ⌘K, a drop, or closing its neighbour. Reveal it, or the
@@ -3022,7 +3025,7 @@ function TabButton(props: {
         // sentence) and the tooltip is then the only place the whole thing is
         // readable — the drag hints follow it rather than replacing it.
         title={[
-          props.label,
+          label,
           ...(props.session === null ? [] : [`Session: ${props.session}`]),
           props.canMove
             ? "Drag to reorder, to a pane edge to split · double-click to send to the other pane"
@@ -3046,7 +3049,7 @@ function TabButton(props: {
             </span>
           </Tooltip>
         )}
-        <span className="pane-tab-text">{props.label}</span>
+        <span className="pane-tab-text">{label}</span>
       </button>
       {/* Which pane the worktree's rail glyph was talking about — the SAME glyph, so
           the two surfaces share one vocabulary instead of having to be learned
@@ -3061,7 +3064,7 @@ function TabButton(props: {
       <button
         type="button"
         className="pane-tab-close"
-        aria-label={`Close ${props.label}`}
+        aria-label={`Close ${label}`}
         // Deliberately out of the tab order: a tablist is one tab stop, and with
         // both docks full, tabbing through every close button on the way to the
         // content is worse than the Delete key being the keyboard route (which the

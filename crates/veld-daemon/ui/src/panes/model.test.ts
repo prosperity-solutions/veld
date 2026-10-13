@@ -68,7 +68,6 @@ import {
   moveTabToOtherDock,
   type AdoptedTermTitle,
   adoptedTermTitle,
-  layoutForPersistence,
   MAX_TERM_TITLE,
   mayAdoptTerminalTitle,
   newPaneTab,
@@ -93,7 +92,6 @@ import {
   terminalIds,
   terminalLabel,
   writeLayouts,
-  tabForTransport,
   updateTab,
   urlForProfile,
   urlLabel,
@@ -511,65 +509,6 @@ describe("persistence", () => {
     l = addTab(l, 0, term());
     const back = parseLayouts(serializeLayouts({ 7: l }));
     expect(back[7]).toEqual(l);
-  });
-
-  // The write half of the same asymmetry the next test pins on the read half.
-  // Storing a field nothing reads back is not free: it made every title a
-  // process sets into a layout mutation — a PUT, a SQLite transaction and a
-  // broadcast to every other client — for as long as a tool keeps its title
-  // live.
-  // The other boundary a tab crosses. Same rule, same reason: the receiving
-  // renderer runs a transferred tab through `parseTab`, which drops the field —
-  // so carrying it only spends `MAX_TAB_BYTES` and `MAX_SEED_BYTES`.
-  it("does not hand an adopted title to another window either", () => {
-    const tab: PaneTab = {
-      id: "t9",
-      kind: "terminal",
-      title: "Claude",
-      spec: "claude",
-      termTitle: adopted("fix the login flow"),
-    };
-    expect(tabForTransport(tab)).not.toHaveProperty("termTitle");
-    // Unchanged tabs come back identical, so a transfer of ordinary tabs
-    // allocates nothing.
-    const plain = term();
-    expect(tabForTransport(plain)).toBe(plain);
-  });
-
-  it("does not persist an adopted terminal title at all", () => {
-    let l = twoDock();
-    l = addTab(l, 0, { id: "t9", kind: "terminal", title: "Claude", spec: "claude" });
-    l = updateTab(l, "t9", { termTitle: adopted("fix the login flow") });
-
-    const stored = JSON.parse(serializeLayouts({ 7: l }));
-    const storedTab = stored[7].docks[0].tabs.find((t: PaneTab) => t.id === "t9");
-    expect(storedTab).toBeDefined();
-    expect(storedTab).not.toHaveProperty("termTitle");
-    // The on-screen layout is untouched — this is a write-time projection.
-    const live = l.docks[0].tabs.find((t) => t.id === "t9") as PaneTab;
-    expect(paneTabLabel(l, live)).toBe("fix the login flow");
-    // And a layout with nothing to strip is handed back as-is, so the app's
-    // save effect keeps seeing a stable document.
-    const plainLayout = addTab(twoDock(), 0, term());
-    expect(layoutForPersistence(plainLayout)).toBe(plainLayout);
-  });
-
-  // What makes `fixed_label` reliable without any code reading the flag back.
-  // An adopted OSC title is display-only, so it is written to storage (the
-  // whole layout is stringified) and deliberately *not* read back — which is
-  // why a pane the project pins after the fact returns to its `label` on the
-  // next load instead of being stuck on a title nothing will overwrite.
-  it("drops an adopted terminal title on the way back in", () => {
-    let l = twoDock();
-    l = addTab(l, 0, { id: "t9", kind: "terminal", title: "Claude", spec: "claude" });
-    l = updateTab(l, "t9", { termTitle: adopted("fix the login flow") });
-    const before = l.docks[0].tabs.find((t) => t.id === "t9") as PaneTab;
-    expect(paneTabLabel(l, before)).toBe("fix the login flow");
-
-    const back = parseLayouts(serializeLayouts({ 7: l }));
-    const tab = back[7].docks[0].tabs.find((t) => t.id === "t9");
-    expect(tab?.termTitle).toBeUndefined();
-    expect(paneTabLabel(back[7], tab as PaneTab)).toBe("Claude");
   });
 
   it("returns nothing for absent or unparseable storage", () => {
@@ -1460,15 +1399,11 @@ describe("paneTabLabel", () => {
     const l = twoDock();
     // A plain terminal adopts its OSC 0/2 title over "Terminal N".
     const plain = term();
-    expect(paneTabLabel(l, { ...plain, termTitle: adopted("build: npm run dev") })).toBe(
-      "build: npm run dev",
-    );
+    expect(paneTabLabel(l, plain, adopted("build: npm run dev"))).toBe("build: npm run dev");
     // A config pane that opted in does too, over its configured label.
     const cfg = configPaneTab({ id: "claude", label: "Claude" });
-    expect(paneTabLabel(l, { ...cfg, termTitle: adopted("fix login flow") })).toBe(
-      "fix login flow",
-    );
-    // Without a termTitle, both keep what they were born with.
+    expect(paneTabLabel(l, cfg, adopted("fix login flow"))).toBe("fix login flow");
+    // Without a title, both keep what they were born with.
     expect(paneTabLabel(l, cfg)).toBe("Claude");
     expect(paneTabLabel(l, plain)).toBe("Terminal");
   });
@@ -1481,13 +1416,13 @@ describe("paneTabBaseLabel", () => {
     l = addTab(l, 0, plain);
     // The exact shape that made a banner read "· sleep 5 && printf '…'": a
     // preexec hook renames the tab to the running command line.
-    const running = { ...plain, termTitle: adopted("sleep 5 && printf '\\033]9;done\\007'") };
-    expect(paneTabLabel(l, running)).toBe("sleep 5 && printf '\\033]9;done\\007'");
-    expect(paneTabBaseLabel(l, running)).toBe("Terminal");
+    const running = adopted("sleep 5 && printf '\\033]9;done\\007'");
+    expect(paneTabLabel(l, plain, running)).toBe("sleep 5 && printf '\\033]9;done\\007'");
+    expect(paneTabBaseLabel(l, plain)).toBe("Terminal");
 
     // A config pane falls back to its configured label, not its spec id.
     const cfg = configPaneTab({ id: "claude", label: "Claude" });
-    expect(paneTabBaseLabel(l, { ...cfg, termTitle: adopted("fix login flow") })).toBe("Claude");
+    expect(paneTabBaseLabel(l, cfg)).toBe("Claude");
   });
 
   it("numbers plain terminals the way the strip does", () => {
@@ -1496,7 +1431,7 @@ describe("paneTabBaseLabel", () => {
     const second = term();
     l = addTab(addTab(l, 0, first), 0, second);
     expect(paneTabBaseLabel(l, second)).toBe("Terminal 2");
-    expect(paneTabBaseLabel(l, { ...second, termTitle: adopted("vim x.rs") })).toBe("Terminal 2");
+    expect(paneTabBaseLabel(l, second)).toBe("Terminal 2");
   });
 
   it("is `paneTabLabel` for every non-terminal kind", () => {
@@ -2107,8 +2042,8 @@ describe("paneAnswerFor", () => {
 /**
  * A `termTitle` fixture, minted the way production mints one.
  *
- * `PaneTab.termTitle` is branded so only `adoptedTermTitle` can produce it — see
- * the field's own comment. That makes a test fixture go through the real
+ * The title store holds a branded `AdoptedTermTitle`, so only `adoptedTermTitle`
+ * can produce one. That makes a test fixture go through the real
  * cleaner, which is the point: a fixture no production path could produce is a
  * test of nothing. Throws rather than returning `undefined`, so a fixture that
  * cleans away to nothing fails loudly here instead of silently asserting a
