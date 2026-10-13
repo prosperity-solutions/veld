@@ -118,12 +118,38 @@ fn raise_fd_limit() {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// A plain `fn main` so the runtime can depend on the mode.
+///
+/// - **Daemon**: the multi-thread runtime `#[tokio::main]` gave it. It has to stay
+///   that way: `offload` calls `Handle::current().block_on` from inside
+///   `spawn_blocking`, and the HTTP, WebSocket, monitor and sampler tasks all want
+///   real parallelism.
+/// - **`--pty-holder`**: a current-thread runtime. A holder pumps one PTY fd and one
+///   socket for a single terminal, and there is one holder process per terminal, so a
+///   worker thread per core (and its stack and allocator arenas) was paid N times for
+///   nothing. Everything it awaits is non-blocking I/O (`AsyncFd`, unix sockets,
+///   channels) plus a `spawn_blocking` for `child.wait()`, which runs on the blocking
+///   pool and works on any flavour. Nothing on the holder path may call
+///   `block_in_place` (it panics on a current-thread runtime) — there is none in the
+///   workspace today.
+fn main() -> Result<()> {
     // Parsed before tracing is initialised, because the mode decides where the
     // logs go — and parsing writes nothing.
     let args = parse_args();
 
+    let mut builder = if args.pty_holder {
+        tokio::runtime::Builder::new_current_thread()
+    } else {
+        tokio::runtime::Builder::new_multi_thread()
+    };
+    builder
+        .enable_all()
+        .build()
+        .context("failed to build the tokio runtime")?
+        .block_on(run(args))
+}
+
+async fn run(args: Args) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     if args.pty_holder {
