@@ -56,6 +56,7 @@ const {
   serializeWindowList,
   slotFor,
 } = require("./windowState");
+const { focusGatedInterval } = require("./focusPoll");
 
 /**
  * @typedef {object} WindowRecord
@@ -874,8 +875,12 @@ function openWindow(options = {}) {
   // rather than an event, and why the `did-finish-load` sync is a backstop for
   // the per-origin zoom a window can be restored at.
   if (!detached) {
-    const zoomTimer = setInterval(() => syncTrafficLights(record), ZOOM_POLL_MS);
-    win.on("closed", () => clearInterval(zoomTimer));
+    // Only while this window has focus: a background window has nobody zooming
+    // it, and ten reads a second per window for nothing adds up with several open.
+    // Focus restarts the poll and syncs at once, which catches a zoom changed
+    // while the window was in the background (a wheel zoom, say).
+    const stopZoomPoll = focusGatedInterval(win, () => syncTrafficLights(record), ZOOM_POLL_MS);
+    win.on("closed", stopZoomPoll);
     win.webContents.on("did-finish-load", () => syncTrafficLights(record));
   }
 
