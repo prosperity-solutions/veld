@@ -15,10 +15,13 @@
 //! 1. **Waiting to be told is not enough.** Passive observation only ever sees
 //!    the pages somebody happened to touch, and `pane_layouts` is touched only
 //!    when a person rearranges panes. So this module *asks* — `PRAGMA
-//!    quick_check` on a timer, which costs ~15 ms on a real 8.7 MB database and
-//!    names exactly this fault class. Errors that other subsystems trip over are
-//!    still folded in via [`note_error`], because they arrive sooner than the
-//!    next probe.
+//!    quick_check` on a timer, which names exactly this fault class. It costs
+//!    ~15 ms on an 8.7 MB database but it is a full page walk, so it scales with
+//!    the file: measured 5.4 CPU-seconds per run on a 6.6 GB one. That is why it
+//!    runs once at startup and then hourly rather than every probe tick — see
+//!    [`quick_check_due`]. Errors that other subsystems trip over are still
+//!    folded in via [`note_error`], because they arrive sooner than the next
+//!    probe.
 //! 2. **`Db::open()` succeeding proves nothing.** It succeeded throughout the
 //!    incident. Any health story built on "can we open it" reports OK while the
 //!    file rots, which is precisely what `veld doctor` did.
@@ -45,14 +48,31 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use veld_core::db::{Db, DbError, DbFault, Integrity, backup};
 
-/// How often the probe asks SQLite whether the file is still intact.
+/// How often the probe wakes up.
 ///
-/// Five minutes, not five seconds: a quick check is cheap but not free, and the
-/// fault it looks for does not appear and vanish between ticks. The paths that
-/// *do* run every few seconds report through [`note_error`] instead, so a fault
-/// somebody trips over is recorded immediately and the probe is the backstop for
-/// the tables nothing reads.
+/// Five minutes, not five seconds: the fault it looks for does not appear and
+/// vanish between ticks. The paths that *do* run every few seconds report
+/// through [`note_error`] instead, so a fault somebody trips over is recorded
+/// immediately and the probe is the backstop for the tables nothing reads.
+///
+/// This is the cadence of the backup deadman ([`check_overdue_backup`]) and of
+/// the quick check *while a fault is recorded or before the first verdict*. A
+/// healthy, already-verified database is only re-checked every
+/// [`QUICK_CHECK_HEALTHY_INTERVAL_SECS`].
 const PROBE_INTERVAL_SECS: u64 = 300;
+
+/// How long a healthy, already-verified database goes between `PRAGMA
+/// quick_check` runs.
+///
+/// An hour, because the check is a full page walk: 5.4 CPU-seconds on a 6.6 GB
+/// database, which at the five-minute probe cadence was a permanent ~2% of a
+/// core spent re-proving a file that had not changed. The incident this module
+/// exists for was found by a 17-hour-old symptom, so an hour of detection
+/// latency for the *unread* tables is well inside what the passive path
+/// ([`note_error`], immediate) plus the startup check already gives. A fault
+/// that is recorded drops straight back to [`PROBE_INTERVAL_SECS`] — see
+/// [`quick_check_due`].
+const QUICK_CHECK_HEALTHY_INTERVAL_SECS: i64 = 3600;
 
 /// How long before the same unresolved fault is worth telling somebody about
 /// again. A fault that is still there tomorrow is still worth a banner; one that
@@ -248,6 +268,11 @@ struct BackupState {
 #[derive(Debug, Default)]
 struct State {
     checked_at: Option<DateTime<Utc>>,
+    /// When the last `quick_check` came back **ok**. Distinct from `checked_at`,
+    /// which is also set when the check could not run at all (so housekeeping is
+    /// not blocked forever by a probe error): only a clean verdict may stretch
+    /// the cadence out to an hour.
+    last_ok_at: Option<DateTime<Utc>>,
     fault: Fault,
     backup: BackupState,
 }
@@ -262,7 +287,7 @@ fn state() -> &'static Mutex<State> {
 /// Called from the funnels that already log one — the desktop API's `db_err`,
 /// and each periodic task's error arm — so the *first* symptom a user's own
 /// activity produces is recorded immediately rather than waiting up to
-/// [`PROBE_INTERVAL_SECS`] for the probe to notice.
+/// [`QUICK_CHECK_HEALTHY_INTERVAL_SECS`] for the probe to notice.
 ///
 /// Errors that are not about the file (a refused row, a taken alias) are
 /// ignored, which is what makes this safe to call from a hot path: the
@@ -404,14 +429,62 @@ pub async fn run_probe() {
     }
 }
 
+/// Whether this probe tick should run `PRAGMA quick_check`.
+///
+/// Yes on the first tick (nothing verified yet), yes on every tick while a fault
+/// of any kind is recorded — **"only the probe may declare the database healthy
+/// again"**, so an I/O blip recorded by [`note_error`] must be able to clear
+/// within one probe interval, not an hour — and otherwise once
+/// [`QUICK_CHECK_HEALTHY_INTERVAL_SECS`] after the last clean verdict. A clock
+/// that went backwards (negative age) counts as due rather than as "fresh for
+/// another hour".
+///
+/// Housekeeping's gate ([`verified_not_corrupt`]) only asks whether a verdict
+/// has *ever* been reached and that none of them is corruption, never how old it
+/// is, so the longer cadence does not starve the GC; it is re-closed within one
+/// probe tick of a corrupt observation either way.
+fn quick_check_due(
+    last_ok_at: Option<DateTime<Utc>>,
+    fault: Option<DbFault>,
+    now: DateTime<Utc>,
+) -> bool {
+    if fault.is_some() {
+        return true;
+    }
+    match last_ok_at {
+        None => true,
+        Some(at) => {
+            let age = now.signed_duration_since(at);
+            age < Duration::zero() || age >= Duration::seconds(QUICK_CHECK_HEALTHY_INTERVAL_SECS)
+        }
+    }
+}
+
 /// One probe pass.
 fn probe_once() {
     let now = Utc::now();
+    let due = {
+        let st = state().lock().expect("dbhealth state poisoned");
+        quick_check_due(st.last_ok_at, st.fault.kind, now)
+    };
+    if due {
+        run_quick_check(now);
+    }
+    // The deadman runs on every tick regardless: it is a directory listing and a
+    // couple of kv reads, and a missed backup should be reported within one
+    // probe interval whatever the integrity cadence is.
+    check_overdue_backup();
+}
+
+/// The integrity half of a probe pass: open the database, ask SQLite, record the
+/// answer.
+fn run_quick_check(now: DateTime<Utc>) {
     match Db::open() {
         Ok(db) => match db.integrity() {
             Ok(Integrity::Ok) => {
                 let mut st = state().lock().expect("dbhealth state poisoned");
                 st.checked_at = Some(now);
+                st.last_ok_at = Some(now);
                 // Only the probe may declare the database healthy again. A
                 // passive observer sees one statement succeed, which says
                 // nothing about the page that is broken.
@@ -426,6 +499,7 @@ fn probe_once() {
                 tracing::error!("database integrity check failed: {detail}");
                 let mut st = state().lock().expect("dbhealth state poisoned");
                 st.checked_at = Some(now);
+                st.last_ok_at = None;
                 st.fault.observe(DbFault::Corrupt, detail, now);
             }
             // An error the classifier does not recognise as a file fault: worth a
@@ -441,8 +515,6 @@ fn probe_once() {
             note_error(&e);
         }
     }
-
-    check_overdue_backup();
 }
 
 /// The deadman half: a backup that was due and did not happen.
@@ -749,7 +821,8 @@ fn forget_notified(id: &str) {
 /// The freshness cost is nil in practice — artifacts appear on the backup
 /// schedule, measured in minutes.
 fn artifacts_cached() -> (Option<backup::Artifact>, Option<backup::Artifact>) {
-    /// Deliberately shorter than the probe interval, so a `veld backup now` taken
+    /// Deliberately shorter than the probe interval (the deadman that reads these
+    /// artifacts ticks every [`PROBE_INTERVAL_SECS`]), so a `veld backup now` taken
     /// by hand shows up quickly, and far longer than the UI's 5-second poll.
     const ARTIFACT_CACHE_SECS: u64 = 30;
     static CACHE: OnceLock<Mutex<Option<(std::time::Instant, ArtifactPair)>>> = OnceLock::new();
@@ -1050,6 +1123,40 @@ fn first_sentence(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quick_check_cadence_is_startup_then_hourly_but_prompt_while_faulted() {
+        let now = Utc::now();
+        let ago = |secs: i64| Some(now - Duration::seconds(secs));
+
+        // Nothing verified yet: run it, whatever else is true.
+        assert!(quick_check_due(None, None, now));
+        // Clean, verified moments ago: the five-minute tick must NOT pay for a
+        // full page walk again.
+        assert!(!quick_check_due(ago(PROBE_INTERVAL_SECS as i64), None, now));
+        assert!(!quick_check_due(
+            ago(QUICK_CHECK_HEALTHY_INTERVAL_SECS - 1),
+            None,
+            now
+        ));
+        // An hour on, it is owed.
+        assert!(quick_check_due(
+            ago(QUICK_CHECK_HEALTHY_INTERVAL_SECS),
+            None,
+            now
+        ));
+        // A recorded fault of any kind keeps the five-minute cadence, so that
+        // only the probe can clear it promptly.
+        for kind in [DbFault::Corrupt, DbFault::Io] {
+            assert!(quick_check_due(ago(1), Some(kind), now), "{kind:?}");
+        }
+        // A clock that stepped backwards must not read as "fresh for an hour".
+        assert!(quick_check_due(
+            Some(now + Duration::seconds(60)),
+            None,
+            now
+        ));
+    }
+
     use super::*;
 
     fn db_view(state: &'static str) -> DatabaseView {
