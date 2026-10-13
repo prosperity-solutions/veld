@@ -3628,9 +3628,14 @@ async fn repo_git_status_cached(
         return hit;
     }
     let fresh = git_status_against_origin(repo_root, default_branch.clone()).await;
-    memo_put(repo_root, fingerprint, |m| {
-        m.status = Some((default_branch, fresh.clone()))
-    });
+    // A failed `rev-list` (no `origin/<default>` yet, or a spawn that did not
+    // run) is not kept: like the other memoized answers, only successes are, so
+    // the next poll asks git again.
+    if fresh.behind.is_some() {
+        memo_put(repo_root, fingerprint, |m| {
+            m.status = Some((default_branch, fresh.clone()))
+        });
+    }
     fresh
 }
 
@@ -6437,6 +6442,87 @@ async fn start_worktree_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- `RepoGitMemo` ---------------------------------------------------------
+
+    /// A memo key no other test uses: the memo is process-wide.
+    fn memo_repo(name: &str) -> PathBuf {
+        PathBuf::from(format!("/memo-test/{name}"))
+    }
+
+    fn status_of(
+        memo_repo: &FsPath,
+        fp: &Option<repo_fingerprint::RepoFingerprint>,
+    ) -> Option<i64> {
+        memo_get(memo_repo, fp, |m| m.status.as_ref().map(|(_, s)| s.behind)).flatten()
+    }
+
+    fn put_status(memo_repo: &FsPath, fp: &Option<repo_fingerprint::RepoFingerprint>, behind: i64) {
+        memo_put(memo_repo, fp, |m| {
+            m.status = Some((
+                "main".to_owned(),
+                RepoGitStatus {
+                    default_branch: Some("main".to_owned()),
+                    behind: Some(behind),
+                    latest_commit: None,
+                },
+            ))
+        });
+    }
+
+    #[test]
+    fn a_memo_answer_is_reused_only_under_the_same_fingerprint() {
+        let repo = memo_repo("same");
+        let one = Some(repo_fingerprint::for_test(1));
+        let two = Some(repo_fingerprint::for_test(2));
+        put_status(&repo, &one, 3);
+        assert_eq!(status_of(&repo, &one), Some(3));
+        assert_eq!(status_of(&repo, &two), None, "a moved fingerprint misses");
+    }
+
+    #[test]
+    fn a_new_fingerprint_discards_every_answer_kept_under_the_old_one() {
+        let repo = memo_repo("discard");
+        let one = Some(repo_fingerprint::for_test(1));
+        let two = Some(repo_fingerprint::for_test(2));
+        put_status(&repo, &one, 3);
+        memo_put(&repo, &two, |m| {
+            m.discovered = Some((Vec::new(), Vec::new()))
+        });
+        assert_eq!(status_of(&repo, &two), None, "old status must not survive");
+        assert_eq!(status_of(&repo, &one), None);
+        assert!(memo_get(&repo, &two, |m| m.discovered.clone()).is_some());
+    }
+
+    #[test]
+    fn without_a_fingerprint_nothing_is_kept_or_served() {
+        let repo = memo_repo("none");
+        put_status(&repo, &None, 3);
+        assert!(!REPO_GIT_MEMO.lock().unwrap().contains_key(&repo));
+        let one = Some(repo_fingerprint::for_test(1));
+        put_status(&repo, &one, 3);
+        assert_eq!(status_of(&repo, &None), None);
+    }
+
+    #[test]
+    fn an_entry_older_than_the_max_age_misses_and_is_replaced() {
+        let repo = memo_repo("expired");
+        let one = Some(repo_fingerprint::for_test(1));
+        put_status(&repo, &one, 3);
+        let aged = std::time::Instant::now()
+            .checked_sub(REPO_GIT_MEMO_MAX_AGE + std::time::Duration::from_secs(1))
+            .expect("the clock is past the max age");
+        REPO_GIT_MEMO.lock().unwrap().get_mut(&repo).unwrap().at = aged;
+        assert_eq!(status_of(&repo, &one), None);
+        memo_put(&repo, &one, |m| {
+            m.discovered = Some((Vec::new(), Vec::new()))
+        });
+        assert_eq!(
+            status_of(&repo, &one),
+            None,
+            "expired status is not carried over"
+        );
+    }
 
     // -- `select_news` (`news.source`) ---------------------------------------
 

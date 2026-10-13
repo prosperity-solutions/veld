@@ -67,6 +67,20 @@ enum Stamp {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RepoFingerprint(BTreeMap<PathBuf, Stamp>);
 
+/// A fingerprint equal only to another of the same `seed`, for tests of what is
+/// kept under one.
+#[cfg(test)]
+pub(super) fn for_test(seed: u64) -> RepoFingerprint {
+    RepoFingerprint(BTreeMap::from([(
+        PathBuf::from("seed"),
+        Stamp::Present {
+            mtime_ns: 0,
+            size: seed,
+            ino: 0,
+        },
+    )]))
+}
+
 /// The fingerprint of `repo_root`'s git state, or `None` when it cannot be taken
 /// cheaply and trustworthily (see the module docs) — in which case the caller
 /// must ask git.
@@ -106,8 +120,10 @@ fn fingerprint_at(repo_root: &Path, now: SystemTime) -> Option<RepoFingerprint> 
                 }
                 // Whether the checkout is still there is the one fact about a
                 // linked worktree that lives outside the git dir.
+                // A relative target (`worktree.useRelativePaths`) is relative to
+                // this admin dir, not to the daemon's cwd.
                 if let Ok(target) = std::fs::read_to_string(dir.join("gitdir")) {
-                    let target = PathBuf::from(target.trim());
+                    let target = dir.join(target.trim());
                     out.exists(&target)?;
                 }
             }
@@ -447,6 +463,26 @@ mod tests {
 
         git(&f.work, &["worktree", "prune"]);
         assert_ne!(vanished, fp(&f.work));
+    }
+
+    #[test]
+    fn removing_a_worktree_recorded_with_a_relative_path_moves_it() {
+        let f = fixture();
+        let wt = f.work.parent().unwrap().join("wt");
+        git(
+            &f.work,
+            &["worktree", "add", "-q", "-b", "wtb", wt.to_str().unwrap()],
+        );
+        // What `git worktree add --relative-paths` writes; set by hand so the
+        // test does not depend on a git new enough to have the flag.
+        std::fs::write(
+            f.work.join(".git/worktrees/wt/gitdir"),
+            "../../../../wt/.git\n",
+        )
+        .unwrap();
+        let present = fp(&f.work);
+        std::fs::remove_dir_all(&wt).unwrap();
+        assert_ne!(present, fp(&f.work));
     }
 
     #[test]
