@@ -79,7 +79,7 @@ try:
 except Exception:
     print("unknown"); sys.exit()
 print("locked" if active else "unlocked")
-' "$rulesets" "$RULESET")
+' "$rulesets" "$RULESET" 2>/dev/null) || state=
   # Empty when python3 itself is missing or broken — not "unlocked".
   [ -n "$state" ] || state=unknown
   echo "$state"
@@ -97,7 +97,8 @@ try:
 except Exception:
     pass
 print(reason)
-' "$(api_get "repos/$REPO/issues?labels=$LABEL&state=open")" "${OWNERS[@]}"
+' "$(api_get "repos/$REPO/issues?labels=$LABEL&state=open")" "${OWNERS[@]}" 2>/dev/null \
+    || echo "(no reason given)"
 }
 
 github_login() {
@@ -156,8 +157,11 @@ JSON
     [ -n "$id" ] || { echo "no $RULESET ruleset — run: scripts/dev/lock.sh setup" >&2; exit 1; }
     # Only an issue this owner wrote: a label needs just triage access, and
     # lock_state ignores issues by anyone else.
+    # `--author ""` is no filter at all, so an unknown login is a stop.
+    login=$(github_login)
+    [ -n "$login" ] || { echo "cannot tell who you are — run: gh auth login" >&2; exit 1; }
     issue=$(gh issue list --repo "$REPO" --label "$LABEL" --state open \
-      --author "$(github_login)" --json number --jq '.[0].number')
+      --author "$login" --json number --jq '.[0].number')
     if [ -n "$issue" ]; then
       gh issue edit "$issue" --repo "$REPO" --body "$reason" >/dev/null
     else
@@ -168,7 +172,9 @@ JSON
     gh issue pin "$issue" --repo "$REPO" >/dev/null 2>&1 || true
     gh api -X PUT "repos/$REPO/rulesets/$id" -f enforcement=active >/dev/null
     # An active ruleset with an empty bypass list would lock the owner out too.
-    if [ "$(gh api "repos/$REPO/rulesets/$id" --jq '.bypass_actors | length')" = 0 ]; then
+    # Unreadable counts as empty: this check must not fail open.
+    n=$(gh api "repos/$REPO/rulesets/$id" --jq '.bypass_actors | length' 2>/dev/null) || n=""
+    if ! [ "${n:-0}" -gt 0 ] 2>/dev/null; then
       gh api -X PUT "repos/$REPO/rulesets/$id" -f enforcement=disabled >/dev/null
       echo "❌ the $RULESET ruleset has no bypass team — left unlocked; re-run setup" >&2
       exit 1
@@ -183,6 +189,7 @@ JSON
       gh issue close "$issue" --repo "$REPO" --comment "🔓 Unlocked." >/dev/null
     done
     # PRs that went red under the lock stay red until their Lock check re-runs.
+    # Re-runs every recent failure, closed PRs included; that is cheap.
     for run in $(gh run list --repo "$REPO" --workflow lock.yml --status failure \
         --limit 50 --json databaseId --jq '.[].databaseId'); do
       gh run rerun "$run" --repo "$REPO" >/dev/null 2>&1 || true
@@ -239,13 +246,8 @@ PY
       # Unreadable (offline, rate-limited). Blocking here would lock the owner
       # out of their own repo on a plane; GitHub's ruleset is the actual wall,
       # and CI fails closed.
-      python3 - <<'PY'
-import json
-print(json.dumps({"hookSpecificOutput": {
-    "hookEventName": "UserPromptSubmit",
-    "additionalContext": "Could not check whether veld is locked. Before changing "
-    "anything, run scripts/dev/lock.sh status; if it exits non-zero, stop."}}))
-PY
+      # Fixed text, printed without python3: its absence is one way to get here.
+      printf '%s\n' '{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": "Could not check whether veld is locked. Before changing anything, run scripts/dev/lock.sh status; if it exits non-zero, stop."}}'
     fi
     ;;
   ci)
