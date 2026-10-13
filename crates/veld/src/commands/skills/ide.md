@@ -175,10 +175,10 @@ once per piece of work, not on every turn. When they agree, or ask for it
 themselves:
 
 ```sh
-veld ide worktree new --branch fix/login-timeout --prompt-file /tmp/task.md
+veld ide worktree new --branch fix/login-timeout --name "Fix login timeout" --prompt-file /tmp/task.md
 veld ide worktree new --branch docs/api --name "API docs" --prompt "Document the v2 endpoints in docs/api.md"
 veld ide worktree groups                       # the groups you can file into
-veld ide worktree new --branch spike/cache --group Experiments --from-here --prompt-file - < plan.md --json
+veld ide worktree new --branch spike/cache --name "Cache spike" --group Experiments --from-here --prompt-file - < plan.md --json
 ```
 
 Veld creates the worktree in **the project your working directory is in** — run
@@ -213,12 +213,15 @@ which files, how to tell it is done.
   declare is refused before anything is created (exit `5`); if the new checkout
   turns out not to declare it (a branch cut from `origin` without it), the
   human's usual agent starts instead and they are told.
-- `--name` is what the rail shows. Leave it out and the project's
-  `ide.worktreeName` names it from the prompt, if it declares one, else the
-  branch does.
+- `--name` is the title the rail shows, and it is **required**: a few words
+  saying what the task is, in sentence case — "Fix login timeout", "API docs",
+  "Cache spike" — not the branch name and not a sentence. It must fit the
+  sidebar: at most 18 columns (a wide character such as 漢 or an emoji counts as
+  two). A missing or longer title is refused before anything is created (exit
+  `2`).
 
-Exit status: `0` created; `1` refused, so nothing was created; `2` bad flags or
-an unreadable prompt file; `3` not inside a worktree Veld knows; `4` no such
+Exit status: `0` created; `1` refused, so nothing was created; `2` bad flags, a
+missing or too-long title, or an unreadable prompt file; `3` not inside a worktree Veld knows; `4` no such
 group; `5` no such agent pane; **`6` it may exist without everything you
 asked for** — a large checkout can take longer than the command waits, or the
 hand-off failed partway — so check the rail and **do not run it again** (the

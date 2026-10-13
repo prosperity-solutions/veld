@@ -30,7 +30,7 @@ mod stats;
 mod var_overrides;
 mod worktrees;
 
-pub use handoffs::{HANDOFF_LANE, Handoff};
+pub use handoffs::{HANDOFF_LANE, Handoff, MAX_HANDOFF_NAME_COLUMNS, check_handoff_name};
 pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};

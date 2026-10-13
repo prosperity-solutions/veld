@@ -31,6 +31,37 @@ use super::{Db, DbError, now_str};
 /// stored value and must stay in step.
 pub const HANDOFF_LANE: &str = "\u{0}handoff";
 
+/// The widest title a hand-off may carry, in terminal columns.
+///
+/// Measured, not chosen: at the rail's default width (236 px) a row showing the
+/// hand-off hourglass and its menu has room for 19 columns of the rail's
+/// monospace label before it ellipsises, and the one held back is for a status
+/// glyph that may sit beside it later. Columns rather than characters because
+/// a CJK character or an emoji takes two.
+pub const MAX_HANDOFF_NAME_COLUMNS: usize = 18;
+
+/// Why `name` cannot title a hand-off, or `Ok` when it can: it must say
+/// something (not blank) and fit the rail ([`MAX_HANDOFF_NAME_COLUMNS`]).
+/// Shared by the CLI, which refuses before sending anything, and the daemon,
+/// which is the one that has to be right.
+pub fn check_handoff_name(name: &str) -> Result<(), String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err(
+            "give the worktree a title with --name — a few words saying what the task is"
+                .to_owned(),
+        );
+    }
+    let width = unicode_width::UnicodeWidthStr::width(name);
+    if width > MAX_HANDOFF_NAME_COLUMNS {
+        return Err(format!(
+            "the title \"{name}\" is {width} columns; it has to fit the sidebar, so keep it to \
+             {MAX_HANDOFF_NAME_COLUMNS} — say what the task is, e.g. \"Fix login timeout\""
+        ));
+    }
+    Ok(())
+}
+
 /// An agent pane waiting to be started in a handed-off worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handoff {
@@ -251,6 +282,23 @@ mod tests {
         assert!(!db.delete_lane(root, HANDOFF_LANE).unwrap());
         assert!(!db.rename_lane(root, HANDOFF_LANE, "mine").unwrap());
         assert_eq!(db.get_worktree(wt).unwrap().unwrap().lane, HANDOFF_LANE);
+    }
+
+    #[test]
+    fn a_handoff_title_must_say_something_and_fit_the_sidebar() {
+        assert!(check_handoff_name("Fix login timeout").is_ok());
+        assert!(check_handoff_name(&"x".repeat(MAX_HANDOFF_NAME_COLUMNS)).is_ok());
+        assert!(check_handoff_name(&"x".repeat(MAX_HANDOFF_NAME_COLUMNS + 1)).is_err());
+        // Surrounding spaces are not part of the title.
+        assert!(
+            check_handoff_name(&format!("  {}  ", "x".repeat(MAX_HANDOFF_NAME_COLUMNS))).is_ok()
+        );
+        for blank in ["", "   "] {
+            assert!(check_handoff_name(blank).is_err(), "{blank:?}");
+        }
+        // Wide characters count double: nine of them fill the 18 columns.
+        assert!(check_handoff_name(&"漢".repeat(9)).is_ok());
+        assert!(check_handoff_name(&"漢".repeat(10)).is_err());
     }
 
     #[test]

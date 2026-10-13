@@ -14,7 +14,8 @@
 //! - `0` — the worktree exists (and, with a prompt, its agent pane is waiting).
 //! - `1` — the request was refused, so nothing was created: the branch exists,
 //!   the daemon is not running, the prompt is too long.
-//! - `2` — usage: bad flags, or the prompt could not be read.
+//! - `2` — usage: bad flags, a missing or too-wide `--name`, or the prompt could
+//!   not be read.
 //! - `3` — not inside a worktree Veld knows, so there is no project to branch.
 //! - `4` — no group by that name in this project.
 //! - `5` — the agent named is not one this project declares, or it declares none.
@@ -37,7 +38,8 @@ pub enum WorktreeCommand {
     /// with the prompt as its first message; the human takes it from there.
     /// Nothing reports back to the caller.
     ///
-    /// Exit status: 0 created, 1 refused (nothing created), 2 usage, 3 not inside a
+    /// Exit status: 0 created, 1 refused (nothing created), 2 usage (including a
+    /// missing or too-wide title), 3 not inside a
     /// worktree Veld knows, 4 no such group, 5 no such agent pane, 6 it may exist
     /// without everything asked for — check the rail rather than retrying.
     #[command(group(clap::ArgGroup::new("first").args(["prompt", "prompt_file"]).multiple(false)))]
@@ -59,10 +61,10 @@ pub enum WorktreeCommand {
         #[arg(long, value_name = "PANE")]
         agent: Option<String>,
 
-        /// The name the rail shows. Defaults to one generated from the prompt when
-        /// the project declares `ide.worktreeName`, else the branch.
+        /// The title the rail shows: a few words saying what the task is, at most
+        /// 18 columns so it fits the sidebar (e.g. "Fix login timeout").
         #[arg(long)]
-        name: Option<String>,
+        name: String,
 
         /// Start the branch at this checkout's HEAD, instead of where a new branch
         /// normally starts. Uncommitted changes stay here.
@@ -130,6 +132,10 @@ pub async fn run(command: WorktreeCommand) -> i32 {
             json,
             session,
         } => {
+            if let Err(e) = veld_core::db::check_handoff_name(&name) {
+                eprintln!("veld: {e}");
+                return 2;
+            }
             let prompt = match read_prompt(prompt, prompt_file.as_deref()) {
                 Ok(p) => p,
                 Err(e) => {
@@ -237,6 +243,7 @@ fn read_prompt(
 /// What a refusal from the daemon means for the exit status.
 fn exit_for(code: Option<&str>) -> i32 {
     match code {
+        Some("bad_name") => 2,
         Some("not_in_worktree") => 3,
         Some("unknown_group") => 4,
         Some("no_agent" | "unknown_agent") => 5,
@@ -378,17 +385,31 @@ mod tests {
             "new",
             "--branch",
             "b",
+            "--name",
+            "T",
             "--prompt",
             "x",
             "--prompt-file",
             "p.md",
         ]);
         assert!(both.is_err());
-        assert!(Cli::try_parse_from(["veld", "new", "--branch", "b", "--prompt", "x"]).is_ok());
-        assert!(Cli::try_parse_from(["veld", "new", "--branch", "b"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "veld", "new", "--branch", "b", "--name", "T", "--prompt", "x"
+            ])
+            .is_ok()
+        );
+        assert!(Cli::try_parse_from(["veld", "new", "--branch", "b", "--name", "T"]).is_ok());
+        // The title is required.
+        assert!(Cli::try_parse_from(["veld", "new", "--branch", "b"]).is_err());
         assert!(Cli::try_parse_from(["veld", "new", "--prompt", "x"]).is_err());
         // `--lane` is kept as the alias of `--group`, the rail's own word.
-        assert!(Cli::try_parse_from(["veld", "new", "--branch", "b", "--lane", "review"]).is_ok());
+        assert!(
+            Cli::try_parse_from([
+                "veld", "new", "--branch", "b", "--name", "T", "--lane", "review"
+            ])
+            .is_ok()
+        );
         assert!(Cli::try_parse_from(["veld", "groups", "--json"]).is_ok());
     }
 
@@ -420,6 +441,7 @@ mod tests {
         assert_eq!(exit_for(Some("no_agent")), 5);
         assert_eq!(exit_for(Some("unknown_agent")), 5);
         assert_eq!(exit_for(Some("unknown_group")), 4);
+        assert_eq!(exit_for(Some("bad_name")), 2);
         assert_eq!(exit_for(Some(NO_ANSWER)), 6);
         assert_eq!(exit_for(Some("created_unrecorded")), 6);
         assert_eq!(exit_for(Some("anything_else")), 1);

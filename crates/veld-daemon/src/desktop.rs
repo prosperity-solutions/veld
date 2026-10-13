@@ -4933,10 +4933,9 @@ struct HandoffRequest {
     /// new branch normally starts (`git.createFrom`).
     #[serde(default)]
     from_here: bool,
-    /// The name the rail shows. Absent: `ide.worktreeName` names it from the
-    /// prompt when the project declares that, else the alias does.
-    #[serde(default)]
-    name: Option<String>,
+    /// The title the rail shows — required, and at most
+    /// [`veld_core::db::MAX_HANDOFF_NAME_COLUMNS`] wide so it is never cut off.
+    name: String,
     /// One of the user's groups (a rail lane, by name) to file it under instead
     /// of the "Waiting for you" section.
     #[serde(default)]
@@ -5003,6 +5002,8 @@ async fn create_handoff(
         .as_deref()
         .filter(|a| !a.is_empty() && prompt.is_some());
 
+    veld_core::db::check_handoff_name(&body.name)
+        .map_err(|e| coded(StatusCode::BAD_REQUEST, "bad_name", e))?;
     let source = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
     let source = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
@@ -5079,16 +5080,12 @@ async fn create_handoff(
             carry_over: false,
         }),
         alias: None,
-        display_name: body.name.clone(),
+        display_name: Some(body.name.trim().to_owned()),
         lane: body.lane.clone(),
         path: None,
-        // Named from the prompt only when nobody named it, and only by a project
-        // that declares a naming command — which `spawn_worktree_naming` checks.
-        name_prompt: body
-            .name
-            .is_none()
-            .then(|| prompt.map(str::to_owned))
-            .flatten(),
+        // The caller named it — the agent knows the task better than a naming
+        // command reading its prompt would — so `ide.worktreeName` is not asked.
+        name_prompt: None,
         emoji: None,
         marker_color: None,
     };
