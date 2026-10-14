@@ -28,10 +28,96 @@ reasons to stop and ask are in **When to involve the human** below.
 
 Read [AGENTS.md](AGENTS.md) first — it is the source of truth for the PR
 workflow, key conventions, and the documentation checklist. This skill is the
-operational wrapper around it, not a replacement. Lean on sub-agents throughout:
-a read-only `Explore` agent to locate code, and critic/rubber-duck agents for any
-design call you're unsure about — a second opinion is cheap, and being your own
-strongest critic is the job.
+operational wrapper around it, not a replacement. Lean on sub-agents throughout,
+tiered by model as **Who does the work** below sets out — a second opinion is
+cheap, and being your own strongest critic is the job.
+
+## MINDSET
+
+**QUESTION EVERYTHING.** EVERYTHING IN THIS REPO WAS WRITTEN BY HUMANS BEFORE
+AGENTS DID THE WORK. Every rule, layout and convention — this file included — is
+*physics* (true because of how the machine, the network or the security model
+works) or *habit* (true because that is how people did it). Physics stays. Habit
+dies. "That is how it is done" is not a reason, and neither is "that is how the
+industry does it".
+
+**NO PARITY.** BREAKING CHANGES ARE FINE WHEN THE VISION NEEDS THEM. Do not keep
+an old flag, command or shape alive just so nothing changes.
+
+**NO FOLLOW-UPS.** BUILD THE WHOLE THING. No half shipped with a plan for the
+rest, no "phase 2" for somebody else. If the task needs it, it is in this PR.
+
+**DO NOT PLAY HUMAN.** No time estimates, no "this would take weeks", no
+handoffs between imaginary departments. There is no frontend team, QA team or
+ops team downstream. You are all of them, and the work is done when it merges.
+
+Where those four stop:
+
+- **Change a rule in a PR, never by ignoring it mid-run.** The lock, the stamp
+  and Step 0's answers hold until the maintainer or a merged change says
+  otherwise. Delete a habit in the PR whose task needs it gone, under its own
+  heading in the PR body; one you merely noticed goes in the body's list of
+  things outside this task.
+- **A red test is evidence, not habit.** Change it only when the behaviour it
+  pins is the one you meant to change — never just to get green.
+- **The task or the maintainer says when the vision needs a break.** A break the
+  task did not ask for is a **Vision call**: ask, do not decide.
+- **Mark a break with `!` in the commit and the PR title** (`feat(cli)!: …`).
+  The title becomes the squash commit, and that is what cuts the major release.
+  Say what broke in the PR body.
+- **Break interfaces, not stored state.** Commands, flags and `veld.json` fields
+  may break; database rows, secrets and saved settings migrate forward.
+- **Two things leave part of the task unbuilt, and neither is a follow-up.** A
+  customization feature goes to the extension backlog (Step 1). The cases
+  **When to involve the human** and **Shipping means fixing** name come back as
+  a question. Out-of-scope review findings
+  ([docs/agentic-review.md](docs/agentic-review.md) §8) were never part of the
+  task, so listing them is not a follow-up.
+
+## Who does the work — model tiering
+
+Your main context is for **decisions**. Doing the work is mostly someone else's
+job, and the cheapest model that can do a piece well is the one that should. This
+covers everything outside two stages that keep their own routing: Step 1.5's
+sparring and Step 4's review loop ([docs/agentic-review.md](docs/agentic-review.md)
+§0 and §3.2).
+
+- **Haiku finds things.** Every *where is X / what calls Y / which files touch
+  Z* that takes more than a grep or two goes to a Haiku explorer
+  (`model: "haiku"`). Never read thirty files in the
+  main context to answer a lookup. You read the few files you are about to
+  change; Haiku reads the rest and tells you where to look.
+- **Sonnet builds bounded pieces and mechanical sweeps** (`model: "sonnet"`): a
+  function with a clear contract, a rename across forty call sites, a test file
+  for code that already exists. When it runs tests or builds, give it its own
+  worktree (`isolation: "worktree"`) so its build does not fight yours. That
+  worktree does not see your uncommitted edits, has no dev stack and a cold
+  `target/`: commit what it builds on first, have it check its base with
+  `git log -1`, and take its work back as a patch. You hand it the contract; you
+  review what comes back.
+- **Opus is on call at three moments only**, as a fresh subagent
+  (`model: "opus"`):
+  1. **Before a plan locks** — the design you are about to build on. One read
+     of the plan; no design, no read. Step 1.5's sparring is extra, and only
+     for forks that are expensive to reverse.
+  2. **When the same test or compiler error fails twice** — the second identical
+     failure means your model of the problem is wrong, not your typing.
+  3. **Before you say done** — the finished diff, against the task. For the
+     PR's diff, Step 4 is this moment and its depth is Step 0's call, not
+     yours: *Super light* means one Sonnet read, *None* means none. A CI repair
+     or late fix made after the review gets one read of the fix, by the tier
+     that depth uses: Opus, Sonnet for *Super light*, none for *None*.
+
+  **Hand it the code, not your conclusion.** Paths, the diff, the failing
+  output, the task text. A summary of what you think is wrong gets your own
+  mistake confirmed back to you.
+- **Subagents return short structured summaries, never dumps.** Ask for the
+  shape you want — `path:line` tables, a verdict and its evidence, a diff
+  receipt. A subagent that pastes file contents back has spent your context for
+  you.
+
+Not Claude Code? The Haiku and Sonnet tiers collapse into you, and each Opus
+moment becomes a deliberate re-read — see **If you are not Claude Code** below.
 
 ## This workflow is not optional
 
@@ -74,6 +160,10 @@ reaches for a read-only investigator (`Explore`), a classifier, a repetitive-dif
 sweep, or a fixer subagent: read the files and do the work yourself. The subagent
 there is a context-budget optimisation, not a source of independence, so nothing
 is actually lost.
+The same goes for **Who does the work**'s Haiku and Sonnet tiers. Its three Opus
+moments are different — they are a second reader, and you cannot be one for
+yourself. Still stop at each of them and re-read the code itself, not your notes
+about it. Unlike the two stages below, this needs no line in the PR body.
 
 **Do less, and declare it.** Two stages depend on *independence between agents*,
 which you cannot manufacture alone:
@@ -139,8 +229,8 @@ So when the task names a bug, a leak, a regression, a hang, or anything
 already-broken, **spend a few minutes on evidence before the questionnaire.**
 This is reading, not a review loop: `git grep` the field, function, or status the
 report names, read every call site, and check each path the report claims is
-unwired. A read-only investigator (`Explore`) is the right tool; the verdict is
-yours, not its.
+unwired. A Haiku explorer (see **Who does the work**) is the right tool; the
+verdict is yours, not its.
 
 Do not edit anything here. Ordering matters and it is the whole point of this
 sub-step: an answer to *"how deep should the review be"* is worth little before
@@ -349,8 +439,8 @@ Rules that make it work:
   before the review loop, and again before opening the PR. If it reports the
   branch is behind, `git fetch origin && git rebase origin/main` (or fast-forward
   if unpushed) before proceeding — do not build on a stale base.
-- Prefer a read-only investigator (`Explore` sub-agent) for "where is X / what
-  calls Y" so main context holds decisions, not file dumps.
+- Send "where is X / what calls Y" to a Haiku explorer (see **Who does the
+  work**) so main context holds decisions, not file dumps.
 - **Classify the feature as core or customization** using
   [`docs/extensions-vision.md`](docs/extensions-vision.md) — the
   universal-primitive / data-contract tests. State the verdict in one sentence.
@@ -640,7 +730,8 @@ opening the PR.
     workflow, not a lock against someone who did.
 
 - Push and open a **draft** PR with a clear body: what changed, why, root cause,
-  test evidence, reviewer-scope notes, and any known follow-ups.
+  test evidence, reviewer-scope notes, and anything you found that lies outside
+  this task (not parts of it you left undone — see **NO FOLLOW-UPS**).
 - **End the PR body with this run's settings.** Read `.veld-ship.json` back and
   render it, so a reviewer can see how the change was carried without asking:
 
@@ -773,9 +864,9 @@ So, on hitting an obstacle:
    heading so a reviewer sees it was deliberate rather than smuggled in.
 3. **Prefer the proper fix to the one that makes the symptom go away.** If two
    users are fighting over one file, give them a file each; do not `chown` after
-   the fact. If the honest fix is genuinely too large for this PR, do the small
-   correct thing *and* record the real one as a named follow-up — never leave a
-   workaround unlabelled.
+   the fact. Do the honest fix — not a small one with the real one parked as a
+   follow-up (see **NO FOLLOW-UPS**). If it is genuinely its own PR, that is the
+   exception below: ask, do not defer.
 
 **The narrow exception — a genuine blocker with no right answer.** Stop and ask
 only when fixing it properly would mean a *product decision* you cannot make, an
