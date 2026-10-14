@@ -229,8 +229,9 @@ and several were paid for in this codebase already.
   and the PR title, which becomes the squash-merge commit — must begin with a
   conventional type and a colon: `feat`, `fix`, `docs`, `style`, `refactor`,
   `perf`, `test`, `build`, `ci`, `chore`, or `revert`, optionally with a `scope`
-  (`feat(ui)`, `fix(daemon)`). This is enforced, not suggested: the
-  `Conventional Commits` CI job (`ci.yml`) checks *every* commit in the PR's
+  (`feat(ui)`, `fix(daemon)`), and a `!` before the colon for a breaking change
+  (`feat(cli)!:`), which cuts a major release. This is enforced, not suggested:
+  the `Conventional Commits` CI job (`ci.yml`) checks *every* commit in the PR's
   range against that pattern and fails the PR otherwise — a `ui: …` scope prefix
   is not a `feat`, so even a fully green diff fails once it hits the check job.
   Prefer a `feat`/`fix`/`docs` type and put the package in the scope, never a
