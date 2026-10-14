@@ -90,7 +90,7 @@ mod tests {
         let project = dir.path().join("proj");
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
-            project.join("veld.json"),
+            project.join("veld.json"), // root-config-gate-ok: a test fixture writing the file
             r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#,
         )
         .unwrap();
