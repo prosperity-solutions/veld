@@ -231,6 +231,79 @@ pub fn pty_dir() -> PathBuf {
         .join(format!("{PTY_DIR_PREFIX}{}", daemon_port()))
 }
 
+/// The pid of a daemon the CLI started by hand (no launchd/systemd job), so
+/// `veld update` and `veld uninstall` can stop it. Per instance.
+pub fn bootstrapped_daemon_pidfile() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".veld")
+        .join(format!("daemon-{}.pid", daemon_port()))
+}
+
+/// Stop a daemon the CLI started by hand, if its pid file names a live
+/// `veld-daemon`. Returns whether one was signalled.
+pub fn stop_bootstrapped_daemon() -> bool {
+    let path = bootstrapped_daemon_pidfile();
+    let Some(pid) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| s.trim().parse::<i32>().ok())
+    else {
+        return false;
+    };
+    let _ = std::fs::remove_file(&path);
+    // Only a process that is still a veld-daemon: the pid may have been reused.
+    let ps = |field: &str| {
+        std::process::Command::new("ps")
+            .args(["-o", field, "-p", &pid.to_string()])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    // The daemon itself — by name (`comm`, which keeps a path with spaces whole)
+    // and not an engine worker, a log sink or a terminal holder, which are the
+    // same binary in another mode (`args`).
+    let args = ps("args=");
+    let is_daemon = ps("comm=").ends_with("veld-daemon")
+        && !["--engine-worker", "--log-sink", "--pty-holder"]
+            .iter()
+            .any(|mode| args.contains(mode));
+    if pid > 1 && is_daemon {
+        // SAFETY: kill only sends a signal.
+        unsafe { libc::kill(pid, libc::SIGTERM) == 0 }
+    } else {
+        false
+    }
+}
+
+/// Where engine workers keep their liveness locks: `VELD_ENGINE_DIR`, else
+/// `<database file>.engine/` beside the database.
+///
+/// **Beside the database, not keyed by port**, because the actions it guards live
+/// in the database: two daemons sharing one database (a port set without a
+/// database) must see the same locks, or each sweeps the other's live workers as
+/// lost. Named after the database *file*, not a bare `engine/`: a database in a
+/// shared directory (`VELD_DB_PATH=/tmp/x.db`) must not share its locks with
+/// every other user's and database's.
+pub fn engine_dir() -> PathBuf {
+    if let Some(dir) = env_nonempty("VELD_ENGINE_DIR") {
+        return PathBuf::from(dir);
+    }
+    match crate::db::Db::default_path() {
+        Ok(db) => engine_dir_for(&db),
+        Err(_) => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(".veld")
+            .join(format!("engine-{}", daemon_port())),
+    }
+}
+
+fn engine_dir_for(db: &std::path::Path) -> PathBuf {
+    let mut name = db.file_name().unwrap_or_default().to_os_string();
+    name.push(".engine");
+    db.with_file_name(name)
+}
+
 /// The longest a holder socket path may be, and what to do about it.
 ///
 /// `sun_path` is 104 bytes on macOS and 108 on Linux; 104 is the safe floor.
@@ -747,5 +820,20 @@ mod tests {
         assert!(socket_path_too_long(&at).is_some());
         let under = PathBuf::from("x".repeat(MAX_SOCKET_PATH - 1));
         assert_eq!(socket_path_too_long(&under), None);
+    }
+}
+
+#[cfg(test)]
+mod engine_dir_tests {
+    #[test]
+    fn the_engine_dir_belongs_to_one_database_file() {
+        assert_eq!(
+            super::engine_dir_for(std::path::Path::new("/tmp/x.db")),
+            std::path::PathBuf::from("/tmp/x.db.engine")
+        );
+        assert_ne!(
+            super::engine_dir_for(std::path::Path::new("/tmp/x.db")),
+            super::engine_dir_for(std::path::Path::new("/tmp/y.db"))
+        );
     }
 }

@@ -998,8 +998,10 @@ mod tests {
         // `spawn_failed` and `opted_out` must stay separate: one is the feature
         // working as configured, the other is it not working, and the UI says
         // different things for them.
-        let mut state = State::default();
-        state.spawn_failed = true;
+        let mut state = State {
+            spawn_failed: true,
+            ..State::default()
+        };
         state.recompute(t(0), &prefs(), mains(), sharing(1));
         assert_eq!(state.reasons.sharing, None);
         assert!(state.opted_out.is_none());

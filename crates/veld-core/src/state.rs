@@ -106,7 +106,7 @@ pub enum NodeStatus {
     /// the value means, not merely "its process is gone".
     ///
     /// It is the per-node teardown ledger
-    /// ([`crate::orchestrator::teardown_pending`]): every path that ends a run
+    /// (`veld_engine::orchestrator::teardown_pending`): every path that ends a run
     /// reads it to decide which nodes still owe a hook, which is what lets an
     /// interrupted teardown resume instead of running a hook twice. **Never
     /// write it without running that node's hook.** A crash detector, an orphan

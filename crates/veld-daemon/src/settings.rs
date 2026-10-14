@@ -683,6 +683,8 @@ mod tests {
         }
     }
 
+    // The guard serialises a process-wide env var for the whole test, awaits included.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_write_echoes_the_clamped_effective_document() {
         // The handler doc calls this "the point": the response carries what was
@@ -740,6 +742,8 @@ mod catalog_tests {
     /// identically and already returns `worktree.storageDir`, an absolute path the
     /// user chose — but the old claim would have quietly stopped being true, which
     /// is worse than the path itself.
+    // The guard serialises a process-wide env var for the whole test, awaits included.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn the_catalog_is_served_without_a_csrf_header() {
         // **A reader of `VELD_DB_PATH` needs the lock as much as a writer does.**
@@ -950,6 +954,8 @@ mod catalog_tests {
     /// needs from the router is only that the *comparison* accepts a correctly
     /// encoded match, which the real path proves without touching the
     /// environment at all.
+    // The guard serialises a process-wide env var for the whole test, awaits included.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_caller_whose_database_path_matches_is_accepted() {
         // Removing this test's own `VELD_DB_PATH` mutation was not enough: it

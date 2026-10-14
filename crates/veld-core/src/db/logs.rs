@@ -1,7 +1,7 @@
 //! Service log storage: one row per log line, scoped by project + run.
 //!
 //! Replaces the old `.veld/logs/{run}/*.log` files. Writers (the CLI, the
-//! detached `veld _log` pipeline wrapper, and the daemon) insert rows; readers
+//! detached `veld-daemon --log-sink` pipeline wrapper, and the daemon) insert rows; readers
 //! (`veld logs`, the management UI) query by scope. Follow mode polls for
 //! rows with `id` greater than the last one seen — `id` is a global,
 //! monotonically increasing insert order across all writer processes.

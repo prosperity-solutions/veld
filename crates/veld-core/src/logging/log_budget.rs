@@ -1,16 +1,16 @@
-//! The ingest budget for `veld _log`: a token bucket in front of the database, and the
+//! The ingest budget for `veld-daemon --log-sink`: a token bucket in front of the database, and the
 //! bookkeeping that keeps the *end* of a shed burst.
 //!
 //! # Why a budget at all
 //!
-//! `veld _log` writes every line a detached node prints. One crash-looping worker
+//! `veld-daemon --log-sink` writes every line a detached node prints. One crash-looping worker
 //! (Redis "Connection is closed", pretty-printed JSON errors) wrote about 1.1 M lines an
 //! hour for days — 7.75 M rows, a multi-GB database, and a `quick_check` that took
 //! seconds. Retention is by age only, so nothing else bounds it.
 //!
 //! # What it does
 //!
-//! Each `veld _log` process owns one [`TokenBucket`]: [`LOG_RATE_PER_SEC`] lines per
+//! Each `veld-daemon --log-sink` process owns one [`TokenBucket`]: [`LOG_RATE_PER_SEC`] lines per
 //! second sustained, [`LOG_BURST`] in a burst. A line over budget is not stored; it is
 //! recorded in a [`RateShed`]. The writer thread turns that record into:
 //!
@@ -34,15 +34,15 @@
 //! The reader thread never waits on any of this: [`LogGate::offer`] is arithmetic,
 //! plus a brief uncontended lock on [`RateShed`] only around a shed burst.
 //!
-//! Foreground ingest (`veld_core::process`'s `LineAssembler`/`LogTarget`, used by `veld
-//! start --attach` from a terminal and by a `--oneshot` run's own node) is **not**
-//! covered; it has the same shape of problem but a human watching it.
+//! The streaming ingest of a `--oneshot` run's own terminal node
+//! (`veld_core::process::run_command_streaming`) is **not** covered; it has the same
+//! shape of problem but a human watching it.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-/// Sustained lines per second one `veld _log` process stores.
+/// Sustained lines per second one `veld-daemon --log-sink` process stores.
 ///
 /// An order of magnitude above anything a healthy server prints (the #332 incident's
 /// mean was 4 rows/s and its busiest hour 17.5 rows/s), and below the 300 rows/s the

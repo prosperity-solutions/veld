@@ -56,7 +56,7 @@ use serde::{Deserialize, Serialize};
 /// It is a trait, and not simply a sampler in this crate, so that `veld-core`
 /// stays free of `sysinfo`: `veld-helper` (privileged) and `veld-gateway` depend
 /// on this crate and have no business linking a machine-wide process scanner.
-/// The `veld` binary injects `veld_stats::CommandStatsRecorder`.
+/// The engine worker injects `veld_stats::CommandStatsRecorder`.
 ///
 /// **Scope: node steps only.** Project-level `setup`/`teardown` steps and
 /// `skip_if` probes deliberately do not report here, because a sample is stored

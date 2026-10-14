@@ -166,7 +166,7 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n> [-a]` | Start an environment. Detached by default — it returns once everything is healthy; `-a`/`--attach` stays in the foreground and streams logs (there is no `-d`). Given nothing to start: prompts with the preset list (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
+| `veld start [NODE:VARIANT...] --name <n> [-a]` | Start an environment. Detached by default — it returns once everything is healthy; `-a`/`--attach` from a terminal then follows its logs until Ctrl+C, which stops it (there is no `-d`). Given nothing to start: prompts with the preset list (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
 | `veld start --preset <NAME-OR-KEY>` | Start a preset by name, or by the stable key `veld presets` shows. A bare preset name as a positional does **not** work — positionals are `node:variant` selections |
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. The e2e-test / CI pattern (like `docker compose run --rm --abort-on-container-exit`). Only the terminal node's output goes to stdout unless `--all-logs`. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
@@ -219,9 +219,9 @@ Most commands take `--json` for structured output, making veld scriptable and CI
 
 Three binaries work together:
 
-- **`veld`** — CLI. Parses commands, orchestrates environments, displays output.
+- **`veld`** — CLI. A thin client of the engine in the daemon: sends commands, displays the progress it streams back, and starts the daemon if it is not running.
 - **`veld-helper`** — manages DNS entries and Caddy routes via a minimal Unix socket API. Runs as either a system daemon (privileged, for clean URLs on ports 80/443) or a user process (unprivileged, on port 18443).
-- **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
+- **`veld-daemon`** — user-space daemon. Hosts the engine that orchestrates environments (each start, stop, restart or action runs in a worker process that survives daemon restarts and updates), monitors health, runs garbage collection, broadcasts state updates.
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 

@@ -37,6 +37,7 @@ async fn streaming_interrupt_reports_130() {
         None,
         None,
         None,
+        None,
     )
     .await
     .expect("interrupted run reports a code, not an error");

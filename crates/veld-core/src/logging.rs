@@ -9,6 +9,9 @@ use std::path::{Path, PathBuf};
 use chrono::Utc;
 use thiserror::Error;
 
+mod log_budget;
+pub mod pump;
+
 use crate::db::{Db, DbError, LogStream};
 
 #[derive(Debug, Error)]

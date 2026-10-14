@@ -4555,7 +4555,8 @@ fn interpolation_refs(s: &str) -> Vec<String> {
 }
 
 /// `${<prefix><name>}` references in `s`.
-pub(crate) fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
+#[doc(hidden)]
+pub fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
     let needle = format!("${{{prefix}");
     let mut out = Vec::new();
     let mut rest = s;
@@ -4720,7 +4721,8 @@ pub(crate) fn env_refs_detailed(s: &str) -> Vec<(String, bool)> {
     out
 }
 
-pub(crate) fn env_refs(s: &str) -> Vec<String> {
+#[doc(hidden)]
+pub fn env_refs(s: &str) -> Vec<String> {
     env_refs_detailed(s).into_iter().map(|(n, _)| n).collect()
 }
 

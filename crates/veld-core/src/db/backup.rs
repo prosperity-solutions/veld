@@ -85,6 +85,8 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     "node_stats",
     "node_process_stats",
     "feedback_screenshots",
+    "engine_actions",
+    "engine_action_events",
 ];
 
 /// The `kv` key an artifact carries its own provenance under.

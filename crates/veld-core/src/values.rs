@@ -140,6 +140,53 @@ pub enum ValueError {
     },
 }
 
+/// The environment `{ "env": … }` reads from, when it is not this process's own.
+///
+/// The engine runs in a worker the daemon spawns, whose own environment is the
+/// daemon's — not the terminal of whoever asked for the run. So the face sends the
+/// values of exactly the names veld.json declares (and nothing else), and the
+/// worker installs them here once, before it resolves anything. When set, it is
+/// the **only** source: a name the caller did not send is missing, rather than
+/// quietly read from the daemon's environment, so a run behaves the same however
+/// it was started.
+///
+/// A process-wide value because a worker is one process per action; never
+/// `std::env::set_var`, which would hand every value to every node spawned.
+static CALLER_ENV: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =
+    std::sync::OnceLock::new();
+
+/// Install the caller's declared environment. First call wins; later calls are
+/// ignored and return `false`.
+pub fn set_caller_env(env: std::collections::BTreeMap<String, String>) -> bool {
+    CALLER_ENV.set(env).is_ok()
+}
+
+tokio::task_local! {
+    /// [`CALLER_ENV`] for one request inside a long-lived process (the daemon
+    /// resolving `veld action` for a terminal), where a process-wide value would
+    /// hand one caller's environment to the next.
+    static SCOPED_CALLER_ENV: std::collections::BTreeMap<String, String>;
+}
+
+/// Resolve inside `fut` against `env` as the caller's environment — the only
+/// source, exactly as [`set_caller_env`] makes it for a worker.
+pub async fn with_caller_env<F: std::future::Future>(
+    env: std::collections::BTreeMap<String, String>,
+    fut: F,
+) -> F::Output {
+    SCOPED_CALLER_ENV.scope(env, fut).await
+}
+
+fn read_env(name: &str) -> Option<String> {
+    if let Ok(scoped) = SCOPED_CALLER_ENV.try_with(|env| env.get(name).cloned()) {
+        return scoped;
+    }
+    match CALLER_ENV.get() {
+        Some(env) => env.get(name).cloned(),
+        None => std::env::var(name).ok(),
+    }
+}
+
 /// Resolve one value. `at` labels the location for error messages (e.g.
 /// `nodes.api.variants.dev.env.DATABASE_URL`) and never contains the value.
 ///
@@ -154,7 +201,7 @@ pub async fn resolve_value(
 ) -> Result<String, ValueError> {
     match &value.source {
         SecretSource::Literal(v) => Ok(v.clone()),
-        SecretSource::Env(var) => std::env::var(var).map_err(|_| ValueError::MissingEnv {
+        SecretSource::Env(var) => read_env(var).ok_or_else(|| ValueError::MissingEnv {
             at: at.to_owned(),
             var: var.clone(),
         }),
@@ -187,10 +234,10 @@ pub async fn resolve_value(
 
 /// Run a source command and take its trimmed stdout.
 ///
-/// The command inherits the user's login-shell `PATH`: a run started from the
-/// management UI or the desktop app is spawned by the daemon, which has a bare
-/// service `PATH`, so `op read …` would otherwise fail with "command not found"
-/// even though it works in the author's terminal. Same convention as liveness
+/// The command inherits the user's login-shell `PATH`: every run is driven by an
+/// engine worker the daemon spawns, which has a bare service `PATH`, so `op read …`
+/// would otherwise fail with "command not found" even though it works in the
+/// author's terminal. Same convention as liveness
 /// probes and relay-token resolution.
 async fn run_source_command(spec: &CommandSpec, at: &str) -> Result<String, ValueError> {
     let user_path = crate::user_path::resolve_user_path().await;
@@ -570,6 +617,27 @@ pub async fn resolve_vars(
 
 #[cfg(test)]
 mod tests {
+
+    /// A request-scoped caller environment is the only source inside its scope:
+    /// a name it lacks is missing, even when this process has it.
+    #[tokio::test]
+    async fn a_scoped_caller_env_is_the_only_source_inside_its_scope() {
+        let source = |name: &str| ConfigValue {
+            source: SecretSource::Env(name.to_owned()),
+            secret: false,
+        };
+        let env = std::collections::BTreeMap::from([("ONLY_HERE".to_owned(), "x".to_owned())]);
+        let (hit, miss) = with_caller_env(env, async {
+            (
+                resolve_value(&source("ONLY_HERE"), "t", None).await,
+                // HOME is set in this process, but not in the caller's map.
+                resolve_value(&source("HOME"), "t", None).await,
+            )
+        })
+        .await;
+        assert_eq!(hit.unwrap(), "x");
+        assert!(matches!(miss, Err(ValueError::MissingEnv { .. })));
+    }
     use super::*;
 
     fn cv(json: &str) -> ConfigValue {

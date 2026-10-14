@@ -4645,6 +4645,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-width",
  "veld-core",
+ "veld-engine",
  "veld-stats",
 ]
 
@@ -4658,6 +4659,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek 2.2.0",
  "indexmap",
+ "libc",
  "nix 0.29.0",
  "petname",
  "reqwest 0.12.28",
@@ -4700,8 +4702,25 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "veld-core",
+ "veld-engine",
  "veld-share",
  "veld-stats",
+]
+
+[[package]]
+name = "veld-engine"
+version = "16.89.3"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "veld-core",
 ]
 
 [[package]]

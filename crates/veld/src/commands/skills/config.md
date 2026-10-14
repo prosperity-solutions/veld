@@ -329,8 +329,13 @@ steps too (it silently did not before).
 
 Sources: `value` (inline literal, so it can carry the flag), `env`, `file`,
 `argv`, `shell`. Resolved at most once per run, at start — never at parse, and
-only if the resolved plan reaches the value. A missing `env` source is an error
-naming the node and the variable. A source command has a 30s timeout (an
+only if the resolved plan reaches the value. An `env` source reads the variable from the **terminal of the command that
+asked** (`veld start`/`restart`/`stop`): veld sends the values of exactly the names
+the config reads this way with that request and stores nothing. It is never read
+from the daemon's own environment, and a run started with no terminal (IDE button,
+automatic recovery) has none, so there the variable is missing. Nodes do not
+otherwise inherit the terminal's environment — declare what they need. A missing
+`env` source is an error naming the node and the variable. A source command has a 30s timeout (an
 interactive credential helper has no terminal under the daemon, so it hangs — use
 a non-interactive source).
 
@@ -677,7 +682,7 @@ Actions are **node-scoped**: each action belongs to the node it's declared under
 ```
 
 - `name`: Identifier used as `veld action <name>` (pattern `^[a-zA-Z0-9._-]+$`). Required.
-- `command`: Shell command run via `$SHELL -c` in the node's working directory. Required. Inherits the parent env.
+- `command`: Shell command run via `$SHELL -c` in the node's working directory. Required. Runs in the terminal of `veld action`, so it inherits that terminal's environment (the one place a terminal's environment reaches a node's command).
 - `label`: Dashboard button text (defaults to `name`).
 - `description`: One-line summary shown in `veld actions` and as a button tooltip.
 - `parameters`: Static `{key: value}` map. Available as `${param.KEY}` and as `$KEY` env vars. Values support `${...}` substitution.

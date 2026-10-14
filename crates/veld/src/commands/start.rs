@@ -1,11 +1,24 @@
-use veld_core::config::VeldConfig;
-use veld_core::graph::{self, NodeSelection};
-use veld_core::orchestrator::Orchestrator;
-use veld_core::progress::ProgressEvent;
-use veld_core::url::generate_run_name;
+//! `veld start` — a face of the engine.
+//!
+//! Everything that decides something (which nodes, which run, which answers are
+//! missing, what to spawn) is the engine's, in the daemon. What is left here is
+//! what needs this terminal: the picker, the prompts, and drawing the progress
+//! the engine reports.
+
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use tokio::sync::mpsc;
+use veld_core::config::VeldConfig;
+use veld_core::graph::NodeSelection;
+use veld_engine::api::{
+    ActionOutcome, ActionRequest, ActionSecrets, AnswerProvenance, Choice, EngineEvent,
+    NoticeLevel, OutputStream, PreflightPlan, PreflightRequest, PreflightResponse, SaveVarAnswers,
+    SubmitAction, UnansweredVarWire, VarAnswer,
+};
+use veld_engine::progress::ProgressEvent;
 
+use crate::engine_client::EngineClient;
 use crate::output::{self, is_tty};
 
 /// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--oneshot] [--debug]`
@@ -20,372 +33,603 @@ pub async fn run(
     oneshot: bool,
     all_logs: bool,
     var: Vec<String>,
-    _debug: bool,
+    debug: bool,
 ) -> i32 {
-    let Some((config_path, config)) = super::parse_config(false) else {
+    if attach && oneshot {
+        output::print_error("--attach and --oneshot cannot be combined.", false);
+        return 1;
+    }
+    let Some(project_root) = super::project_root() else {
         return 1;
     };
+    let client = match super::engine().await {
+        Ok(c) => c,
+        Err(code) => return code,
+    };
 
-    // Determine what to start. The second half of the pair is the preset's
-    // config name when one was involved — recorded on the run so a later reader
-    // can say what it was started *from*, not only what it resolved to. `--preset`
-    // may name a key, so this is `chosen.name`, never the token as typed.
-    let (parsed_selections, origin_preset) = if let Some(ref token) = preset {
-        // `--preset` takes a name or the key `veld presets` printed, resolved here
-        // rather than passed straight to `expand_preset`.
-        //
-        // Name-first, unlike the picker: `--preset` is what scripts, CI and the
-        // desktop UI pass, and all of those predate keys existing. The two orders
-        // agree for every config that does not both name a preset like a number and
-        // pin that number on a different preset — a config `veld lint` warns about.
-        // See `presets::find_by_name_then_key`.
-        let Some(chosen) = veld_core::presets::find_by_name_then_key(&config, token) else {
-            output::print_error(&unknown_preset_message(&config, token), false);
-            return 1;
-        };
-        match expand_and_resolve(&chosen.name, &config) {
-            Some(sels) => (sels, Some(chosen.name.clone())),
-            None => return 1,
-        }
-    } else if selections.is_empty() {
-        match handle_no_selections(&config) {
-            Some(pair) => pair,
-            None => return 1,
-        }
-    } else {
-        let raw: Result<Vec<NodeSelection>, _> = selections
-            .iter()
-            .map(|s| graph::parse_selection(s))
-            .collect();
-        match raw {
-            Ok(parsed) => match graph::resolve_selections(&parsed, &config) {
-                // Explicit tokens: `preset: None` is the honest record, and the
-                // absence is meaningful — this run did not come from a preset.
-                Ok(resolved) => (resolved, None),
-                Err(e) => {
-                    output::print_error(
-                        &with_preset_hint(&format!("{e}"), &selections, &config),
-                        false,
-                    );
-                    return 1;
-                }
+    // Preflight, with the picker in the loop: a bare `veld start` at a terminal
+    // is answered by a human choosing, then asked again with their choice.
+    let mut plan_selections = selections;
+    let mut plan_preset = preset;
+    let interactive = is_tty();
+    let ready = loop {
+        let req = PreflightRequest {
+            project_root: project_root.clone(),
+            plan: PreflightPlan::Start {
+                selections: plan_selections.clone(),
+                preset: plan_preset.clone(),
+                name: name.clone(),
+                oneshot,
+                all_logs,
             },
-            Err(e) => {
+            var_flags: var.clone(),
+            interactive,
+        };
+        match client.preflight(&req).await {
+            Err(e) => return super::client_error(&e),
+            Ok(PreflightResponse::Ready(ready)) => break *ready,
+            Ok(PreflightResponse::Refused { message, payload }) => {
+                match payload {
+                    // The unattended no-selection answer is a payload for the
+                    // agent that hit it, on stdout.
+                    Some(p) => println!("{}", serde_json::to_string_pretty(&p).unwrap_or_default()),
+                    None => output::print_error(&message, false),
+                }
+                return 1;
+            }
+            Ok(PreflightResponse::Choose(choice)) => match pick(&choice) {
+                Some(Picked::Preset(p)) => plan_preset = Some(p),
+                Some(Picked::Selections(s)) => plan_selections = s,
+                None => return 1,
+            },
+            Ok(PreflightResponse::Unknown) => {
                 output::print_error(
-                    &with_preset_hint(&format!("{e}"), &selections, &config),
+                    "The daemon answered in a way this veld does not know — update veld.",
                     false,
                 );
                 return 1;
             }
         }
     };
-
-    // Validate: non-localhost URL templates require privileged mode.
-    let non_localhost = find_non_localhost_domains(&parsed_selections, &config);
-    if !non_localhost.is_empty() {
-        let mode = super::read_setup_mode().unwrap_or_else(|| "auto".to_owned());
-        if mode != "privileged" {
-            let mut detail =
-                String::from("Custom apex domains are only supported in privileged mode.\n");
-            detail.push_str("\n  Affected nodes:\n");
-            for (label, hostname) in &non_localhost {
-                detail.push_str(&format!("    - {label} => {hostname}\n"));
-            }
-            detail.push_str(
-                "\n  In unprivileged/auto mode, veld cannot write to /etc/hosts or manage\n  \
-                 system DNS, so only .localhost domains work (RFC 6761).\n\
-                 \n  To fix this, either:\n  \
-                 - Change your url_template to use .localhost (e.g. {service}.{run}.{project}.localhost)\n  \
-                 - Run `veld setup privileged` (one-time sudo) to enable custom domains",
-            );
-            output::print_error(&detail, false);
-            return 1;
-        }
+    for notice in &ready.notices {
+        eprintln!("{}", output::one_line(notice));
     }
 
-    // --oneshot: validate and pick the terminal command node.
-    let terminal_sel = if oneshot {
-        if attach {
-            output::print_error("--attach and --oneshot cannot be combined.", false);
-            return 1;
-        }
-        if parsed_selections.len() != 1 {
-            output::print_error(
-                "--oneshot requires exactly one command-type selection (the terminal node whose \
-                 exit ends the run). Its dependencies are started automatically.",
-                false,
-            );
-            return 1;
-        }
-        let sel = parsed_selections[0].clone();
-        // Resolved: `type` is hoistable to node level (F3), so a raw read would
-        // misclassify a node that declares it once for all its variants.
-        let is_command = config
-            .resolved(&sel.node, &sel.variant)
-            .map(|r| r.step_type == veld_core::config::StepType::Command)
-            .unwrap_or(false);
-        if !is_command {
-            output::print_error(
-                &format!(
-                    "--oneshot requires a command-type node; '{}:{}' is long_running (it never \
-                     exits, so it cannot be the terminal node).",
-                    sel.node, sel.variant
-                ),
-                false,
-            );
-            return 1;
-        }
-        Some(sel)
-    } else {
-        if all_logs {
-            output::print_error("--all-logs only applies with --oneshot.", false);
-            return 1;
-        }
-        None
-    };
-
-    let project_root = veld_core::config::project_root(&config_path);
-    let run_name = match name {
-        Some(ref n) => n.clone(),
-        None => generate_run_name(&project_root),
-    };
-    let run_name_str = run_name.as_str();
-
-    // Parsed before the config is moved into the orchestrator, because
-    // validating a `--var` name needs the declarations. Refusing an unknown one
-    // here also means we refuse *before* anything is built or spawned.
-    let var_answers = match parse_var_answers(&var, &config) {
-        Ok(answers) => answers,
-        Err(e) => {
-            output::print_error(&e, false);
-            return 1;
-        }
-    };
-
-    // Build the orchestrator.
-    let foreground = attach && is_tty();
-    let mut orchestrator = match Orchestrator::new(config_path.clone(), config) {
-        Ok(o) => o,
-        Err(e) => {
-            output::print_error(&format!("Failed to initialize: {e}"), false);
-            return 1;
-        }
-    };
-    orchestrator.set_debug(_debug);
-    orchestrator.set_foreground(foreground);
-    orchestrator.set_terminal_node(terminal_sel.clone());
-
-    // Record CPU/memory for this run's `command` steps while they execute. The
-    // orchestrator holds it, so it also covers the `--oneshot` terminal node
-    // that `run_terminal` executes after the stages.
-    super::observe_command_stats(&mut orchestrator, run_name_str);
-
-    // Per-run answers, above the stored ones and never written anywhere.
-    if !var_answers.is_empty() {
-        // `--var` is per-run by definition: nothing was written, so a later
-        // `veld stop` cannot see it.
-        orchestrator.set_var_answers(var_answers, veld_core::orchestrator::VarProvenance::Flag);
-    }
-
-    // Pre-flight: every machine-overridable var this plan needs must have an
-    // answer before the first process spawns.
-    if resolve_machine_vars(&mut orchestrator, &parsed_selections, &project_root, true)
-        .await
-        .is_none()
-    {
+    let Some(mut answers) = gather_answers(&client, &project_root, &ready.unanswered, true).await
+    else {
         return 1;
-    }
-    // A `--var` answer does not survive this process, and `veld stop` runs in
-    // another one. Say so now, while `veld config set` is still an option.
-    let stranded = orchestrator.flag_answers_needed_at_teardown(&parsed_selections);
-    if !stranded.is_empty() {
-        eprintln!(
-            "Warning: {} answered with --var, but this project's teardown needs {}. \
-             `veld stop` runs in a different process and cannot see a --var answer, so its \
-             `${{vars.*}}` steps will be skipped. Use `veld config set` for {} if teardown \
-             has to work.",
-            stranded.join(", "),
-            if stranded.len() == 1 { "it" } else { "them" },
-            if stranded.len() == 1 { "it" } else { "them" },
-        );
-    }
+    };
+    answers.extend(ready.flag_answers.iter().cloned());
+    warn_stranded(
+        &client,
+        &project_root,
+        PreflightPlan::Start {
+            selections: plan_selections.clone(),
+            preset: plan_preset.clone(),
+            name: name.clone(),
+            oneshot: false,
+            all_logs: false,
+        },
+        &var,
+        &ready,
+        &answers,
+    )
+    .await;
 
-    // Set up live progress channel.
-    let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
-    orchestrator.set_progress_sender(progress_tx);
-    let tty = is_tty();
-    // In --oneshot mode, stdout must carry ONLY the terminal node's output, so
-    // the startup progress stream goes to stderr.
-    let progress_handle = tokio::spawn(render_progress(progress_rx, tty, terminal_sel.is_some()));
+    let run_name = ready.action.run().unwrap_or_default().to_owned();
+    let action_id = match client
+        .submit(&SubmitAction {
+            request: ActionRequest {
+                project_root: project_root.clone(),
+                kind: ready.action.clone(),
+                debug,
+            },
+            secrets: ActionSecrets {
+                env: caller_env(&ready.env_names),
+                var_answers: answers,
+            },
+        })
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => return super::client_error(&e),
+    };
 
     eprintln!(
         "{} Starting environment {}...",
         output::bold("veld"),
-        output::bold(&format!("'{run_name_str}'")),
+        output::bold(&format!("'{run_name}'")),
     );
     eprintln!();
 
-    // Run start with Ctrl+C interception so we can clean up on interrupt.
-    let start_result = tokio::select! {
-        result = orchestrator.start(
-            &parsed_selections,
-            run_name_str,
-            // Always recorded here: a `veld start` always knows what it was asked
-            // for, even when that was explicit tokens (`preset: None`).
-            Some(veld_core::state::StartOrigin::new(
-                origin_preset.clone(),
-                &parsed_selections,
-            )),
-        ) => result,
-        _ = tokio::signal::ctrl_c() => {
-            orchestrator.close_progress_sender();
-            let _ = progress_handle.await;
-            eprintln!();
-            // Interrupt/cleanup messages are diagnostics → stderr (keeps stdout
-            // clean, notably for --oneshot where stdout is the node's output).
-            eprintln!(
-                "  {} Interrupted — stopping partially started environment...",
-                output::dim("»")
-            );
-            match orchestrator.stop(run_name_str).await {
-                Ok(_) => eprintln!(
-                    "  {} Environment '{run_name_str}' cleaned up.",
-                    output::checkmark()
-                ),
-                Err(e) => output::print_error(&format!("Cleanup failed: {e}"), false),
-            }
-            return 130; // Standard exit code for SIGINT
-        }
+    let client = Arc::new(client);
+    let mode = if oneshot {
+        Drive::Oneshot
+    } else {
+        Drive::Progress
     };
-
-    match start_result {
-        Ok(run_state) => {
-            // Drop the progress sender so the renderer can finish.
-            orchestrator.close_progress_sender();
-            let _ = progress_handle.await;
-
-            // --oneshot: dependencies are up; now run the terminal node to
-            // completion, tear everything down, and exit with its code.
-            if let Some(ref sel) = terminal_sel {
-                return run_oneshot_terminal(
-                    &mut orchestrator,
-                    &run_state,
-                    sel,
-                    run_name_str,
-                    &project_root,
-                    all_logs,
-                )
-                .await;
-            }
-
-            // Final receipt: summary table.
+    let outcome = match drive(&client, &action_id, mode).await {
+        Ok(o) => o,
+        Err(code) => return code,
+    };
+    match outcome {
+        ActionOutcome::Started { run } => {
             println!();
-            print_start_receipt(&run_state);
-
-            // Show setup hint if in unprivileged mode.
-            crate::hints::maybe_show_privileged_hint(orchestrator.https_port);
-
-            // Foreground mode: tail logs and stop on Ctrl+C.
-            if foreground {
-                println!();
-                output::print_info("Streaming logs (Ctrl+C to stop)...");
-                println!();
-
-                let project_root = veld_core::config::project_root(&config_path);
-                let targets: Vec<(String, String)> = run_state
-                    .nodes
-                    .values()
-                    .map(|ns| (ns.node_name.clone(), ns.variant.clone()))
-                    .collect();
-
-                // Stream logs until Ctrl+C.
-                follow_logs_until_interrupt(
-                    &orchestrator.db,
-                    &targets,
-                    &project_root,
-                    run_name_str,
-                )
-                .await;
-
-                // Ctrl+C received — stop the environment.
-                println!();
-                output::print_info("Stopping environment...");
-                let _ = orchestrator.stop(run_name_str).await;
-                output::print_success(&format!("Environment '{}' stopped.", run_name_str));
+            print_start_receipt(&run);
+            let privileged = super::read_setup_mode().as_deref() == Some("privileged");
+            crate::hints::maybe_show_privileged_hint(if privileged { 443 } else { 18443 });
+            // Only with a terminal to stream to, as before: without one there is
+            // no Ctrl-C to end it, and a CI job passing `-a` must not block.
+            if attach && is_tty() {
+                return attach_logs(&client, &project_root, &run.name).await;
             }
-
             0
         }
-        Err(e) => {
-            orchestrator.close_progress_sender();
-            let _ = progress_handle.await;
-            // Surface failureMessage for setup step failures.
-            if let veld_core::orchestrator::OrchestratorError::SetupFailed {
-                failure_message: Some(ref msg),
-                ..
-            } = e
-            {
-                output::print_error(&format!("Startup failed: {msg}"), false);
+        ActionOutcome::OneshotExited { exit_code, label } => {
+            // An older daemon does not send the label.
+            let label = if label.is_empty() {
+                "The terminal node".to_owned()
             } else {
-                output::print_error(&format!("Startup failed: {e}"), false);
+                label
+            };
+            eprintln!();
+            if exit_code == 0 {
+                eprintln!(
+                    "  {} {} completed successfully (exit 0).",
+                    output::checkmark(),
+                    label
+                );
+            } else {
+                output::print_error(&format!("{label} exited with code {exit_code}."), false);
             }
-            // Dump the tail of the service log so the user can see what went wrong.
-            if tty {
-                if let veld_core::orchestrator::OrchestratorError::NodeFailed {
-                    ref node,
-                    ref variant,
-                    ..
-                } = e
-                {
-                    // Scoped to this run. Unscoped, the tail spans every run
-                    // ever started under this name — and now that a `command`
-                    // node produces log rows at all, a node that failed after
-                    // three lines would have the other seventeen filled in from
-                    // a previous attempt and presented as this failure's.
-                    let run_id = orchestrator
-                        .db
-                        .get_run(&project_root, run_name_str)
-                        .ok()
-                        .flatten()
-                        .map(|r| r.run_id.to_string());
-                    let filter = veld_core::db::LogFilter {
-                        node: Some(node.clone()),
-                        variant: Some(variant.clone()),
-                        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
-                        run_id,
-                    };
-                    if let Ok(rows) =
-                        orchestrator
-                            .db
-                            .tail_logs(&project_root, run_name_str, &filter, 20)
-                    {
-                        if !rows.is_empty() {
-                            eprintln!();
-                            eprintln!(
-                                "  {}",
-                                output::dim(&format!("Last log lines from {node}:{variant}:"))
-                            );
-                            eprintln!();
-                            for row in &rows {
-                                eprintln!("    {}", output::dim(&row.line));
-                            }
-                            eprintln!();
-                            eprintln!(
-                                "  {}",
-                                output::dim(&format!(
-                                    "Full log: veld logs --name {run_name_str} --node {node}"
-                                ))
-                            );
-                        }
-                    }
-                }
+            exit_code
+        }
+        ActionOutcome::Failed {
+            message,
+            failed_node: Some(node),
+            ..
+        } => {
+            output::print_error(&message, false);
+            if is_tty() {
+                print_failed_node_tail(&client, &project_root, &run_name, &node).await;
             }
-
-            // Best-effort teardown.
-            let _stop_result = orchestrator.stop(run_name_str).await;
             1
         }
+        other => finish(other),
     }
+}
+
+/// The tail of a failed node's server log, so the user sees what went wrong.
+/// Scoped to the run's latest instance by the engine's query, so a node that
+/// failed after three lines is not padded out with a previous attempt's.
+async fn print_failed_node_tail(
+    client: &EngineClient,
+    project_root: &std::path::Path,
+    run: &str,
+    node_key: &str,
+) {
+    let node = node_key.split(':').next().unwrap_or(node_key);
+    let Ok(page) = client
+        .get::<veld_engine::api::LogsPage>(
+            "/api/engine/logs",
+            &[
+                ("project_root", project_root.to_string_lossy().into_owned()),
+                ("name", run.to_owned()),
+                ("node", node.to_owned()),
+                ("lines", "20".to_owned()),
+                ("source", "server".to_owned()),
+            ],
+        )
+        .await
+    else {
+        return;
+    };
+    if page.rows.is_empty() {
+        return;
+    }
+    eprintln!();
+    eprintln!(
+        "  {}",
+        output::dim(&format!("Last log lines from {node_key}:"))
+    );
+    eprintln!();
+    for row in &page.rows {
+        eprintln!("    {}", output::dim(&row.line));
+    }
+    eprintln!();
+    eprintln!(
+        "  {}",
+        output::dim(&format!("Full log: veld logs --name {run} --node {node}"))
+    );
+}
+
+/// `--attach`: stream the run's logs until Ctrl-C, then stop it.
+async fn attach_logs(client: &Arc<EngineClient>, project_root: &std::path::Path, run: &str) -> i32 {
+    println!();
+    output::print_info("Streaming logs (Ctrl+C to stop)...");
+    println!();
+    // `veld logs -f` for this run, from now: it returns on Ctrl-C (or when the
+    // run ends on its own), and then the run is stopped.
+    let _ = project_root;
+    super::logs::run(super::logs::LogsOptions {
+        name: Some(run.to_owned()),
+        node: None,
+        lines: 0,
+        since: None,
+        follow: true,
+        json: false,
+        // The nodes' own output, as `--attach` always streamed — not veld's
+        // internal or client rows.
+        source: super::logs::SourceFilter::Server,
+        search: None,
+        context_lines: 0,
+        run: None,
+        previous: false,
+        all_runs: false,
+        time_zone: None,
+    })
+    .await;
+    println!();
+    output::print_info("Stopping environment...");
+    super::stop::stop_run(client, project_root, run).await;
+    0
+}
+
+/// Print how an action ended that has nothing more specific to say, and return
+/// the exit code.
+pub(super) fn finish(outcome: ActionOutcome) -> i32 {
+    let code = outcome.exit_code();
+    match outcome {
+        ActionOutcome::Failed { message, .. } => output::print_error(&message, false),
+        ActionOutcome::Unknown => output::print_error(
+            "The action ended in a way this veld does not know — update veld.",
+            false,
+        ),
+        _ => {}
+    }
+    code
+}
+
+enum Picked {
+    Preset(String),
+    Selections(Vec<String>),
+}
+
+/// The human half of a bare `veld start`. Reads this checkout's veld.json for
+/// the picker's `interpret_pick`, which is a parse of what was typed, not a
+/// decision: the choice goes back to the engine's preflight.
+fn pick(choice: &Choice) -> Option<Picked> {
+    let (_, config) = super::parse_config(false)?;
+    if choice.presets.is_empty() {
+        let sels = interactive_node_variant_picker(&config)?;
+        return Some(Picked::Selections(
+            sels.iter().map(ToString::to_string).collect(),
+        ));
+    }
+    let default = choice.presets.iter().find(|p| p.is_default);
+    interactive_preset_selector(&config, &choice.presets, default).map(Picked::Preset)
+}
+
+/// The values of the env names the engine says veld.json reads — and only
+/// those. Nothing else from this terminal reaches a node.
+pub(super) fn caller_env(names: &[String]) -> BTreeMap<String, String> {
+    names
+        .iter()
+        .filter_map(|n| std::env::var(n).ok().map(|v| (n.clone(), v)))
+        .collect()
+}
+
+/// How [`drive`] shows an action's progress.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Drive {
+    /// `veld start`: spinners at a terminal, NDJSON on stdout otherwise.
+    Progress,
+    /// `--oneshot`: as `Progress` but on stderr — stdout is the node's output —
+    /// with the engine's notices as plain lines, as the CLI always printed them.
+    Oneshot,
+    /// `veld stop`/`restart`: only the engine's notices and warnings, as plain
+    /// lines on stderr. These never streamed progress, and a script reading their
+    /// stdout must not start seeing JSON.
+    Quiet,
+}
+
+/// Follow an action to its end, drawing what it reports. Ctrl-C asks the engine
+/// to cancel (it cleans up what it started and the stream ends `cancelled`); a
+/// second Ctrl-C stops waiting.
+pub(super) async fn drive(
+    client: &Arc<EngineClient>,
+    action_id: &str,
+    mode: Drive,
+) -> Result<ActionOutcome, i32> {
+    let oneshot = mode == Drive::Oneshot;
+    let (tx, rx) = mpsc::unbounded_channel::<Shown>();
+    // In --oneshot mode stdout carries only the terminal node's output, so the
+    // startup progress goes to stderr.
+    let renderer = tokio::spawn(render_progress(rx, is_tty(), oneshot));
+    let follower = {
+        let client = Arc::clone(client);
+        let id = action_id.to_owned();
+        tokio::spawn(async move {
+            let mut outcome = None;
+            let r = client
+                .follow(&id, |env| {
+                    match env.event {
+                        EngineEvent::Progress { progress } => match (mode, progress) {
+                            (Drive::Quiet, ProgressEvent::Notice { message }) => {
+                                let _ = tx.send(Shown::Line {
+                                    stderr: true,
+                                    line: format!("  {} {message}", output::dim("»")),
+                                });
+                            }
+                            (Drive::Quiet, ProgressEvent::Warning { message }) => {
+                                let _ = tx.send(Shown::Line {
+                                    stderr: true,
+                                    line: format!("  {} {message}", output::yellow("!")),
+                                });
+                            }
+                            (Drive::Quiet, _) => {}
+                            (_, progress) => {
+                                let _ = tx.send(Shown::Progress(progress));
+                            }
+                        },
+                        EngineEvent::Notice { message, level } if mode != Drive::Progress => {
+                            let mark = match level {
+                                NoticeLevel::Error => output::red("✗"),
+                                NoticeLevel::Warning => output::yellow("!"),
+                                _ => output::dim("»"),
+                            };
+                            let _ = tx.send(Shown::Line {
+                                stderr: true,
+                                line: format!("  {mark} {message}"),
+                            });
+                        }
+                        EngineEvent::Notice { message, level } => {
+                            let _ = tx.send(Shown::Progress(match level {
+                                NoticeLevel::Warning | NoticeLevel::Error => {
+                                    ProgressEvent::Warning { message }
+                                }
+                                _ => ProgressEvent::Notice { message },
+                            }));
+                        }
+                        EngineEvent::Output { stream, line } => {
+                            let _ = tx.send(Shown::Line {
+                                stderr: stream == OutputStream::Stderr,
+                                line,
+                            });
+                        }
+                        EngineEvent::DependencyLog {
+                            node,
+                            variant,
+                            line,
+                        } => {
+                            let _ = tx.send(Shown::Line {
+                                stderr: true,
+                                line: format!(
+                                    "{} {}",
+                                    output::dim(&format!("{node}:{variant}")),
+                                    output::dim(&line)
+                                ),
+                            });
+                        }
+                        EngineEvent::Finished { outcome: o } => outcome = Some(o),
+                        EngineEvent::Unknown => {}
+                    }
+                    true
+                })
+                .await;
+            drop(tx);
+            r.map(|()| outcome)
+        })
+    };
+    tokio::pin!(follower);
+    let mut cancelled = false;
+    let result = loop {
+        tokio::select! {
+            r = &mut follower => break r,
+            _ = tokio::signal::ctrl_c() => {
+                if cancelled {
+                    // Second Ctrl-C: stop waiting. The engine carries on — a
+                    // cancelled start cleaning up, a stop finishing.
+                    return Err(130);
+                }
+                cancelled = true;
+                eprintln!();
+                match client.cancel(action_id).await {
+                    Ok(()) => eprintln!(
+                        "  {} Interrupted — asking the engine to stop what it started...",
+                        output::dim("»")
+                    ),
+                    // Refused (a stop runs to its end; a worker still starting has
+                    // no pid yet): say why and keep waiting.
+                    Err(e) => eprintln!(
+                        "  {} {e}. Waiting for it — Ctrl+C again to stop waiting.",
+                        output::dim("»")
+                    ),
+                }
+            }
+        }
+    };
+    let _ = renderer.await;
+    match result {
+        Ok(Ok(Some(outcome))) => Ok(outcome),
+        Ok(Ok(None)) => {
+            output::print_error(
+                "The engine ended the action without saying how. Check `veld status`.",
+                false,
+            );
+            Err(1)
+        }
+        Ok(Err(e)) => Err(super::client_error(&e)),
+        Err(_) => Err(1),
+    }
+}
+
+/// Make sure every machine-overridable var the plan needs has an answer.
+///
+/// **The rule this exists to enforce: a value nobody chose is never written.**
+/// Falling back to a declared `default` stores nothing, and a prompt's answer is
+/// stored only when the human says so. The failure that motivated it was a
+/// background process taking a default, which then looked exactly like a
+/// deliberate choice for as long as the machine lived.
+///
+/// Each answer carries its provenance: one that reached the database is
+/// `Saved`, one the human kept for this run only is `PerRun`. Labelling a saved
+/// answer per-run makes the teardown warning fire for a var the user just set —
+/// three review rounds found that bug in this seam. `None` means refuse.
+pub(super) async fn gather_answers(
+    client: &EngineClient,
+    project_root: &std::path::Path,
+    missing: &[UnansweredVarWire],
+    // Whether the caller supports `--var`, so the refusal does not name a flag
+    // the subcommand the user typed does not have.
+    offer_var_flag: bool,
+) -> Option<Vec<VarAnswer>> {
+    if missing.is_empty() {
+        return Some(Vec::new());
+    }
+    let missing: Vec<veld_core::values::UnansweredVar> =
+        missing.iter().cloned().map(Into::into).collect();
+
+    // Attended means "a human is reading this and can type": both streams the
+    // prompt uses must be a terminal, and VELD_NON_INTERACTIVE unset. Not stdout
+    // (`--oneshot … > out.json` from a real terminal is attended), and not stdin
+    // alone (a process handed a tty stdin but writing stderr to a file must not
+    // block on a question nobody can see).
+    let attended = std::io::IsTerminal::is_terminal(&std::io::stdin())
+        && std::io::IsTerminal::is_terminal(&std::io::stderr())
+        && std::env::var("VELD_NON_INTERACTIVE")
+            .map(|v| v.is_empty())
+            .unwrap_or(true);
+    if !attended {
+        report_unanswered_vars(&missing, offer_var_flag);
+        return None;
+    }
+
+    let mut answers: Vec<VarAnswer> = Vec::new();
+    let mut to_store: Vec<(String, String)> = Vec::new();
+    eprintln!();
+    eprintln!(
+        "{} value(s) this project needs on your machine:",
+        missing.len()
+    );
+    for var in &missing {
+        if let Some(stale) = &var.stale {
+            eprintln!();
+            eprintln!(
+                "  {} is no longer one of the allowed values{}.",
+                var.name,
+                if stale.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (currently \"{stale}\")")
+                }
+            );
+        }
+        let Some(value) = prompt_for_var(var) else {
+            eprintln!("Cancelled.");
+            return None;
+        };
+        // Ask before writing. A "no" still starts the run — the answer is just
+        // not this machine's answer.
+        if prompt_yes_no(&format!("  Save `{}` for this machine?", var.name)) {
+            to_store.push((var.name.clone(), value.clone()));
+        } else {
+            eprintln!("  Using it for this run only.");
+        }
+        answers.push(VarAnswer {
+            name: var.name.clone(),
+            value,
+            provenance: AnswerProvenance::PerRun,
+        });
+    }
+
+    if !to_store.is_empty() {
+        // Counted, so the summary describes what happened rather than what was
+        // attempted. Not fatal: the run has its answers; losing the *storage*
+        // costs a re-prompt next time, not this start.
+        match client
+            .save_var_answers(&SaveVarAnswers {
+                project_root: project_root.to_path_buf(),
+                answers: to_store,
+            })
+            .await
+        {
+            Ok(saved) => {
+                for (name, e) in &saved.failed {
+                    eprintln!("Warning: could not save `{name}` for this machine: {e}");
+                }
+                for a in &mut answers {
+                    if saved.saved.contains(&a.name) {
+                        a.provenance = AnswerProvenance::Saved;
+                    }
+                }
+                if !saved.saved.is_empty() {
+                    eprintln!(
+                        "Saved {} value(s) to {} — shared by every worktree of this project. \
+                         Change with `veld config set`, clear with `veld config unset`.",
+                        saved.saved.len(),
+                        saved.project_id
+                    );
+                }
+            }
+            Err(e) => eprintln!(
+                "Warning: nothing was saved for this machine ({e}). This run has your answers; \
+                 the next one will ask again."
+            ),
+        }
+    }
+    eprintln!();
+    Some(answers)
+}
+
+/// A per-run answer lives only in this action. `veld stop` is another one, so a
+/// teardown that needs it will skip its `${vars.*}` steps. Say so now, while
+/// `veld config set` is still an option.
+pub(super) async fn warn_stranded(
+    client: &EngineClient,
+    project_root: &std::path::Path,
+    plan: PreflightPlan,
+    var: &[String],
+    ready: &veld_engine::api::Preflight,
+    answers: &[VarAnswer],
+) {
+    let prompt_only: Vec<String> = answers
+        .iter()
+        .filter(|a| a.provenance == AnswerProvenance::PerRun)
+        .filter(|a| !ready.flag_answers.iter().any(|f| f.name == a.name))
+        .map(|a| format!("{}={}", a.name, a.value))
+        .collect();
+    // The engine computed this for the `--var` answers; ask again with the
+    // prompt answers the human kept for this run only, which strand the same way.
+    let stranded = if prompt_only.is_empty() {
+        ready.stranded_at_teardown.clone()
+    } else {
+        let mut flags = var.to_vec();
+        flags.extend(prompt_only);
+        match client
+            .preflight(&PreflightRequest {
+                project_root: project_root.to_path_buf(),
+                plan,
+                var_flags: flags,
+                interactive: false,
+            })
+            .await
+        {
+            Ok(PreflightResponse::Ready(r)) => r.stranded_at_teardown,
+            _ => ready.stranded_at_teardown.clone(),
+        }
+    };
+    if stranded.is_empty() {
+        return;
+    }
+    let them = if stranded.len() == 1 { "it" } else { "them" };
+    eprintln!(
+        "Warning: {} answered for this run only, but this project's teardown needs {them}. \
+         `veld stop` is a separate action and cannot see a per-run answer, so its \
+         `${{vars.*}}` steps will be skipped. Use `veld config set` for {them} if teardown has \
+         to work.",
+        stranded.join(", "),
+    );
 }
 
 /// Print the final receipt after a successful start.
@@ -486,14 +730,28 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
 ///
 /// TTY mode: Uses `indicatif::MultiProgress` for concurrent node spinners.
 /// Non-TTY/JSON mode: Emits NDJSON for agent consumption.
-async fn render_progress(
-    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
-    tty: bool,
-    json_stderr: bool,
-) {
+async fn render_progress(mut rx: mpsc::UnboundedReceiver<Shown>, tty: bool, json_stderr: bool) {
     let mut ctx = TtyProgressCtx::new();
 
-    while let Some(event) = rx.recv().await {
+    while let Some(item) = rx.recv().await {
+        let event = match item {
+            Shown::Progress(event) => event,
+            // Program output, in the order it arrived relative to progress: one
+            // queue, so a `--oneshot` node's stderr cannot overtake the progress
+            // lines that came before it.
+            Shown::Line { stderr, line } => {
+                // stdout stays stdout: `--oneshot`'s stdout is the node's output
+                // and nothing else, and indicatif draws on stderr.
+                if stderr && tty && !ctx.bars.is_empty() {
+                    ctx.say(line);
+                } else if stderr {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+                continue;
+            }
+        };
         if tty {
             render_progress_tty(&event, &mut ctx);
         } else {
@@ -517,6 +775,12 @@ async fn render_progress(
     }
 }
 
+/// What the renderer shows: the engine's progress, or a line of program output.
+enum Shown {
+    Progress(ProgressEvent),
+    Line { stderr: bool, line: String },
+}
+
 /// State tracked across TTY progress events. Uses `indicatif::MultiProgress`
 /// to show concurrent spinners for parallel node execution within a stage.
 struct TtyProgressCtx {
@@ -537,6 +801,18 @@ struct NodeBarState {
 }
 
 impl TtyProgressCtx {
+    /// Print a line above the spinners — or plainly when none is on screen:
+    /// indicatif's `println` with nothing drawn leaves the cursor mid-line, and
+    /// the next line printed outside it lands glued to the end of this one.
+    fn say(&self, line: impl Into<String>) {
+        let line = line.into();
+        if self.bars.is_empty() {
+            eprintln!("{line}");
+        } else {
+            let _ = self.multi.println(line);
+        }
+    }
+
     fn new() -> Self {
         Self {
             multi: indicatif::MultiProgress::new(),
@@ -580,7 +856,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             stages,
         } => {
             ctx.total = *total_nodes;
-            let _ = ctx.multi.println(format!(
+            ctx.say(format!(
                 "  {} {total_nodes} node(s) in {stages} stage(s)\n",
                 output::dim("plan:"),
             ));
@@ -712,9 +988,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             for line in lines {
                 // Lines are verbatim; printed through `multi` so they interleave
                 // with the spinners instead of overwriting them.
-                let _ = ctx
-                    .multi
-                    .println(format!("  {label} {}", output::dim(line)));
+                ctx.say(format!("  {label} {}", output::dim(line)));
             }
         }
         ProgressEvent::SetupStepStarting { name, index, total } => {
@@ -762,596 +1036,22 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             }
         }
         ProgressEvent::TeardownStepRunning { name, index, total } => {
-            let _ = ctx.multi.println(format!(
+            ctx.say(format!(
                 "  {} {}",
                 output::dim(&format!("teardown ({index}/{total}):")),
                 name,
             ));
         }
         ProgressEvent::TeardownStepCompleted { name } => {
-            let _ = ctx
-                .multi
-                .println(format!("  {} {}", output::checkmark(), name,));
+            ctx.say(format!("  {} {}", output::checkmark(), name,));
         }
         ProgressEvent::Notice { message } => {
-            let _ = ctx
-                .multi
-                .println(format!("  {} {message}", output::dim("»")));
+            ctx.say(format!("  {} {message}", output::dim("»")));
         }
-    }
-}
-
-/// Tail server logs from the database, printing timestamped lines with node
-/// labels, until Ctrl+C.
-async fn follow_logs_until_interrupt(
-    db: &veld_core::db::Db,
-    targets: &[(String, String)],
-    project_root: &std::path::Path,
-    run_name: &str,
-) {
-    // Skip historical output: start after the current newest row.
-    let mut last_id = db.max_log_id().unwrap_or(0);
-    // Same rendering as `veld logs`, from the same setting: this prints the identical
-    // `node:variant [ts] line` shape into the same terminal, so a different zone here
-    // would show two clocks for one run. `veld start` has no `--utc`/`--local` of its
-    // own — the setting is the whole control, and `veld logs --utc` re-reads the same
-    // rows for anyone who wants the stored value once.
-    let tz = db.logs_time_zone();
-    let target_set: std::collections::HashSet<(String, String)> = targets.iter().cloned().collect();
-    let filter = veld_core::db::LogFilter {
-        node: None,
-        variant: None,
-        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
-        run_id: None,
-    };
-
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-
-    loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                let rows = match db.logs_after_id(project_root, run_name, &filter, last_id) {
-                    Ok(rows) => rows,
-                    Err(_) => continue,
-                };
-                for row in rows {
-                    last_id = row.id;
-                    let (Some(node), Some(variant)) = (row.node.as_deref(), row.variant.as_deref())
-                    else {
-                        continue;
-                    };
-                    if !target_set.contains(&(node.to_owned(), variant.to_owned())) {
-                        continue;
-                    }
-                    let label = output::cyan(&format!("{node}:{variant}"));
-                    println!(
-                        "{label} [{}] {}",
-                        veld_core::logging::format_ts(&row.ts, tz),
-                        row.line
-                    );
-                }
-            }
-            _ = tokio::signal::ctrl_c() => {
-                return;
-            }
+        ProgressEvent::Warning { message } => {
+            ctx.say(format!("  {} {}", output::yellow("!"), message));
         }
-    }
-}
-
-/// Run the terminal one-off node (`--oneshot`) after its dependencies are
-/// healthy: stream its output, tear everything down in reverse order, and
-/// return its exit code so CI/callers see pass/fail directly.
-async fn run_oneshot_terminal(
-    orchestrator: &mut Orchestrator,
-    run_state: &veld_core::state::RunState,
-    sel: &NodeSelection,
-    run_name: &str,
-    project_root: &std::path::Path,
-    all_logs: bool,
-) -> i32 {
-    let label = format!("{}:{}", sel.node, sel.variant);
-
-    // Everything veld prints here is chrome and goes to STDERR: stdout must
-    // carry only the terminal node's own output (streamed by run_terminal), so
-    // an agent or CI job that captures stdout gets just the test results.
-    eprintln!();
-    print_deps_summary_stderr(run_state, sel);
-    eprintln!();
-    eprintln!(
-        "  {} Running {} (Ctrl+C to abort)...",
-        output::dim("»"),
-        output::bold(&label)
-    );
-    eprintln!();
-
-    // Optionally interleave dependency logs — also on stderr, keeping stdout
-    // the terminal node's output only.
-    let tailer = if all_logs {
-        let db = orchestrator.db.clone();
-        let pr = project_root.to_path_buf();
-        let rn = run_name.to_owned();
-        let dep_targets: Vec<(String, String)> = run_state
-            .nodes
-            .values()
-            .filter(|ns| !(ns.node_name == sel.node && ns.variant == sel.variant))
-            .map(|ns| (ns.node_name.clone(), ns.variant.clone()))
-            .collect();
-        Some(tokio::spawn(async move {
-            follow_dep_logs(&db, &dep_targets, &pr, &rn).await;
-        }))
-    } else {
-        None
-    };
-
-    let result = orchestrator.run_terminal(run_name, sel).await;
-
-    if let Some(handle) = tailer {
-        handle.abort();
-    }
-
-    let exit_code = match result {
-        Ok(code) => code,
-        Err(e) => {
-            output::print_error(&format!("Failed to run {label}: {e}"), false);
-            // The terminal node never produced an exit — record the failure
-            // intent before the teardown below finalizes, or history would
-            // read `stopped` for a run that actually failed to execute.
-            if let Ok(Some(run)) = orchestrator.db.get_run(project_root, run_name) {
-                let detail = veld_core::state::EndDetail {
-                    exit_code: Some(127),
-                    message: Some(format!("terminal node failed to run: {e}")),
-                    ..Default::default()
-                };
-                let _ = orchestrator.db.begin_ending(
-                    &run.run_id,
-                    veld_core::state::EndReason::Failed,
-                    Some(&detail),
-                );
-            }
-            127
-        }
-    };
-
-    // Tear down all dependencies in reverse order, regardless of outcome.
-    eprintln!();
-    eprintln!("  {} Tearing down environment...", output::dim("»"));
-    match orchestrator.stop(run_name).await {
-        Ok(_) => eprintln!(
-            "  {} Environment '{run_name}' torn down.",
-            output::checkmark()
-        ),
-        Err(e) => output::print_error(&format!("Teardown failed: {e}"), false),
-    }
-
-    eprintln!();
-    if exit_code == 0 {
-        eprintln!(
-            "  {} {} completed successfully (exit 0).",
-            output::checkmark(),
-            label
-        );
-    } else {
-        output::print_error(&format!("{label} exited with code {exit_code}."), false);
-    }
-
-    exit_code
-}
-
-/// Print a compact summary of the started dependencies to **stderr** (stdout is
-/// reserved for the terminal node's own output in `--oneshot` mode).
-fn print_deps_summary_stderr(run_state: &veld_core::state::RunState, terminal: &NodeSelection) {
-    use veld_core::state::{NodeStatus, RunState};
-
-    let term_key = RunState::node_key(&terminal.node, &terminal.variant);
-    for key in &run_state.execution_order {
-        if key == &term_key {
-            continue;
-        }
-        let Some(ns) = run_state.nodes.get(key) else {
-            continue;
-        };
-        let status = match ns.status {
-            NodeStatus::Healthy => output::green("healthy"),
-            NodeStatus::Skipped => output::dim("skipped"),
-            _ => output::dim(&format!("{:?}", ns.status).to_lowercase()),
-        };
-        eprintln!(
-            "  {} {} {}",
-            output::dim(&format!("{}:{}", ns.node_name, ns.variant)),
-            status,
-            output::dim(ns.url.as_deref().unwrap_or("-")),
-        );
-    }
-}
-
-/// Tail dependency server logs until the task is aborted. Used by
-/// `--oneshot --all-logs` to interleave dependency output with the terminal
-/// node's own (already-streamed) output.
-async fn follow_dep_logs(
-    db: &veld_core::db::Db,
-    targets: &[(String, String)],
-    project_root: &std::path::Path,
-    run_name: &str,
-) {
-    let mut last_id = db.max_log_id().unwrap_or(0);
-    let target_set: std::collections::HashSet<(String, String)> = targets.iter().cloned().collect();
-    let filter = veld_core::db::LogFilter {
-        node: None,
-        variant: None,
-        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
-        run_id: None,
-    };
-
-    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-    loop {
-        interval.tick().await;
-        let rows = match db.logs_after_id(project_root, run_name, &filter, last_id) {
-            Ok(rows) => rows,
-            Err(_) => continue,
-        };
-        for row in rows {
-            last_id = row.id;
-            let (Some(node), Some(variant)) = (row.node.as_deref(), row.variant.as_deref()) else {
-                continue;
-            };
-            if !target_set.contains(&(node.to_owned(), variant.to_owned())) {
-                continue;
-            }
-            let plabel = output::dim(&format!("{node}:{variant}"));
-            eprintln!("{plabel} {}", output::dim(&row.line));
-        }
-    }
-}
-
-/// Expand a preset by name and resolve it to concrete selections, reporting the
-/// failure. `None` means the caller should exit non-zero.
-fn expand_and_resolve(name: &str, config: &VeldConfig) -> Option<Vec<NodeSelection>> {
-    match graph::expand_preset(name, config) {
-        Ok(sels) => match graph::resolve_selections(&sels, config) {
-            Ok(resolved) => Some(resolved),
-            Err(e) => {
-                output::print_error(&format!("Invalid preset `{name}`: {e}"), false);
-                None
-            }
-        },
-        Err(e) => {
-            output::print_error(&format!("Invalid preset `{name}`: {e}"), false);
-            None
-        }
-    }
-}
-
-/// What to say when `--preset` names nothing. Lists what *is* available, keys
-/// included, because the next thing the reader needs is the thing they should
-/// have typed.
-/// Append the `--preset` correction when a rejected selection token is in fact a
-/// preset of this project.
-///
-/// This is the single most common thing a coding agent gets wrong about veld, and
-/// the docs are not the reason: every example in the repo already writes
-/// `--preset`. The failure is a prior — `docker compose up <service>`,
-/// `npm run <script>`, `just <recipe>` all take the thing you want as a
-/// positional — and no amount of documentation reaches an agent that never had
-/// the question. The error message does, because it arrives exactly when the
-/// belief is wrong and nowhere else.
-///
-/// It matches by **name only**, never by the printed key: a key is a small
-/// integer, `veld start 2` is not a plausible thing to have meant, and a node
-/// legitimately called `1` would otherwise be told it is a preset.
-///
-/// **The rejected alternative is accepting it** — resolving a bare token as a
-/// preset when no node bears the name. It costs one fewer round trip and it was
-/// not chosen, for two reasons worth keeping. Node and preset are separate
-/// namespaces that veld does not otherwise merge, so a project that later adds a
-/// node named after a preset would silently change what an existing command
-/// starts. And the run records *what it was started from* (`origin_preset`,
-/// above): a preset reached through the positional path would have to either
-/// lose that provenance or acquire it by a second guess, and `veld runs show`
-/// exists to answer exactly that question. One failed invocation, once, is the
-/// cheaper side of that trade.
-fn with_preset_hint(message: &str, selections: &[String], config: &VeldConfig) -> String {
-    let presets = veld_core::presets::resolve(config);
-    // The node half of `node:variant`, so `dev-headless:local` is caught too — a
-    // preset name with a variant appended is the same misunderstanding one step on.
-    //
-    // **A token that names a real node is skipped, even if a preset shares the
-    // name.** Nothing forbids that overlap and `veld lint` passes a config with
-    // both; without this guard, `veld start api web:nosuchvariant` — which fails
-    // on `web` — would accuse `api` of being a preset and point at a command that
-    // starts something else entirely. The hint scans every selection because the
-    // error does not say which token it came from, so the node check is what keeps
-    // that scan from convicting the innocent one.
-    let hit = selections.iter().find_map(|token| {
-        let node = token.split(':').next().unwrap_or(token);
-        if config.nodes.contains_key(node) {
-            return None;
-        }
-        presets.iter().find(|p| p.name == node)
-    });
-    match hit {
-        Some(p) => format!(
-            "{message}\n\n  `{}` is a preset, not a node. Presets go behind the flag:\n    \
-             veld start --preset {}",
-            output::one_line(&p.name),
-            output::one_line(&p.name),
-        ),
-        None => message.to_owned(),
-    }
-}
-
-fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
-    let available = veld_core::presets::resolve(config);
-    if available.is_empty() {
-        return format!("Unknown preset `{token}` — this project defines no presets.");
-    }
-    let list = available
-        .iter()
-        .map(|p| format!("{} ({})", output::one_line(&p.name), p.key))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "Unknown preset `{}`. Available (name and key): {list}",
-        output::one_line(token)
-    )
-}
-
-/// Parse `--var NAME=VALUE` pairs, refusing a name the config does not declare
-/// machine-overridable.
-///
-/// Silence here is the worst option: resolution only consults an override for a
-/// var that is still declared `machine`, so `--var typo=x` — or a `--var` for an
-/// ordinary var — would otherwise be dropped without a word. The run starts, the
-/// config's value wins, and the snapshot does not record the flag either, so
-/// nothing anywhere says the answer was ignored. `veld config set` already
-/// refuses the same input and lists the declared names.
-fn parse_var_answers(
-    pairs: &[String],
-    config: &VeldConfig,
-) -> Result<veld_core::values::VarOverrides, String> {
-    let declared: Vec<&str> = {
-        let mut v: Vec<&str> = config
-            .vars
-            .iter()
-            .flatten()
-            .filter(|(_, d)| d.machine().is_some())
-            .map(|(n, _)| n.as_str())
-            .collect();
-        v.sort_unstable();
-        v
-    };
-    let mut out = veld_core::values::VarOverrides::new();
-    for pair in pairs {
-        let Some((name, value)) = pair.split_once('=') else {
-            return Err(format!(
-                "--var expects NAME=VALUE, got `{pair}`. An empty value is written `NAME=`"
-            ));
-        };
-        if name.is_empty() {
-            return Err(format!("--var `{pair}` has no name before the `=`"));
-        }
-        if !declared.contains(&name) {
-            return Err(format!(
-                "--var `{name}` is not declared machine-overridable in this project, so it \
-                 would be ignored. Machine-overridable vars: {}",
-                if declared.is_empty() {
-                    "(none)".to_owned()
-                } else {
-                    declared.join(", ")
-                }
-            ));
-        }
-        // Sensitivity is applied at resolution from the *declaration*, so a
-        // `--var` answer for a secret var is still redacted. The flag itself is
-        // visible in the process table, which is why it is documented as the
-        // wrong way to pass a secret.
-        out.insert(
-            name.to_owned(),
-            veld_core::config::ConfigValue::literal(value),
-        );
-    }
-    Ok(out)
-}
-
-/// Make sure every machine-overridable var this plan needs has an answer.
-///
-/// **The rule this function exists to enforce: a value nobody chose is never
-/// written.** Falling back to a declared `default` stores nothing, and a prompt's
-/// answer is stored only when the human says so. The failure that motivated it
-/// was a background process taking a default, which then looked exactly like a
-/// deliberate choice for as long as the machine lived.
-///
-/// **Returns the answers rather than only applying them.** They are applied to
-/// the orchestrator passed in *and* handed back, because `veld restart` throws
-/// that orchestrator away and builds a second one to start with — and an answer
-/// that reached memory but not the store (the human said "n" to saving it, or
-/// the write failed) exists nowhere else. Losing it there means the environment
-/// has already been torn down and the start then fails for the value the user
-/// just typed, which is precisely the outcome the restart pre-flight was added
-/// to prevent. `None` means refuse; `Some(answers)` means proceed and apply
-/// these to whatever eventually starts.
-pub(super) async fn resolve_machine_vars(
-    orchestrator: &mut Orchestrator,
-    selections: &[NodeSelection],
-    project_root: &std::path::Path,
-    // Whether the caller supports `--var`, so the refusal does not name a flag
-    // the subcommand the user typed does not have.
-    offer_var_flag: bool,
-) -> Option<MachineAnswers> {
-    let missing = match orchestrator.unanswered_vars(selections) {
-        Ok(m) => m,
-        Err(e) => {
-            output::print_error(&format!("{e}"), false);
-            return None;
-        }
-    };
-    if missing.is_empty() {
-        return Some(MachineAnswers {
-            answers: Default::default(),
-            stored: Default::default(),
-        });
-    }
-
-    // Attended means "a human is reading this and can type". Without a terminal
-    // there is no channel, and inventing one — resolving a default, or worse
-    // persisting a guess — is the documented failure.
-    //
-    // Gated on **both streams this prompt actually uses**, and on neither of the
-    // ones it doesn't.
-    //
-    // Not stdout (`output::is_tty()`): the question goes to stderr, so
-    // `veld start --oneshot … > out.json` from a real terminal was declared
-    // unattended and refused with a human sitting right there.
-    //
-    // Not stdin alone either, which is the trap on the way back: the daemon
-    // spawns `veld start` with stdout nulled and stderr redirected to a log file
-    // but **inherits stdin**, so a daemon launched from a terminal hands its tty
-    // to every run it starts. Gating on stdin alone would make that run believe a
-    // human was watching, write the question into a log file nobody reads, and
-    // block on `read_line` forever — while the UI, which already got its
-    // `202 ACCEPTED`, showed a run that never starts. Requiring stderr to be a
-    // terminal is what distinguishes the two: a human can only answer a question
-    // they can see. (`spawn_veld_in` also nulls stdin now; this is the half that
-    // does not depend on the spawner getting it right.)
-    let attended = std::io::IsTerminal::is_terminal(&std::io::stdin())
-        && std::io::IsTerminal::is_terminal(&std::io::stderr())
-        && std::env::var("VELD_NON_INTERACTIVE")
-            .map(|v| v.is_empty())
-            .unwrap_or(true);
-    if !attended {
-        report_unanswered_vars(&missing, offer_var_flag);
-        return None;
-    }
-
-    let mut answers = veld_core::values::VarOverrides::new();
-    let mut to_store: Vec<(String, veld_core::config::ConfigValue)> = Vec::new();
-    // Which names actually reached the database. Not `to_store` — a write can
-    // fail — and this is what tells a saved answer (backed by a row, resolvable
-    // by a later `veld stop`) from one that lives only in this process.
-    let mut stored: std::collections::BTreeSet<String> = Default::default();
-    eprintln!();
-    eprintln!(
-        "{} value(s) this project needs on your machine:",
-        missing.len()
-    );
-    for var in &missing {
-        if let Some(stale) = &var.stale {
-            eprintln!();
-            eprintln!(
-                "  {} is no longer one of the allowed values{}.",
-                var.name,
-                if stale.is_empty() {
-                    String::new()
-                } else {
-                    format!(" (currently \"{stale}\")")
-                }
-            );
-        }
-        let Some(value) = prompt_for_var(var) else {
-            eprintln!("Cancelled.");
-            return None;
-        };
-        let cv = veld_core::config::ConfigValue {
-            source: veld_core::config::SecretSource::Literal(value),
-            secret: var.secret,
-        };
-        // Ask before writing. A "no" still starts the run — the answer is just
-        // not this machine's answer, which is exactly the distinction the store
-        // is supposed to preserve.
-        if prompt_yes_no(&format!("  Save `{}` for this machine?", var.name)) {
-            to_store.push((var.name.clone(), cv.clone()));
-        } else {
-            eprintln!("  Using it for this run only.");
-        }
-        answers.insert(var.name.clone(), cv);
-    }
-
-    if !to_store.is_empty() {
-        // Counted, so the summary describes what happened rather than what was
-        // attempted: it used to print "Saved to …" even when every write failed,
-        // and print nothing at all when the database would not open — losing
-        // answers the human had explicitly confirmed saving, silently.
-        let mut saved = 0usize;
-        match super::open_db(false) {
-            Some(db) => {
-                let project_id = orchestrator.project_id().clone();
-                for (name, value) in &to_store {
-                    match db.set_var_override(
-                        &project_id,
-                        veld_core::db::OverrideScope::Project,
-                        project_root,
-                        name,
-                        value,
-                    ) {
-                        // Not fatal: the run has its answers in memory. Losing
-                        // the *storage* costs a re-prompt next time, not this
-                        // start.
-                        Err(e) => {
-                            eprintln!("Warning: could not save `{name}` for this machine: {e}");
-                        }
-                        Ok(()) => {
-                            saved += 1;
-                            stored.insert(name.clone());
-                        }
-                    }
-                }
-                if saved > 0 {
-                    eprintln!(
-                        "Saved {saved} value(s) to {project_id} — shared by every worktree of \
-                         this project. Change with `veld config set`, clear with \
-                         `veld config unset`."
-                    );
-                }
-            }
-            None => eprintln!(
-                "Warning: veld's database could not be opened, so nothing was saved for this \
-                 machine. This run has your answers; the next one will ask again."
-            ),
-        }
-    }
-    eprintln!();
-    let collected = MachineAnswers { answers, stored };
-    // Applied here for the caller that starts straight away, and returned so a
-    // caller that builds a second orchestrator (`veld restart`) can apply them
-    // to the one that will actually run.
-    collected.apply(orchestrator);
-    Some(collected)
-}
-
-/// Answers gathered by [`resolve_machine_vars`], with the provenance each one
-/// must carry.
-///
-/// **A struct with an `apply`, not a bare map.** Splitting these by provenance is
-/// the step three separate review rounds got wrong — a saved answer labelled as
-/// a per-run flag makes the teardown warning fire for a var the user just set and
-/// records the wrong origin in the run snapshot. Handing callers a value they
-/// cannot apply incorrectly is cheaper than remembering the rule at each call.
-pub(super) struct MachineAnswers {
-    answers: veld_core::values::VarOverrides,
-    /// Names that reached the database, so a later `veld stop` can resolve them.
-    stored: std::collections::BTreeSet<String>,
-}
-
-impl MachineAnswers {
-    pub(super) fn is_empty(&self) -> bool {
-        self.answers.is_empty()
-    }
-
-    /// Apply to whichever orchestrator will actually start.
-    pub(super) fn apply(&self, orchestrator: &mut Orchestrator) {
-        let (saved, per_run): (
-            veld_core::values::VarOverrides,
-            veld_core::values::VarOverrides,
-        ) = self
-            .answers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .partition(|(k, _)| self.stored.contains(k));
-        if !saved.is_empty() {
-            orchestrator.set_var_answers(saved, veld_core::orchestrator::VarProvenance::Project);
-        }
-        if !per_run.is_empty() {
-            orchestrator.set_var_answers(per_run, veld_core::orchestrator::VarProvenance::Flag);
-        }
+        ProgressEvent::Unknown => {}
     }
 }
 
@@ -1447,60 +1147,6 @@ fn prompt_yes_no(question: &str) -> bool {
         return false;
     }
     !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
-}
-
-/// Handle the case where no selections or preset were given.
-///
-/// Returns the selections and, when the answer came from a preset, that
-/// preset's config name — a bare `veld start` that lands on `default_preset` or
-/// on the interactive picker *did* start from a preset, and the run's record has
-/// to say so or the two paths would look like explicit-token starts.
-fn handle_no_selections(config: &VeldConfig) -> Option<(Vec<NodeSelection>, Option<String>)> {
-    let presets = veld_core::presets::resolve(config);
-    let default = veld_core::presets::default_preset(config);
-
-    // A declared default is the answer to "just start it" whether or not anyone
-    // is watching — so it applies without a TTY too. That is the case a coding
-    // agent hits: `veld start` in a non-interactive shell used to be an error
-    // payload listing everything and choosing nothing.
-    if !is_tty() {
-        if let Some(default) = default {
-            // stderr, not `print_info`: without a TTY this run streams JSON
-            // events on stdout, and a chrome line in that stream corrupts the
-            // capture of the very agent this path exists to serve. Names the
-            // config key, which is what `--preset` takes, not just the label.
-            let label = default
-                .label
-                .as_deref()
-                .map(|l| format!(" ({})", output::one_line(l)))
-                .unwrap_or_default();
-            eprintln!(
-                "Starting default preset `{}`{label}.",
-                output::one_line(&default.name)
-            );
-            let sels = expand_and_resolve(&default.name, config)?;
-            return Some((sels, Some(default.name.clone())));
-        }
-        let node_names: Vec<String> = config.nodes.keys().cloned().collect();
-        let payload = serde_json::json!({
-            "error": "No selections provided",
-            "nodes": node_names,
-            "presets": presets,
-            "hint": "Pass `--preset <name-or-key>`, explicit `node:variant` selections, \
-                     or set `default_preset` in veld.json so a bare `veld start` has an \
-                     answer.",
-        });
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-        return None;
-    }
-
-    if presets.is_empty() {
-        return interactive_node_variant_picker(config).map(|sels| (sels, None));
-    }
-
-    let selected = interactive_preset_selector(config, &presets, default.as_ref())?;
-    let sels = expand_and_resolve(&selected, config)?;
-    Some((sels, Some(selected)))
 }
 
 /// Interactive preset selector.
@@ -1730,164 +1376,4 @@ fn interactive_node_variant_picker(config: &VeldConfig) -> Option<Vec<NodeSelect
     }
 
     Some(selections)
-}
-
-/// Find all `long_running` nodes whose URL template resolves to a
-/// non-localhost domain. Returns a list of `(node:variant, hostname)` pairs.
-fn find_non_localhost_domains(
-    selections: &[veld_core::graph::NodeSelection],
-    config: &VeldConfig,
-) -> Vec<(String, String)> {
-    use veld_core::config::StepType;
-    use veld_core::url;
-
-    // Build dummy values to evaluate templates — the apex domain is the static
-    // part of the template, so placeholder values are sufficient.
-    let dummy_values =
-        url::build_url_template_values("svc", "var", "run", "proj", "branch", "wt", "user", "host");
-
-    let mut offenders = Vec::new();
-
-    for sel in selections {
-        let node_cfg = match config.nodes.get(&sel.node) {
-            Some(n) => n,
-            None => continue,
-        };
-        let variant_cfg = match node_cfg.variants.get(&sel.variant) {
-            Some(v) => v,
-            None => continue,
-        };
-        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
-            continue;
-        };
-
-        if resolved.step_type != StepType::LongRunning {
-            continue;
-        }
-
-        let effective_template = url::resolve_url_template(
-            &config.url_template,
-            node_cfg.url_template.as_deref(),
-            variant_cfg.url_template.as_deref(),
-        );
-
-        // Err means an unrecognized variable — that template will also fail at
-        // runtime, so we skip it here rather than producing a confusing error.
-        if let Ok(hostname) = url::evaluate_url_template(effective_template, &dummy_values) {
-            if !url::is_localhost_domain(&hostname) {
-                offenders.push((format!("{}:{}", sel.node, sel.variant), hostname));
-            }
-        }
-    }
-
-    offenders
-}
-
-#[cfg(test)]
-mod tests {
-    use super::with_preset_hint;
-    use std::io::Write;
-
-    fn config_with_a_preset() -> veld_core::config::VeldConfig {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("veld.json");
-        let mut f = std::fs::File::create(&path).expect("create");
-        f.write_all(
-            br#"{
-              "schemaVersion": "3",
-              "name": "hinted",
-              "nodes": {
-                "api": {
-                  "default_variant": "local",
-                  "variants": { "local": { "type": "command", "shell": "true" } }
-                }
-              },
-              "presets": { "dev-headless": { "selections": ["api:local"] } }
-            }"#,
-        )
-        .expect("write");
-        // The parse has to happen before `dir` goes out of scope — a `TempDir`
-        // deletes its tree on drop, and the failure that produces is a
-        // file-not-found from a path the test can see right there in the source.
-        let config = veld_core::config::parse_config(&path).expect("parse");
-        drop(dir);
-        config
-    }
-
-    /// The correction is the whole point of the function — an agent that reached
-    /// here believes presets are positional, and only this message is in front of
-    /// it at the moment the belief is wrong.
-    #[test]
-    fn a_preset_used_as_a_positional_is_named_as_one() {
-        let config = config_with_a_preset();
-        let out = with_preset_hint(
-            "unknown node \"dev-headless\"",
-            &["dev-headless".to_owned()],
-            &config,
-        );
-        assert!(out.contains("is a preset, not a node"), "{out}");
-        assert!(out.contains("veld start --preset dev-headless"), "{out}");
-        // The original diagnostic survives: the hint adds, it does not replace.
-        assert!(out.contains("unknown node"), "{out}");
-    }
-
-    /// `dev-headless:local` is the same misunderstanding one step further on, and
-    /// the node half is what has to be matched.
-    #[test]
-    fn a_preset_with_a_variant_appended_is_caught_too() {
-        let config = config_with_a_preset();
-        let out = with_preset_hint("boom", &["dev-headless:local".to_owned()], &config);
-        assert!(out.contains("is a preset, not a node"), "{out}");
-    }
-
-    /// A node and a preset may legally share a name, and then the node wins: the
-    /// token was used correctly and the failure is about some other selection.
-    #[test]
-    fn a_real_node_is_never_accused_of_being_a_preset() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("veld.json");
-        std::fs::write(
-            &path,
-            br#"{
-              "schemaVersion": "3",
-              "name": "collide",
-              "nodes": {
-                "api": {
-                  "default_variant": "local",
-                  "variants": { "local": { "type": "command", "shell": "true" } }
-                },
-                "web": {
-                  "default_variant": "local",
-                  "variants": { "local": { "type": "command", "shell": "true" } }
-                }
-              },
-              "presets": { "api": { "selections": ["web:local"] } }
-            }"#,
-        )
-        .expect("write");
-        let config = veld_core::config::parse_config(&path).expect("parse");
-        drop(dir);
-
-        // `web:nosuchvariant` is what failed; `api` is a node used correctly and
-        // must not be rewritten into `veld start --preset api`, which starts
-        // something else.
-        let out = with_preset_hint(
-            "unknown variant \"nosuchvariant\"",
-            &["api".to_owned(), "web:nosuchvariant".to_owned()],
-            &config,
-        );
-        assert_eq!(out, "unknown variant \"nosuchvariant\"", "{out}");
-    }
-
-    /// A genuinely unknown node must not be told it is a preset, and a numeric
-    /// token must not match a preset's printed key — `veld start 2` is not a
-    /// plausible thing to have meant, and a node called `1` would be slandered.
-    #[test]
-    fn an_unrelated_token_is_left_alone() {
-        let config = config_with_a_preset();
-        for token in ["typo", "1", "api"] {
-            let out = with_preset_hint("boom", &[token.to_owned()], &config);
-            assert_eq!(out, "boom", "token `{token}` should not produce a hint");
-        }
-    }
 }

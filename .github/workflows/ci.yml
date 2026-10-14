@@ -1595,13 +1595,29 @@ jobs:
           # which in CI is most of the time, so the bug only surfaces on the runs that get
           # far enough. Giving root its own database is the fix rather than chowning the
           # shared one afterwards: two users sharing one SQLite file is the problem.
-          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" ./tests/integration.sh \
+          #
+          # Its own daemon instance too (`VELD_DAEMON_PORT`/`VELD_DAEMON_SOCK`): the
+          # engine lives in the daemon, and the CLI refuses a daemon that drives a
+          # different database. `veld setup privileged` below installs the runner's
+          # LaunchAgent daemon on the default port with the default database, so a
+          # root CLI on the default port would meet it and refuse every command. On
+          # its own port the CLI starts this build's sibling `veld-daemon` with root's
+          # database, and the cleanup step stops it.
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" \
+            VELD_DAEMON_PORT=19950 VELD_DAEMON_SOCK=/tmp/veld-ci-int.sock \
+            ./tests/integration.sh \
             --veld-bin "$(pwd)/target/debug/veld" \
             --project-dir "$(pwd)/testproject"
 
       - name: "Cleanup after integration tests"
+        if: always()
         run: |
-          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" \
+            VELD_DAEMON_PORT=19950 VELD_DAEMON_SOCK=/tmp/veld-ci-int.sock \
+            "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
+          # The daemon the integration CLI started for itself (and any engine
+          # worker still finishing) — no service manager knows them.
+          sudo pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
@@ -1780,6 +1796,10 @@ jobs:
             echo ""
             echo "=== Start a service in privileged mode ==="
             cd testproject
+            # This build's own daemon instance: the LaunchAgent daemon `setup`
+            # installed drives the installed database, which this cargo-built CLI
+            # does not use — it would refuse to drive it.
+            export VELD_DAEMON_PORT=19951 VELD_DAEMON_SOCK=/tmp/veld-ci-priv.sock
             if $VELD start frontend:local --name priv-test 2>&1; then
               sleep 2
               URLS=$($VELD urls --name priv-test --json 2>/dev/null || true)
@@ -1814,6 +1834,9 @@ jobs:
       - name: "Cleanup between lifecycle tests (priv → auto)"
         if: always()
         run: |
+          # The daemon the privileged step's `veld start` started for itself —
+          # as the runner, so no sudo here (the integration daemon is root's).
+          pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
           sudo curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
@@ -1858,6 +1881,8 @@ jobs:
           echo ""
           echo "=== Cleanup auto-bootstrap state ==="
           curl -s http://localhost:2019/stop >/dev/null 2>&1 || true
+          # The daemons `veld start` started for itself in this and the privileged step.
+          pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
           rm -rf "$HOME/.veld"
           sleep 1
           echo "=== Auto-bootstrap PASSED ==="

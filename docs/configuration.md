@@ -891,9 +891,9 @@ Extra environment variables injected into the process. Values support Veld varia
 
 **Layering:** Environment variables cascade from project to node to variant. For each key, the most specific layer wins. Keys from parent layers that are not overridden are preserved. See the project-level [`env`](#env) section for a full example.
 
-**Precedence:** The merged `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
+**Precedence:** The merged `env` block takes strict precedence over the base environment of the node.
 
-**Which shell environment gets inherited depends on who started the run.** `veld start` in a terminal passes your terminal's environment straight through, including anything exported from `.zprofile`/`.profile` and `.zshrc`. A run started from the management UI or Veld Desktop is spawned by the Veld daemon, which inherits only `PATH` — resolved from your login shell so `npx`, `pg_isready`, `op` and version-manager shims are found — and not the rest of your shell environment. So a node that depends on a variable you export from a shell rc file works from the terminal and not from the UI. Declare it in `env` and it works from both; that is the only form that doesn't depend on how the run was launched.
+**Nodes do not inherit your terminal's environment.** Every node — whether you ran `veld start`, pressed Start in the IDE, or Veld restarted the run itself — is spawned by the Veld daemon's engine, so its base environment is the daemon's own environment plus your login-shell `PATH`, resolved in the project directory so `npx`, `pg_isready`, `op` and version-manager shims are found. Other variables you export in a terminal or a shell rc file (`JAVA_HOME`, `LANG`, tokens) do **not** reach the node. Declare what a node needs in `env`; to take a value from the shell that ran `veld start`, use a [value source](#value-sources): `{ "env": "JAVA_HOME" }`. The one exception is `veld action`, which runs in your terminal with your full terminal environment.
 
 #### The veld-owned environment
 
@@ -1723,7 +1723,7 @@ optional `secret` flag.
 | Source | Meaning |
 |---|---|
 | `value` | An inline literal. This object form exists so a literal can carry `secret: true` |
-| `env` | Read from the environment Veld was launched with. **Missing at start is an error naming the node and the variable** |
+| `env` | Read the variable from the terminal of the command that asked for the run (`veld start`, `veld restart`, `veld stop`). Veld sends the values of exactly the names your config reads this way, with that request, and stores nothing. A run started with no terminal behind it — the IDE, automatic recovery, a crash teardown — has no such values. In the IDE and in recovery the variable is therefore **missing, which is an error naming the node and the variable** (as it is at any start where it is unset). For a value that must also work from the IDE, use a `file`, `argv` or `shell` source instead. A stored `veld config set NAME --env VAR` pointer behaves the same way as `{ "env": … }` here. (For share relay and gateway tokens `env` means the *daemon's* environment — see [relay auth tokens](#relay-auth-tokens).) |
 | `file` | The (trimmed) contents of a file, relative to the project root |
 | `argv` / `shell` | Run a command, take its trimmed stdout |
 
@@ -4166,26 +4166,30 @@ veld start --preset fullstack --name my-feature
 3. `backend:local` starts next -- Veld allocates a port, injects `${nodes.database.DATABASE_URL}` into the env, and waits for `/health` to return 200.
 4. `frontend:local` and `admin:local` start in parallel -- both depend only on `backend:local`, which is now healthy.
 5. Each service gets a stable HTTPS URL like `https://frontend.my-feature.my-project.localhost`.
-6. `veld start` returns once everything is healthy; the environment keeps running. Add `--attach` from a terminal to stay in the foreground and stream every node's logs, with Ctrl+C stopping the lot.
+6. `veld start` returns once everything is healthy; the environment keeps running. Add `--attach` from a terminal to follow every node's logs afterwards, with Ctrl+C stopping the lot.
 
-### Detached vs Foreground Mode
+### Detached vs `--attach`
 
 **`veld start` detaches.** It brings the environment up, prints where to find it, and exits, leaving the services running (like `docker compose up -d`). There is no `--detach` / `-d` flag, because there is nothing to opt into.
 
-Use `--attach` / `-a` for the other behaviour — stay in the foreground, stream every node's logs, and stop the environment on Ctrl+C:
+Use `--attach` / `-a` for the other behaviour: the run still starts detached (the engine in the daemon owns it, not your terminal), then `veld` follows its logs like `veld logs -f` and, on Ctrl+C, stops the environment:
 
 ```sh
 # Detached (the default) — starts and exits, services keep running
 veld start --preset fullstack --name my-feature
 
-# Foreground — streams logs, Ctrl+C stops everything
+# Attached — follows logs, Ctrl+C stops everything
 veld start --preset fullstack --name my-feature --attach
 
 # View logs later, either way
 veld logs -f
 ```
 
-`--attach` needs a terminal. Piped or in a script it is ignored and the run detaches as usual, so a CI job never hangs waiting on a stream nobody reads.
+Because the run is the daemon's, closing the terminal or killing `veld` does not stop it — Ctrl+C is the stop. `--attach` needs a terminal. Piped or in a script it is ignored and `veld start` returns as usual, so a CI job never hangs waiting on a stream nobody reads.
+
+**Ctrl+C while `veld start` (or `veld restart`) is still bringing the environment up** asks the engine to cancel: it cleans up what it had started and `veld` exits `130`. A second Ctrl+C stops waiting; the engine carries on cleaning up.
+
+**The daemon starts if it is not running.** Every engine command (`start`, `stop`, `restart`, `status`, `logs`, `action`) is a client of the daemon's engine; when no daemon answers, `veld` starts it (through launchd or `systemd --user` when it is installed as a service, otherwise a detached `veld-daemon`) and waits for it. During `veld update` the daemon is unavailable and these commands exit `75` — try again shortly. Runs and in-flight actions survive both a daemon restart and an update.
 
 ### One-off runs (`--oneshot`)
 

@@ -23,6 +23,12 @@ mod feedback_assets;
 #[path = "management.rs"]
 pub mod management;
 
+#[path = "engine.rs"]
+pub(crate) mod engine;
+
+#[path = "engine_query.rs"]
+pub(crate) mod engine_query;
+
 #[path = "desktop.rs"]
 mod desktop;
 
@@ -195,6 +201,8 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // directly on this port for debugging). Merged after with_state()
         // because management routes are stateless.
         .merge(management::routes())
+        .merge(engine::routes())
+        .merge(engine_query::routes())
         .merge(desktop::routes())
         // User preferences. Kept out of desktop::routes() because settings are
         // not desktop-specific (runs mode reads them too) and that router's

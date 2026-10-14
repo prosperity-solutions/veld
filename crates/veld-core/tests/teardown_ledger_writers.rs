@@ -1,7 +1,7 @@
 //! **Repo-wide guard: only teardown may record a teardown.**
 //!
 //! `NodeStatus::Stopped` is the per-node teardown ledger
-//! (`veld_core::orchestrator::teardown_pending`): it means a node's `on_stop`
+//! (`veld_engine::orchestrator::teardown_pending`): it means a node's `on_stop`
 //! hook has been attempted, and every path that ends a run reads it to decide
 //! which nodes still owe one. Writing it without running the hook tells every
 //! later reaper that a teardown which never happened already had — and whatever
@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 
 /// Files permitted to record a node as torn down. Each one runs the node's
 /// `on_stop` hook first.
-const ALLOWED: &[&str] = &["crates/veld-core/src/orchestrator.rs"];
+const ALLOWED: &[&str] = &["crates/veld-engine/src/orchestrator.rs"];
 
 /// This file, skipped because `is_ledger_write_spots_every_spelling` below
 /// necessarily contains every spelling it is looking for.

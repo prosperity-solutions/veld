@@ -184,7 +184,7 @@ fn preset_def_from_value(value: serde_json::Value) -> Result<PresetDef, String> 
 
 /// A preset with its key assigned and its metadata flattened — what every
 /// surface (picker, `veld presets`, `--json`, the management UI) renders.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ResolvedPreset {
     /// The preset's config key, e.g. `dev-staging`. Always usable with
     /// `veld start --preset`.

@@ -16,6 +16,7 @@
 //! instead of corrupting data — running environments are never touched.
 
 pub mod backup;
+pub mod engine_actions;
 pub(crate) mod feedback;
 mod handoffs;
 mod import;
@@ -973,7 +974,7 @@ impl Db {
     /// A bare `PRAGMA incremental_vacuum` empties the **whole** freelist. On a
     /// pass that just deleted seven days of log rows that is tens of thousands
     /// of page relocations under a single lock, while every other veld process
-    /// waits on its 10-second `busy_timeout` and `veld _log` drops lines when
+    /// waits on its 10-second `busy_timeout` and `veld-daemon --log-sink` drops lines when
     /// that expires.
     ///
     /// 2,000 pages is ~8 MB at the 4 KiB page size this database uses, so at the
@@ -1233,6 +1234,11 @@ const MIGRATIONS: &[Migration] = &[
         version: 18,
         name: "worktree-handoffs",
         apply: migrate_v18_worktree_handoffs,
+    },
+    Migration {
+        version: 19,
+        name: "engine-actions",
+        apply: migrate_v19_engine_actions,
     },
 ];
 
@@ -2049,6 +2055,39 @@ fn migrate_v18_worktree_handoffs(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// The engine's actions and their event logs (see `db/engine_actions.rs`).
+///
+/// `seq` is the table's rowid, so it is monotonic across every action and a
+/// reader resumes a stream with `seq > ?`. Events cascade with their action. Both
+/// tables are transient (pruned after a week) and excluded from backups.
+fn migrate_v19_engine_actions(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE engine_actions (
+            id           TEXT PRIMARY KEY,
+            project_root TEXT NOT NULL,
+            run_name     TEXT NOT NULL DEFAULT '',
+            kind         TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            status       TEXT NOT NULL,
+            outcome_json TEXT,
+            worker_pid   INTEGER,
+            created_at   TEXT NOT NULL,
+            ended_at     TEXT
+        );
+        CREATE INDEX idx_engine_actions_status ON engine_actions(status);
+        CREATE INDEX idx_engine_actions_run ON engine_actions(project_root, run_name);
+        CREATE TABLE engine_action_events (
+            seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+            action_id TEXT NOT NULL REFERENCES engine_actions(id) ON DELETE CASCADE,
+            json      TEXT NOT NULL,
+            ts        TEXT NOT NULL
+        );
+        CREATE INDEX idx_engine_action_events ON engine_action_events(action_id, seq);
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2811,8 +2850,12 @@ mod tests {
             branch: "x".into(),
             is_main: false,
         };
-        db.sync_worktrees_listing(root, std::slice::from_ref(&main), &[x.path.clone()])
-            .unwrap();
+        db.sync_worktrees_listing(
+            root,
+            std::slice::from_ref(&main),
+            std::slice::from_ref(&x.path),
+        )
+        .unwrap();
         let wts = db.sync_worktrees(root, &[main, x]).unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
     }

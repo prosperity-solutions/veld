@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 veld-core = { workspace = true }
+veld-engine = { workspace = true }
 veld-share = { workspace = true }
 veld-stats = { workspace = true }
 serde = { workspace = true }
