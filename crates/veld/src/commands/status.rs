@@ -1,59 +1,60 @@
 use veld_core::config;
-use veld_core::process;
 use veld_core::state::{NodeStatus, RunStatus};
+use veld_engine::api::StatusReport;
 
+use crate::engine_client::{ClientError, EngineClient};
 use crate::output;
 
+/// Print a failed daemon call the way every command does and pick the exit
+/// code: 75 while an update holds the lock, 1 otherwise.
+pub(super) fn client_failed(e: &ClientError, json: bool) -> i32 {
+    output::print_error(&e.to_string(), json);
+    if e.is_update_in_progress() { 75 } else { 1 }
+}
+
 /// `veld status [--name <n>] [--outputs] [--json]`
+///
+/// The engine (in the daemon) resolves the environment, checks liveness and
+/// reads the stats; this renders its report.
 pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
     let Some((config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
 
-    let Some(db) = super::open_db(json) else {
-        return 1;
+    let client = match EngineClient::connect().await {
+        Ok(c) => c,
+        Err(e) => return client_failed(&e, json),
     };
-    let project_state = match db.load_project_state(&project_root) {
-        Ok(s) => s,
-        Err(e) => {
-            output::print_error(&format!("Failed to load state: {e}"), json);
-            return 1;
-        }
+    let mut query = vec![
+        ("project_root", project_root.to_string_lossy().into_owned()),
+        ("outputs", show_outputs.to_string()),
+    ];
+    if let Some(n) = name {
+        query.push(("name", n));
+    }
+    let report: StatusReport = match client.get("/api/engine/status", &query).await {
+        Ok(r) => r,
+        Err(e) => return client_failed(&e, json),
     };
-
-    let run_name = match super::resolve_run_name(name, &project_state, true, json) {
-        Some(n) => n,
-        None => return 1,
-    };
+    let StatusReport {
+        name: run_name,
+        note,
+        run: run_state,
+        effective: effective_statuses,
+        stats: node_stats,
+        outputs,
+    } = report;
     let run_name = run_name.as_str();
-
-    let run_state = match project_state.get_run(run_name) {
-        Some(r) => r.clone(),
-        None => {
-            output::print_error(&format!("Run '{run_name}' not found."), json);
-            return 1;
-        }
-    };
-
-    // Check PID liveness for each node and compute effective statuses.
-    let effective_statuses = compute_effective_statuses(&run_state);
-
-    // Latest per-node resource stats (recorded by the daemon's stats sampler);
-    // keyed by node key ("node:variant"). Empty when the daemon hasn't sampled
-    // yet or isn't running. Stale samples (a dead node, or a daemon that has
-    // stopped writing) are dropped so we never present a frozen reading as live.
-    let mut node_stats = db
-        .latest_node_stats(&project_root, run_name)
-        .unwrap_or_default();
-    let stats_now = chrono::Utc::now();
-    node_stats.retain(|_, s| s.is_fresh(stats_now));
+    if let (Some(note), false) = (&note, json) {
+        output::print_info(note);
+    }
 
     if json {
         // Build a modified run state with effective statuses for JSON output.
         let mut run_for_json = run_state.clone();
         for (key, effective) in &effective_statuses {
-            if let Some(ns) = run_for_json.nodes.get_mut(*key) {
+            if let Some(ns) = run_for_json.nodes.get_mut(key.as_str()) {
                 ns.status = effective.clone();
             }
         }
@@ -275,66 +276,28 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             }
         }
 
-        // Show outputs per node when --outputs is passed.
-        if show_outputs {
+        // Show outputs per node when --outputs is passed (the engine masks
+        // sensitive values).
+        if let Some(outputs) = outputs {
             println!();
             println!("{}", output::bold("Outputs:"));
-            let mut any = false;
-            for key in &node_keys {
-                let ns = &run_state.nodes[*key];
-                if ns.outputs.is_empty() {
-                    continue;
-                }
-                any = true;
+            for node in &outputs {
                 println!();
                 println!(
                     "  {}",
-                    output::cyan(&format!("{}:{}", ns.node_name, ns.variant))
+                    output::cyan(&format!("{}:{}", node.node, node.variant))
                 );
-                let mut okeys: Vec<&String> = ns.outputs.keys().collect();
-                okeys.sort();
-                for okey in okeys {
-                    let val = if ns.sensitive_keys.contains(okey) {
-                        "***".to_owned()
-                    } else {
-                        ns.outputs[okey].clone()
-                    };
+                for (okey, val) in &node.values {
                     println!("    {} = {}", output::dim(okey), val);
                 }
             }
-            if !any {
+            if outputs.is_empty() {
                 println!("  {}", output::dim("No outputs recorded."));
             }
         }
     }
 
     0
-}
-
-/// Check PID liveness for each node and return effective statuses.
-/// If a node is supposedly running but the process is dead, mark it as Failed.
-fn compute_effective_statuses(
-    run_state: &veld_core::state::RunState,
-) -> std::collections::HashMap<&str, NodeStatus> {
-    let mut result = std::collections::HashMap::new();
-    for (key, ns) in &run_state.nodes {
-        let effective = match ns.status {
-            NodeStatus::Healthy | NodeStatus::Starting | NodeStatus::HealthChecking => {
-                if let Some(pid) = ns.pid {
-                    if process::is_alive(pid) {
-                        ns.status.clone()
-                    } else {
-                        NodeStatus::Failed
-                    }
-                } else {
-                    ns.status.clone()
-                }
-            }
-            _ => ns.status.clone(),
-        };
-        result.insert(key.as_str(), effective);
-    }
-    result
 }
 
 fn format_run_status(status: &RunStatus) -> String {

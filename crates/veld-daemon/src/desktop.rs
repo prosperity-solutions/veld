@@ -26,7 +26,7 @@ use veld_core::user_path::cached_user_path;
 
 use super::repo_fingerprint;
 
-use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, validate_run_name};
+use super::management::{check_csrf, is_safe_identifier, open_db, validate_run_name};
 
 /// Build an axum [`Router`] for the desktop APIs (mounted into the daemon's
 /// HTTP server alongside the management routes).
@@ -6318,7 +6318,6 @@ async fn start_worktree_run(
             ),
         ));
     }
-    let mut args = vec!["start".to_owned()];
     for sel in &body.selections {
         // `node:variant` — both halves identifier-safe.
         let valid = match sel.split_once(':') {
@@ -6328,32 +6327,26 @@ async fn start_worktree_run(
         if !valid {
             return Err(err(StatusCode::BAD_REQUEST, "invalid node selection"));
         }
-        args.push(sel.clone());
     }
-    args.push("--name".to_owned());
-    args.push(run_name);
     if let Some(preset) = &body.preset {
         if !is_safe_identifier(preset) {
             return Err(err(StatusCode::BAD_REQUEST, "invalid preset name"));
         }
-        args.push("--preset".to_owned());
-        args.push(preset.clone());
     }
 
-    let code = spawn_veld(&wt_path, &args).await;
-    match code {
-        StatusCode::ACCEPTED => Ok(StatusCode::ACCEPTED),
-        // `spawn_veld` refuses while `veld update` holds the update lock, and
-        // nothing was spawned. Saying "failed to spawn veld start" here would
-        // throw away the only part of that answer a user can act on: this is
-        // temporary, it will clear in a minute or two, and retrying is the fix.
-        // The IDE renders this string in a toast, so it is the whole message.
-        StatusCode::SERVICE_UNAVAILABLE => Err(err(
-            code,
-            "a veld update is in progress — try again when it finishes",
-        )),
-        _ => Err(err(code, "failed to spawn veld start")),
-    }
+    // The engine's preflight answers here, in this request: a start it would
+    // refuse (an unknown preset, a machine var with no answer, a hostname another
+    // project serves) comes back as the toast's message instead of a run that
+    // never appears. The IDE renders the string, so it is the whole message.
+    super::engine::start_unattended(
+        &wt_path,
+        body.selections.clone(),
+        body.preset.clone(),
+        Some(run_name),
+    )
+    .await
+    .map(|_| StatusCode::ACCEPTED)
+    .map_err(|(code, message)| err(code, message))
 }
 
 #[cfg(test)]

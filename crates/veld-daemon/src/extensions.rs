@@ -2010,16 +2010,34 @@ mod tests {
             std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))
                 .expect("chmod");
 
-            let out = spawn_command(
-                &veld_core::config::CommandSpec::Argv(vec!["scripts/veld/pr-badge.sh".into()]),
-                &old_worktree.path().to_string_lossy(),
-                &declaring.path().to_string_lossy(),
-                &HashMap::new(),
-                Duration::from_secs(5),
-                &[],
-            )
-            .await
-            .expect("spawned");
+            // A script written and exec'd at once is ETXTBSY-prone under a
+            // parallel test run: any process another test forks between our
+            // write's open and close inherits the write descriptor until it
+            // execs, and the kernel refuses to exec a file open for writing
+            // ("Text file busy"). Seen as a rare red in full `cargo test` runs,
+            // never alone. Retry that one failure; anything else still fails.
+            let mut attempts = 0;
+            let out = loop {
+                attempts += 1;
+                let out = spawn_command(
+                    &veld_core::config::CommandSpec::Argv(vec!["scripts/veld/pr-badge.sh".into()]),
+                    &old_worktree.path().to_string_lossy(),
+                    &declaring.path().to_string_lossy(),
+                    &HashMap::new(),
+                    Duration::from_secs(5),
+                    &[],
+                )
+                .await;
+                let busy = match &out {
+                    Ok(o) => !o.success && o.stderr.contains("Text file busy"),
+                    Err(e) => e.to_string().contains("Text file busy"),
+                };
+                if busy && attempts < 5 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                    continue;
+                }
+                break out.expect("spawned");
+            };
 
             assert!(
                 out.success,
@@ -2403,6 +2421,8 @@ mod tests {
             (wt.id, db_dir, repo_dir, env)
         }
 
+        // The guard serialises a process-wide env var for the whole test, awaits included.
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn status_answers_no_badges_rather_than_the_worktrees_own() {
             let (id, _db_dir, _repo_dir, _env) = seed_worktree_with_no_main();
@@ -2432,6 +2452,8 @@ mod tests {
             unsafe { std::env::remove_var("VELD_DB_PATH") };
         }
 
+        // The guard serialises a process-wide env var for the whole test, awaits included.
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn activate_refuses_rather_than_running_the_worktrees_own() {
             let (id, _db_dir, _repo_dir, _env) = seed_worktree_with_no_main();

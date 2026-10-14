@@ -167,7 +167,7 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n>` | Start an environment. With nothing to start: prompts (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
+| `veld start [NODE:VARIANT...] --name <n>` | Start an environment. With nothing to start: prompts (enter takes `default_preset`), or without a TTY uses `default_preset` directly. Returns once the environment is up (the daemon's engine owns the run, not your terminal); `--attach` from a terminal then follows its logs until Ctrl+C, which stops it. Ctrl+C while it is still starting cancels and cleans up (exit 130). Starts the daemon if it is not running |
 | `veld start --preset <NAME-OR-KEY>` | Start a preset by name or by the number `veld presets` shows |
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. Ideal for end-to-end test runs. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
@@ -358,6 +358,8 @@ Add or strip HTTP headers as requests and responses pass through the reverse pro
 
 Declare `env` at the project, node, or variant level. Variables cascade: variant > node > project (per-key merge, most specific wins). Values support `${...}` variable substitution.
 
+**Nodes do not inherit your terminal's environment.** The daemon's engine spawns every node, so its base environment is the daemon's own plus your login-shell `PATH` (resolved in the project directory). To use a value from the shell that ran `veld start`, name it with `{ "env": "NAME" }` — Veld sends the values of exactly those names with the request and stores nothing. A run started without a terminal (the IDE, automatic recovery) has none of them and stops naming the missing variable. `veld action` is the exception: it runs in your terminal with your full environment.
+
 Veld also injects a `VELD_*` environment on **every** surface of a node — the node's process, its readiness and liveness probes, its `on_stop` hook, and `veld action`: `VELD_RUN`, `VELD_RUN_ID`, `VELD_ROOT`, `VELD_PROJECT`, `VELD_NODE`, `VELD_VARIANT`, plus `VELD_PORT`/`VELD_URL`/`VELD_PORT_<NAME>`/`VELD_URL_<NAME>`/`VELD_HOST_<NAME>` on a `long_running` node that has ports. A `command` probe also gets the node's declared `env` and outputs as `$KEY`, and so does an `action` on the node. Probe fields (`path`, `argv`/`shell`) are interpolated like the node's own `argv`/`env`. See [Environment variables](docs/configuration.md#env) in the config reference.
 
 ```json
@@ -402,9 +404,9 @@ Availability is not uniform — a `command` node has no port or URL of its own, 
 
 Three binaries work together:
 
-- **`veld`** — CLI. Parses commands, orchestrates environments, displays output.
+- **`veld`** — CLI, a thin client of the engine in the daemon: it sends `start`/`stop`/`restart`/`status`/`logs`/`action` requests, draws the progress it streams back, and starts the daemon if it is not running.
 - **`veld-helper`** — manages DNS entries and Caddy routes via a minimal Unix socket API. Runs as either a system daemon (privileged, for clean URLs on ports 80/443) or a user process (unprivileged, on port 18443).
-- **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
+- **`veld-daemon`** — user-space daemon. Hosts the engine (`veld-engine`, which orchestrates environments): every start, stop, restart and action — from the CLI or the IDE — runs in a short-lived worker process of its own, so it survives a daemon restart and `veld update`. Started by launchd/systemd after `veld setup`; when none is installed (CI, a fresh machine), the first `veld` command starts one itself, and `veld update` and `veld uninstall` stop that one too. Also monitors health, runs garbage collection, broadcasts state updates.
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 

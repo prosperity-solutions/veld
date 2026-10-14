@@ -1,10 +1,14 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Progress events emitted by the orchestrator during `start()`.
 ///
-/// The CLI decides how to render these — TTY gets live-updating lines,
+/// A face decides how to render these — the CLI's TTY gets live-updating lines,
 /// non-TTY/JSON mode gets NDJSON for agent consumption.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Read back by faces that may be older than the worker that wrote them (an
+/// update between the two), so an unknown variant deserializes to
+/// [`ProgressEvent::Unknown`] rather than failing the stream.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProgressEvent {
     /// Execution plan resolved.
@@ -118,6 +122,17 @@ pub enum ProgressEvent {
     /// `{"type":"notice","message":"…"}` in the NDJSON progress stream. Not for
     /// diagnostics: those are `tracing` (stderr) and stay out of this channel.
     Notice { message: String },
+
+    /// Like [`ProgressEvent::Notice`], but something was left undone that the
+    /// user may have to clean up by hand — a teardown hook skipped or killed.
+    ///
+    /// These used to be written straight to the CLI's stderr, which was the
+    /// stream the user read. The engine now runs in a worker whose stderr is the
+    /// daemon's log, so a warning that is not an event is a warning nobody sees.
+    Warning { message: String },
+
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]

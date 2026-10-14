@@ -1,6 +1,7 @@
 mod backup;
 mod broadcaster;
 mod dbhealth;
+mod engine_worker;
 mod feedback_server;
 mod gc;
 mod monitor;
@@ -25,12 +26,30 @@ struct Args {
     socket_path: PathBuf,
     /// True for `--pty-holder`: serve one terminal session and nothing else.
     pty_holder: bool,
+    /// True for `--engine-worker`: carry out one engine action and exit.
+    engine_worker: bool,
+    /// Set for `--log-sink`: be the log sink of one detached node's pipeline.
+    log_sink: Option<LogSink>,
+}
+
+/// The `--log-sink` flags as parsed. Fields stay optional here: in this mode
+/// nothing may fail before the pipe is being drained (see `run_log_sink_mode`),
+/// so a missing flag is reported there, not by `parse_args` exiting.
+#[derive(Default)]
+struct LogSink {
+    project_root: Option<PathBuf>,
+    run: Option<String>,
+    run_id: Option<String>,
+    node: Option<String>,
+    variant: Option<String>,
 }
 
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut socket_path: Option<PathBuf> = None;
     let mut pty_holder = false;
+    let mut engine_worker = false;
+    let mut log_sink: Option<LogSink> = None;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -54,11 +73,40 @@ fn parse_args() -> Args {
             // a terminal's PTY in a process that outlives the daemon, and hands
             // it its configuration on stdin.
             "--pty-holder" => pty_holder = true,
+            // Not a user-facing mode: the daemon spawns itself with this to run
+            // one engine action (start, stop, …) in a process that outlives the
+            // daemon, with the action on stdin. See `engine_worker`.
+            "--engine-worker" => engine_worker = true,
+            // Not a user-facing mode either: the stdout-side of every detached
+            // node's pipeline, `sh -c '{ cmd; } 2>&1 | veld-daemon --log-sink …'`
+            // (built by `veld_core::process::log_sink_argv`). It reads stdin and
+            // writes the database; see `veld_core::logging::pump`.
+            //
+            // **This argv shape is frozen across versions**:
+            //   --log-sink --project-root P --run R [--run-id I] --node N --variant V
+            // An old worker may exec a newer binary after an update (and the
+            // reverse), so flags may only be added as optional ones, never
+            // renamed, reordered or removed — and unknown flags are ignored, not
+            // fatal, in this mode.
+            "--log-sink" => {
+                log_sink.get_or_insert_with(LogSink::default);
+            }
+            "--project-root" => {
+                log_sink.get_or_insert_with(LogSink::default).project_root =
+                    args.next().map(PathBuf::from);
+            }
+            "--run" => log_sink.get_or_insert_with(LogSink::default).run = args.next(),
+            "--run-id" => log_sink.get_or_insert_with(LogSink::default).run_id = args.next(),
+            "--node" => log_sink.get_or_insert_with(LogSink::default).node = args.next(),
+            "--variant" => log_sink.get_or_insert_with(LogSink::default).variant = args.next(),
             "--socket-path" => {
                 socket_path = Some(PathBuf::from(
                     args.next().expect("--socket-path requires a value"),
                 ));
             }
+            // The sink is the read end of a node's stdout: exiting on a flag a
+            // newer worker added would SIGPIPE the node on its next write.
+            _ if log_sink.is_some() => {}
             other => {
                 eprintln!("Unknown argument: {other}");
                 std::process::exit(1);
@@ -73,6 +121,38 @@ fn parse_args() -> Args {
     Args {
         socket_path,
         pty_holder,
+        engine_worker,
+        log_sink,
+    }
+}
+
+/// Run as the log sink and return the process exit code. Dispatched from `main`
+/// **before** the tokio runtime is built and before tracing is initialised: this
+/// process's stdin is the node's stdout, so it must be draining within
+/// microseconds and must never die early — and tracing init would write to the
+/// daemon's log file and could fail. Nothing here is async.
+fn run_log_sink_mode(sink: LogSink) -> i32 {
+    match sink {
+        LogSink {
+            project_root: Some(project_root),
+            run: Some(run),
+            node: Some(node),
+            variant: Some(variant),
+            run_id,
+        } => veld_core::logging::pump::run_log_sink(veld_core::logging::pump::LogSinkArgs {
+            project_root,
+            run,
+            run_id,
+            node,
+            variant,
+        }),
+        // A malformed argv is a bug in whoever built it, but the node is still
+        // writing: drain and discard rather than SIGPIPE it.
+        _ => {
+            eprintln!("veld-daemon --log-sink: missing required flag, discarding output");
+            let _ = std::io::copy(&mut std::io::stdin().lock(), &mut std::io::sink());
+            0
+        }
     }
 }
 
@@ -137,8 +217,18 @@ fn main() -> Result<()> {
     // logs go — and parsing writes nothing.
     let args = parse_args();
 
+    if let Some(sink) = args.log_sink {
+        std::process::exit(run_log_sink_mode(sink));
+    }
+
     let mut builder = if args.pty_holder {
         tokio::runtime::Builder::new_current_thread()
+    } else if args.engine_worker {
+        // A worker runs one action: a few stages of parallel probes and
+        // spawns, not a server. Two threads are plenty and cost little per action.
+        let mut b = tokio::runtime::Builder::new_multi_thread();
+        b.worker_threads(2);
+        b
     } else {
         tokio::runtime::Builder::new_multi_thread()
     };
@@ -152,8 +242,8 @@ fn main() -> Result<()> {
 async fn run(args: Args) -> Result<()> {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
-    if args.pty_holder {
-        // A holder logs to **stderr**, and the daemon spawns it with stderr
+    if args.pty_holder || args.engine_worker {
+        // A holder (and an engine worker) logs to **stderr**, and the daemon spawns it with stderr
         // inherited, so its lines land in the daemon's log beside the session
         // they belong to. Not stdout: that is nulled on the spawn (a pipe nobody
         // drains would block the holder the first time it filled), so a
@@ -176,6 +266,10 @@ async fn run(args: Args) -> Result<()> {
     // that so nothing below can mistake it for a second instance.
     if args.pty_holder {
         return feedback_server::run_pty_holder().await;
+    }
+    // Nor is an engine worker: one action, then exit.
+    if args.engine_worker {
+        std::process::exit(engine_worker::run().await);
     }
 
     info!("veld-daemon {VERSION} starting");
@@ -320,6 +414,10 @@ async fn run(args: Args) -> Result<()> {
     // Collect stderr captures left by a previous daemon that was killed between
     // spawning a `veld` command and reaping it.
     feedback_server::management::sweep_spawn_logs();
+
+    // The engine's supervisor: adopts the workers a previous daemon left running
+    // (they outlive it by design) and marks the ones that died as lost.
+    tokio::spawn(feedback_server::engine::supervise());
 
     // Spawn background tasks.
     let monitor_broadcaster = broadcaster.clone();

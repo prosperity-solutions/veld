@@ -36,37 +36,6 @@ pub mod worktree;
 
 use crate::output;
 
-/// Record CPU/memory for the `command` steps an orchestrator is about to run.
-///
-/// **Every command that executes a run's graph must call this**, not just
-/// `veld start` — `veld restart` re-runs the same builds and installs, into the
-/// same run name, so leaving it out puts a hole in the middle of a node's curve
-/// that reads as a sampling bug rather than as an unsupported path.
-///
-/// The daemon samples what has a persisted PID, which is only the `start_server`
-/// nodes. A `command` step's process is spawned, awaited and reaped inside *this*
-/// process, so if this process does not measure it, nothing can.
-///
-/// **The orchestrator owns the recorder, so sampling ends when it does** — which
-/// is the end of the command, and is why nothing is returned here. An earlier
-/// version handed back a guard whose docs promised that dropping it stopped
-/// sampling; it did not, because `with_step_observer` keeps an `Arc` of its own
-/// and clones it into every node execution context. A handle that has to be held
-/// but cannot enforce it is a footgun with a `#[must_use]` on it — and
-/// `let _ = …` silences that anyway.
-pub fn observe_command_stats(
-    orchestrator: &mut veld_core::orchestrator::Orchestrator,
-    run_name: &str,
-) {
-    orchestrator.with_step_observer(std::sync::Arc::new(
-        veld_stats::CommandStatsRecorder::start(
-            orchestrator.db.clone(),
-            orchestrator.project_root.clone(),
-            run_name.to_owned(),
-        ),
-    ));
-}
-
 /// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld
 /// used to ship, and report what it did.
 ///
@@ -104,6 +73,9 @@ pub async fn remove_legacy_hammerspoon() {
 
 /// Open the central veld database. On failure prints an error and returns
 /// `None`.
+///
+/// For data a command owns locally. A run's lifecycle and status are the
+/// engine's: go through `crate::engine_client`, as `start`/`stop`/`status` do.
 pub fn open_db(json: bool) -> Option<veld_core::db::Db> {
     match veld_core::db::Db::open() {
         Ok(db) => Some(db),
@@ -181,70 +153,40 @@ pub fn resolve_run_name(
     include_stopped: bool,
     json: bool,
 ) -> Option<String> {
-    if let Some(n) = name {
-        return Some(n);
-    }
-
-    // Tier 1: environments with a live run.
-    let live: Vec<&String> = project_state
-        .runs
-        .iter()
-        .filter(|(_, r)| r.is_live())
-        .map(|(name, _)| name)
-        .collect();
-
-    match live.len() {
-        1 => {
-            let resolved = live[0].clone();
-            if !json {
-                output::print_info(&format!(
-                    "Using environment '{resolved}' (only live environment)."
-                ));
+    match veld_engine::preflight::resolve_run_name(name, project_state, include_stopped) {
+        Ok((resolved, note)) => {
+            if let (Some(note), false) = (note, json) {
+                output::print_info(&note);
             }
-            return Some(resolved);
+            Some(resolved)
         }
-        n if n > 1 => {
-            let mut names: Vec<&str> = live.iter().map(|s| s.as_str()).collect();
-            names.sort();
-            output::print_error(
-                &format!(
-                    "Multiple live environments found. Specify one with --name: {}",
-                    names.join(", ")
-                ),
-                json,
-            );
-            return None;
+        Err(e) => {
+            output::print_error(&e, json);
+            None
         }
-        _ => {}
     }
+}
 
-    // Tier 2: nothing live — fall back to a sole environment (its latest run
-    // is history at this point).
-    if include_stopped && project_state.runs.len() == 1 {
-        let resolved = project_state.runs.keys().next().unwrap().clone();
-        if !json {
-            output::print_info(&format!(
-                "Using environment '{resolved}' (only environment)."
-            ));
-        }
-        return Some(resolved);
-    }
+/// The project this command is about: the directory of the `veld.json` found
+/// from the current directory upward. On failure prints an error.
+pub fn project_root() -> Option<std::path::PathBuf> {
+    parse_config(false).map(|(path, _)| veld_core::config::project_root(&path))
+}
 
-    if include_stopped && project_state.runs.len() > 1 {
-        let mut names: Vec<&str> = project_state.runs.keys().map(|s| s.as_str()).collect();
-        names.sort();
-        output::print_error(
-            &format!(
-                "Multiple environments found. Specify one with --name: {}",
-                names.join(", ")
-            ),
-            json,
-        );
-        return None;
-    }
+/// Connect to the engine (starting the daemon if needed). On failure prints why
+/// and returns the exit code.
+pub async fn engine() -> Result<crate::engine_client::EngineClient, i32> {
+    crate::engine_client::EngineClient::connect()
+        .await
+        .map_err(|e| client_error(&e))
+}
 
-    output::print_error("No environments found. Start one with `veld start`.", json);
-    None
+/// Print a client error and return its exit code: 75 (`EX_TEMPFAIL`) while an
+/// update holds the daemon, so an agent can tell "try again shortly" from a
+/// failure — the same code the CLI's own update gate uses.
+pub fn client_error(e: &crate::engine_client::ClientError) -> i32 {
+    output::print_error(&e.to_string(), false);
+    if e.is_update_in_progress() { 75 } else { 1 }
 }
 
 /// Parse the project configuration from the current working directory.

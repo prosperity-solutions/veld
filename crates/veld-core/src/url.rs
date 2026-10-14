@@ -240,7 +240,7 @@ fn git_output(project_root: &Path, args: &[&str]) -> String {
 /// # Determinism
 ///
 /// Steps 1–3 produce deterministic names for a given project+branch state.
-/// This is intentional: [`crate::orchestrator::Orchestrator::cleanup_stale_run`]
+/// This is intentional: `veld_engine::orchestrator::Orchestrator::cleanup_stale_run`
 /// tears down any existing run with the same name, so reusing a name replaces
 /// the previous run rather than accumulating stale instances.
 pub fn generate_run_name(project_root: &Path) -> String {

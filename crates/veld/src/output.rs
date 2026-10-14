@@ -400,12 +400,12 @@ mod tests {
         let rows = vec![
             vec![
                 "api".to_owned(),
-                format!("\u{1b}[32m\u{2713} healthy\u{1b}[0m"),
+                "\u{1b}[32m\u{2713} healthy\u{1b}[0m".to_owned(),
                 "1.0 GB".to_owned(),
             ],
             vec![
                 "oci-runtime".to_owned(),
-                format!("\u{1b}[33m\u{2713} starting\u{1b}[0m"),
+                "\u{1b}[33m\u{2713} starting\u{1b}[0m".to_owned(),
                 "\u{2014}".to_owned(),
             ],
         ];

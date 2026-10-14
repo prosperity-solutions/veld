@@ -94,40 +94,30 @@ Retention: node totals 24h, per-process rows 2h — the API reports both
 them. A by-process view over a window longer than the per-process horizon is
 legitimately empty for the older part of the range.
 
-Two escape hatches. **There are two samplers, so each switch has to be set in two
-places** — the daemon's service environment (for `start_server` nodes) *and* the
-shell you run `veld start` from (for `command` steps, which the CLI samples).
-Setting only one leaves the other half capturing.
+Two escape hatches. **There are two samplers, but both run on the daemon's side** —
+the daemon samples `long_running` nodes itself, and the engine worker the daemon
+spawns samples `command` steps — so the daemon's service environment is the one
+place to set a switch. (Older veld sampled `command` steps in the CLI, which
+needed the variable in your shell too; that no longer matters.)
 
 > A plain `export VELD_STATS_CMDLINE=off` in your shell does **not** reach the
-> daemon. It runs as a launchd LaunchAgent (macOS) or a `systemd --user` unit
-> (Linux); neither inherits an interactive shell's environment — the same reason
-> veld has to inject `PATH` into daemon-spawned commands. And the reverse is just
-> as true: `launchctl setenv` / `systemctl --user set-environment` does **not**
-> reach an already-running interactive shell, so a terminal-launched `veld start`
-> keeps capturing its build steps' argv unless you export it there too. (A run
-> started from the dashboard or Veld Desktop inherits the daemon's environment,
-> so that half is covered by the service form alone — which is exactly how this
-> ends up looking like "works from the UI, not from my terminal".)
+> daemon, and so reaches no node or worker. It runs as a launchd LaunchAgent
+> (macOS) or a `systemd --user` unit (Linux); neither inherits an interactive
+> shell's environment, and the engine workers the daemon spawns inherit the
+> daemon's. Set it where the daemon can see it, then restart the daemon:
 >
 > ```sh
-> # 1. the daemon — macOS: set it, then restart the agent so it picks it up
+> # macOS: set it, then restart the agent so it picks it up
 > launchctl setenv VELD_STATS_CMDLINE off
 > launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon"
 >
-> # 1. the daemon — Linux
+> # Linux
 > systemctl --user set-environment VELD_STATS_CMDLINE=off
 > systemctl --user restart veld-daemon
->
-> # 2. the CLI — in your shell profile, so every `veld start` sees it
-> export VELD_STATS_CMDLINE=off
 > ```
 >
-> Verify with `veld stats --processes --json` **against a `command` node**, not a
-> server one: a server node reads the daemon's setting and will report `cmd:
-> null` even when the CLI half is still on. With argv capture off, every
+> Verify with `veld stats --processes --json`: with argv capture off, every
 > process's `cmd` is `null` while `name` still reports.
-
 
 | variable | effect |
 |---|---|
@@ -184,13 +174,12 @@ Log sources, and where each kind of output lands:
   a gap in a node's log as explained only when this line is present. Two wordings:
   *the database was not keeping up* is a full write queue; *rate limit* means the
   node printed more than **200 lines/s** after a **2,000-line burst**, which is
-  the ingest budget of a detached run (a plain `veld start`, one started from
-  the IDE, or a `--oneshot` run's dependencies) — it exists so one crash-looping
+  the ingest budget of a detached run (a plain `veld start` — with or
+  without `--attach` — one started from the IDE, or a `--oneshot` run's dependencies) — it exists so one crash-looping
   process cannot write millions of rows an hour. A rate-limit notice is followed
   by the **last 50 dropped lines** with their original timestamps, so the error a
-  crash loop ends on is still there. Only foreground output is not rate limited:
-  `veld start --attach` from a terminal, and a `--oneshot` run's own node.
-  Without a terminal `--attach` is ignored and the run is detached, so budgeted.
+  crash loop ends on is still there. Only a `--oneshot` run's own terminal node is not rate limited.
+  `veld start --attach` follows a detached run, so it is budgeted.
   Both notices carry no node, and `--node` hides the `internal` stream, so read
   them without `--node`.
 - `database reports as damaged — skipping log retention and page reclaim` from

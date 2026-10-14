@@ -63,8 +63,19 @@ unknown node. (It will tell you so and point at `--preset`, but the round trip
 is wasted.)
 
 **2. `veld start` detaches.** It returns as soon as the environment is up; it
-does not stream. Pass `--attach` (`-a`) from a TTY to stay in the foreground.
-There is no `--detach`/`-d` — that is already what happens.
+does not stream. The run belongs to veld's daemon, not to your terminal: closing
+the terminal or killing `veld` does not stop it. Pass `--attach` (`-a`) to follow
+its logs afterwards — it blocks until Ctrl+C, which stops the run, so do not use
+it in an agent shell. There is no `--detach`/`-d` — that is already what happens.
+Ctrl+C (or SIGINT) while `veld start`/`restart` is still bringing things up asks
+the daemon to cancel and clean up what it started, and exits `130`.
+
+**2b. The daemon starts on demand.** `start`, `stop`, `restart`, `status`,
+`logs` and `action` talk to the daemon's engine; if it is not running `veld`
+starts it and waits (so a first command can be slower). Exit `75` means an
+update is in progress — retry shortly (`veld skills gotchas`). Nodes get the
+daemon's environment plus the login-shell `PATH`, **not** your terminal's
+environment — see `veld skills gotchas`.
 
 **3. Machine-readable output is on stdout; everything else is on stderr.**
 `--json` payloads and a `--oneshot` node's own output go to stdout. Progress,

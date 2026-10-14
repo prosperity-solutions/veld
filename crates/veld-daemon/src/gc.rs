@@ -276,6 +276,13 @@ pub(crate) async fn run_gc_pass(
     if let Ok(stale) = db.stale_stopping_runs(stopping_cutoff) {
         for (project_root, _project_name, run) in stale {
             let run_name = run.name.clone();
+            // An engine worker still holding this run's action is the ender, and
+            // it is alive (the supervisor marks a dead one lost within seconds) —
+            // a teardown hook that takes longer than the grace is slow, not stuck.
+            // The grace alone is left for enders that are not engine workers.
+            if crate::feedback_server::engine::has_running_action(db, &project_root, &run_name) {
+                continue;
+            }
             info!("finalizing stale 'stopping' run '{run_name}' (ender gone)");
             for (key, node) in &run.nodes {
                 if let Some(pid) = node.pid {
@@ -374,7 +381,7 @@ pub(crate) async fn run_gc_pass(
     // bought at most 30 minutes.
     //
     // Still uncovered, named so the list is not read as complete: the detached
-    // `veld _log` writers keep inserting rows, and phases 1a-1c above still
+    // `veld-daemon --log-sink` writers keep inserting rows, and phases 1a-1c above still
     // `save_run`/`finalize_crashed`/`clear_node_pid` and signal PIDs read out of
     // this file. Those are *reconciliation* rather than housekeeping — they
     // record what has already happened to real processes, and suppressing them

@@ -401,7 +401,7 @@ pub fn try_restore(db: &Db, id: i64) -> Result<bool, veld_core::db::DbError> {
 /// Ask every live run in the worktree to stop, then wait for the runs to leave
 /// the live set.
 ///
-/// Waits on the *persisted status*, not on the spawned command: `veld stop` is
+/// Waits on the *persisted status*, not on the engine action: the stop is
 /// fire-and-forget from here, and a run's teardown is two-phase (#162), so the
 /// database is the only place that says whether it finished.
 async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
@@ -417,19 +417,23 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
         names.len()
     );
     for name in &names {
-        let code = super::management::spawn_veld(
+        let spawned = super::engine::spawn_daemon_action(
             &wt_path,
-            &["stop".to_owned(), "--name".to_owned(), name.clone()],
+            veld_engine::api::ActionKind::Stop { run: name.clone() },
         )
         .await;
         // **Fail now, with the real reason, instead of after 120 seconds with the
-        // wrong one.** `spawn_veld` refuses outright while `veld update` holds the
+        // wrong one.** The engine refuses outright while `veld update` holds the
         // update lock, so nothing was spawned and nothing is going to stop — but
         // the poll below cannot tell that from a run that is merely slow, and it
         // would spend the whole `STOP_TIMEOUT` before reporting "stop it yourself
         // and try again" about a run the user cannot do anything about. An update
         // takes one to four minutes, so this collision is realistic rather than
         // theoretical, and "wait for the update" is the actionable answer.
+        let code = match spawned {
+            Ok(_) => axum::http::StatusCode::ACCEPTED,
+            Err((code, _)) => code,
+        };
         if code == axum::http::StatusCode::SERVICE_UNAVAILABLE {
             return Err(
                 "a veld update is in progress, so runs cannot be stopped right now — try again \

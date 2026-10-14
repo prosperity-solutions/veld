@@ -2,7 +2,7 @@
 //!
 //! Every `Db` call is synchronous, and any of them can wait up to the
 //! connection's 10-second `busy_timeout` whenever something else holds the write
-//! lock: a GC pass, a migration, a `veld _log` writer, the CLI. A tokio worker
+//! lock: a GC pass, a migration, a `veld-daemon --log-sink` writer, the CLI. A tokio worker
 //! parked in that wait is one fewer to drive everything else, and there are only
 //! as many workers as cores. Park them all and the daemon stops — **terminals
 //! included**, because the PTY relay is ordinary tasks on the same runtime and its

@@ -547,7 +547,7 @@ async fn run_liveness_checks(
                 }
 
                 // **Never spend a recovery attempt during an update.** Recovery
-                // execs `veld restart`, which refuses with `EX_TEMPFAIL` while
+                // is an engine restart, which the engine refuses (`503`) while
                 // `veld update` holds the lock — and the attempt is counted and
                 // persisted *before* that call, with nothing rolling it back. An
                 // update deliberately leaves environments running while it
@@ -593,6 +593,19 @@ async fn run_liveness_checks(
                             "timestamp": chrono::Utc::now().to_rfc3339(),
                         });
                         broadcaster.broadcast(&event).await;
+                    } else if crate::feedback_server::engine::has_running_action(
+                        db,
+                        project_root,
+                        run_name,
+                    ) {
+                        // Something is already starting, stopping or restarting
+                        // this run — a user's restart, a previous recovery still
+                        // finishing. Let it land; this cycle counts nothing.
+                        info!(
+                            run = run_name,
+                            "recovery skipped: an engine action is in flight"
+                        );
+                        return changes;
                     } else {
                         // Trigger restart.
                         let new_recovery_count = node_state.recovery_count + 1;
@@ -737,8 +750,8 @@ async fn run_single_liveness_check(
                         .env("PATH", &user_path)
                         // The veld-owned vars — VELD_RUN, VELD_ROOT, the
                         // port/url/host family — from the shared builder.
-                        .envs(veld_core::orchestrator::veld_owned_env(
-                            &veld_core::orchestrator::NodeEnvContext::from_node_state(
+                        .envs(veld_engine::orchestrator::veld_owned_env(
+                            &veld_engine::orchestrator::NodeEnvContext::from_node_state(
                                 run_name,
                                 Some(run.run_id.to_string()),
                                 project_root,
@@ -898,160 +911,86 @@ fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
     crate::feedback_server::config_cache::parse_config(&config_path)
 }
 
-/// Find the veld CLI binary path.
-/// Checks: next to daemon binary, `~/.local/bin/veld`, then falls back to PATH.
-fn find_veld_binary() -> std::path::PathBuf {
-    // 1. Same directory as daemon binary.
-    if let Some(sibling) = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("veld")))
-        .filter(|p| p.exists())
-    {
-        return sibling;
-    }
-
-    // 2. Standard user install location.
-    if let Some(home) = dirs::home_dir() {
-        let user_bin = home.join(".local/bin/veld");
-        if user_bin.exists() {
-            return user_bin;
-        }
-    }
-
-    // 3. System paths.
-    for path in ["/usr/local/bin/veld", "/usr/bin/veld"] {
-        let p = std::path::PathBuf::from(path);
-        if p.exists() {
-            return p;
-        }
-    }
-
-    // 4. Fall back to PATH lookup.
-    std::path::PathBuf::from("veld")
-}
-
-/// Run `veld restart --name <run>` and wait for completion.
-/// Captures stdout/stderr and logs the result.
+/// Restart a run through the engine and wait for it to finish.
 ///
 /// **Precondition, enforced only at the call site: no `veld update` may be
-/// holding the update lock.** `veld restart` is not on the CLI's
-/// `command_survives_an_update` allow-list, so during an update it exits 75
-/// (`EX_TEMPFAIL`) without doing anything — while the caller has already
-/// incremented and *persisted* `recovery_count`. A second call site that forgets
-/// the check therefore burns a node's whole recovery budget over one update and
-/// lands it in `recovery_exhausted` having never restarted anything. The check
-/// lives at the caller because what it must do is **skip** the cycle rather than
-/// record a failed attempt, which is a decision this function cannot make for it.
+/// holding the update lock.** The engine refuses new actions during an update
+/// (`503`) — while the caller has already incremented and *persisted*
+/// `recovery_count`. A second call site that forgets the check therefore burns a
+/// node's whole recovery budget over one update and lands it in
+/// `recovery_exhausted` having never restarted anything. The check lives at the
+/// caller because what it must do is **skip** the cycle rather than record a
+/// failed attempt, which is a decision this function cannot make for it.
 async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Option<&LogWriter>) {
-    let veld_bin = find_veld_binary();
-    // Resolved in `project_root`: this execs `veld restart`, which itself
-    // spawns the project's declared commands — same directory-scoped-PATH
-    // need as `spawn_veld`.
-    let user_path = cached_user_path_for(project_root).await;
-
-    info!(
-        run = run_name,
-        bin = %veld_bin.display(),
-        "running veld restart"
-    );
-
-    if let Some(log) = internal_log {
-        let _ = log
-            .write_line(&format!(
-                "[recovery] running: {} restart --name {}",
-                veld_bin.display(),
-                run_name
-            ))
-            .await;
-    }
-
-    let result = tokio::time::timeout(
-        Duration::from_secs(300), // 5 min timeout for full restart
-        tokio::process::Command::new(&veld_bin)
-            .arg("restart")
-            .arg("--name")
-            .arg(run_name)
-            .current_dir(project_root)
-            .env("PATH", user_path)
-            // Null rather than inherited, as in `spawn_veld_in`: a daemon
-            // launched from a terminal would otherwise pass its tty to an
-            // automatic recovery restart, which must never wait on a human.
-            // (Its stderr is piped, so the prompt gate already refuses here —
-            // this is the half that does not depend on that staying true.)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output(),
+    info!(run = run_name, "recovery: restarting through the engine");
+    let note = |line: String| async move {
+        if let Some(log) = internal_log {
+            let _ = log.write_line(&line).await;
+        }
+    };
+    note(format!("[recovery] restarting '{run_name}'")).await;
+    let id = match crate::feedback_server::engine::spawn_daemon_action(
+        project_root,
+        veld_engine::api::ActionKind::Restart {
+            run: run_name.to_owned(),
+        },
     )
-    .await;
-
-    match result {
-        Ok(Ok(output)) => {
-            let code = output.status.code().unwrap_or(-1);
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-
-            // One transaction for the whole restart report, not one per line: a
-            // `veld restart` can print hundreds of lines and the loops below
-            // used to take the process-wide connection lock for each of them.
-            if output.status.success() {
-                info!(run = run_name, "veld restart completed successfully");
-                if let Some(log) = internal_log {
-                    let mut lines = vec![format!(
-                        "[recovery] veld restart completed (exit code {code})"
-                    )];
-                    lines.extend(
-                        stdout
-                            .trim()
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(|line| format!("[recovery]   {line}")),
-                    );
-                    let _ = log.write_lines(chrono::Utc::now(), &lines);
-                }
-            } else {
-                warn!(run = run_name, exit_code = code, "veld restart failed");
-                if let Some(log) = internal_log {
-                    let mut lines =
-                        vec![format!("[recovery] veld restart FAILED (exit code {code})")];
-                    lines.extend(
-                        stdout
-                            .trim()
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(|line| format!("[recovery]   stdout: {line}")),
-                    );
-                    lines.extend(
-                        stderr
-                            .trim()
-                            .lines()
-                            .filter(|l| !l.is_empty())
-                            .map(|line| format!("[recovery]   stderr: {line}")),
-                    );
-                    let _ = log.write_lines(chrono::Utc::now(), &lines);
-                }
-            }
+    .await
+    {
+        Ok(id) => id,
+        Err((code, message)) => {
+            warn!(run = run_name, %code, "recovery restart refused: {message}");
+            note(format!("[recovery] restart refused: {message}")).await;
+            return;
         }
-        Ok(Err(e)) => {
-            warn!(
-                run = run_name,
-                bin = %veld_bin.display(),
-                error = %e,
-                "failed to execute veld restart"
-            );
-            if let Some(log) = internal_log {
-                let _ = log
-                    .write_line(&format!("[recovery] failed to execute veld restart: {e}"))
-                    .await;
-            }
+    };
+    let ended = crate::feedback_server::engine::await_action(&id, Duration::from_secs(300)).await;
+    // What the restart said — teardown warnings, released shares, the failure —
+    // into the run's own log, as the `veld restart` output used to be. Progress
+    // stays in the action's event log.
+    if let Some(log) = internal_log {
+        let said: Vec<String> = {
+            let id = id.clone();
+            crate::offload::blocking(move || {
+                veld_core::db::Db::open()
+                    .and_then(|db| db.engine_events_after(&id, 0, 1000))
+                    .unwrap_or_default()
+            })
+            .await
         }
-        Err(_) => {
-            warn!(run = run_name, "veld restart timed out (300s)");
-            if let Some(log) = internal_log {
-                let _ = log
-                    .write_line("[recovery] veld restart timed out (300s)")
-                    .await;
+        .into_iter()
+        .filter_map(|(_, json)| serde_json::from_str::<veld_engine::api::EngineEvent>(&json).ok())
+        .filter_map(|event| match event {
+            veld_engine::api::EngineEvent::Notice { message, .. }
+            | veld_engine::api::EngineEvent::Progress {
+                progress: veld_engine::progress::ProgressEvent::Warning { message },
             }
+            | veld_engine::api::EngineEvent::Progress {
+                progress: veld_engine::progress::ProgressEvent::Notice { message },
+            } => Some(format!("[recovery]   {message}")),
+            _ => None,
+        })
+        .collect();
+        if !said.is_empty() {
+            let _ = log.write_lines(chrono::Utc::now(), &said);
+        }
+    }
+    match ended {
+        Some((_, veld_engine::api::ActionOutcome::Started { .. })) => {
+            info!(run = run_name, "recovery restart completed");
+            note("[recovery] restart completed".to_owned()).await;
+        }
+        Some((status, outcome)) => {
+            let detail = match outcome {
+                veld_engine::api::ActionOutcome::Failed { message, .. } => message,
+                other => format!("{other:?}"),
+            };
+            warn!(run = run_name, status, "recovery restart failed: {detail}");
+            note(format!("[recovery] restart FAILED: {detail}")).await;
+        }
+        None => {
+            warn!(run = run_name, "recovery restart still running after 300s");
+            note("[recovery] restart still running after 300s".to_owned()).await;
         }
     }
 }

@@ -4,7 +4,7 @@ use std::process::Stdio;
 
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
 use tracing;
 
 use crate::config::CommandSpec;
@@ -46,18 +46,12 @@ pub struct CommandOutput {
 }
 
 // ---------------------------------------------------------------------------
-// Server handle — abstracts over foreground (tokio Child) vs detached (PID only)
+// Server handle
 // ---------------------------------------------------------------------------
 
-/// Handle to a spawned server process.
-///
-/// In foreground mode this wraps a `tokio::process::Child` so the orchestrator
-/// can manage the async I/O pipes.  In detached mode the process is fully
-/// decoupled from the tokio runtime — we only keep the PID.
+/// Handle to a spawned server process. It runs independently of its spawner;
+/// only the PID (which is also its process group) is tracked.
 pub enum ServerHandle {
-    /// Foreground: tokio-managed child with piped stdout/stderr.
-    Foreground(Child),
-    /// Detached: process runs independently; only the PID is tracked.
     Detached { pid: u32 },
 }
 
@@ -65,16 +59,7 @@ impl ServerHandle {
     /// Return the OS process ID.
     pub fn pid(&self) -> u32 {
         match self {
-            ServerHandle::Foreground(child) => child.id().unwrap_or(0),
             ServerHandle::Detached { pid } => *pid,
-        }
-    }
-
-    /// Take the inner tokio `Child` if this is a foreground handle.
-    pub fn into_child(self) -> Option<Child> {
-        match self {
-            ServerHandle::Foreground(child) => Some(child),
-            ServerHandle::Detached { .. } => None,
         }
     }
 }
@@ -120,7 +105,7 @@ pub type LineSink = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// its output accumulates in memory for the life of the step and lands as one
 /// enormous row. 64 KiB is far past any real log line.
 ///
-/// `pub` because the detached `veld _log` pump in `crates/veld/src/main.rs`
+/// `pub` because the detached `veld-daemon --log-sink` pump (`crate::logging::pump`)
 /// needs the same ceiling: it buffers lines for its writer thread, so an
 /// uncapped line there is an uncapped queue.
 ///
@@ -130,8 +115,7 @@ pub type LineSink = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
 /// | reader | caps? |
 /// |---|---|
 /// | [`drain_pipe`] (`command` steps via `LineSink`) | yes |
-/// | `veld _log` (detached servers) | yes, at the enqueue |
-/// | [`log_pipe`] (foreground servers) | **no** |
+/// | `veld-daemon --log-sink` (detached servers) | yes, at the enqueue |
 /// | `run_command_streaming` stdout | **no** |
 /// | `run_command_streaming` stderr | **no** |
 ///
@@ -184,8 +168,9 @@ impl Drop for DrainTasks {
 /// delimiter or EOF, so a stream that never emits one — a `\r`-only progress
 /// meter, the exact case the cap is for — grows their buffer without bound before
 /// any caller-side check can look at it. Three of veld's pipe readers were built
-/// on those two functions and were therefore uncapped: [`log_pipe`] (foreground
-/// servers) and both drain tasks of [`run_command_streaming`]. They now share this.
+/// on those two functions and were therefore uncapped: the foreground server pipe
+/// (since removed with foreground mode) and both drain tasks of
+/// [`run_command_streaming`]. They now share this.
 ///
 /// **Line semantics, matching what those readers already did**, so adopting it
 /// changes only the bound:
@@ -264,7 +249,7 @@ impl LineAssembler {
 /// whose remaining bytes have not arrived (0 if it ends on a boundary).
 ///
 /// A UTF-8 character is at most 4 bytes, so at most 3 can be pending.
-/// `pub` so the `veld _log` pump can split an over-long line the same way
+/// `pub` so the `veld-daemon --log-sink` pump can split an over-long line the same way
 /// [`drain_pipe`] does — same ceiling *and* same behaviour at it, rather than one
 /// path splitting and the other truncating.
 pub fn trailing_partial_char(buf: &[u8]) -> usize {
@@ -413,12 +398,12 @@ impl LogTarget {
     /// dropping 512 lines on the path that carries a foreground server's output is
     /// the shape of gap #332 is a report about.
     ///
-    /// **Reported to `tracing`, not to the database — unlike `veld _log`'s
+    /// **Reported to `tracing`, not to the database — unlike `veld-daemon --log-sink`'s
     /// otherwise-identical notice.** A second write here would sit on the same
     /// connection with the same 10-second `busy_timeout`, so a busy database would
     /// stall this drain for up to 20 seconds per batch instead of 10 — doubling
     /// the exact harm the paragraph above gives as the reason for swallowing the
-    /// error. `veld _log` can afford the database write because its writer thread
+    /// error. `veld-daemon --log-sink` can afford the database write because its writer thread
     /// is off the drain path by construction; this task is the drain. Both readers
     /// that reach here run inside the foreground `veld` process, so a `warn!`
     /// lands where somebody is looking.
@@ -501,68 +486,20 @@ fn empty_argv() -> ProcessError {
     ))
 }
 
-/// Spawn a long-running server process.
+/// Spawn a long-running server process, detached.
 ///
-/// When `foreground` is true, stdout/stderr are piped through background
-/// tasks that timestamp each line into the database. The process will
-/// die when the CLI exits (pipes close).
-///
-/// When `foreground` is false (detached mode), the process is spawned via
-/// `std::process::Command` in its own process group so it is fully
-/// independent of the CLI process and the tokio runtime. stdout/stderr are
-/// piped through a detached `veld _log` writer that outlives the CLI.
-pub async fn start_server(
+/// Spawned via `std::process::Command` in its own process group, so it is
+/// independent of whoever spawned it (the engine worker) and of the tokio
+/// runtime; stdout/stderr are piped through a `veld-daemon --log-sink` writer in
+/// the same group. Nothing else exists: a server tied to its spawner's pipes died
+/// with it, and the spawner is now a short-lived worker.
+pub fn start_server(
     command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
-    log_target: LogTarget,
-    foreground: bool,
+    log_target: &LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
-    if foreground {
-        start_server_foreground(command, working_dir, env, log_target).await
-    } else {
-        start_server_detached(command, working_dir, env, &log_target)
-    }
-}
-
-/// Foreground mode: pipe stdout/stderr through timestamping tasks.
-async fn start_server_foreground(
-    command: &CommandSpec,
-    working_dir: &Path,
-    env: &HashMap<String, String>,
-    log_target: LogTarget,
-) -> Result<ServerHandle, ProcessError> {
-    let mut child = tokio_command(command)?
-        .current_dir(working_dir)
-        .envs(env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(false)
-        .spawn()
-        .map_err(ProcessError::SpawnFailed)?;
-
-    tracing::info!(
-        pid = child.id().unwrap_or(0),
-        command = command.display(),
-        "started server process (foreground)"
-    );
-
-    if let Some(stdout) = child.stdout.take() {
-        let target = log_target.clone();
-        tokio::spawn(async move {
-            log_pipe(stdout, target).await;
-        });
-    }
-
-    if let Some(stderr) = child.stderr.take() {
-        let target = log_target.clone();
-        tokio::spawn(async move {
-            log_pipe(stderr, target).await;
-        });
-    }
-
-    Ok(ServerHandle::Foreground(child))
+    start_server_detached(command, working_dir, env, log_target)
 }
 
 /// Single-quote a string for safe inclusion in a `sh -c` script.
@@ -570,16 +507,81 @@ fn sq(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// The argv of the log-sink stage of the detached pipeline: veld's own binary
-/// re-invoked as `veld _log`, which timestamps each line into the database.
+/// This process's own executable path, resolved **once** and cached for the life
+/// of the process.
+///
+/// The detached pipeline's log sink is `<own-exe> --log-sink …`, built by
+/// [`log_sink_argv`], so the path has to be one that still names a file after
+/// the binary is replaced under a running process.
+///
+/// **Resolving it again later is a Linux bug, not a style preference.** When an
+/// update replaces the binary by `rename()` rather than writing in place, the
+/// running process's inode is unlinked — and Linux's `/proc/self/exe`, which
+/// `std::env::current_exe()` reads, then answers
+/// `"/usr/local/bin/veld-daemon (deleted)"`. A node spawned after that would
+/// exec a path that does not exist, and its pipe's read end would never come up.
+/// macOS does not have the problem: `_NSGetExecutablePath` returns the path used
+/// to exec, and the new binary is at it. Caching at startup is also the right
+/// value: "the file that will be exec'd next", not "the inode I am".
+///
+/// **Calling this early is the caller's job.** The worker calls it at boot, before
+/// anything can replace the binary, so the cached value predates every update;
+/// [`strip_deleted_suffix`] is the belt to that braces.
+pub fn own_exe() -> &'static Path {
+    static OWN_EXE: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    OWN_EXE
+        .get_or_init(|| {
+            std::env::current_exe()
+                .map(strip_deleted_suffix)
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "could not resolve own executable path");
+                    std::path::PathBuf::from("veld-daemon")
+                })
+        })
+        .as_path()
+}
+
+/// Drop a trailing `" (deleted)"` from a `/proc/self/exe` reading.
+fn strip_deleted_suffix(path: std::path::PathBuf) -> std::path::PathBuf {
+    match path.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(real) => std::path::PathBuf::from(real),
+        None => path,
+    }
+}
+
+/// The binary that has the `--log-sink` mode: `veld-daemon`.
+///
+/// Nodes are spawned by the engine worker, which *is* `veld-daemon`, so this is
+/// [`own_exe`] in production. Anything else that reaches a detached spawn — a test
+/// binary, a future face running the orchestrator in-process — gets the sibling
+/// `veld-daemon` instead of re-invoking itself with a flag it does not have, which
+/// would kill the sink and SIGPIPE the node on its first line of output.
+fn log_sink_binary() -> std::path::PathBuf {
+    let exe = own_exe();
+    let is_daemon = exe
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "veld-daemon");
+    if is_daemon {
+        return exe.to_path_buf();
+    }
+    exe.parent()
+        .map(|dir| dir.join("veld-daemon"))
+        .unwrap_or_else(|| std::path::PathBuf::from("veld-daemon"))
+}
+
+/// The argv of the log-sink stage of the detached pipeline: this process's own
+/// binary ([`own_exe`]) in its `--log-sink` mode, which timestamps each line into
+/// the database (`crate::logging::pump::run_log_sink`).
+///
+/// **This argv shape is frozen across versions.** `veld-daemon` parses it in
+/// `parse_args`, and a running worker built before an update may exec a newer
+/// binary with this argv (or the reverse), so flags may be added only as optional
+/// ones and never renamed, reordered or removed.
 fn log_sink_argv(log_target: &LogTarget) -> Vec<String> {
-    let veld_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
-        .to_string_lossy()
-        .into_owned();
     vec![
-        veld_bin,
-        "_log".to_owned(),
+        log_sink_binary().to_string_lossy().into_owned(),
+        "--log-sink".to_owned(),
         "--project-root".to_owned(),
         log_target.project_root.to_string_lossy().into_owned(),
         "--run".to_owned(),
@@ -602,7 +604,7 @@ fn log_sink_argv(log_target: &LogTarget) -> Vec<String> {
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
 ///
-/// stdout/stderr are piped through `veld _log`, which timestamps each line
+/// stdout/stderr are piped through `veld-daemon --log-sink`, which timestamps each line
 /// into the central database. The entire pipeline (server + log writer) runs
 /// in the same process group and survives CLI exit.
 fn start_server_detached(
@@ -617,7 +619,7 @@ fn start_server_detached(
 /// Spawn the detached pipeline with an explicit log-sink argv.
 ///
 /// Split out from [`start_server_detached`] so the RC1 characterization tests
-/// can substitute a stub sink: the real sink is `veld _log`, and a test process
+/// can substitute a stub sink: the real sink is `veld-daemon --log-sink`, and a test process
 /// has no veld binary at `current_exe()`. Production always supplies
 /// [`log_sink_argv`]; the pipeline shape, tracked PID, and process-group
 /// leadership are identical either way, which is exactly what those tests pin.
@@ -630,7 +632,7 @@ pub fn spawn_detached(
 ) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    // Only veld's own `_log` arguments are shell-quoted; they are ours, not the
+    // Only veld's own `--log-sink` arguments are shell-quoted; they are ours, not the
     // author's.
     let sink = sink_argv
         .iter()
@@ -704,75 +706,6 @@ fn flush_out(target: &Option<LogTarget>, batch: &mut crate::logging::LogBatch) {
     if let Some(t) = target {
         t.append_batch(&lines);
     }
-}
-
-/// Read lines from an async reader and store them in the database, in batches.
-///
-/// A foreground server's stdout is one of the highest-volume writers veld has,
-/// and it used to be one autocommit `INSERT` per line. The batch flushes on
-/// `LOG_BATCH_MAX_LINES` under load and on `LOG_BATCH_FLUSH` when the server goes
-/// quiet, so a line is never held longer than the flush window — well inside the
-/// 200 ms the interactive `--follow` loops poll at.
-async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget) {
-    use crate::logging::LogBatch;
-
-    // `fill_buf` + `LineAssembler`, not `BufReader::lines()`. `Lines::next_line`
-    // does not return until it sees a `\n`, so a server emitting a `\r`-only
-    // progress meter grew its buffer without bound — `MAX_LINE_BYTES` could not
-    // be applied from out here because there was no point at which to apply it.
-    // The assembler enforces the cap while accumulating and keeps this path's line
-    // semantics unchanged otherwise.
-    let mut reader = BufReader::new(reader);
-    let mut assembler = LineAssembler::new();
-    let mut batch = LogBatch::new();
-    let mut lines: Vec<String> = Vec::new();
-
-    loop {
-        // With nothing buffered there is no deadline to honour — block for the
-        // first read rather than spinning on an expired timeout.
-        let chunk = match batch.deadline() {
-            None => reader.fill_buf().await.map(<[u8]>::to_vec),
-            Some(deadline) => {
-                match tokio::time::timeout_at(deadline.into(), reader.fill_buf()).await {
-                    Ok(read) => read.map(<[u8]>::to_vec),
-                    Err(_) => {
-                        // Deadline reached with a partial batch. `fill_buf` is
-                        // cancel-safe — a cancelled call consumes nothing, so the
-                        // bytes are still there for the next one.
-                        target.append_batch(&batch.take());
-                        continue;
-                    }
-                }
-            }
-        };
-
-        match chunk {
-            Ok(chunk) if chunk.is_empty() => break, // EOF
-            Ok(chunk) => {
-                reader.consume(chunk.len());
-                lines.clear();
-                assembler.push_chunk(&chunk, &mut lines);
-                for line in lines.drain(..) {
-                    batch.push(line);
-                    if batch.is_full() {
-                        target.append_batch(&batch.take());
-                    }
-                }
-            }
-            // A signal can interrupt the read with nothing wrong with the pipe;
-            // treating that as EOF would stop draining while the server is still
-            // writing, and it would then block forever on a full pipe.
-            Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
-        }
-    }
-
-    // EOF: the last thing a dying server said is the line most worth having, and
-    // it may never have got its newline.
-    if let Some(last) = assembler.finish() {
-        batch.push(last);
-    }
-    target.append_batch(&batch.take());
 }
 
 /// Drain one of a `command` step's pipes: echo every line to the terminal as it
@@ -1131,6 +1064,65 @@ pub async fn run_command_observed(
 // Run a command to completion while streaming its output live
 // ---------------------------------------------------------------------------
 
+/// Where [`run_command_streaming`] echoes a line when it is not this process's
+/// own stdout/stderr — the engine worker has no terminal, so it hands each line
+/// to the face that asked for the run instead.
+pub type LineEcho = std::sync::Arc<dyn Fn(&str) + Send + Sync>;
+
+/// One [`LineEcho`] per stream, so stdout stays stdout at the far end.
+#[derive(Clone)]
+pub struct StreamEcho {
+    pub stdout: LineEcho,
+    pub stderr: LineEcho,
+}
+
+type EchoWriter = Box<dyn tokio::io::AsyncWrite + Unpin + Send>;
+
+/// An `AsyncWrite` that hands each complete line to a callback. The drain writes
+/// a line, then `\n`, then flushes, so every line arrives whole.
+struct LineCallbackWriter {
+    buf: Vec<u8>,
+    echo: LineEcho,
+}
+
+impl LineCallbackWriter {
+    fn new(echo: LineEcho) -> Self {
+        Self {
+            buf: Vec::new(),
+            echo,
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for LineCallbackWriter {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.buf.extend_from_slice(data);
+        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
+            let line: Vec<u8> = self.buf.drain(..=pos).collect();
+            (self.echo)(&String::from_utf8_lossy(&line[..line.len() - 1]));
+        }
+        std::task::Poll::Ready(Ok(data.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
 /// Run a command/script to completion, streaming its output live.
 ///
 /// Unlike [`run_command`], every stdout line is echoed to the process's own
@@ -1166,6 +1158,7 @@ pub async fn run_command_streaming(
     output_file: Option<&Path>,
     log_target: Option<LogTarget>,
     on_spawn: Option<Box<dyn FnOnce(u32) + Send>>,
+    echo: Option<StreamEcho>,
 ) -> Result<CommandOutput, ProcessError> {
     // Prepare the output file and augmented env (mirrors `run_command`).
     let mut env = env.clone();
@@ -1243,14 +1236,21 @@ pub async fn run_command_streaming(
     // stdout carries the program's real output; `VELD_OUTPUT key=value`
     // control lines are peeled off it and sent back over `out_tx` instead of
     // being echoed or logged. stderr is forwarded verbatim.
+    let (out_echo, err_echo): (EchoWriter, EchoWriter) = match echo {
+        Some(echo) => (
+            Box::new(LineCallbackWriter::new(echo.stdout)),
+            Box::new(LineCallbackWriter::new(echo.stderr)),
+        ),
+        None => (Box::new(tokio::io::stdout()), Box::new(tokio::io::stderr())),
+    };
     let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
     let out_log = log_target.clone();
     let out_task = tokio::spawn(async move {
-        drain_to_terminal_and_log(stdout, tokio::io::stdout(), out_log, Some(out_tx)).await;
+        drain_to_terminal_and_log(stdout, out_echo, out_log, Some(out_tx)).await;
     });
     let err_log = log_target.clone();
     let err_task = tokio::spawn(async move {
-        drain_to_terminal_and_log(stderr, tokio::io::stderr(), err_log, None).await;
+        drain_to_terminal_and_log(stderr, err_echo, err_log, None).await;
     });
 
     // Wait for both drain tasks to finish; a Ctrl+C kills the child's process
@@ -1456,7 +1456,7 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
 ///
 /// These deliberately assert *today's* behaviour rather than a desired one.
 /// The detached wrapper is a shell pipeline by construction
-/// (`sh -c '{ cmd ; } 2>&1 | veld _log …'`), and a great deal of veld depends on
+/// (`sh -c '{ cmd ; } 2>&1 | veld-daemon --log-sink …'`), and a great deal of veld depends on
 /// its exact shape: the tracked PID is the pipeline shell and the process-group
 /// leader, so `kill(-pid)` reaps the node *and* the log writer; `is_alive` on
 /// that PID is what `cleanup_dead_runs` and the daemon monitor treat as "the
@@ -1530,7 +1530,7 @@ mod characterization_tests {
     }
 
     /// A stub log sink: a single binary that drains stdin into a file, standing
-    /// in for `veld _log` (whose binary is not at a test process's
+    /// in for `veld-daemon --log-sink` (whose binary is not at a test process's
     /// `current_exe()`). One exec, like the real sink, so the process topology
     /// matches production.
     fn sink_argv(path: &Path) -> Vec<String> {
@@ -1690,6 +1690,25 @@ mod characterization_tests {
         );
     }
 
+    /// Linux reads a replaced binary's own path as `"… (deleted)"`; the cached
+    /// path must be the one the next exec will find.
+    #[test]
+    fn strip_deleted_suffix_drops_only_the_proc_marker() {
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/local/bin/veld-daemon (deleted)")),
+            PathBuf::from("/usr/local/bin/veld-daemon")
+        );
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/usr/local/bin/veld-daemon")),
+            PathBuf::from("/usr/local/bin/veld-daemon")
+        );
+        // Only a *trailing* marker is the kernel's; one mid-path is a directory name.
+        assert_eq!(
+            strip_deleted_suffix(PathBuf::from("/opt/a (deleted)/veld-daemon")),
+            PathBuf::from("/opt/a (deleted)/veld-daemon")
+        );
+    }
+
     fn spec_len(spec: &CommandSpec) -> usize {
         match spec {
             CommandSpec::Argv(a) => a.len(),
@@ -1699,7 +1718,7 @@ mod characterization_tests {
 
     /// A `shell` node keeps the exact wrapper it had before argv existed, and an
     /// `argv` node gets the positional-parameter form. Pins the emitted script,
-    /// which no other test covers — renaming a `veld _log` flag would otherwise
+    /// which no other test covers — renaming a `veld-daemon --log-sink` flag would otherwise
     /// only fail at runtime.
     #[test]
     fn detached_wrapper_shape_is_pinned() {
@@ -1722,7 +1741,7 @@ mod characterization_tests {
         assert_eq!(
             &sink[1..],
             &[
-                "_log",
+                "--log-sink",
                 "--project-root",
                 "/pro ject",
                 "--run",
@@ -1734,7 +1753,7 @@ mod characterization_tests {
                 "--variant",
                 "local",
             ],
-            "the _log flag names and order are what the detached pipeline depends on"
+            "the --log-sink flag names and order are what the detached pipeline depends on"
         );
         // A path containing a single quote must not break out of the script.
         let quoted = sq("it's");
@@ -1830,6 +1849,7 @@ mod streaming_tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("streaming run should not error on non-zero exit");
@@ -1845,6 +1865,7 @@ mod streaming_tests {
             &CommandSpec::Shell("true".to_owned()),
             &dir,
             &env,
+            None,
             None,
             None,
             None,
@@ -1865,6 +1886,7 @@ mod streaming_tests {
             &CommandSpec::Shell("printf '\\377\\n'; echo 'VELD_OUTPUT foo=bar'".to_owned()),
             &dir,
             &env,
+            None,
             None,
             None,
             None,
@@ -2205,7 +2227,7 @@ mod command_capture_tests {
 #[cfg(test)]
 mod batched_drain_tests {
     use super::*;
-    use crate::db::{LogFilter, LogStream};
+    use crate::db::LogFilter;
 
     /// A `LogTarget` backed by a real temp database, so the batched drains can
     /// be asserted on what actually landed in `log_lines`.
@@ -2241,36 +2263,6 @@ mod batched_drain_tests {
             .collect()
     }
 
-    /// Every line a server prints lands exactly once, in order, through the
-    /// batched path — including the last one, and including one that never got
-    /// its newline.
-    ///
-    /// The batching is invisible from here, which is the point: the flush cap and
-    /// the flush deadline are both internal, and no reader is supposed to be able
-    /// to tell how the rows were grouped into transactions.
-    #[tokio::test]
-    async fn log_pipe_stores_every_line_including_an_unterminated_last_one() {
-        let (_dir, target) = temp_target();
-        // 1,200 lines crosses `LOG_BATCH_MAX_LINES` (512) twice, so the size cap
-        // fires and the remainder leaves a partial batch for the EOF flush.
-        let mut payload = String::new();
-        for i in 0..1_200 {
-            payload.push_str(&format!("line {i}\n"));
-        }
-        payload.push_str("no trailing newline");
-
-        log_pipe(std::io::Cursor::new(payload.into_bytes()), target.clone()).await;
-
-        let rows = stored(&target);
-        assert_eq!(rows.len(), 1_201, "every line must land exactly once");
-        assert_eq!(rows[0], "line 0");
-        assert_eq!(rows[1_199], "line 1199");
-        assert_eq!(
-            rows[1_200], "no trailing newline",
-            "a final line with no newline is still output and must be stored"
-        );
-    }
-
     /// The regression that the batching introduced and that this test now pins:
     /// a trailing line with no newline, printed after a pause long enough for the
     /// flush deadline to fire, used to be **lost from both the terminal and the
@@ -2302,6 +2294,7 @@ mod batched_drain_tests {
             None,
             Some(target.clone()),
             None,
+            None,
         )
         .await
         .expect("run should succeed");
@@ -2329,6 +2322,7 @@ mod batched_drain_tests {
             None,
             Some(target.clone()),
             None,
+            None,
         )
         .await
         .expect("run should succeed");
@@ -2337,42 +2331,6 @@ mod batched_drain_tests {
         assert!(
             rows.contains(&"err-partial".to_owned()),
             "the unterminated final stderr line must survive; got {rows:?}"
-        );
-    }
-
-    /// **The bound, on the reader that had none.** `log_pipe` used
-    /// `BufReader::lines()`, which does not return until it sees a `\n` — so a
-    /// foreground server emitting a `\r`-only progress meter accumulated its
-    /// entire output as one row, and `MAX_LINE_BYTES` could not be applied from
-    /// outside because there was no point at which to apply it.
-    #[tokio::test]
-    async fn log_pipe_bounds_a_stream_that_never_sends_a_newline() {
-        let (_dir, target) = temp_target();
-        let mut payload = Vec::new();
-        for i in 0..20_000 {
-            payload.extend_from_slice(format!("progress {i}\r").as_bytes());
-        }
-        let raw_len = payload.len();
-        assert!(
-            raw_len > MAX_LINE_BYTES * 3,
-            "the fixture must exceed the cap several times"
-        );
-
-        log_pipe(std::io::Cursor::new(payload), target.clone()).await;
-
-        let rows = stored(&target);
-        assert!(
-            rows.len() > 1,
-            "an uncapped reader would have stored exactly one row"
-        );
-        assert!(
-            rows.iter().all(|l| l.len() <= MAX_LINE_BYTES),
-            "no row may exceed the cap"
-        );
-        assert_eq!(
-            rows.iter().map(String::len).sum::<usize>(),
-            raw_len - 1,
-            "splitting must lose nothing but the one trailing terminator"
         );
     }
 
@@ -2394,6 +2352,7 @@ for i in range(20000): sys.stdout.write('progress %06d\\r'%i)
                 &HashMap::new(),
                 None,
                 Some(target.clone()),
+                None,
                 None,
             )
             .await
@@ -2423,6 +2382,7 @@ for i in range(20000): sys.stdout.write('progress %06d\\r'%i)
             None,
             Some(target.clone()),
             None,
+            None,
         )
         .await
         .expect("run should succeed");
@@ -2433,37 +2393,6 @@ for i in range(20000): sys.stdout.write('progress %06d\\r'%i)
         assert!(
             !rows.iter().any(|l| l.contains("s3cr3t")),
             "a VELD_OUTPUT control line must never be logged; got {rows:?}"
-        );
-    }
-
-    /// The `internal` stream is where veld's own words go, and the batched
-    /// drains must not put a supervised process's output there — that boundary
-    /// is what lets a reader tell veld's claims from the child's.
-    #[tokio::test]
-    async fn a_processs_output_never_reaches_the_internal_stream() {
-        let (_dir, target) = temp_target();
-        log_pipe(
-            std::io::Cursor::new(b"[log] dropped 5 lines\n".to_vec()),
-            target.clone(),
-        )
-        .await;
-
-        let internal = target
-            .db
-            .tail_logs(
-                &target.project_root,
-                &target.run_name,
-                &LogFilter {
-                    streams: Some(vec![LogStream::Internal.as_str()]),
-                    ..Default::default()
-                },
-                100,
-            )
-            .unwrap();
-        assert!(
-            internal.is_empty(),
-            "a line printed by the supervised process must stay on its own stream, \
-             whatever it says: {internal:?}"
         );
     }
 }

@@ -15,7 +15,6 @@ use tracing::warn;
 use veld_core::config;
 use veld_core::db::{Db, LogFilter, LogStream};
 use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus, StartOrigin};
-use veld_core::user_path::cached_user_path_for;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -80,6 +79,11 @@ async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        // The database this daemon's engine drives. A CLI built against a
+        // different one refuses to use this daemon rather than start and stop
+        // runs it cannot see (#306's class of bug: a cargo-built CLI on the dev
+        // database talking to the installed daemon).
+        "db_path": veld_core::db::Db::default_path().ok(),
     }))
 }
 
@@ -1399,9 +1403,9 @@ struct ActionBody {
     node: Option<String>,
 }
 
-/// Run a node-defined action by delegating to `veld action <name>`, which
-/// reads the live outputs and shells out. Any credentials stay server-side —
-/// the daemon hands off to the CLI; the browser only ever sent a name.
+/// Run a node-defined action through the engine, which reads the live outputs
+/// and runs it unattended. Any credentials stay server-side — the browser only
+/// ever sent a name.
 async fn run_action(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
@@ -1454,23 +1458,34 @@ async fn run_action(
         return StatusCode::NOT_FOUND;
     }
 
-    let mut args = vec![
-        "action".to_owned(),
-        body.action.clone(),
-        "--name".to_owned(),
-        run_name.clone(),
-    ];
-    if let Some(node) = &body.node {
-        args.push("--node".to_owned());
-        args.push(node.clone());
-    }
-    spawn_veld(&project_root, &args).await
+    engine_status(
+        super::engine::spawn_daemon_action(
+            &project_root,
+            veld_engine::api::ActionKind::Action {
+                run: run_name,
+                action: body.action,
+                node: body.node,
+            },
+        )
+        .await,
+    )
 }
 
-/// Stop / restart helper: spawn `veld <action> --name <run>` in the project
-/// the caller scoped the run to. The `--name` argument stays name-based (that
-/// is the CLI's own contract); it is the *working directory* that disambiguates
-/// which project's `main` gets stopped.
+/// What an IDE button gets back: `202` once the worker is running, or the
+/// engine's refusal (`503` during an update).
+fn engine_status(r: Result<String, (StatusCode, String)>) -> StatusCode {
+    match r {
+        Ok(_) => StatusCode::ACCEPTED,
+        Err((code, message)) => {
+            warn!("engine refused an IDE action ({code}): {message}");
+            code
+        }
+    }
+}
+
+/// Stop / restart helper: an engine action for the run in the project the
+/// caller scoped it to — the project root is what disambiguates which
+/// project's `main` gets stopped.
 async fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCode {
     let registry = match open_db().and_then(|db| {
         db.registry().map_err(|e| {
@@ -1485,71 +1500,26 @@ async fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> Sta
         Ok(p) => p,
         Err(code) => return code,
     };
-    spawn_veld(
-        &project_root,
-        &[action.to_owned(), "--name".to_owned(), run_name.to_owned()],
-    )
-    .await
+    let run = run_name.to_owned();
+    let kind = match action {
+        "restart" => veld_engine::api::ActionKind::Restart { run },
+        _ => veld_engine::api::ActionKind::Stop { run },
+    };
+    engine_status(super::engine::spawn_daemon_action(&project_root, kind).await)
 }
 
-/// Longest stderr tail kept from a failed spawned command. A `veld start`
-/// streams its whole progress to stderr and only the end of it says why the
-/// command failed.
-const STDERR_TAIL_BYTES: u64 = 4096;
-
-/// Create the file a spawned command's stderr is redirected to.
-///
-/// Under `~/.veld/spawn-logs` (owner-only), never a world-writable temp
-/// directory, and with `create_new` so an existing path — including a symlink
-/// another local user planted — is a hard failure rather than a write-through.
-/// `None` means "no capture": the caller falls back to `Stdio::null()`, which is
-/// what this always did before, so a failure here never blocks the command.
-fn spawn_stderr_file() -> Option<(std::fs::File, std::path::PathBuf)> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let dir = spawn_log_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    // Timestamp as well as pid+counter: a daemon killed between spawn and reap
-    // leaves its file behind (the reaper died with it), and a pid+counter alone
-    // would collide with that leftover after pid reuse — `create_new` would then
-    // fail and capture would be silently off for the rest of that daemon's life.
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let path = dir.join(format!(
-        "{}-{}-{}.err",
-        std::process::id(),
-        stamp,
-        SEQ.fetch_add(1, Ordering::Relaxed)
-    ));
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create_new(true);
-    // Owner-only: a spawned command's stderr can carry whatever its output
-    // contains, and the database next to it is 0o600 for the same reason.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-        opts.mode(0o600);
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    let file = opts.open(&path).ok()?;
-    Some((file, path))
-}
-
-/// Where a spawned command's stderr is captured. Owner-only, alongside the
-/// daemon's socket and database rather than in a world-writable temp directory.
+/// Where an older daemon captured a spawned `veld`'s stderr.
 fn spawn_log_dir() -> Option<std::path::PathBuf> {
     Some(dirs::home_dir()?.join(".veld").join("spawn-logs"))
 }
 
 /// Delete leftover capture files at daemon start.
 ///
-/// The reaper task unlinks its own file, but it dies with the daemon — a SIGKILL
-/// or a `veld update` between spawn and reap leaves the file named on disk, and
-/// nothing else in veld collects this directory (`veld gc` prunes per-project
-/// logs, not this).
+/// Nothing writes here any more: the daemon used to exec `veld` and capture its
+/// stderr in this directory, and now runs the engine in workers instead. A
+/// daemon killed between such a spawn and its reap left the file named on disk,
+/// and nothing else collects this directory — so the sweep stays, to clear what
+/// an older daemon left behind.
 ///
 /// Only files whose owning daemon is **gone** are removed. `$HOME` is shared by
 /// every veld instance (a source-built dev daemon runs alongside the installed
@@ -1586,31 +1556,7 @@ pub fn sweep_spawn_logs() {
     }
 }
 
-/// The last [`STDERR_TAIL_BYTES`] of a spawned command's captured stderr.
-fn stderr_tail(path: &std::path::Path) -> String {
-    use std::io::{Read as _, Seek as _, SeekFrom};
-    let Ok(file) = std::fs::File::open(path) else {
-        return String::new();
-    };
-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let mut file = file.take(STDERR_TAIL_BYTES);
-    if len > STDERR_TAIL_BYTES
-        && file
-            .get_mut()
-            .seek(SeekFrom::End(-(STDERR_TAIL_BYTES as i64)))
-            .is_err()
-    {
-        return String::new();
-    }
-    let mut buf = Vec::new();
-    if file.read_to_end(&mut buf).is_err() {
-        return String::new();
-    }
-    // Lossy: a tail can start mid-character, and this is a diagnostic.
-    String::from_utf8_lossy(&buf).trim().to_owned()
-}
-
-/// Hand a run that ended abnormally to `veld stop`, so its nodes' `on_stop`
+/// Hand a run that ended abnormally to an engine `stop`, so its nodes' `on_stop`
 /// hooks actually run.
 ///
 /// A crashed, orphaned or half-torn-down run still owes every node's teardown,
@@ -1624,14 +1570,12 @@ fn stderr_tail(path: &std::path::Path) -> String {
 /// it by hand. `veld gc` does not help: it collects veld's own state and logs,
 /// never the container runtime's.
 ///
-/// **Delegated rather than run in this process, for two reasons.** Resolving a
-/// hook's command, `${vars.*}`, env and cwd is `Orchestrator`'s job and it must
+/// **Delegated to an engine worker rather than run in this process.** Resolving
+/// a hook's command, `${vars.*}`, env and cwd is `Orchestrator`'s job and it must
 /// stay the only resolver (AGENTS.md → Config Authoring Principles: one owner
-/// for resolution). And a daemon-spawned command needs the user's login-shell
-/// `PATH`, which [`spawn_veld`] resolves in the project's own directory —
-/// under launchd this daemon's own `PATH` cannot find `docker` at all, so a
-/// hook run in-process would fail precisely where it matters and report
-/// success-shaped nothing.
+/// for resolution). The worker gets the user's login-shell `PATH` resolved in
+/// the project's own directory — under launchd this daemon's own `PATH` cannot
+/// find `docker` at all — and a hung hook hangs the worker, not the daemon.
 ///
 /// The delegate reaches the run when it is already terminal and takes
 /// `Orchestrator::stop`'s already-ended branch, which runs what the run still
@@ -1642,219 +1586,26 @@ fn stderr_tail(path: &std::path::Path) -> String {
 /// rather than wrong — teardown's ledger is per node and persisted as each hook
 /// returns, so a second delegate resumes instead of repeating.
 ///
-/// Best-effort by design, and **the child's own failure is invisible here**:
-/// [`spawn_veld`] answers as soon as the process starts and never awaits it, so
-/// a `veld stop` that then fails logs on its own side and nothing on this one.
-/// Neither that nor a refused spawn (an update holding the lock) nor a missing
-/// binary loses anything permanently: the next `veld start` for the project
-/// sweeps whatever its runs still owe.
+/// Best-effort by design and not awaited: the worker's outcome is in its
+/// action's event log (`engine_actions`), not here. Neither a failed teardown
+/// nor a refused one (an update holding the lock) loses anything permanently:
+/// the next `veld start` for the project sweeps whatever its runs still owe.
 pub(crate) async fn delegate_teardown(project_root: &std::path::Path, run_name: &str) {
-    let args = vec!["stop".to_owned(), "--name".to_owned(), run_name.to_owned()];
-    let code = spawn_veld(project_root, &args).await;
-    if code.is_success() {
-        // A breadcrumb, because the child's own outcome never reaches here:
-        // `spawn_veld` answers as soon as the process starts, so a `veld stop`
-        // that then fails — an unloadable config, a hook whose `${vars.*}`
-        // cannot resolve, a panic — leaves nothing in the daemon log to tell an
-        // operator whether the hooks ran. This line at least records that the
-        // attempt was made; the recovery is the next `veld start`'s sweep.
-        tracing::info!("spawned `veld stop --name {run_name}` to tear down an ended run");
-    } else {
-        warn!(
-            "could not spawn `veld stop --name {run_name}` to tear down an ended run \
-             ({code}); its on_stop hooks run on the next `veld start` here"
-        );
-    }
-}
-
-/// Spawn `veld <args...>` in the project directory with the user's login-shell
-/// `PATH`. The project_root is looked up from the GlobalRegistry (never
-/// supplied by the client) to prevent directory traversal.
-pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
-    // **Refuse here rather than let the child refuse where nobody is listening.**
-    // Every command this spawns is one the CLI's own update gate turns into exit
-    // 75 while `veld update` holds the lock — but this function answers `202
-    // ACCEPTED` the moment the process starts and only `warn!`s a non-zero exit
-    // into the daemon log, so a start/stop/restart/action button in the IDE or in
-    // Veld Desktop would silently do nothing for the one to four minutes an
-    // update takes. `503` is a status the UI already surfaces as an error toast,
-    // and it is the honest one: the service really is briefly unavailable, and
-    // the caller really should try again. Checked before the spawn so the
-    // answer is the same whether or not the child ever ran.
-    if veld_core::update_lock::current().is_some() {
-        warn!(
-            "refusing to spawn `veld {}`: an update is in progress",
-            args.join(" ")
-        );
-        return StatusCode::SERVICE_UNAVAILABLE;
-    }
-    // Resolve the veld binary as THIS daemon's sibling (current_exe), by
-    // absolute path — a bare `veld` would resolve via PATH to the INSTALLED
-    // binary, which would then operate a dev instance's DB/daemon (inherited
-    // env) and fail closed on a schema-ahead dev DB.
-    let veld_bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("veld")))
-        .filter(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "veld".to_owned());
-    // AGENTS.md: a daemon-spawned command must inherit the user's login-shell
-    // PATH, and `veld start` runs every command a node declares. This used to
-    // rely on `$SHELL -l -c`, which does not get there: a login shell sources
-    // `.zprofile` but NOT `.zshrc`, and `.zshrc` is where version managers
-    // (nvm, fnm, rbenv) and `brew shellenv` put their bin directories on most
-    // machines. Under launchd the daemon's own PATH is the bare service one,
-    // so a UI- or Desktop-initiated `veld start` resolved node commands
-    // against `/usr/bin:/bin:/usr/sbin:/sbin` plus whatever `.zprofile` added
-    // and reported `sh: npx: command not found` for a config that works in the
-    // user's terminal.
-    //
-    // The login shell is gone rather than kept alongside the injection: on
-    // Debian `/etc/profile` *overwrites* PATH unconditionally, so a login
-    // shell would discard the injected value and leave this broken on Linux,
-    // and `export PATH=…` inside the command string is not fish syntax. Only
-    // PATH is inherited, never the rest of the login environment — the same
-    // contract the monitor's liveness probes and `SecretSource::Command` hold.
-    // The visible consequence: a node command that needs a variable exported
-    // only from `.zprofile`/`.profile` used to see it here and no longer does.
-    // That is a real asymmetry with the CLI path, where a macOS terminal's zsh
-    // *is* a login shell and those exports are simply in the environment veld
-    // inherits — so a node needing one must declare it in its `env` rather than
-    // rely on who started the run.
-    //
-    // Dropping the shell also drops the shell-escaping of a client-supplied
-    // run name; arguments now reach the binary as argv.
-    //
-    // Resolved *in the project's own directory*, not the process-wide
-    // `cached_user_path()`: a config's declared commands need whatever Node
-    // (etc.) version this specific project's `.zshrc`/`.nvmrc` would select,
-    // which is exactly what a terminal pane gets by sitting in that directory
-    // and a directory-agnostic global PATH cannot represent — one project
-    // starting with another's Node version, or the daemon's own bare
-    // launchd-cwd PATH, was the top-bar/terminal-pane divergence this
-    // resolves. Still cached (`DIR_PATH_TTL`, keyed per directory) so a
-    // stalled rc file doesn't hang the click for the full 10s resolution
-    // budget on every one of the stop/restart/action/start handlers this
-    // backs.
-    let path_env = cached_user_path_for(project_root).await;
-    spawn_veld_in(&veld_bin, &path_env, project_root, args)
-}
-
-/// The spawn itself, with every ambient input (the veld binary, the resolved
-/// `PATH`) passed in so a test can supply its own. Separate from
-/// [`spawn_veld`] only for that reason.
-fn spawn_veld_in(
-    veld_bin: &str,
-    path_env: &str,
-    project_root: &std::path::Path,
-    args: &[String],
-) -> StatusCode {
-    // tokio::process (NOT std): `veld stop` can call back into THIS daemon's
-    // HTTP API (share teardown) — a synchronous child.wait() here parks a
-    // core runtime worker until the child exits, and with the child waiting
-    // on the daemon that's a circular wait: the daemon plays dead until the
-    // child is killed (observed live, 2026-07-27).
-    // stderr is captured, not discarded: the reply is always `202 ACCEPTED`
-    // (the child outlives this request), so a command that fails outright —
-    // `veld start` refusing a hostname another project already serves, a
-    // missing preset, an unparseable veld.json — would otherwise leave no
-    // trace anywhere and the UI would just never show a run.
-    //
-    // Captured to a FILE, not a pipe. A pipe would have to be drained to keep
-    // from blocking the child, would not reach EOF when the CLI exits
-    // (`veld action` inherits stderr, so anything it backgrounds holds the
-    // write end open — `process::run_command` now captures both of a step's own
-    // pipes, but the CLI's stderr, which this file is, is still inherited by
-    // whatever a step leaves running), and closing the read end on such a
-    // survivor would hand it EPIPE/SIGPIPE and kill it — a process the user
-    // started. A file blocks nobody, stays writable for any descendant that
-    // inherited it, and needs no reader at all.
-    let (stderr_sink, stderr_path) = match spawn_stderr_file() {
-        Some((file, path)) => (std::process::Stdio::from(file), Some(path)),
-        None => (std::process::Stdio::null(), None),
-    };
-    match tokio::process::Command::new(veld_bin)
-        .args(args)
-        .current_dir(project_root)
-        .env("PATH", path_env)
-        // Explicitly null, not inherited. A daemon launched from a terminal
-        // (`veld daemon`, `just dev-daemon`, an Electron shell started from a
-        // shell) would otherwise hand its tty stdin to every run it spawns, and a
-        // `veld start` that needs a machine-var answer decides whether a human is
-        // watching partly from stdin — it would prompt into the stderr log file
-        // above and block on `read_line` forever, while the UI showed a run that
-        // never starts. Nothing the child does should depend on who launched the
-        // daemon.
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(stderr_sink)
-        .spawn()
+    match super::engine::spawn_daemon_action(
+        project_root,
+        veld_engine::api::ActionKind::Stop {
+            run: run_name.to_owned(),
+        },
+    )
+    .await
     {
-        Ok(mut child) => {
-            let label = args.join(" ");
-            // Owned: the reaper outlives this call, so it cannot borrow the
-            // caller's PATH.
-            let path_env = path_env.to_owned();
-            // Reap the child in the background so nothing waits on it here (a
-            // synchronous wait would deadlock against a `veld stop` that calls
-            // back into this daemon). The tail read and unlink below are blocking
-            // `std::fs`, but bounded to one 4 KiB read of a local file.
-            tokio::spawn(async move {
-                let waited = child.wait().await;
-                // Logged whether or not capture is available: an exit code with no
-                // stderr is still the difference between a visible failure and a
-                // `202 ACCEPTED` that leaves no trace anywhere.
-                if let Ok(status) = &waited {
-                    if !status.success() {
-                        warn!(
-                            command = %label,
-                            code = status.code().unwrap_or(-1),
-                            // The bug class this spawn path exists for is
-                            // "command not found", so the PATH the child was
-                            // given is the first thing worth knowing.
-                            path = %path_env,
-                            stderr = %stderr_path.as_deref().map(stderr_tail).unwrap_or_default(),
-                            "spawned veld command failed"
-                        );
-                    }
-                }
-                if let Some(path) = stderr_path {
-                    // A descendant still holding the fd keeps writing to the
-                    // now-nameless inode; its blocks are reclaimed when that
-                    // descendant exits, so the growth is bounded by its lifetime
-                    // and invisible to the directory. A daemon killed before this
-                    // runs leaves the file named — `sweep_spawn_logs` collects
-                    // those at the next start.
-                    let _ = std::fs::remove_file(&path);
-                }
-            });
-            StatusCode::ACCEPTED
+        Ok(id) => {
+            tracing::info!(action = %id, "engine stop for '{run_name}' to tear down an ended run");
         }
-        // Without a shell in between, this arm now catches what the shell used
-        // to report as a nonzero exit with captured stderr: a project root that
-        // vanished since the registry lookup, and a veld binary that isn't
-        // executable. Structured like the exit-code warn above so both failure
-        // classes are one query, not two log shapes.
-        Err(e) => {
-            warn!(
-                command = %args.join(" "),
-                bin = %veld_bin,
-                cwd = %project_root.display(),
-                path = %path_env,
-                error = %e,
-                "failed to spawn veld command"
-            );
-            // No child means no reaper task, so unlink here or the capture file
-            // leaks for the daemon's whole uptime: `sweep_spawn_logs` spares
-            // files whose owning pid is still alive, and that pid is ours. The
-            // old shell-wrapped spawn never reached this arm — a failed `cd`
-            // happened inside a successfully spawned shell — so this cleanup
-            // path is new with the direct spawn.
-            if let Some(path) = stderr_path {
-                let _ = std::fs::remove_file(&path);
-            }
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+        Err((code, message)) => warn!(
+            "could not tear down the ended run '{run_name}' ({code}: {message}); its on_stop \
+             hooks run on the next `veld start` here"
+        ),
     }
 }
 
@@ -2287,165 +2038,6 @@ mod tests {
         assert_eq!(
             resolve_run_project(&reg, "", "main"),
             Err(StatusCode::NOT_FOUND)
-        );
-    }
-
-    /// Serialises the two tests that spawn through `spawn_veld_in`. They share
-    /// one real directory (`~/.veld/spawn-logs`) and identify their own capture
-    /// file by set difference, which only holds if no sibling is creating one
-    /// concurrently — `cargo test` runs them on parallel threads by default.
-    #[cfg(unix)]
-    fn capture_dir_lock() -> &'static tokio::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-    }
-
-    /// Names of this process's own capture files currently in the shared
-    /// `~/.veld/spawn-logs` (the filename carries the creating pid, so a real
-    /// daemon writing to the same directory is excluded).
-    #[cfg(unix)]
-    fn own_capture_files() -> std::collections::HashSet<String> {
-        let mine = format!("{}-", std::process::id());
-        spawn_log_dir()
-            .and_then(|d| std::fs::read_dir(d).ok())
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|e| e.file_name().to_string_lossy().into_owned())
-                    .filter(|n| n.starts_with(&mine))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Pins the load-bearing `.env("PATH", path_env)` in `spawn_veld_in`, the
-    /// whole point of this spawn path: a stand-in `veld` records the PATH and
-    /// cwd it was invoked with, and both must be the injected ones — not the
-    /// daemon's own (bare, under launchd) environment, which is what produced
-    /// `sh: npx: command not found` for node commands. The binary path and PATH
-    /// are arguments rather than process env so the test never touches
-    /// `set_var` (an env data race under multithreaded `cargo test`).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn spawned_veld_gets_the_injected_path_and_cwd() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _serialised = capture_dir_lock().lock().await;
-        let before = own_capture_files();
-        let bin_dir = tempfile::tempdir().unwrap();
-        let project = tempfile::tempdir().unwrap();
-        let receipt = bin_dir.path().join("receipt");
-
-        let fake_veld = bin_dir.path().join("veld");
-        std::fs::write(
-            &fake_veld,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$PATH\" \"$(pwd)\" \"$*\" > {}\n",
-                receipt.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake_veld, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let injected = format!("{}:/usr/bin:/bin", bin_dir.path().display());
-        assert_eq!(
-            spawn_veld_in(
-                &fake_veld.to_string_lossy(),
-                &injected,
-                project.path(),
-                &["stop".to_owned(), "--name".to_owned(), "main".to_owned()],
-            ),
-            StatusCode::ACCEPTED
-        );
-
-        // Exactly one capture file appeared, checked before any `.await` so the
-        // reaper (a `tokio::spawn` on this current-thread runtime) cannot yet
-        // have removed it. Without this, both capture-file tests would pass
-        // vacuously on a host where `spawn_stderr_file` never creates one (no
-        // HOME, unwritable `~/.veld`) — `own_capture_files` reports empty either
-        // way, and the leak assertion in the sibling test would guard nothing.
-        assert_eq!(
-            own_capture_files().difference(&before).count(),
-            1,
-            "no stderr capture file was created for the spawn"
-        );
-
-        // Fire-and-forget: the handler returns before the child runs, so poll
-        // for the receipt rather than assuming it is already there.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        let recorded = loop {
-            match std::fs::read_to_string(&receipt) {
-                Ok(s) if s.lines().count() >= 3 => break s,
-                _ => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "spawned veld never wrote its receipt"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                }
-            }
-        };
-        let mut lines = recorded.lines();
-        assert_eq!(
-            lines.next().unwrap(),
-            injected,
-            "child PATH is not injected"
-        );
-        // macOS hands out /var symlinks for temp dirs; `pwd` in the child
-        // reports the resolved path, so compare canonicalised.
-        assert_eq!(
-            std::fs::canonicalize(lines.next().unwrap()).unwrap(),
-            std::fs::canonicalize(project.path()).unwrap(),
-            "child cwd is not the project root"
-        );
-        // Arguments reach the CLI as argv, unquoted — no shell in between.
-        assert_eq!(lines.next().unwrap(), "stop --name main");
-
-        // Wait for this spawn's capture file to be unlinked before returning.
-        // The reaper that does it is a `tokio::spawn` on this test's runtime,
-        // which is dropped when the test function returns — so without waiting,
-        // the task is simply cancelled and the file is orphaned in the real
-        // `~/.veld/spawn-logs` on every run.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while !own_capture_files().is_subset(&before) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "spawn stderr capture file was never reaped"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    /// A project root that no longer exists must fail the request, not answer
-    /// `202 ACCEPTED` for a run that will never appear. The old shell-wrapped
-    /// spawn always started successfully and let `cd … &&` short-circuit
-    /// inside the child, so this failure was visible only in the daemon's own
-    /// stderr capture; `current_dir` makes it synchronous.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn vanished_project_root_is_an_error_not_an_accept() {
-        let _serialised = capture_dir_lock().lock().await;
-        let gone = tempfile::tempdir().unwrap();
-        let path = gone.path().to_path_buf();
-        drop(gone);
-
-        let before = own_capture_files();
-
-        assert_eq!(
-            spawn_veld_in("/bin/echo", "/usr/bin:/bin", &path, &["stop".to_owned()]),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-
-        // The capture file created for this spawn must be unlinked: there is no
-        // child, so no reaper task will do it, and `sweep_spawn_logs`
-        // deliberately spares files belonging to a live pid — ours. Checked
-        // once, not polled: the unlink on that arm is synchronous, so anything
-        // new here is a leak. By set difference rather than by count, so the
-        // sibling test's concurrent file (same pid prefix, different name)
-        // neither fails this nor masks a real leak.
-        assert!(
-            own_capture_files().difference(&before).next().is_none(),
-            "spawn stderr capture file leaked on the error path"
         );
     }
 }

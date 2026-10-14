@@ -3151,6 +3151,8 @@ pub fn write_desktop_update_report(version: &str, result: Result<(), &str>, half
 
 /// Uninstall Veld from this machine.
 pub async fn uninstall() -> Result<(), anyhow::Error> {
+    // A daemon a `veld` command started by hand, which no service manager knows.
+    crate::instance::stop_bootstrapped_daemon();
     match std::env::consts::OS {
         "macos" => {
             // Stop and remove helper (system daemon).

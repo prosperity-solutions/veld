@@ -14,7 +14,7 @@
 //! shell and a stalled rc file must cost one resolution, not one per call.
 //! [`cached_user_path_for`] is the project-directory-scoped sibling, and the
 //! default for anything spawning *a project's own declared command*:
-//! `spawn_veld` (the start/stop/restart/action handlers), the health
+//! the engine's workers (every start/stop/restart/action), the health
 //! monitor's `command`/`bash` liveness probes and recovery restarts, an
 //! `ide.extensions` command, a pane's `requires_bin` preflight. These need
 //! the `PATH` a login shell would have *in that project's directory*,
@@ -419,7 +419,8 @@ pub async fn cached_user_path() -> String {
 
 /// Directory-scoped sibling of [`cached_user_path`], for a caller that needs
 /// the `PATH` a login shell would have *in a specific project directory* —
-/// today `spawn_veld`, which runs a config's declared commands and must
+/// today the engine's workers (`engine::spawn_action`), which run a config's
+/// declared commands and must
 /// resolve the same Node/Ruby/etc. version a directory-based version-manager
 /// hook (`.nvmrc` + `.zshrc`, fnm's directory hook) would pick in a real
 /// terminal sitting in that project.
@@ -437,8 +438,8 @@ pub async fn cached_user_path() -> String {
 /// project's entry at boot). Serving a stale value inline (rather than
 /// resolving inline, as an earlier version of this function did) is
 /// load-bearing, not an optimization: a version-managed rc file is slow
-/// precisely on the machines that need this cache, and `spawn_veld`'s callers
-/// are UI `fetch`es with no timeout — the exact click-hang [`cached_user_path`]'s
+/// precisely on the machines that need this cache, and `spawn_action`'s callers
+/// include UI `fetch`es with no timeout — the exact click-hang [`cached_user_path`]'s
 /// own warm task exists to prevent.
 ///
 /// At most one background refresh runs per directory at a time — a stale

@@ -2203,7 +2203,7 @@ pub(crate) fn worktree_builtins(
     builtins.insert("project".to_owned(), config.name.clone());
     builtins.insert(
         "username".to_owned(),
-        veld_core::orchestrator::whoami_username(),
+        veld_engine::orchestrator::whoami_username(),
     );
     builtins
 }

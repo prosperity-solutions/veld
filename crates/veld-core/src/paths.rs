@@ -134,11 +134,8 @@ pub fn cli_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 /// directory to agree about *which* one, and that is doctor's job, not this
 /// function's.
 ///
-/// Two more resolvers in this repo answer a related question differently and are
-/// deliberately left alone here: `veld-daemon`'s `monitor::find_veld_binary` (which
-/// falls back to `PATH` when restarting a run) and `management::spawn_veld`. Both
-/// predate this and changing what they resolve would change when a run restarts —
-/// tracked separately rather than folded into a shim fix.
+/// The daemon no longer resolves a CLI at all: it runs the engine in workers of
+/// its own binary (`veld-daemon --engine-worker`), so this is the only resolver.
 pub fn cli_for_exe(exe_dir: &Path) -> Option<PathBuf> {
     cli_candidates(exe_dir)
         .into_iter()

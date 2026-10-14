@@ -725,7 +725,7 @@ mod tests {
     /// RC1 characterization: the sampled *set* for a detached node.
     ///
     /// The parent-tree walk from the tracked PID must reach both stages of the
-    /// detached pipeline — the node's own process and the `veld _log` writer —
+    /// detached pipeline — the node's own process and the `veld-daemon --log-sink` writer —
     /// because the tracked PID is the pipeline shell that parents both. Any
     /// change to the spawn path that reparents a stage (e.g. rebuilding the
     /// pipeline with explicit file descriptors) would silently change which
@@ -734,7 +734,7 @@ mod tests {
     #[tokio::test]
     async fn process_tree_shape_stable() {
         let tmp = tempfile::tempdir().unwrap();
-        // `tee` stands in for `veld _log`: one exec'd binary draining the pipe,
+        // `tee` stands in for `veld-daemon --log-sink`: one exec'd binary draining the pipe,
         // matching production's topology. `sleep` stands in for the node.
         let sink = vec![
             "tee".to_owned(),

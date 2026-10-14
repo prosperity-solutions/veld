@@ -1547,6 +1547,15 @@ async fn privileged_helper_serviceable() -> bool {
 async fn restart_services(target_version: &str, helper_dead_privileged: bool) -> bool {
     let mode = super::read_setup_mode();
 
+    // A daemon a `veld` command started by hand has no service manager to
+    // restart it onto the new binary. Stop it; the next command starts the new
+    // one. Engine workers it spawned are in their own process groups and finish.
+    if veld_core::instance::stop_bootstrapped_daemon() {
+        Steps::detail(&output::dim(
+            "veld-daemon stopped — the next `veld` command starts the new one",
+        ));
+    }
+
     // Auto mode has no persistent service: stop the ephemeral helper so the
     // next `veld start` re-bootstraps it with the new binary.
     if !matches!(mode.as_deref(), Some("privileged") | Some("unprivileged")) {

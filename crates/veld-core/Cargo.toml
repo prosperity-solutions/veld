@@ -20,6 +20,7 @@ slug = { workspace = true }
 dirs = { workspace = true }
 rusqlite = { workspace = true }
 nix = { workspace = true }
+libc = "0.2"
 reqwest = { workspace = true }
 sha2 = { workspace = true }
 ed25519-dalek = { workspace = true }

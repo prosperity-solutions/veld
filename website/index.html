@@ -583,8 +583,8 @@ veld skills config</code></pre>
       <p class="section-sub">For the nerds. A few small Rust binaries, one config file, and Caddy for HTTPS — that's the whole thing.</p>
 
       <div class="comp-list">
-        <div class="comp"><div class="name">veld</div><p>The CLI. Parses commands, orchestrates environments, resolves the dependency graph, displays output.</p></div>
-        <div class="comp"><div class="name">veld-daemon</div><p>User-space daemon. Monitors health, runs garbage collection, broadcasts state updates.</p></div>
+        <div class="comp"><div class="name">veld</div><p>The CLI. A thin client: sends your command to the engine in the daemon, draws the progress it streams back, and starts the daemon if it isn't running.</p></div>
+        <div class="comp"><div class="name">veld-daemon</div><p>User-space daemon. Hosts the engine that starts, stops and restarts environments (each action in a worker process that outlives daemon restarts), monitors health, runs garbage collection, broadcasts state updates.</p></div>
         <div class="comp"><div class="name">veld-helper</div><p>Manages DNS entries and Caddy routes over a minimal Unix socket. Privileged or unprivileged.</p></div>
         <div class="comp"><div class="name">veld-gateway</div><p>Public web gateway (one Docker container). Joins a share over iroh and reverse-proxies it onto a public URL.</p></div>
         <div class="comp"><div class="name">veld-share</div><p>Shared P2P transport built on iroh (QUIC, NAT hole-punching). Used by the daemon and the gateway.</p></div>

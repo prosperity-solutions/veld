@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/veld-core",
+    "crates/veld-engine",
     "crates/veld",
     "crates/veld-helper",
     "crates/veld-daemon",
@@ -23,6 +24,7 @@ publish = false
 
 [workspace.dependencies]
 veld-core = { path = "crates/veld-core" }
+veld-engine = { path = "crates/veld-engine" }
 veld-share = { path = "crates/veld-share" }
 veld-stats = { path = "crates/veld-stats" }
 iroh = "1"

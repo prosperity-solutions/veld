@@ -9,7 +9,7 @@
 //! **This sampler sees exactly the nodes with a persisted
 //! [`veld_core::state::NodeState::pid`], which is only ever the `start_server`
 //! path.** A run's `command` steps (builds, installs, codegen) are sampled by
-//! the CLI that spawns them, via `veld_stats::CommandStatsRecorder`, because
+//! the engine worker that spawns them, via `veld_stats::CommandStatsRecorder`, because
 //! their PIDs exist only inside that process. The two producers are therefore
 //! disjoint by node kind: no process is counted twice, and no node key is
 //! written by both. Persisting a `command` step's PID to make it visible here

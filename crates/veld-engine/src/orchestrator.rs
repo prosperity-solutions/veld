@@ -8,21 +8,21 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing;
 
-use crate::config::{self, Outputs, StepType, VeldConfig};
-use crate::db::{Db, LogFilter, LogStream};
-use crate::graph::{self, NodeSelection};
-use crate::health;
-use crate::helper::HelperClient;
-use crate::logging::{self, LogWriter};
-use crate::port::PortAllocator;
-use crate::process;
 use crate::progress::ProgressEvent;
-use crate::state::{
+use veld_core::config::{self, Outputs, StepType, VeldConfig};
+use veld_core::db::{Db, LogFilter, LogStream};
+use veld_core::graph::{self, NodeSelection};
+use veld_core::health;
+use veld_core::helper::HelperClient;
+use veld_core::logging::{self, LogWriter};
+use veld_core::port::PortAllocator;
+use veld_core::process;
+use veld_core::state::{
     EndDetail, EndReason, NodeState, NodeStatus, ReadinessPhase, RunState, RunStatus,
 };
-use crate::stats;
-use crate::url;
-use crate::variables::VariableContext;
+use veld_core::stats;
+use veld_core::url;
+use veld_core::variables::VariableContext;
 
 use tokio::sync::mpsc;
 
@@ -39,7 +39,7 @@ pub enum OrchestratorError {
     Graph(#[from] graph::GraphError),
 
     #[error(transparent)]
-    Port(#[from] crate::port::PortError),
+    Port(#[from] veld_core::port::PortError),
 
     #[error(transparent)]
     Process(#[from] process::ProcessError),
@@ -48,18 +48,18 @@ pub enum OrchestratorError {
     Health(#[from] health::HealthError),
 
     #[error(transparent)]
-    Db(#[from] crate::db::DbError),
+    Db(#[from] veld_core::db::DbError),
 
     #[error(transparent)]
-    Variable(#[from] crate::variables::VariableError),
+    Variable(#[from] veld_core::variables::VariableError),
 
     /// A configured value source could not be dereferenced at run start — an
     /// unset `env` var, an unreadable file, a failing or hanging helper.
     #[error(transparent)]
-    Value(#[from] crate::values::ValueError),
+    Value(#[from] veld_core::values::ValueError),
 
     #[error(transparent)]
-    Helper(#[from] crate::helper::HelperError),
+    Helper(#[from] veld_core::helper::HelperError),
 
     #[error(transparent)]
     Log(#[from] logging::LogError),
@@ -509,7 +509,7 @@ struct HostnameClaim {
 /// Two veld *instances* (separate databases, one shared helper) cannot see each
 /// other's runs, so this never fires across them — see `instance.rs`.
 fn claimed_hostname(
-    registry: &crate::state::GlobalRegistry,
+    registry: &veld_core::state::GlobalRegistry,
     own_root: &Path,
     planned: &[String],
 ) -> Option<HostnameClaim> {
@@ -574,17 +574,17 @@ async fn kill_and_confirm(pids: &[u32]) -> bool {
 }
 
 /// Capture what this run is being started WITH — the pre-interpolation
-/// resolved graph (see [`crate::state::GraphSnapshot`]). Raw command strings
+/// resolved graph (see [`veld_core::state::GraphSnapshot`]). Raw command strings
 /// keep their `${...}` placeholders and env is names-only, so no resolved
 /// value (port, URL, secret output) is ever persisted.
 fn build_graph_snapshot(
     config: &VeldConfig,
     config_hash: String,
     plan: &[Vec<NodeSelection>],
-    started_from: Option<crate::state::StartOrigin>,
-    overrides: &crate::values::VarOverrides,
+    started_from: Option<veld_core::state::StartOrigin>,
+    overrides: &veld_core::values::VarOverrides,
     provenance: &std::collections::BTreeMap<String, VarProvenance>,
-) -> crate::state::GraphSnapshot {
+) -> veld_core::state::GraphSnapshot {
     let mut nodes = std::collections::BTreeMap::new();
     // The FULL resolved graph, deliberately including the oneshot terminal
     // node (which never gets a node row of its own) — the snapshot describes
@@ -600,7 +600,7 @@ fn build_graph_snapshot(
         // hoisted to node level would otherwise read as absent.
         let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
         let command = match &resolved.script {
-            Some(script) => Some(crate::state::CommandSnapshot::Script(script.clone())),
+            Some(script) => Some(veld_core::state::CommandSnapshot::Script(script.clone())),
             None => resolved.command.clone().map(Into::into),
         };
         let mut env_keys: Vec<String> = resolved
@@ -619,7 +619,7 @@ fn build_graph_snapshot(
         });
         nodes.insert(
             RunState::node_key(&sel.node, &sel.variant),
-            crate::state::NodeSnapshot {
+            veld_core::state::NodeSnapshot {
                 step_type: resolved.step_type.as_str().to_owned(),
                 command,
                 cwd: variant_cfg.cwd.clone().or_else(|| node_cfg.cwd.clone()),
@@ -632,12 +632,12 @@ fn build_graph_snapshot(
     // Declared-but-unanswered vars are listed too (`from: "default"`), because
     // "this machine had no override for it" is exactly as much of an explanation
     // as "it did" when two runs disagree.
-    let mut var_overrides: Vec<crate::state::VarOverrideSnapshot> = config
+    let mut var_overrides: Vec<veld_core::state::VarOverrideSnapshot> = config
         .vars
         .iter()
         .flatten()
         .filter(|(_, decl)| decl.machine().is_some())
-        .map(|(name, _)| crate::state::VarOverrideSnapshot {
+        .map(|(name, _)| veld_core::state::VarOverrideSnapshot {
             name: name.clone(),
             from: match provenance.get(name) {
                 Some(from) if overrides.contains_key(name) => from.as_str().to_owned(),
@@ -652,7 +652,7 @@ fn build_graph_snapshot(
     // Always `Some` from a run this binary started, even when empty — that is
     // what lets a later diff tell "no machine vars" from "recorded before the
     // field existed".
-    crate::state::GraphSnapshot {
+    veld_core::state::GraphSnapshot {
         config_hash,
         started_from,
         nodes,
@@ -817,7 +817,7 @@ pub struct NodeEnvContext {
 }
 
 impl NodeEnvContext {
-    /// From a persisted [`crate::state::NodeState`] — used by the `on_stop`
+    /// From a persisted [`veld_core::state::NodeState`] — used by the `on_stop`
     /// hook, the liveness monitor, and `veld action`, which have the node's
     /// recorded port, url and endpoints rather than the pre-computed start-time
     /// server info.
@@ -826,7 +826,7 @@ impl NodeEnvContext {
         run_id: Option<String>,
         project_root: &std::path::Path,
         project_name: &str,
-        node_state: &crate::state::NodeState,
+        node_state: &veld_core::state::NodeState,
     ) -> Self {
         let mut named_ports = Vec::new();
         let mut endpoints = Vec::new();
@@ -940,9 +940,9 @@ struct PrecomputedServer {
     endpoints: std::collections::BTreeMap<String, PortEndpoint>,
     /// Held TCP listeners that reserve the ports from other processes.
     /// Taken (released) right before the child process is spawned.
-    reservation: Option<crate::port::PortReservation>,
+    reservation: Option<veld_core::port::PortReservation>,
     /// Reservations for the non-primary named ports, released alongside it.
-    extra_reservations: Vec<crate::port::PortReservation>,
+    extra_reservations: Vec<veld_core::port::PortReservation>,
 }
 
 impl PrecomputedServer {
@@ -964,7 +964,6 @@ struct NodeExecutionContext {
     config: Arc<VeldConfig>,
     db: Db,
     project_root: Arc<PathBuf>,
-    foreground: bool,
     helper_client: HelperClient,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     debug_writer: Option<LogWriter>,
@@ -1022,10 +1021,10 @@ pub enum VarProvenance {
 }
 
 impl VarProvenance {
-    pub fn from_scope(scope: crate::db::OverrideScope) -> Self {
+    pub fn from_scope(scope: veld_core::db::OverrideScope) -> Self {
         match scope {
-            crate::db::OverrideScope::Project => Self::Project,
-            crate::db::OverrideScope::Worktree => Self::Worktree,
+            veld_core::db::OverrideScope::Project => Self::Project,
+            veld_core::db::OverrideScope::Worktree => Self::Worktree,
         }
     }
 
@@ -1071,9 +1070,6 @@ pub struct Orchestrator {
     debug: bool,
     /// Debug log writer (created on demand when debug is true).
     debug_writer: Option<LogWriter>,
-    /// Foreground mode — pipes stdout/stderr through timestamping tasks.
-    /// When false (detached), redirects directly to file so processes survive CLI exit.
-    foreground: bool,
     /// Optional channel for live progress events.
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     /// Internal log writer for the current run (liveness/recovery/lifecycle events).
@@ -1084,12 +1080,12 @@ pub struct Orchestrator {
     /// the run (see `veld start --oneshot`).
     terminal_node: Option<NodeSelection>,
     /// What this project is called for override purposes — one value across every
-    /// worktree of the repo. See [`crate::project_id`].
-    project_id: crate::project_id::ProjectId,
+    /// worktree of the repo. See [`veld_core::project_id`].
+    project_id: veld_core::project_id::ProjectId,
     /// This machine's answers for machine-overridable vars, read once at
     /// construction. Empty is a legal state: it means every var falls back to its
     /// declared `default`.
-    var_overrides: crate::values::VarOverrides,
+    var_overrides: veld_core::values::VarOverrides,
     /// Where each answer above came from, kept beside the values rather than
     /// inside them so resolution stays a plain name→value lookup while the run
     /// snapshot can still record provenance.
@@ -1125,6 +1121,13 @@ pub struct Orchestrator {
     /// [`stats::StepObserver`]. Left `None` by `new`, so every other consumer of
     /// the orchestrator (`stop`, `restart`, tests) is unaffected.
     step_observer: Option<Arc<dyn stats::StepObserver>>,
+    /// Does the engine's side effects that live outside it (share release).
+    /// `None` in tests and anywhere no daemon holds shares.
+    host: Option<Arc<dyn crate::host::EngineHost>>,
+    /// Where a `--oneshot` terminal node's output goes when this process's own
+    /// stdout/stderr are nobody's terminal (the engine worker). `None` echoes to
+    /// them, as an in-process caller expects.
+    terminal_echo: Option<process::StreamEcho>,
 }
 
 impl Orchestrator {
@@ -1144,7 +1147,7 @@ impl Orchestrator {
         // different process. Teardown therefore reads the store and never asks:
         // a `veld stop` that prompted, or that failed because a var had no
         // answer, would leak the containers it exists to remove.
-        let project_id = crate::project_id::project_id_for(&project_root);
+        let project_id = veld_core::project_id::project_id_for(&project_root);
         let stored = db
             .effective_var_overrides(&project_id, &project_root)
             .unwrap_or_else(|e| {
@@ -1155,7 +1158,7 @@ impl Orchestrator {
             .iter()
             .map(|(k, v)| (k.clone(), VarProvenance::from_scope(v.scope)))
             .collect();
-        let var_overrides: crate::values::VarOverrides =
+        let var_overrides: veld_core::values::VarOverrides =
             stored.into_iter().map(|(k, v)| (k, v.value)).collect();
         Ok(Self {
             config,
@@ -1173,7 +1176,6 @@ impl Orchestrator {
             precomputed_servers: HashMap::new(),
             debug: false,
             debug_writer: None,
-            foreground: false,
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
@@ -1181,12 +1183,14 @@ impl Orchestrator {
             resolved_vars_run: None,
             terminal_outputs: None,
             step_observer: None,
+            host: None,
+            terminal_echo: None,
         })
     }
 
     /// Watch this run's `command` steps while they execute.
     ///
-    /// The `veld` CLI installs `veld_stats::CommandStatsRecorder` here so a
+    /// The engine worker installs `veld_stats::CommandStatsRecorder` here so a
     /// build's or an install's CPU and memory are recorded like any other node's
     /// — the start phase is otherwise unobserved, because a `command` step's PID
     /// never leaves the task that spawned it and the daemon's sampler can only
@@ -1200,7 +1204,7 @@ impl Orchestrator {
     }
 
     /// What this project is called for machine-override purposes.
-    pub fn project_id(&self) -> &crate::project_id::ProjectId {
+    pub fn project_id(&self) -> &veld_core::project_id::ProjectId {
         &self.project_id
     }
 
@@ -1214,7 +1218,7 @@ impl Orchestrator {
     /// the user just set, and the run snapshot records the wrong origin.
     pub fn set_var_answers(
         &mut self,
-        answers: crate::values::VarOverrides,
+        answers: veld_core::values::VarOverrides,
         provenance: VarProvenance,
     ) {
         for (name, value) in answers {
@@ -1234,11 +1238,11 @@ impl Orchestrator {
     pub fn unanswered_vars(
         &self,
         selections: &[NodeSelection],
-    ) -> Result<Vec<crate::values::UnansweredVar>, OrchestratorError> {
+    ) -> Result<Vec<veld_core::values::UnansweredVar>, OrchestratorError> {
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
         let planned: Vec<NodeSelection> = plan.into_iter().flatten().collect();
-        Ok(crate::values::unanswered_machine_vars(
+        Ok(veld_core::values::unanswered_machine_vars(
             &self.config,
             &self.var_overrides,
             &planned,
@@ -1300,11 +1304,6 @@ impl Orchestrator {
         self.terminal_node = sel;
     }
 
-    /// Enable foreground mode (timestamped pipe for server output).
-    pub fn set_foreground(&mut self, foreground: bool) {
-        self.foreground = foreground;
-    }
-
     /// Enable debug mode for orchestration trace logging.
     pub fn set_debug(&mut self, debug: bool) {
         self.debug = debug;
@@ -1321,6 +1320,30 @@ impl Orchestrator {
     }
 
     /// Emit a progress event (no-op if no sender is set).
+    /// Tell the user something was left undone. An event when a face is
+    /// listening (always, in the engine worker); stderr otherwise, so an
+    /// in-process caller with no progress channel still says it.
+    fn warn(&self, message: String) {
+        match self.progress_tx {
+            Some(ref tx) => {
+                let _ = tx.send(ProgressEvent::Warning { message });
+            }
+            None => eprintln!("  ! {message}"),
+        }
+    }
+
+    /// Who does the engine's out-of-process side effects. See
+    /// [`crate::host::EngineHost`].
+    pub fn set_host(&mut self, host: Arc<dyn crate::host::EngineHost>) {
+        self.host = Some(host);
+    }
+
+    /// Send a `--oneshot` terminal node's output somewhere other than this
+    /// process's stdout/stderr.
+    pub fn set_terminal_echo(&mut self, echo: process::StreamEcho) {
+        self.terminal_echo = Some(echo);
+    }
+
     fn emit(&self, event: ProgressEvent) {
         if let Some(ref tx) = self.progress_tx {
             let _ = tx.send(event);
@@ -1354,7 +1377,7 @@ impl Orchestrator {
     /// Start a run: resolve graph, allocate ports, configure DNS/Caddy,
     /// launch processes in dependency order, run health checks.
     /// `origin` is what the caller was asked for — a preset name plus the
-    /// expansion it produced (see [`crate::state::StartOrigin`]). It is recorded
+    /// expansion it produced (see [`veld_core::state::StartOrigin`]). It is recorded
     /// verbatim: the orchestrator never re-reads the preset and never validates
     /// it against the config, because a preset can be edited while the run is
     /// live and the point of the record is to make that detectable later.
@@ -1368,7 +1391,7 @@ impl Orchestrator {
         &mut self,
         selections: &[NodeSelection],
         run_name: &str,
-        origin: Option<crate::state::StartOrigin>,
+        origin: Option<veld_core::state::StartOrigin>,
     ) -> Result<RunState, OrchestratorError> {
         // Semantic validation runs HERE, not in `parse_config`: a typo must not
         // strand `veld stop` against a running environment (its `on_stop` hooks
@@ -1426,7 +1449,7 @@ impl Orchestrator {
 
         // Ensure a helper is running (auto-bootstraps if needed) and
         // query the HTTPS port so we can construct port-aware URLs.
-        match crate::setup::ensure_helper().await {
+        match veld_core::setup::ensure_helper().await {
             Ok(client) => {
                 if let Ok(port) = client.https_port().await {
                     self.https_port = port;
@@ -1541,7 +1564,7 @@ impl Orchestrator {
             } else {
                 HashMap::new()
             };
-        let setup_result = match crate::values::resolve_vars(
+        let setup_result = match veld_core::values::resolve_vars(
             self.config.vars.as_ref(),
             &self.var_overrides,
             Some(&self.project_root),
@@ -1792,7 +1815,7 @@ impl Orchestrator {
         let mut all_vars: HashMap<String, String> =
             self.resolved_vars.as_deref().cloned().unwrap_or_default();
         all_vars.extend(
-            crate::values::resolve_vars(
+            veld_core::values::resolve_vars(
                 self.config.vars.as_ref(),
                 &self.var_overrides,
                 Some(&self.project_root),
@@ -2207,6 +2230,7 @@ impl Orchestrator {
             Some(&output_file),
             Some(log_target),
             observed.on_spawn(),
+            self.terminal_echo.clone(),
         )
         .await?;
         drop(observed);
@@ -2298,7 +2322,6 @@ impl Orchestrator {
             config: Arc::clone(shared_config),
             db: self.db.clone(),
             project_root: Arc::clone(shared_project_root),
-            foreground: self.foreground,
             helper_client: self.helper_client.clone(),
             progress_tx: self.progress_tx.clone(),
             debug_writer: self.debug_writer.clone(),
@@ -2428,7 +2451,7 @@ impl Orchestrator {
             .await;
 
         // Reconnect to whichever helper is running (system or user socket)
-        if let Ok(client) = crate::helper::HelperClient::connect().await {
+        if let Ok(client) = veld_core::helper::HelperClient::connect().await {
             self.helper_client = client;
         }
 
@@ -2757,7 +2780,7 @@ impl Orchestrator {
         // Always clear stale feedback data so a reused run name starts fresh,
         // even if the run was already removed from state.
         let feedback =
-            crate::feedback::FeedbackStore::new(self.db.clone(), &self.project_root, run_name);
+            veld_core::feedback::FeedbackStore::new(self.db.clone(), &self.project_root, run_name);
         if feedback.has_data() {
             tracing::info!(run_name, "clearing stale feedback data");
             let _ = feedback.clear();
@@ -2835,44 +2858,18 @@ impl Orchestrator {
     /// and `veld restart` already do this explicitly, and the GC pass releases
     /// runs it *finds* dead; a deliberate replacement is neither.
     ///
-    /// Same shape as `veld restart`'s call: bounded by 5s so an unresponsive
-    /// daemon cannot stall a start, and silent on `NotRunning` — a daemon that
-    /// isn't up holds no shares, so there is nothing to report.
+    /// Done through the [`crate::host::EngineHost`], which bounds it (an
+    /// unresponsive daemon must not stall a start) and reports `NotRunning`
+    /// silently — a daemon that isn't up holds no shares. No host, no shares.
     async fn release_shares_of_replaced_run(&self, run_id: &uuid::Uuid) {
-        let client = crate::share::DaemonClient::new();
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.unshare_run(&run_id.to_string()),
-        )
-        .await
+        let Some(host) = self.host.as_ref() else {
+            return;
+        };
+        let release = host.release_shares(&run_id.to_string()).await;
+        if let Some(message) =
+            crate::host::share_release_notice(&release, "the replaced run", "the new run")
         {
-            Ok(Ok(0)) => {}
-            Ok(Ok(n)) => {
-                self.emit(ProgressEvent::Notice {
-                    message: format!(
-                        "Released {n} share(s) of the replaced run — re-share if you still \
-                         need the URL."
-                    ),
-                });
-            }
-            Ok(Err(crate::share::DaemonError::NotRunning)) => {}
-            Ok(Err(e)) => {
-                self.emit(ProgressEvent::Notice {
-                    message: format!(
-                        "Could not release the replaced run's shares ({e}) — any share of it \
-                         now points at the new run. Check `veld shares` and stop it with \
-                         `veld unshare <id>`."
-                    ),
-                });
-            }
-            Err(_) => {
-                self.emit(ProgressEvent::Notice {
-                    message: "Timed out releasing the replaced run's shares — any share of it \
-                              now points at the new run. Check `veld shares` and stop it with \
-                              `veld unshare <id>`."
-                        .to_owned(),
-                });
-            }
+            self.emit(ProgressEvent::Notice { message });
         }
     }
 
@@ -3247,15 +3244,15 @@ impl Orchestrator {
                 // tracing warning. `veld start`/`veld lint` catch the common cause
                 // (an unknown `${veld.*}` name — see `check_builtin_names`), but
                 // this path stays reachable for a config edited after start.
-                eprintln!(
-                    "  ! teardown hook for {}:{} was SKIPPED: {e}\n    \
+                self.warn(format!(
+                    "teardown hook for {}:{} was SKIPPED: {e}\n    \
                      The command was: {}\n    \
                      Anything it was meant to clean up (containers, volumes, \
                      temp state) has been left behind.",
                     node_state.node_name,
                     node_state.variant,
                     on_stop_cmd.display(),
-                );
+                ));
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
@@ -3286,12 +3283,12 @@ impl Orchestrator {
                 // blind, which is how the wrapper it was meant to clean up
                 // outlives its run. Skip the hook and say so loudly, exactly as
                 // the command-interpolation failure path above does.
-                eprintln!(
-                    "  ! teardown hook for {}:{} was SKIPPED: could not resolve its environment: {e}\n    \
+                self.warn(format!(
+                    "teardown hook for {}:{} was SKIPPED: could not resolve its environment: {e}\n    \
                      Anything it was meant to clean up (containers, volumes, \
                      temp state) has been left behind.",
                     node_state.node_name, node_state.variant,
-                );
+                ));
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
@@ -3395,8 +3392,8 @@ impl Orchestrator {
                 // resolution failure is: they are about to be told the
                 // environment stopped, and whatever the hook was removing is
                 // still there.
-                eprintln!(
-                    "  ! teardown hook for {}:{} TIMED OUT after {}s and was killed\n    \
+                self.warn(format!(
+                    "teardown hook for {}:{} TIMED OUT after {}s and was killed\n    \
                      The command was: {}\n    \
                      Anything it was meant to clean up (containers, volumes, \
                      temp state) may have been left behind.",
@@ -3404,7 +3401,7 @@ impl Orchestrator {
                     node_state.variant,
                     TEARDOWN_HOOK_TIMEOUT.as_secs(),
                     on_stop_cmd.display(),
-                );
+                ));
                 tracing::warn!(
                     node = node_state.node_name,
                     timeout_secs = TEARDOWN_HOOK_TIMEOUT.as_secs(),
@@ -3488,7 +3485,7 @@ impl Orchestrator {
                     .unwrap_or("default"),
                 &whoami_username(),
             );
-            match crate::values::resolve_vars(
+            match veld_core::values::resolve_vars(
                 self.config.vars.as_ref(),
                 &self.var_overrides,
                 Some(&self.project_root),
@@ -3766,11 +3763,11 @@ impl Orchestrator {
                     if pid != 0 {
                         let _ = process::kill_process(pid).await;
                     }
-                    eprintln!(
-                        "  ! teardown step '{}' TIMED OUT after {}s and was killed",
+                    self.warn(format!(
+                        "teardown step '{}' TIMED OUT after {}s and was killed",
                         step.name,
                         TEARDOWN_HOOK_TIMEOUT.as_secs(),
-                    );
+                    ));
                     tracing::warn!(
                         step = step.name,
                         timeout_secs = TEARDOWN_HOOK_TIMEOUT.as_secs(),
@@ -3907,27 +3904,27 @@ fn mark_sensitive(keys: &mut Vec<String>, add: impl IntoIterator<Item = String>)
 fn template_is_tainted(tmpl: &str, sensitive: &[String], secret_vars: &[String]) -> bool {
     let is_sensitive = |name: &str| sensitive.iter().any(|s| s == name);
 
-    if crate::config::env_refs(tmpl)
+    if veld_core::config::env_refs(tmpl)
         .iter()
         .any(|n| is_sensitive(n))
     {
         return true;
     }
-    if crate::config::builtin_refs_in(tmpl, "output.")
+    if veld_core::config::builtin_refs_in(tmpl, "output.")
         .iter()
         .any(|n| is_sensitive(n))
     {
         return true;
     }
     // `${nodes.<node>.KEY}` — the trailing field is the output key.
-    if crate::config::builtin_refs_in(tmpl, "nodes.")
+    if veld_core::config::builtin_refs_in(tmpl, "nodes.")
         .iter()
         .filter_map(|r| r.rsplit('.').next().map(str::to_owned))
         .any(|n| is_sensitive(&n))
     {
         return true;
     }
-    crate::config::builtin_refs_in(tmpl, "vars.")
+    veld_core::config::builtin_refs_in(tmpl, "vars.")
         .iter()
         .any(|n| secret_vars.iter().any(|v| v == n))
 }
@@ -3969,11 +3966,11 @@ fn resolve_working_dir(
     node_cwd: Option<&str>,
     project_root: &Path,
     ctx: &VariableContext,
-) -> Result<PathBuf, crate::variables::VariableError> {
+) -> Result<PathBuf, veld_core::variables::VariableError> {
     let raw_cwd = variant_cwd.or(node_cwd);
     match raw_cwd {
         Some(cwd_tmpl) => {
-            let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
+            let resolved = veld_core::variables::interpolate(cwd_tmpl, ctx)?;
             let p = std::path::Path::new(&resolved);
             if p.is_absolute() {
                 Ok(p.to_path_buf())
@@ -4178,7 +4175,7 @@ async fn execute_start_server_isolated(
         .map(|(name, e)| {
             (
                 name.clone(),
-                crate::state::NodeEndpoint {
+                veld_core::state::NodeEndpoint {
                     hostname: e.hostname.clone(),
                     url: e.https_url.clone(),
                     port: e.port,
@@ -4308,7 +4305,7 @@ async fn execute_start_server_isolated(
         // The proxy routes are created whenever a feature is enabled, even if
         // inject is false (manual injection mode — user adds script tags themselves).
         if features.feedback_overlay || features.client_logs {
-            route["feedback_upstream"] = serde_json::json!(crate::instance::daemon_upstream());
+            route["feedback_upstream"] = serde_json::json!(veld_core::instance::daemon_upstream());
             route["run_name"] = serde_json::json!(&ctx.run_name);
             route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
         }
@@ -4409,7 +4406,7 @@ async fn execute_start_server_isolated(
             .collect();
         let mut tainted: Vec<String> = Vec::new();
         for (okey, tmpl) in map {
-            let val = crate::variables::interpolate(tmpl, var_ctx)?;
+            let val = veld_core::variables::interpolate(tmpl, var_ctx)?;
             if template_is_tainted(tmpl, &node_state.sensitive_keys, &secret_vars) {
                 tainted.push(okey.clone());
             }
@@ -4432,7 +4429,7 @@ async fn execute_start_server_isolated(
     // its first line. Failing here aborts the node rather than letting it start
     // and fail obscurely on a missing certificate.
     if let Some(files) = &resolved.files {
-        crate::values::deliver_files(
+        veld_core::values::deliver_files(
             files,
             &ctx.project_root,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
@@ -4449,14 +4446,7 @@ async fn execute_start_server_isolated(
         reservation.release();
     }
 
-    let handle = process::start_server(
-        &resolved_cmd,
-        &working_dir,
-        &env,
-        log_target,
-        ctx.foreground,
-    )
-    .await?;
+    let handle = process::start_server(&resolved_cmd, &working_dir, &env, &log_target)?;
     let pid = handle.pid();
     node_state.pid = Some(pid);
 
@@ -4928,7 +4918,7 @@ async fn execute_command_isolated(
     }));
 
     if let Some(files) = &resolved.files {
-        crate::values::deliver_files(
+        veld_core::values::deliver_files(
             files,
             &ctx.project_root,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
@@ -5094,7 +5084,7 @@ async fn execute_command_isolated(
             .collect();
         let mut tainted: Vec<String> = Vec::new();
         for (key, template) in map {
-            let value = crate::variables::interpolate(template, var_ctx)?;
+            let value = veld_core::variables::interpolate(template, var_ctx)?;
             if template_is_tainted(template, &sensitive, &secret_vars) {
                 tainted.push(key.clone());
             }
@@ -5315,9 +5305,9 @@ pub async fn build_env(
     for key in keys {
         let value = &map[key];
         let resolved = match value.as_literal() {
-            Some(tmpl) => crate::variables::interpolate(tmpl, ctx)?,
+            Some(tmpl) => veld_core::variables::interpolate(tmpl, ctx)?,
             None => {
-                crate::values::resolve_value(
+                veld_core::values::resolve_value(
                     value,
                     &format!("{at_prefix}.env.{key}"),
                     Some(project_root),
@@ -5493,7 +5483,7 @@ mod tests {
                         .await
                         .expect("step runs");
                 } else {
-                    process::run_command_streaming(&cmd, &dir, &env, None, None, on_spawn)
+                    process::run_command_streaming(&cmd, &dir, &env, None, None, on_spawn, None)
                         .await
                         .expect("step runs");
                 }
@@ -5597,11 +5587,11 @@ mod tests {
         run_name: &str,
         status: RunStatus,
         hostname: &str,
-    ) -> crate::state::GlobalRegistry {
+    ) -> veld_core::state::GlobalRegistry {
         let mut runs = HashMap::new();
         runs.insert(
             run_name.to_owned(),
-            crate::state::RegistryRunInfo {
+            veld_core::state::RegistryRunInfo {
                 run_id: uuid::Uuid::new_v4(),
                 name: run_name.to_owned(),
                 status,
@@ -5615,13 +5605,13 @@ mod tests {
         let mut projects = HashMap::new();
         projects.insert(
             root.to_owned(),
-            crate::state::RegistryEntry {
+            veld_core::state::RegistryEntry {
                 project_root: PathBuf::from(root),
                 project_name: project_name.to_owned(),
                 runs,
             },
         );
-        crate::state::GlobalRegistry { projects }
+        veld_core::state::GlobalRegistry { projects }
     }
 
     #[test]
@@ -6029,7 +6019,7 @@ mod tests {
         orch.set_var_answers(
             [(
                 "runtime".to_owned(),
-                crate::config::ConfigValue::literal("containerd"),
+                veld_core::config::ConfigValue::literal("containerd"),
             )]
             .into(),
             VarProvenance::Flag,
@@ -6075,7 +6065,7 @@ mod tests {
         let answer = || {
             std::collections::BTreeMap::from([(
                 "token".to_owned(),
-                crate::config::ConfigValue::literal("t"),
+                veld_core::config::ConfigValue::literal("t"),
             )])
         };
 
@@ -6108,7 +6098,9 @@ mod tests {
             config_path: project_root.join("veld.json"), // root-config-gate-ok
             config_hash: String::new(),
             project_root: project_root.to_path_buf(),
-            project_id: crate::project_id::ProjectId::from_stored(project_root.to_string_lossy()),
+            project_id: veld_core::project_id::ProjectId::from_stored(
+                project_root.to_string_lossy(),
+            ),
             var_overrides: Default::default(),
             var_provenance: Default::default(),
             db,
@@ -6119,7 +6111,6 @@ mod tests {
             precomputed_servers: HashMap::new(),
             debug: false,
             debug_writer: None,
-            foreground: false,
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
@@ -6127,6 +6118,8 @@ mod tests {
             resolved_vars_run: None,
             terminal_outputs: Some(HashMap::new()),
             step_observer: None,
+            host: None,
+            terminal_echo: None,
         }
     }
 
@@ -6261,7 +6254,7 @@ mod tests {
 
         // A hostname veld generates can never contain a colon, so the split is
         // unambiguous for everything except the templated case above.
-        assert!(!crate::url::slugify("weird:name").contains(':'));
+        assert!(!veld_core::url::slugify("weird:name").contains(':'));
     }
 
     /// F0.3: one builtin set, so `${veld.node}` (and every sibling) resolves the
