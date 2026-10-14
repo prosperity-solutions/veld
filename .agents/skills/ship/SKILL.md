@@ -34,10 +34,10 @@ cheap, and being your own strongest critic is the job.
 
 ## MINDSET
 
-**QUESTION EVERYTHING.** EVERYTHING IN THIS REPO WAS WRITTEN BY HUMANS BEFORE
-AGENTS DID THE WORK. Every rule, layout and convention — this file included — is
+**QUESTION EVERYTHING.** AGENTS WROTE ALL OF THIS REPO, BUT THEY WROTE IT THE
+WAY HUMANS WORK. Every rule, layout and convention — this file included — is
 *physics* (true because of how the machine, the network or the security model
-works) or *habit* (true because that is how people did it). Physics stays. Habit
+works) or *habit* (true because that is how humans did it). Physics stays. Habit
 dies. "That is how it is done" is not a reason, and neither is "that is how the
 industry does it".
 
