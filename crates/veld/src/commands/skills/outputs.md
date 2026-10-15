@@ -160,10 +160,9 @@ Log sources, and where each kind of output lands:
 | `--source` | Contains |
 |---|---|
 | `server` | Node output — both `long_running` processes and `command` steps (a `docker build`'s progress is here, under that node). Read one node with `--node <name>` |
-| `client` | Browser `console.*` from the client-log collector |
 | `setup` | Project-level `setup`/`teardown` step output, labelled `setup:<step name>` |
 | `internal` | Liveness probe **transitions** and recovery decisions — see below |
-| `all` (default) | All four, interleaved by timestamp |
+| `all` (default) | All of them, interleaved by timestamp |
 
 **Two `internal`-stream lines that mean something specific.**
 

@@ -10,10 +10,9 @@
 // **Why panes need a policy at all.** Until now every permission was refused
 // outright, because a prompt raised by an embedded pane has no chrome to
 // attribute it to — "example.com wants your camera" is a lie when the window says
-// Veld. Blanket denial has its own cost, and one case had become a functional
-// break: veld's own feedback overlay screenshots through
-// `getDisplayMedia({ preferCurrentTab: true })`, so `veld feedback` could not take
-// a screenshot inside a browser pane, which is the one place it should work best.
+// Veld. Blanket denial has its own cost: a page that screenshots itself through
+// `getDisplayMedia({ preferCurrentTab: true })` could not do so inside a browser
+// pane, though that is exactly the page a developer is working on.
 //
 // So the answer is a policy with three sources, and a prompt that *can* name the
 // pane, its session and the origin:
@@ -249,10 +248,10 @@ function isLocalOrigin(origin) {
  * Veld's own answer for one permission at one origin.
  *
  * `display-capture` is the conditional one: granted only at an origin veld itself
- * serves, because that is the case with no policy question in it. Veld's feedback
- * overlay captures the pane's own frame through `preferCurrentTab`, and the
- * frame is all the pane ever hands over — nothing is shared beyond what is
- * already on screen. At any other origin it prompts like everything else.
+ * serves, because that is the case with no policy question in it: a page there
+ * captures the pane's own frame through `preferCurrentTab`, and the frame is all
+ * the pane ever hands over — nothing is shared beyond what is already on screen.
+ * At any other origin it prompts like everything else.
  */
 function defaultVerdict(id, origin, trustedOrigins) {
   if (DEFAULT_ALLOW.has(id)) return "allow";

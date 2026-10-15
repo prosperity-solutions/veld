@@ -37,7 +37,7 @@ fn a_built_helper_carries_exactly_one_version_record() {
 
     assert_eq!(
         veld_core::signing::version_in_signed_bytes(&bytes).as_deref(),
-        Some(env!("CARGO_PKG_VERSION")),
+        Some(veld_core::VERSION),
         "the built veld-helper does not carry its own version. Nothing reads \
          VELD_HELPER_VERSION_RECORD, so it survives only through #[used] and \
          #[unsafe(no_mangle)] — check those before anything else. A helper without this \
@@ -58,7 +58,7 @@ fn a_built_helper_carries_exactly_one_version_record() {
 #[test]
 fn the_scanners_own_needle_is_not_a_second_record() {
     let bytes = std::fs::read(env!("CARGO_BIN_EXE_veld-helper")).unwrap();
-    let record = veld_core::signing::version_record(env!("CARGO_PKG_VERSION"));
+    let record = veld_core::signing::version_record(veld_core::VERSION);
     let magic = &record[..16];
 
     let hits = bytes.windows(16).filter(|w| *w == magic).count();

@@ -91,7 +91,7 @@ pub async fn run(json: bool) -> i32 {
         Answer::Down => (down, None, None),
     };
     let overview = Overview {
-        version: env!("CARGO_PKG_VERSION"),
+        version: veld_core::VERSION,
         daemon,
         helper: Helper {
             up: setup.helper_running,

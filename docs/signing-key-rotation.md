@@ -151,8 +151,9 @@ pub const ORG_KEYS: &[OrgKey] = &[
     OrgKey {
         key: ORG_KEY_2,
         secret: "SIGNING_PRIVATE_KEY_2",
-        // Cargo.toml's `version` right now — read it, do not copy this line.
-        added_after: "<Cargo.toml's version>",
+        // The latest release tag right now (`git describe --tags --abbrev=0 --match 'v[0-9]*'`,
+        // without the `v`) — read it, do not copy this line.
+        added_after: "<latest release tag, without the v>",
         status: KeyStatus::Accepted,
     },
 ];
@@ -161,11 +162,12 @@ pub const ORG_KEYS: &[OrgKey] = &[
 **Append. Never reorder, never delete a row.** A row's position in this table *is*
 its slot in `<binary>.sig`, and slot position is the format's only key identifier.
 
-`added_after` is `Cargo.toml`'s `version` at the moment you write the row — the
-last release before the one this change will become. You can always know it, and
-that is what makes it useful: `Cargo.toml` still holds the *previous* release until
-semantic-release bumps it after your merge, so it is the one thing about the future
-release you can state truthfully. [The two-release rule, and its
+`added_after` is the latest release tag at the moment you write the row
+(`git describe --tags --abbrev=0 --match 'v[0-9]*'`, without the `v`) — the last release before the
+one this change will become. You can always know it, and that is what makes it
+useful: a release is a tag made after your merge, so the newest tag is the
+*previous* release, and it is the one thing about the future release you can state
+truthfully. [The two-release rule, and its
 guard](#the-two-release-rule-and-its-guard) is what it is for.
 
 **5. `cargo fmt --all`.** A hand-written 32-byte array will not match rustfmt, and
@@ -193,7 +195,7 @@ secret name without the `SIGNING_` prefix the leak gate matches on.
 
 **7. Merge — and `feat:` or `fix:` in the squashed subject, or nothing ships.**
 Merging **is** releasing here: semantic-release cuts the version from the commit
-subject. A `chore:` or `docs:` subject publishes nothing, silently, with CI green,
+subject and tags it. A `chore:` or `docs:` subject publishes nothing, silently, with CI green,
 and you will believe the key is deployed when it is not. Check the Releases page
 before you go any further.
 
@@ -228,9 +230,9 @@ release](#why-retirement-is-a-separate-release).
         secret: "SIGNING_PRIVATE_KEY",
         added_after: "0.0.0",
         status: KeyStatus::Retired {
-            // Cargo.toml's `version` right now — which, because release 1 has
+            // The latest release tag right now — which, because release 1 has
             // shipped, is no longer what release 1's row says.
-            retired_after: "<Cargo.toml's version>",
+            retired_after: "<latest release tag, without the v>",
         },
     },
 ```
@@ -282,18 +284,20 @@ back to the version that conflated them.
 It is guarded twice, in two different places, because neither layer alone is
 enough. Both are worth knowing, because they fail differently.
 
-**Layer 1 — a plain unit test, no git, runs everywhere.**
+**Layer 1 — a plain unit test over the tree and its release tags.**
 `one_release_never_both_adds_a_key_and_retires_one` reads the two dates. Both halves
-of the edit record `Cargo.toml`'s version at the time they were written, and
-`Cargo.toml` holds the *previous* release until semantic-release bumps it after the
-merge — so a combined edit written in one sitting puts the **same** version in both
+of the edit record the latest release tag at the time they were written, and
+a release is a tag made after the merge, so the newest tag is the *previous*
+release — a combined edit written in one sitting puts the **same** version in both
 fields, and the test fails. `added_after_increases_down_the_table` stops the obvious
 way around it: a new row's date must be strictly later than the row above, which
 refuses row 0's `0.0.0` and every earlier row's version, the two stale values
 actually lying around to copy. This layer runs in `cargo test --workspace`, on your
-machine, and on a direct push to `main`.
+machine, and on a direct push to `main`. It needs the release tags (`git fetch
+--tags`) and fails without them rather than skip — a shallow clone or a source
+tarball cannot run it.
 
-**Its hole, named rather than glossed:** if the branch's `Cargo.toml` moves between
+**Its hole, named rather than glossed:** if the newest release tag moves between
 the two edits — an unrelated release lands, you update the branch, then retire — the
 two dates are both *honest* and *different*, neither equals the current version, and
 layer 1 sees nothing. The tree cannot tell "added last release" from "added in this
@@ -477,7 +481,7 @@ why it is only one edit and what each part of it is load-bearing for.
 OrgKey {
     key: ORG_KEY_2,                        // the constant you added above the table
     secret: "SIGNING_PRIVATE_KEY_2",       // the secret from step 1
-    added_after: "<Cargo.toml's version>", // read it; a pasted literal is refused
+    added_after: "<latest release tag, without the v>", // read it; a pasted literal is refused
     status: KeyStatus::Accepted,
 }
 ```
@@ -492,7 +496,7 @@ OrgKey {
   checks every name here against the workflow's permanent `env:` roster on each
   pull request, so a name the roster does not carry fails a PR rather than the
   release.
-- **`added_after` is `Cargo.toml`'s version right now** — see [The two-release
+- **`added_after` is the latest release tag right now** (`git describe --tags --abbrev=0 --match 'v[0-9]*'`, without the `v`) — see [The two-release
   rule, and its guard](#the-two-release-rule-and-its-guard).
 - **`status`** is `Accepted` here. Retirement is release 2 and nothing else.
 
@@ -534,7 +538,7 @@ care about. Then, one field:
 
 ```rust
     status: KeyStatus::Retired {
-        retired_after: "<Cargo.toml's version>", // read it; a pasted literal is refused
+        retired_after: "<latest release tag, without the v>", // read it; a pasted literal is refused
     },
 ```
 
@@ -688,11 +692,11 @@ slot 0.
   knowing which layer covers what.** It used to be ungated entirely, and after the
   first retirement nothing at all would have caught it. Layer 1 is
   `one_release_never_both_adds_a_key_and_retires_one`, a plain test over the two
-  date fields: no git, runs locally and on a direct push to `main`, catches the
+  date fields and the release tags, runs locally and on a direct push to `main`, catches the
   combined edit written in one sitting. Layer 2 is `ci.yml`'s *One release never
   both adds a key and retires one*, which reads the pull request's own diff (the
   merge commit against its first parent) and catches the case layer 1 structurally
-  cannot — a branch whose `Cargo.toml` moved
+  cannot — a branch whose newest release tag moved
   between the two edits, where both dates are honest. Neither catches an *invented*
   `added_after`. Full account: [The two-release rule, and its
   guard](#the-two-release-rule-and-its-guard).

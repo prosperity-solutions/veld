@@ -104,7 +104,7 @@ clear_instance_env := "VELD_DB_PATH= VELD_DAEMON_PORT= VELD_DAEMON_SOCK= VELD_PT
 #   just dev-desktop          Electron against `just dev-ui`
 #   just dev-db-reset         Wipe the dev DBs (fresh state)
 #   just dev-db-from-real     Snapshot the REAL DB into the dev DB (migration rehearsal)
-#   just dev-install-daemon   Install daemon (overlay/feedback changes)
+#   just dev-install-daemon   Install daemon (daemon/dashboard changes)
 #   just dev-install-helper   Install helper + restart Caddy (proxy changes, sudo)
 #   just dev-install          CLI + daemon (no sudo)
 #   just dev-install-all      Everything including helper (sudo)
@@ -158,7 +158,7 @@ dev-daemon:
         ./target/debug/veld-daemon
 
 # Run the source-built CLI against the REAL installed DB — for inspecting
-# runs the installed veld started (e.g. feedback loops on a shared run).
+# runs the installed veld started.
 # ⚠ ONLY safe when your branch adds no schema migration: a schema-ahead dev
 # binary MIGRATES the real DB forward on open, and the installed veld/daemon
 # then fail with NewerSchema until `veld self update`. If in doubt, don't — use
@@ -252,12 +252,11 @@ dev-link:
 # --- Tier 2: Install daemon (user-level, no sudo) ---
 
 # Install dev daemon and restart the service.
-# Use when: you changed the feedback overlay, client-log, or daemon code.
+# Use when: you changed daemon code.
 dev-install-daemon:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
-    cd crates/veld-daemon/frontend && npm run build && cd ../../..
     touch crates/veld-daemon/src/main.rs
     cargo build -p veld-daemon
 
@@ -350,19 +349,17 @@ dev-install-helper:
     echo "✓ Helper restarted."
     echo "  Restart your runs to pick up the new helper: veld orchestrator restart --name <run>"
 
-# --- Tier 4: Build and install Caddy with local veld_inject module ---
+# --- Tier 4: Install the stock Caddy this branch pins ---
 
-# Build Caddy with the local inject module and install it.
-# Use when: you changed caddy/inject/*.go
+# Fetch the upstream Caddy release pinned in scripts/release/caddy.sha512 and
+# install it. Use when: you changed that pin.
 dev-install-caddy:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
-    XCADDY_VERSION=$(cat .xcaddy-version)
-    echo "Building Caddy with local veld_inject module (xcaddy $XCADDY_VERSION)..."
-    xcaddy build \
-        --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-        --output ./target/caddy
+    case "$(uname -s)" in Darwin) os=darwin ;; *) os=linux ;; esac
+    case "$(uname -m)" in arm64 | aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+    scripts/release/fetch-caddy.sh "$os" "$arch" ./target/caddy
     dst="$HOME/.local/lib/veld/caddy"
     cp ./target/caddy "$dst"
     codesign -s - -f "$dst" 2>/dev/null || true
@@ -385,7 +382,7 @@ dev-install:
     # Daemon
     just dev-install-daemon
 
-# Install everything (CLI + daemon + helper + Caddy). Requires sudo + Go.
+# Install everything (CLI + daemon + helper + Caddy). Requires sudo.
 dev-install-all:
     just dev-install
     just dev-install-caddy
@@ -398,7 +395,6 @@ dev-restore:
 # --- Build / Test / Lint ---
 
 build:
-    cd crates/veld-daemon/frontend && npm run build
     cd crates/veld-daemon/ui && npm run build
     cargo build
 
@@ -409,7 +405,6 @@ test:
     # run would be after the PR is marked ready.
     python3 tests/signing-slots.py --selftest
     {{clear_instance_env}} cargo test --workspace
-    cd crates/veld-daemon/frontend && npm test
     cd crates/veld-daemon/ui && npm test
     cd desktop && npm test
 
@@ -424,11 +419,9 @@ lint:
     {{clear_instance_env}} cargo clippy --workspace --all-targets
     {{clear_instance_env}} cargo clippy --workspace -- -D warnings
     cargo fmt --all --check
-    cd crates/veld-daemon/frontend && npx tsc --noEmit
     cd crates/veld-daemon/ui && npm run typecheck
     # JS/TS surfaces — a new linter is its own guard (see `.github/workflows/ci.yml`);
     # keeping it in `just lint` means a local run is as strict as a CI job.
-    cd crates/veld-daemon/frontend && npm run lint
     cd crates/veld-daemon/ui && npm run lint
     cd desktop && npm run lint
     # Folded into `lint` (unlike `workflow-gates`) because it is bash and grep
@@ -594,19 +587,6 @@ stale-check base="origin/main":
         exit 1
     fi
 
-build-frontend:
-    cd crates/veld-daemon/frontend && npm run build
-
-test-frontend:
-    cd crates/veld-daemon/frontend && npm test
-
-lint-frontend:
-    cd crates/veld-daemon/frontend && npx tsc --noEmit
-    cd crates/veld-daemon/frontend && npm run lint
-
-setup-frontend:
-    cd crates/veld-daemon/frontend && npm install
-
 # --- Management UI v2 (crates/veld-daemon/ui) + desktop shell (desktop/) ---
 
 # npm deps for ui/, installed only when they are missing.
@@ -691,7 +671,8 @@ desktop-icons:
 # Package Veld Desktop for this machine's OS into desktop/dist/ (electron-builder).
 #
 # The same commands release CI runs, minus the version injection — a local build
-# is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
+# is whatever `desktop/package.json` says, which is not the released version:
+# releases are tags only (#424) and only CI stamps it. macOS
 # artifacts are ad-hoc signed only (only release CI holds the Developer ID — see
 # docs/macos-signing.md), so a build handed to someone else needs
 # `xattr -dr com.apple.quarantine` on the other end. On Linux

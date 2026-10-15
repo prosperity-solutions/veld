@@ -126,7 +126,7 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Prune old log lines and orphaned feedback data (older than 7 days),
+    // Prune old log lines (older than 7 days),
     // then reclaim the freed pages — **unless the file is damaged**.
     //
     // The daemon gates the same work on `dbhealth::verified_not_corrupt()`, and
@@ -148,19 +148,18 @@ pub async fn run() -> i32 {
     // is unbounded growth in the direction nobody watches. Only a positive
     // report of damage stops the work.
     let damaged = matches!(db.integrity(), Ok(veld_core::db::Integrity::Damaged(_)));
-    let (logs_pruned, feedback_cleaned) = if damaged {
+    let logs_pruned = if damaged {
         output::print_info(
             "Database reports as damaged — skipping log retention and page reclaim, because \
              both relocate pages in a file whose page map is not trustworthy. Run `veld self doctor` \
              for the details, and restore a backup to resume housekeeping.",
         );
-        (0, 0)
+        0
     } else {
         let cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
         let logs_pruned = db.prune_logs_older_than(cutoff).unwrap_or(0);
-        let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
         let _ = db.vacuum();
-        (logs_pruned, feedback_cleaned)
+        logs_pruned
     };
 
     // Prune leftover pre-SQLite log files from each project's .veld/logs/
@@ -203,9 +202,6 @@ pub async fn run() -> i32 {
     }
     if logs_pruned > 0 {
         parts.push(format!("{logs_pruned} old log line(s) pruned"));
-    }
-    if feedback_cleaned > 0 {
-        parts.push(format!("{feedback_cleaned} stale feedback run(s) removed"));
     }
 
     if !parts.is_empty() {

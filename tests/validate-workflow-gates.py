@@ -2,12 +2,12 @@
 """Assert that no GitHub Actions job can run on a draft pull request.
 
 Draft PRs are where an agentic contributor's intermediate commits land, and
-`.github/workflows/ci.yml` is expensive to run: a pull_request run reaches five
-macOS legs (`integration`, `injection-test`, the mac leg of `desktop-package`,
-and both darwin legs of `release-build`), on top of a four-target release build
-matrix. Standard macOS runners are free on public repositories, so what a draft
-run costs is runner time and the account's macOS concurrency allowance rather
-than a dollar figure -- five simultaneous mac jobs is a large share of it, and a
+`.github/workflows/ci.yml` is expensive to run: a pull_request run reaches four
+macOS legs (`integration`, the mac leg of `desktop-package`, and both darwin legs
+of `release-build`), on top of a four-target release build matrix. Standard macOS
+runners are free on public repositories, so what a draft run costs is runner time
+and the account's macOS concurrency allowance rather than a dollar figure -- four
+simultaneous mac jobs is a large share of it, and a
 draft's runs queue ahead of work that matters. The house workflow (AGENTS.md ->
 PR Workflow) reviews locally first and marks the PR ready for review second, so a
 draft has by definition not earned a CI run yet.

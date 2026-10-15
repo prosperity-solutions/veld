@@ -221,7 +221,7 @@ impl State {
         // Reading and installing both touch the filesystem and the binary is
         // several megabytes, so this goes to a blocking thread rather than
         // stalling the reactor that every other connection shares.
-        let running = env!("CARGO_PKG_VERSION");
+        let running = veld_core::VERSION;
         let outcome = tokio::task::spawn_blocking(move || {
             veld_core::helper_store::install_from(&path, running)
         })
@@ -308,49 +308,12 @@ impl State {
             None => return Response::err("missing 'upstream' in args"),
         };
 
-        // Build feedback config if the orchestrator included feedback fields.
-        let client_log_levels = args
-            .get("client_log_levels")
-            .and_then(Value::as_str)
-            .unwrap_or("log,warn,error");
-        let inject = args.get("inject").and_then(Value::as_bool).unwrap_or(true);
-        let inject_feedback_overlay = args
-            .get("inject_feedback_overlay")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let inject_client_logs = args
-            .get("inject_client_logs")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let feedback = match (
-            args.get("feedback_upstream").and_then(Value::as_str),
-            args.get("run_name").and_then(Value::as_str),
-            args.get("project_root").and_then(Value::as_str),
-        ) {
-            (Some(fb_upstream), Some(run_name), Some(project_root)) => {
-                Some(crate::caddy::FeedbackConfig {
-                    upstream: fb_upstream,
-                    run_name,
-                    project_root,
-                    client_log_levels,
-                    inject,
-                    inject_feedback_overlay,
-                    inject_client_logs,
-                })
-            }
-            (None, None, None) => None,
-            _ => {
-                warn!("partial feedback config in add_route args — disabling injection");
-                None
-            }
-        };
-
         // Reverse-proxy header rules, if the orchestrator resolved any.
         let proxy = parse_proxy_arg(args);
 
         match self
             .caddy
-            .add_route(route_id, hostname, upstream, feedback, &proxy)
+            .add_route(route_id, hostname, upstream, &proxy)
             .await
         {
             Ok(()) => Response::ok(),
@@ -423,7 +386,7 @@ impl State {
             "https_port": self.https_port,
             "http_port": self.http_port,
             "helper_pid": helper_pid,
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": veld_core::VERSION,
             "stored_routes": self.caddy.stored_route_count().await,
             // Whether a keep-awake lease is armed right now. Read by `veld
             // self doctor` (`crates/veld/src/commands/doctor.rs`, the helper row), so a

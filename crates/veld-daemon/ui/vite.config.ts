@@ -120,16 +120,15 @@ export default defineConfig({
   // tests, in the same jsdom. It just also taxes the 47 files that never look
   // at a `document`.
   //
-  // **Why by extension rather than a per-file docblock.** The sibling package
-  // `crates/veld-daemon/frontend` reaches the same place with
-  // `// @vitest-environment jsdom` at the top of each of its ~19 DOM tests, and
-  // that is a perfectly good answer there. Here the extension already carries
-  // the signal — a `.tsx` test exists *because* it renders a component — so
-  // deriving the environment from it leaves nothing to remember. Either scheme
-  // fails loudly rather than silently when you get it wrong — a forgotten
-  // docblock over there gives `document is not defined`; a render test saved as
-  // `.test.ts` here dies earlier still, at transform, because esbuild does not
-  // parse JSX in a `.ts` file. So this is ergonomics, not a correctness gate.
+  // **Why by extension rather than a per-file docblock.** A
+  // `// @vitest-environment jsdom` line at the top of each DOM test would work,
+  // but here the extension already carries the signal — a `.tsx` test exists
+  // *because* it renders a component — so deriving the environment from it
+  // leaves nothing to remember. Either scheme fails loudly rather than silently
+  // when you get it wrong — a forgotten docblock gives `document is not
+  // defined`; a render test saved as `.test.ts` here dies earlier still, at
+  // transform, because esbuild does not parse JSX in a `.ts` file. So this is
+  // ergonomics, not a correctness gate.
   //
   // `extends: true` is what gives each project the root config above, the
   // `react()` plugin included — without it a `.tsx` test has no JSX transform.

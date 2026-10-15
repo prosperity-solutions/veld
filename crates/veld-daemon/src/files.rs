@@ -950,7 +950,7 @@ mod tests {
     /// that list would hand a deck a shell — with no other symptom.
     #[test]
     fn the_file_origin_can_never_open_a_terminal_socket() {
-        let allowed = crate::feedback_server::pty::allowed_origins();
+        let allowed = crate::http_server::pty::allowed_origins();
         let files = veld_core::instance::files_host();
         for origin in &allowed {
             assert!(

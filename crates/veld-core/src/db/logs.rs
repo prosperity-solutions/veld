@@ -18,8 +18,6 @@ use crate::db::state::root_key;
 pub enum LogStream {
     /// Server process stdout/stderr (per node).
     Server,
-    /// Browser-side client logs (per node).
-    Client,
     /// Project `setup`/`teardown` step output. Read run-level, but the rows
     /// carry a pseudo-node (`setup`/`teardown` + the step name as variant) so
     /// two steps stay distinguishable in one interleaved stream. A `command`
@@ -35,7 +33,6 @@ impl LogStream {
     pub fn as_str(&self) -> &'static str {
         match self {
             LogStream::Server => "server",
-            LogStream::Client => "client",
             LogStream::Setup => "setup",
             LogStream::Debug => "debug",
             LogStream::Internal => "internal",
@@ -48,7 +45,7 @@ impl LogStream {
 /// rows have `node = NULL`; setup rows carry a node but are read run-level).
 /// Single source of truth for readers that split sources by kind.
 pub fn stream_is_per_node(stream: &str) -> bool {
-    stream == LogStream::Server.as_str() || stream == LogStream::Client.as_str()
+    stream == LogStream::Server.as_str()
 }
 
 /// One stored log line.

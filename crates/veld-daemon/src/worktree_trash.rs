@@ -359,7 +359,7 @@ async fn delete_checkout(
     // leave behind, and no window may be open to prune the pane. After the removal,
     // so a delete git refuses keeps them; before the row goes, while the id is
     // still this worktree's.
-    crate::feedback_server::pty::close_worktree_sessions(wt.id).await;
+    crate::http_server::pty::close_worktree_sessions(wt.id).await;
     if let Err(e) = db.remove_worktree(wt.id) {
         // The checkout is gone; only the row survived. The next reconcile poll reaps
         // it, since the path has left `git worktree list`.

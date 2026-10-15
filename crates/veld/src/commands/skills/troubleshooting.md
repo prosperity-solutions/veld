@@ -1,6 +1,6 @@
 # Troubleshooting
 
-WebSocket failures, CSP errors, a vanishing overlay, port conflicts and cert warnings are all below.
+WebSocket failures, CSP errors, port conflicts and cert warnings are all below.
 
 ## Troubleshooting
 
@@ -17,21 +17,6 @@ Veld serves through a reverse proxy on a different hostname and port than the ap
   img-src 'self' data: blob:
   ```
 - **`script-src`**: Must allow `'unsafe-inline'` and `'unsafe-eval'` in development (required by most dev servers anyway).
-
-## Overlay not working with automatic injection
-
-If the veld toolbar doesn't appear or conflicts with the framework, set `"inject": false` on the node in `veld.json` and add the scripts manually:
-
-```html
-<script src="/__veld__/feedback/script.js"></script>
-<script src="/__veld__/api/client-log.js" data-veld-levels="log,warn,error"></script>
-```
-
-For Next.js, use `next/script` with `strategy="afterInteractive"`.
-
-Everything else still works — `/__veld__/*` API routes, all CLI commands, the full overlay UI. Only the automatic HTML injection is disabled.
-
-**If you need this workaround, [open a GitHub issue](https://github.com/prosperity-solutions/veld/issues)** so we can fix automatic injection for your setup.
 
 ## Browser says the certificate is expired (`ERR_CERT_DATE_INVALID`)
 
@@ -74,7 +59,7 @@ helper's watchdog checks every hostname it serves once a minute, and that is wha
 acts.
 
 Clicking through the browser warning works but is not a fix: the certificate is
-what the shared and injected surfaces are served over too.
+what the shared surfaces are served over too.
 
 ---
 

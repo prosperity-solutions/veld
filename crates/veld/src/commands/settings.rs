@@ -744,10 +744,9 @@ fn coerce(raw: &str, entry: &CatalogEntry) -> Result<Value, String> {
 /// Neutralised through [`output::one_line`], which is not belt-and-braces: this
 /// change gives a stored setting value a **new sink**, a terminal, and one class
 /// of value is not character-bounded on the way in. An unknown key (a preference
-/// written by a newer veld) is stored verbatim with only a length limit, and the
-/// daemon is reachable same-origin from a developer's own app through the
-/// helper's `/__veld__` proxy — so a script on that origin can `PATCH` a key or
-/// value containing `ESC`, and `veld self settings list` would then replay it into the
+/// written by a newer veld) is stored verbatim with only a length limit, and any
+/// script running on a Veld origin is same-origin with the daemon — so it can
+/// `PATCH` a key or value containing `ESC`, and `veld self settings list` would then replay it into the
 /// terminal of whoever ran it, or of an agent. `terminal.fontFamily`'s validator
 /// already bounds characters for exactly this reason, one interpolation site
 /// earlier; this is the same rule for the fourth site.

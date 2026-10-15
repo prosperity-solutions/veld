@@ -1,0 +1,16 @@
+# Stock Caddy, the upstream release Veld ships unchanged. One line per platform
+# Veld releases for: the SHA-512 caddyserver/caddy published for it, and the
+# archive name, which carries the version. `scripts/release/fetch-caddy.sh` reads
+# this file and refuses an archive whose hash is not written here.
+#
+# To move to a newer Caddy, replace all four lines from that release's
+# caddy_<version>_checksums.txt — never one alone:
+#
+#   gh release download v<version> -R caddyserver/caddy -p 'caddy_<version>_checksums.txt'
+#
+# Nothing bumps this file automatically, so a Caddy security release reaches
+# Veld only when someone edits it.
+a7a433a1b133efc3c8d10eb0b99d52a24b5ef5c322dc77f5282182b1c0402139ab83f3a99f0c52409df77d20123fb0b523edad8a66d8f5e49136197bf61ef0e7  caddy_2.11.7_linux_amd64.tar.gz
+3db36ba90c7a6e8dda40ee3dd71fa08844c76b5fb08f61b31e5e78d2ed38e71c51dc7baed875e50d1ca1279196e84302967237386ae87c91ae9f2aaceada682e  caddy_2.11.7_linux_arm64.tar.gz
+147886811fa2320a8881c6116dc8cc3f0562e2f686509ccc60f55cf85dfd5ea78e9f5f770c75da13bf124a2536b72e887b975fefd58706de3dafb57483610e70  caddy_2.11.7_mac_amd64.tar.gz
+68f592df8f0ec058fbdb9b137b64e9a0aa792d28c06e1e3b9ec12d0e7fb371683a54e73ef6d8e6d0dd70dc6b941a5b5d5b73faedd3f89de119ad2eb78bdc668e  caddy_2.11.7_mac_arm64.tar.gz

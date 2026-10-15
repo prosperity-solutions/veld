@@ -103,7 +103,7 @@ pub async fn run(
     // names the release they clicked on rather than the one the CLI happens to be.
     let reported_version = target_version
         .clone()
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        .unwrap_or_else(|| veld_core::VERSION.to_string());
 
     // **`sudo veld self update` is refused, and the reason is not tidiness.** Under
     // sudo, `dirs::home_dir()` is *root's* (this repo already relies on that at
@@ -991,7 +991,7 @@ async fn perform(
         };
     }
 
-    let current = env!("CARGO_PKG_VERSION");
+    let current = veld_core::VERSION;
     phase!(Phase::Checking);
     if target_version.is_none() {
         // The current version is not announced separately: the header below
@@ -1541,7 +1541,7 @@ async fn privileged_helper_serviceable() -> bool {
 /// bounced, so only the polling half applies there.
 ///
 /// `target_version` is the version we just updated TO (from `check_update`),
-/// NOT `env!("CARGO_PKG_VERSION")` — this process is the *old* CLI, so its
+/// NOT `veld_core::VERSION` — this process is the *old* CLI, so its
 /// compile-time version is the version we updated *from*. Comparing against
 /// that would invert the check (fail on every successful update, pass on a
 /// failed one).
@@ -1659,7 +1659,7 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
     // The daemon is a user-level service (LaunchAgent / systemd --user) that the
     // installer restarts. Verify it came back on the new binary too — otherwise
     // `veld self update` returns while the daemon is mid-restart, and an immediate
-    // `veld self doctor` shows "Daemon: not running / Feedback server not responding"
+    // `veld self doctor` shows "Daemon: not running / Daemon HTTP server not responding"
     // even though it self-heals moments later.
     Steps::detail(&output::dim("waiting for veld-daemon..."));
     if wait_for_daemon_version(target_version, std::time::Duration::from_secs(45)).await {

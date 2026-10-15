@@ -579,7 +579,6 @@ pub enum SourceFilter {
     #[default]
     All,
     Server,
-    Client,
     #[serde(alias = "teardown")]
     Setup,
     #[serde(alias = "veld")]

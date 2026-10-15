@@ -1707,7 +1707,7 @@ pub fn claude_mod_files(daemon: &str, context: &str, naming: &str) -> [(&'static
     const CONTRACT: &str = include_str!("agent/claude-mod/types.d.ts");
     let manifest = serde_json::json!({
         "name": "veld",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::VERSION,
         "description": "Tells Veld when Claude Code is working or waiting, and tells Claude how to show you a file.",
         "types": "./types/index.d.ts",
         "author": { "name": "Veld" },

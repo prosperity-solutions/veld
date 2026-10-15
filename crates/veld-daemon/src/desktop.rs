@@ -3718,8 +3718,8 @@ struct ClaimResponse {
 ///
 /// **The id is checked against the closed set, not against a length.** It becomes
 /// a key in a file the daemon rewrites whole and re-parses on every health poll,
-/// and this router is same-origin with any page a veld run serves — so a length
-/// bound plus a comment saying "the ids are a closed set" let any such page grow
+/// and any script running on a Veld origin is same-origin with this router — so a
+/// length bound plus a comment saying "the ids are a closed set" let any such page grow
 /// that file without limit and tax every poll.
 async fn db_health_notified(
     Json(body): Json<NotifiedBody>,
@@ -3779,11 +3779,9 @@ struct RestoreDbResponse {
 /// same property.
 /// **Two gates, and the CSRF header is not one of them.**
 ///
-/// This router is merged into the server Caddy proxies at `/__veld__/*` on every
-/// run's own origin, so a script on the user's dev app is *same-origin* with it —
-/// the exposure [`crate::feedback_server::ide::get_state`] already documents. On
-/// that surface `check_csrf` is a header a same-origin `fetch` sets in one line,
-/// so it separates cross-origin from same-origin and nothing else. Every other
+/// `check_csrf` is a header a same-origin `fetch` sets in one line, so it
+/// separates cross-origin from same-origin and nothing else — and any script that
+/// ends up running on a Veld origin is same-origin with this router. Every other
 /// mutation here is bounded by that reasoning; this one would not be — replacing
 /// the whole database and stopping the daemon is a different class of capability
 /// from renaming a worktree, and it reaches code execution by way of the settings
@@ -8179,9 +8177,9 @@ mod tests {
         /// **The gate that carries the authorization story for the most
         /// destructive route in this router, and it had no test.**
         ///
-        /// This router is same-origin with any page a veld run serves, so the CSRF
-        /// header is not a barrier there — the two things standing between such a
-        /// page and a replaced database are this precondition and a native dialog.
+        /// Any script running on a Veld origin is same-origin with this router, so
+        /// the CSRF header is not a barrier there — the two things standing between
+        /// such a page and a replaced database are this precondition and a native dialog.
         /// The dialog cannot be driven from a test; this half can, and it is also
         /// the half that keeps the endpoint inert on every healthy machine.
         ///

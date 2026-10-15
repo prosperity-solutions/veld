@@ -23,7 +23,7 @@
 //! survive a move, and was the first answer — but a `--depth=1` clone reports
 //! *HEAD* as its root commit, so a shallow checkout gets a plausible, wrong, and
 //! fetch-dependent identity with no error. More importantly, every other
-//! project-scoped thing in this database (runs, logs, stats, feedback) is keyed
+//! project-scoped thing in this database (runs, logs, stats) is keyed
 //! by a raw path already. A cleverer identity here would mean overrides survive a
 //! move while the run history that explains them does not, and two disagreeing
 //! notions of "the same project" is a worse bug than the one it fixes. Moving a

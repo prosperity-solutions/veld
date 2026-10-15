@@ -135,15 +135,17 @@ pub struct OrgKey {
     /// slot at all.
     pub secret: &'static str,
 
-    /// `Cargo.toml`'s `version` at the moment this row was written — i.e. the
-    /// last release before the one that introduces this key. Copy it verbatim.
+    /// The latest release at the moment this row was written — i.e. the last
+    /// release before the one that introduces this key. Read it with
+    /// `git describe --tags --abbrev=0 --match 'v[0-9]*'` and drop the `v`.
     ///
-    /// **You can always know this, and that is the whole point.** `Cargo.toml`
-    /// holds the *previous* release until semantic-release bumps it after the
-    /// merge, so a pull request can never name the version it will itself ship as
+    /// **You can always know this, and that is the whole point.** A release is a
+    /// tag on `main` made after the merge (#424), so the newest tag is the
+    /// *previous* release and a pull request can never name the version it will
+    /// itself ship as
     /// — but it can always name the one it was written against. Together with
     /// [`KeyStatus::Retired`]'s matching field, that is what makes the two-release
-    /// rule checkable from one file with no git history: see
+    /// rule checkable from one file and the release tags, with no diff to read: see
     /// `one_release_never_both_adds_a_key_and_retires_one`.
     ///
     /// [`ORG_KEY_1`] carries `0.0.0` because it predates this table and every
@@ -169,26 +171,26 @@ pub enum KeyStatus {
     /// the cheapest dangerous edit in the repository and invisible in a skim;
     /// constructing a variant with a value in it is an act of authorship.
     Retired {
-        /// `Cargo.toml`'s `version` at the moment this key was retired — the same
+        /// The latest release at the moment this key was retired — the same
         /// thing [`OrgKey::added_after`] records, for the other half of the edit.
         /// Copy it verbatim.
         ///
         /// **The rule these two fields express:** no single release may both add a
         /// key and retire one. A pull request that tried would have to write the
-        /// *same* version in both fields — the one `Cargo.toml` shows right now —
+        /// *same* version in both fields — the newest release tag right now —
         /// and `one_release_never_both_adds_a_key_and_retires_one` fails exactly
-        /// that. Neither needs git history; both are simply what the tree says.
+        /// that. Neither needs a diff; both are simply what the tree and its tags say.
         ///
         /// Not "the next version is unknowable": `release.yml`'s `plan` job runs
         /// semantic-release in dry-run on every non-draft pull request and prints
         /// it. The point is narrower and survives that — the tree cannot be made to
         /// *say* the pull request has already shipped, and
         /// `every_key_lifecycle_date_names_a_release_that_has_happened` refuses a
-        /// value newer than `Cargo.toml`, so writing the upcoming version is caught
+        /// value newer than the newest tag, so writing the upcoming version is caught
         /// too.
         ///
         /// **The hole this leaves, named rather than glossed:** if the branch's
-        /// `Cargo.toml` moves between the two edits — an unrelated release lands,
+        /// newest tag moves between the two edits — an unrelated release lands,
         /// the branch is updated, then the retirement is written — the two dates
         /// are both *honest* and *different*, neither equals the current version,
         /// and the test sees nothing. The tree cannot tell "added last release"
@@ -1937,17 +1939,21 @@ mod tests {
     /// first time anything was ever retired.
     ///
     /// **What makes it a property of one file instead:** both halves of the edit
-    /// record `Cargo.toml`'s version at the moment they were written, and
-    /// `Cargo.toml` holds the *previous* release until semantic-release bumps it
-    /// after the merge. So the two halves of a combined edit necessarily carry the
-    /// **same** version — the one this tree shows right now — while two edits made
-    /// in two releases cannot. No git history, no merge base, no network: the whole
-    /// check is this tree.
+    /// record the latest release at the moment they were written, and a release is
+    /// a tag made after the merge, so the newest tag is the *previous* release. So
+    /// the two halves of a combined edit necessarily carry the **same** version —
+    /// the newest tag right now — while two edits made in two releases cannot. No
+    /// merge base, no diff, no network: the whole check is this tree and its tags.
+    ///
+    /// The tags are the one input it needs, and it fails without them (see
+    /// [`last_release`]). A checked-in "last release" constant would have spared
+    /// that, but nothing would keep it current: no commit reaches `main` after a
+    /// release any more, so it would rot exactly the way `Cargo.toml`'s version did.
     ///
     /// **This is one of two layers, and it is the weaker one.** It catches the
     /// combined edit written in one sitting, which is the common shape, and it does
-    /// so with no git, no network and no CI — so it also covers a direct push to
-    /// `main`. It does **not** catch a branch whose `Cargo.toml` moved between the
+    /// so with no network and no CI — so it also covers a direct push to
+    /// `main`. It does **not** catch a branch whose newest tag moved between the
     /// two edits: those two dates are both honest and both differ from the current
     /// version, and no test reading only this file can tell that apart from a
     /// legitimate retirement. `ci.yml`'s *One release never both adds a key and
@@ -1959,7 +1965,8 @@ mod tests {
     /// values that are actually lying around to copy.
     #[test]
     fn one_release_never_both_adds_a_key_and_retires_one() {
-        let now = env!("CARGO_PKG_VERSION");
+        let now = last_release();
+        let now = now.as_str();
         let added: Vec<&str> = ORG_KEYS
             .iter()
             .filter(|k| k.added_after == now)
@@ -2011,7 +2018,7 @@ mod tests {
     /// `added_after` increases strictly down the table.
     ///
     /// **This is what stops the two-release guard being defeated by a paste.** That
-    /// guard compares each row's date against `Cargo.toml`'s version, so any *stale*
+    /// guard compares each row's date against the latest release, so any *stale*
     /// value in a newly added row slips past it — and the two most available stale
     /// values are sitting in the table being edited: row 0's `0.0.0`, and the
     /// previous row's version. Requiring each row to be strictly later than the one
@@ -2043,7 +2050,7 @@ mod tests {
                  appended in order, so each one was written against a later release \
                  than the one above it. If you copied this value from another row or \
                  from row 0's 0.0.0, that is the paste this check exists to refuse — \
-                 use Cargo.toml's version",
+                 use the latest release (`git describe --tags --abbrev=0 --match 'v[0-9]*'`)",
                 next.secret,
                 next.added_after,
                 prev.secret,
@@ -2081,13 +2088,14 @@ mod tests {
 
     /// Neither half of that rule may cite a release that has not happened.
     ///
-    /// The fields are `Cargo.toml`'s version at the time of the edit, so a value
+    /// The fields are the latest release at the time of the edit, so a value
     /// *newer* than this tree is not a mistake with a benign reading — it is the
     /// shape a combined edit takes when somebody guesses at the version their merge
     /// will ship as, which is exactly what the rule above is stopping.
     #[test]
     fn every_key_lifecycle_date_names_a_release_that_has_happened() {
-        let now = version_parts(env!("CARGO_PKG_VERSION")).expect("our own version parses");
+        let last = last_release();
+        let now = version_parts(&last).expect("the latest release tag parses");
         for k in ORG_KEYS {
             let mut dates = vec![("added_after", k.added_after)];
             if let KeyStatus::Retired { retired_after } = k.status {
@@ -2110,8 +2118,8 @@ mod tests {
                 let parsed = version_parts(value).unwrap_or_else(|| {
                     panic!(
                         "{}'s {field} is {value:?}, which is not an x.y.z version. It is \
-                         Cargo.toml's version at the moment you made the edit — copy it \
-                         verbatim",
+                         the latest release at the moment you made the edit — read it \
+                         with `git describe --tags --abbrev=0 --match 'v[0-9]*'`",
                         k.secret
                     )
                 });
@@ -2121,10 +2129,36 @@ mod tests {
                      fields record the release an edit was made AGAINST, and a pull \
                      request cannot know the version it will itself ship as",
                     k.secret,
-                    env!("CARGO_PKG_VERSION")
+                    last
                 );
             }
         }
+    }
+
+    /// The latest release this tree was written against: its newest `v*` tag.
+    ///
+    /// Not `Cargo.toml`'s version. Releases are tags only (#424) — nothing commits
+    /// a version bump back to `main` — so that field never moves; the build stamps
+    /// the released version in from the tag.
+    ///
+    /// Needs the tags, so it fails rather than skips without them: a check that
+    /// quietly stops checking on a shallow clone is the failure this guards. CI's
+    /// `check` job fetches full history for it.
+    fn last_release() -> String {
+        let out = std::process::Command::new("git")
+            .args(crate::release_version::DESCRIBE_RELEASE_TAG)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "no release tag reachable from HEAD ({}). These checks compare against the \
+             latest release; fetch the tags (`git fetch --tags --unshallow`, or \
+             `git fetch upstream --tags` in a fork)",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        let tag = String::from_utf8(out.stdout).expect("a tag is UTF-8");
+        tag.trim().trim_start_matches('v').to_owned()
     }
 
     /// `x.y.z` as a comparable tuple, or `None` if it is not that shape.

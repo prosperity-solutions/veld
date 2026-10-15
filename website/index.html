@@ -496,7 +496,6 @@ veld network share <span class="kw">--web</span>
       <div class="cli-group">
         <h3>Agent</h3>
         <div class="cli-row"><code>veld agent skills [TOPIC]</code><span>The agent documentation this binary carries — one topic at a time</span></div>
-        <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
       </div>
 
       <div class="cli-group">
@@ -561,7 +560,7 @@ veld network share <span class="kw">--web</span>
       <p class="lead" style="font-size:14px; margin-bottom:6px;">The skill is a pointer, a few kilobytes. The documentation ships inside the binary, so your agent reads the docs for the veld you actually have — and reads only the page it needs, when it needs it, instead of loading a manual and your whole config into its context first.</p>
       <pre data-copy="veld agent skills
 veld agent skills basics
-veld agent skills config"><code><span class="cmt"># the index — fourteen topics, one line each:</span>
+veld agent skills config"><code><span class="cmt"># the index — thirteen topics, one line each:</span>
 veld agent skills
 
 <span class="cmt"># then just the page the task needs:</span>
@@ -571,17 +570,6 @@ veld agent skills config</code></pre>
 
       <h3 style="margin-top:36px; font-size:17px;">Start work by describing it</h3>
       <p class="lead" style="font-size:14px;">A new checkout in the IDE can start with a prompt instead of a name. Pick one of the project&rsquo;s agents, say what needs doing, and it is already working when the worktree opens &mdash; on its own branch, beside everything else you have running. Drop a screenshot or a JSON file anywhere on the dialog and it goes in with the prompt, the way it would if you dropped it on the agent yourself. Name, branch, colour and glyph are all still there in the other mode, and none of them is required. The agent names the checkout itself, with <code>veld ide worktree name</code>, once it knows what the task is.</p>
-
-      <h3 style="margin-top:36px; font-size:17px;">The feedback loop</h3>
-      <p class="lead" style="font-size:14px; margin-bottom:6px;">Every app veld serves gets an in-browser overlay. Review the running thing and hand comments straight to your agent — no copy-pasting screenshots into a chat.</p>
-      <ol class="steps">
-        <li><span class="step-body"><strong>Launch the loop.</strong> In your agent, type <code>/veld-launch-feedback-loop</code> and hit enter — it parks on <code>veld feedback next</code> and waits for you.</span></li>
-        <li><span class="step-body"><strong>You comment on the live app.</strong> Click any element, leave a note — right there in the browser, on the real running page.</span></li>
-        <li><span class="step-body"><strong>Your agent pulls the next item</strong> with <code>veld feedback next</code> — element, selector, screenshot, and your words, in one call.</span></li>
-        <li><span class="step-body"><strong>It fixes the code and replies</strong> on the thread. The change hot-reloads; you see it live.</span></li>
-        <li><span class="step-body"><strong>Repeat until you click Done.</strong> A tight human-in-the-loop review loop, without leaving the page.</span></li>
-      </ol>
-      <p class="note">Fun fact: this entire page was built and refined through exactly that loop.</p>
     </div>
   </section>
 
@@ -597,7 +585,7 @@ veld agent skills config</code></pre>
         <div class="comp"><div class="name">veld-helper</div><p>Manages DNS entries and Caddy routes over a minimal Unix socket. Privileged or unprivileged.</p></div>
         <div class="comp"><div class="name">veld-gateway</div><p>Public web gateway (one Docker container). Joins a share over iroh and reverse-proxies it onto a public URL.</p></div>
         <div class="comp"><div class="name">veld-share</div><p>Shared P2P transport built on iroh (QUIC, NAT hole-punching). Used by the daemon and the gateway.</p></div>
-        <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, feedback, tokens — in one WAL-mode database. Versioned, migrates forward. Backed up on an interval, integrity-checked on a timer, and restorable in one click when it isn't.</p></div>
+        <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, tokens — in one WAL-mode database. Versioned, migrates forward. Backed up on an interval, integrity-checked on a timer, and restorable in one click when it isn't.</p></div>
       </div>
 
       <div class="diagram" role="img" aria-label="Architecture. Local: the veld CLI drives the daemon and helper; the helper configures Caddy, which terminates HTTPS and reverse-proxies your services on clean URLs; SQLite holds all state. Sharing over iroh: veld network share connects your daemon straight to a colleague's Veld — no gateway involved (an optional self-hosted relay may sit in between). Only veld network share --web routes through a veld-gateway to reach anyone in a browser.">

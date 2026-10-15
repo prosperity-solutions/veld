@@ -57,7 +57,7 @@ impl Broadcaster {
         // Send a welcome message so the client knows the connection is live.
         let welcome = serde_json::json!({
             "event": "connected",
-            "daemon_version": env!("CARGO_PKG_VERSION"),
+            "daemon_version": veld_core::VERSION,
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
 

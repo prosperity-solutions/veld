@@ -340,7 +340,7 @@ async fn relocate(
              install that predates signing): {e:#}"
         ))
     })?;
-    let running = env!("CARGO_PKG_VERSION");
+    let running = veld_core::VERSION;
     candidate.verified_version().map_err(|e| {
         Skip(format!(
             "this helper does not verify against the org's key, so moving it into a root-owned \

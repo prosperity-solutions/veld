@@ -91,11 +91,11 @@
         "dev-local"
       ]
     },
-    "client_log_levels": {
-      "$ref": "#/$defs/clientLogLevels"
-    },
     "features": {
-      "$ref": "#/$defs/features"
+      "$ref": "#/$defs/removedKey"
+    },
+    "client_log_levels": {
+      "$ref": "#/$defs/removedKey"
     },
     "proxy": {
       "$ref": "#/$defs/proxy"
@@ -1423,38 +1423,9 @@
       ],
       "description": "`command` runs to completion; `long_running` stays running. These are the only two primitives — the type describes lifecycle only. Whether a long-running node serves anything is a property of its `ports`: it gets one allocated port and a URL by default, and `\"ports\": null` declares a supervised process that serves nothing (an Electron shell, a watcher, a compiler). `start_server` is the historical spelling of `long_running` and remains a permanent alias, exactly as `bash` is for `command`; configs written either way load forever."
     },
-    "clientLogLevels": {
-      "type": "array",
-      "description": "Browser console levels to capture. 'exception' is always captured.",
-      "items": {
-        "type": "string",
-        "enum": [
-          "log",
-          "warn",
-          "error",
-          "info",
-          "debug"
-        ]
-      }
-    },
-    "features": {
-      "type": "object",
-      "additionalProperties": false,
-      "description": "Per-field cascade: project \u2192 node \u2192 variant, most specific wins field by field.",
-      "properties": {
-        "feedback_overlay": {
-          "type": "boolean",
-          "description": "Inject the Veld toolbar into HTML responses."
-        },
-        "client_logs": {
-          "type": "boolean",
-          "description": "Inject the client-side log collector."
-        },
-        "inject": {
-          "type": "boolean",
-          "description": "Inject bootstrap scripts automatically. When false the /__veld__/* routes still exist for manual script tags."
-        }
-      }
+    "removedKey": {
+      "deprecated": true,
+      "description": "No longer read: veld stopped injecting scripts into the pages it serves (#424). Accepted only so a config shared with older veld versions still validates; delete it once nobody on the project runs one."
     },
     "headerRules": {
       "type": "object",
@@ -1767,13 +1738,13 @@
           "$ref": "#/$defs/share"
         },
         "features": {
-          "$ref": "#/$defs/features"
+          "$ref": "#/$defs/removedKey"
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/removedKey"
         },
         "proxy": {
           "$ref": "#/$defs/proxy"
-        },
-        "client_log_levels": {
-          "$ref": "#/$defs/clientLogLevels"
         }
       },
       "additionalProperties": false
@@ -1860,16 +1831,16 @@
           "$ref": "#/$defs/share"
         },
         "features": {
-          "$ref": "#/$defs/features"
+          "$ref": "#/$defs/removedKey"
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/removedKey"
         },
         "proxy": {
           "$ref": "#/$defs/proxy"
         },
         "url_template": {
           "type": "string"
-        },
-        "client_log_levels": {
-          "$ref": "#/$defs/clientLogLevels"
         },
         "verify": {
           "$ref": "#/$defs/commandObject",

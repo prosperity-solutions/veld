@@ -56,7 +56,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         // `spawn_blocking` for the same reason the write path uses it: this is a
         // `read_dir` plus a `stat` per entry, and on a slow or networked home it
         // would hold a tokio worker while unrelated terminals wait for frames.
-        let _ = tokio::task::spawn_blocking(crate::feedback_server::pty::prune_pastes_now).await;
+        let _ = tokio::task::spawn_blocking(crate::http_server::pty::prune_pastes_now).await;
 
         match run_gc().await {
             Ok(summary) => {
@@ -261,7 +261,7 @@ pub(crate) async fn run_gc_pass(
                 // in-process, and why the guarded finalize is what stops two
                 // detectors both spawning one.
                 if crashed {
-                    crate::feedback_server::management::delegate_teardown(&project_root, run_name)
+                    crate::http_server::management::delegate_teardown(&project_root, run_name)
                         .await;
                 }
             }
@@ -280,7 +280,7 @@ pub(crate) async fn run_gc_pass(
             // it is alive (the supervisor marks a dead one lost within seconds) —
             // a teardown hook that takes longer than the grace is slow, not stuck.
             // The grace alone is left for enders that are not engine workers.
-            if crate::feedback_server::engine::has_running_action(db, &project_root, &run_name) {
+            if crate::http_server::engine::has_running_action(db, &project_root, &run_name) {
                 continue;
             }
             info!("finalizing stale 'stopping' run '{run_name}' (ender gone)");
@@ -312,8 +312,7 @@ pub(crate) async fn run_gc_pass(
                 // resumes where the dead stopper stopped instead of starting
                 // over. Guarded by `finalize_run` returning true, so a second
                 // GC pass over the same run spawns nothing.
-                crate::feedback_server::management::delegate_teardown(&project_root, &run_name)
-                    .await;
+                crate::http_server::management::delegate_teardown(&project_root, &run_name).await;
             }
         }
     }
@@ -407,11 +406,9 @@ pub(crate) async fn run_gc_pass(
             }
         }
 
-        // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
-        // the freed pages (screenshot BLOBs and log rows add up).
+        // Phase 2: Prune old log lines, then reclaim the freed pages.
         let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
         summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
-        let _ = db.prune_orphaned_feedback(log_cutoff);
         let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
         summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
         summary.process_stats_pruned = db
@@ -462,7 +459,7 @@ pub(crate) async fn run_gc_pass(
     // of a file whose page map SQLite has declared untrustworthy is not a risk
     // worth taking to reclaim a directory ten minutes sooner.
     if housekeeping() {
-        summary.trash_purged = crate::feedback_server::worktree_trash::purge_expired_trash(db);
+        summary.trash_purged = crate::http_server::worktree_trash::purge_expired_trash(db);
     }
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's

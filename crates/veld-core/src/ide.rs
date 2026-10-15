@@ -10,8 +10,8 @@
 //!
 //! It was spelled `ui` while it was reserved, and was renamed before anything
 //! read it: `/ide` is the route, a per-project IDE surface is what the reserved
-//! shape was for, and "UI" could equally have meant the dashboard, the feedback
-//! overlay or the CLI's own output. Renaming a top-level key is a breaking
+//! shape was for, and "UI" could equally have meant the dashboard or the CLI's
+//! own output. Renaming a top-level key is a breaking
 //! change, so it had to happen in the release that gave the key a meaning or not
 //! at all.
 //!

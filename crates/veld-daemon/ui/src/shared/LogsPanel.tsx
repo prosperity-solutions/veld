@@ -287,7 +287,6 @@ export function LogsPanel(props: {
             data={[
               { value: "all", label: "All" },
               { value: "server", label: "Server" },
-              { value: "client", label: "Client" },
               { value: "setup", label: "Setup" },
               { value: "internal", label: "Internal" },
             ]}
@@ -363,10 +362,8 @@ export function LogsPanel(props: {
                   style={{ color: nodeColor(e.node, colorOrder.current) }}
                 >
                   {e.node}:{e.variant}
-                  {e.source === "client" ? ":client" : ""}
                 </span>
               )}
-              {!multi && e.source === "client" && <span className="node-tag">client</span>}
               <span className="msg">{message(e)}</span>
             </div>
           </div>

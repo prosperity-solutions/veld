@@ -129,7 +129,7 @@ pub enum OrcCmd {
         #[arg(long)]
         json: bool,
 
-        /// Filter by log source: all, server (node output), client, setup
+        /// Filter by log source: all, server (node output), setup
         /// (project setup/teardown steps), or internal (veld daemon
         /// liveness/recovery logs).
         #[arg(long, default_value = "all")]
@@ -453,7 +453,7 @@ pub async fn run(command: OrcCmd) -> i32 {
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
                     output::print_error(
                         &format!(
-                            "Invalid --source value '{source}'. Use: all, server, client, setup, internal"
+                            "Invalid --source value '{source}'. Use: all, server, setup, internal"
                         ),
                         json,
                     );

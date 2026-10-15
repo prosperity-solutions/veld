@@ -1938,8 +1938,7 @@ fn declares_sessions_at(db: &veld_core::db::Db, worktree_id: i64, spec_id: &str)
         return false;
     };
     let source = db.extensions_source();
-    let Some(declare_root) =
-        crate::feedback_server::extensions::resolve_declare_root(db, &wt, source)
+    let Some(declare_root) = crate::http_server::extensions::resolve_declare_root(db, &wt, source)
     else {
         return false;
     };
@@ -2839,9 +2838,8 @@ async fn take_launch_prompt(
 ///
 /// For the two launch-prompt routes, which only the New worktree dialog and the
 /// terminal it opens ever call — from the same origin as the terminal socket, so
-/// the same allowlist. The CSRF header alone is not enough here: a page a veld run
-/// serves reaches this router same-origin through the run's `/__veld__/*` Caddy
-/// route, and could set it.
+/// the same allowlist. The CSRF header alone is not enough here: it only tells
+/// cross-origin from same-origin, and the allowlist is what names a Veld window.
 fn window_origin(headers: &HeaderMap, what: &str) -> Result<(), ApiError> {
     if origin_allowed(headers) {
         return Ok(());
@@ -7765,9 +7763,8 @@ mod tests {
             let sid = session_id();
             let res = post_route(addr, &sid, "reserve", false).await;
             assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
-            // A dev app's page reaches this router same-origin through its run's
-            // `/__veld__/*` route and can set the CSRF header; the origin is what
-            // tells it from a Veld window.
+            // The CSRF header is not enough: the origin is what tells a Veld
+            // window from any other page that managed to send it.
             for route in ["reserve", "launch-prompt/take"] {
                 let res = reqwest::Client::new()
                     .post(format!("http://{addr}/api/pty/sessions/{sid}/{route}"))
@@ -9300,7 +9297,7 @@ mod tests {
             }
 
             backdate(&sid).await;
-            crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
+            crate::http_server::ide::declare_kept_for_test(&client, &[&sid]).await;
             reap_detached(HOUR).await;
             assert!(
                 SESSIONS.lock().await.contains_key(&sid),
@@ -9312,7 +9309,7 @@ mod tests {
             // the reaper rather than the field: a fresh clock the *next* pass still
             // collects would satisfy an assertion on the field and none of the
             // behaviour.
-            crate::feedback_server::ide::forget_client_for_test(&client).await;
+            crate::http_server::ide::forget_client_for_test(&client).await;
             reap_detached(HOUR).await;
             assert!(
                 SESSIONS.lock().await.contains_key(&sid),
@@ -9364,7 +9361,7 @@ mod tests {
             read_control(&mut ws, "ready").await;
             let mut kept = attach(other.clone(), untouched).await;
             read_control(&mut kept, "ready").await;
-            crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
+            crate::http_server::ide::declare_kept_for_test(&client, &[&sid]).await;
 
             let ended = close_sessions_in(&[trashed].into_iter().collect(), "test").await;
             assert_eq!(ended, 1, "only the trashed worktree's session ends");
@@ -9387,7 +9384,7 @@ mod tests {
                 "another worktree's shell is left alone"
             );
 
-            crate::feedback_server::ide::forget_client_for_test(&client).await;
+            crate::http_server::ide::forget_client_for_test(&client).await;
             end_session(&other, "test cleanup").await;
         }
 
@@ -9436,11 +9433,11 @@ mod tests {
             };
 
             backdate(sid.clone()).await;
-            crate::feedback_server::ide::declare_kept_for_test(&client, &[&sid]).await;
+            crate::http_server::ide::declare_kept_for_test(&client, &[&sid]).await;
             // A second window has it too. The first one going away must change
             // nothing: the pane still exists somewhere.
-            crate::feedback_server::ide::declare_kept_for_test(&other, &[&sid]).await;
-            crate::feedback_server::ide::disconnect_for_test(&client).await;
+            crate::http_server::ide::declare_kept_for_test(&other, &[&sid]).await;
+            crate::http_server::ide::disconnect_for_test(&client).await;
             assert!(
                 age(sid.clone()).await.expect("still detached") > ancient / 2,
                 "a session another window still has a pane for must not have its grace restarted"
@@ -9448,7 +9445,7 @@ mod tests {
 
             // Now the last one goes — a closed window, or the socket half of a
             // page reload — and the clock starts here.
-            crate::feedback_server::ide::disconnect_for_test(&other).await;
+            crate::http_server::ide::disconnect_for_test(&other).await;
             assert!(
                 age(sid.clone()).await.expect("still detached") < Duration::from_secs(60),
                 "the last window letting go must start the grace, not inherit a spent one"

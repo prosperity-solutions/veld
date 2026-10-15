@@ -8,8 +8,8 @@
 //! The import is deliberately forgiving: corrupt or missing files are
 //! skipped, the old files are left untouched (they are simply never read
 //! again), and the whole pass runs at most once (guarded by a kv flag).
-//! Logs and feedback threads are not imported — they are ephemeral and
-//! age-pruned anyway.
+//! Logs are not imported — they are ephemeral and age-pruned
+//! anyway.
 
 use std::collections::HashMap;
 use std::path::Path;

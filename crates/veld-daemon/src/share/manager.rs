@@ -185,7 +185,7 @@ struct JoinEntry {
 /// must never wait on it.
 fn publish_share_facts(shares: &HashMap<String, ShareEntry>) {
     let latest = shares.values().map(|entry| entry.expires_at).max();
-    crate::feedback_server::caffeinate::shares_changed(
+    crate::http_server::caffeinate::shares_changed(
         shares.len(),
         latest.and_then(|secs| chrono::DateTime::from_timestamp(secs, 0)),
     );

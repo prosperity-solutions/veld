@@ -2,7 +2,7 @@
 
 This is the canonical reference for how anything Veld shows to a human in a
 browser must look. It exists so that new HTML surfaces (a gateway page, a
-daemon UI, an error page, an overlay) come out branded by default instead of
+daemon UI, an error page) come out branded by default instead of
 falling back to unstyled system-default pages.
 
 **The rule:** any HTML page a Veld binary serves to a browser carries the
@@ -49,10 +49,7 @@ scans the other way, over tracked files: a new page that inlines an icon link
 and never registers itself in that script's list fails the gate. Note what that
 does *not* cover — a new page shipping **no** icon at all, which is what `/`
 did for years, is invisible to a scan for icon links. The checklist at the
-bottom of this file is the only thing standing between you and that one. The
-one deliberate omission
-is the feedback overlay: it is injected into someone else's page and must never
-replace that page's icon.
+bottom of this file is the only thing standing between you and that one.
 
 What the gate cannot see is the geometry: that `website/favicon.svg` is
 `logo.svg`'s two paths translated +8/+8, and that

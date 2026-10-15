@@ -132,12 +132,6 @@ const TOPICS: &[Topic] = &[
         body: include_str!("skills/sharing.md"),
     },
     Topic {
-        name: "feedback",
-        summary: "Get a human to look at your work in the browser, and drain their comments \
-                  one at a time.",
-        body: include_str!("skills/feedback.md"),
-    },
-    Topic {
         name: "ide-extensions",
         summary: "Customize the IDE top bar for a project: status badges, buttons, menus \
                   (`ide.extensions`).",
@@ -286,11 +280,32 @@ fn render_index() -> String {
     s
 }
 
+/// What `veld feedback` and `veld agent skills feedback` answer now (#424).
+///
+/// Both names are still called by skills installed before the removal — the
+/// `veld-launch-feedback-loop` and older `veld-feedback` skills, and older copies
+/// of the `veld` one — which
+/// `npx skills add` froze on the user's machine and this binary cannot update.
+/// An agent following one deserves to learn the feature is gone on purpose, and
+/// how to stop being sent here, rather than a bare "unrecognized subcommand".
+pub(crate) const FEEDBACK_REMOVED: &str = "`veld feedback` and the in-browser feedback overlay were \
+     removed (#424), and there is no replacement yet. If an installed skill sent you here, it \
+     predates that: remove it with `npx skills remove veld-launch-feedback-loop veld-feedback`, \
+     and refresh the `veld` skill with `npx skills add prosperity-solutions/veld`.";
+
 /// A wrong topic name is the one error this command can produce, so it carries
 /// the whole index rather than sending the reader back for it — an agent that
 /// guessed a name is one round-trip from the right one either way, and the list
-/// is fourteen short words.
+/// is thirteen short words.
+#[cfg(test)]
+pub(crate) fn unknown_topic_message_for_test(name: &str) -> String {
+    unknown_topic_message(name)
+}
+
 fn unknown_topic_message(name: &str) -> String {
+    if name == "feedback" {
+        return FEEDBACK_REMOVED.to_owned();
+    }
     let names = TOPICS.iter().map(|t| t.name).collect::<Vec<_>>().join(", ");
     let mut msg = format!("Unknown skill topic `{}`.", output::one_line(name));
     if let Some(near) = closest(name) {
@@ -341,7 +356,7 @@ mod tests {
     fn the_topic_count_matches_what_the_prose_claims() {
         assert_eq!(
             TOPICS.len(),
-            14,
+            13,
             "the number of topics changed. Update the word in AGENTS.md (Agent \
              Skills + the Documentation Checklist row), README.md, \
              skills/veld/SKILL.md, website/index.html and website/llms-full.txt, \
@@ -562,10 +577,10 @@ mod tests {
         shells.sort();
         assert_eq!(
             shells.len(),
-            2,
-            "found {} shipped skill(s) under {}. Two is not arbitrary: README.md \
-             says \"This installs two skills\" and AGENTS.md names both by path, \
-             and neither is tied to this directory by anything else. A third is \
+            1,
+            "found {} shipped skill(s) under {}. One is not arbitrary: README.md \
+             says \"This installs one skill\" and AGENTS.md names it by path, \
+             and neither is tied to this directory by anything else. A second is \
              fine — update those two files and this number.",
             shells.len(),
             root.display()

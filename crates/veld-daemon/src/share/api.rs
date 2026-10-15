@@ -77,8 +77,8 @@ async fn start(
     } else {
         ExposeMode::Peer
     };
-    let run = resolve_run(req.run.clone(), &headers);
-    let project = resolve_project(req.project_root.clone(), &headers);
+    let run = req.run.clone();
+    let project = req.project_root.clone();
     let ResolvedShare {
         manifest,
         relay,
@@ -131,51 +131,6 @@ async fn start(
         public_urls: Vec::new(),
         web_password: None,
     }))
-}
-
-/// The run a share request targets. An explicit run in the body always wins;
-/// without one, fall back to the `X-Veld-Run` header that Caddy injects on
-/// `/__veld__/`-proxied requests — the browser overlay shares the run its
-/// page belongs to without knowing the run's name, even with several runs
-/// active. Direct callers (the CLI) carry no such header and keep the
-/// "only run" resolution downstream.
-fn resolve_run(explicit: Option<String>, headers: &HeaderMap) -> Option<String> {
-    // Trimmed: a run name is an identifier (`validate_run_name` bans whitespace
-    // outright), so surrounding space is noise, never data.
-    explicit.or_else(|| header_value(headers, "x-veld-run").map(|v| v.trim().to_owned()))
-}
-
-/// The project half of the address, resolved the same way: body first, then
-/// the `X-Veld-Project` header Caddy injects alongside `X-Veld-Run`. Without
-/// it the run name is matched against every project, which is ambiguous
-/// whenever two projects run the same name — see [`StartShareRequest::project_root`].
-fn resolve_project(explicit: Option<String>, headers: &HeaderMap) -> Option<String> {
-    // NOT trimmed — unlike the run name, this is a filesystem path compared for
-    // equality downstream, and `Path` normalizes trailing slashes but not
-    // whitespace. Rewriting it would 404 with a message showing the requested
-    // and actual roots as identical. Matches
-    // `feedback_server::project_header`, and the body-supplied `project_root`,
-    // which isn't trimmed either.
-    explicit.or_else(|| header_value(headers, "x-veld-project"))
-}
-
-/// A non-empty header value, read as UTF-8.
-///
-/// Deliberately not `HeaderValue::to_str()`: that rejects every byte >= 0x80, and
-/// `X-Veld-Project` carries a filesystem path, so a project under
-/// `/Users/José/app` yields a valid header `to_str()` refuses to read — which
-/// would silently drop the scope and fall back to machine-wide matching. Run
-/// names are ASCII by `validate_run_name`, but they share this reader.
-fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(name)?;
-    let value = std::str::from_utf8(raw.as_bytes()).ok()?;
-    // Trim to test emptiness, return verbatim. Callers decide whether their
-    // header is an identifier (trim it) or a path (don't) — see `resolve_run`
-    // and `resolve_project`.
-    if value.trim().is_empty() {
-        return None;
-    }
-    Some(value.to_owned())
 }
 
 /// The web path of `start`: mint a share scoped to the `web`-opted nodes,
@@ -667,12 +622,9 @@ fn build_manifest(
         return Err((StatusCode::CONFLICT, {
             use veld_core::state::RunStatus;
             // The remedy has to match the status. "Start it" is wrong for a
-            // run that is already coming up — and that case is reachable
-            // from the overlay's Share button, because Caddy routes and the
-            // injected overlay go live per node as each one comes up, while
-            // `Running` is only set once every node is healthy. A multi-node
-            // project therefore serves a shareable-looking page for the
-            // whole startup window.
+            // run that is already coming up: Caddy routes go live per node as
+            // each one comes up, while `Running` is only set once every node
+            // is healthy.
             //
             // Not `outcome_label()` for the transitional states: its
             // no-end_reason fallback returns "stopping" for ANY non-live
@@ -1214,60 +1166,6 @@ pub(crate) fn hostname_of(url: &str) -> String {
 mod tests {
     use super::*;
     use veld_core::config::{RelayEntry, SecretSource};
-
-    #[test]
-    fn resolve_run_prefers_body_then_caddy_header() {
-        let hdr = |v: &str| {
-            let mut h = HeaderMap::new();
-            h.insert("x-veld-run", v.parse().unwrap());
-            h
-        };
-        // Explicit run always wins, even with a header present.
-        assert_eq!(
-            resolve_run(Some("cli-run".into()), &hdr("page-run")),
-            Some("cli-run".into())
-        );
-        // No explicit run → the Caddy-injected header (trimmed).
-        assert_eq!(
-            resolve_run(None, &hdr("  page-run ")),
-            Some("page-run".into())
-        );
-        // Empty/whitespace header is ignored (falls through to "only run").
-        assert_eq!(resolve_run(None, &hdr("   ")), None);
-        assert_eq!(resolve_run(None, &HeaderMap::new()), None);
-    }
-
-    #[test]
-    fn header_values_survive_non_ascii_project_paths() {
-        // `HeaderValue::to_str()` rejects every byte >= 0x80, and this header
-        // carries a filesystem path — so reading it that way silently dropped
-        // the scope for any project under e.g. /Users/José. Caddy transmits the
-        // raw UTF-8 bytes happily (Go only rejects CTLs), so the daemon must
-        // parse bytes, not visible ASCII.
-        let path = "/Users/José/项目/app";
-        let mut h = HeaderMap::new();
-        h.insert("x-veld-project", path.parse().unwrap());
-        assert!(
-            h.get("x-veld-project").unwrap().to_str().is_err(),
-            "precondition: to_str must reject this, or the test proves nothing"
-        );
-        assert_eq!(resolve_project(None, &h), Some(path.to_owned()));
-    }
-
-    #[test]
-    fn resolve_project_prefers_body_then_caddy_header() {
-        let mut h = HeaderMap::new();
-        h.insert("x-veld-project", " /repos/from-page ".parse().unwrap());
-        assert_eq!(
-            resolve_project(Some("/repos/from-cli".into()), &h),
-            Some("/repos/from-cli".into())
-        );
-        // Verbatim, NOT trimmed: this is a path compared for equality, and
-        // `Path` does not normalize whitespace. Contrast `resolve_run` above,
-        // which does trim because a run name is an identifier.
-        assert_eq!(resolve_project(None, &h), Some(" /repos/from-page ".into()));
-        assert_eq!(resolve_project(None, &HeaderMap::new()), None);
-    }
 
     fn run_info(name: &str) -> veld_core::state::RegistryRunInfo {
         veld_core::state::RegistryRunInfo {

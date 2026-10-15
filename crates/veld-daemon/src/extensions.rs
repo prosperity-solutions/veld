@@ -38,8 +38,8 @@ use serde_json::Value;
 use veld_core::db::ConfigSource;
 use veld_core::ide::{BadgeDisplay, Extension, ExtensionBody, IdeSection, OpenIn, PaneIcon};
 
-use crate::feedback_server::desktop::{ApiError, db_err, err, open_desktop_db};
-use crate::feedback_server::pty::{missing_pane_binaries, worktree_builtins};
+use crate::http_server::desktop::{ApiError, db_err, err, open_desktop_db};
+use crate::http_server::pty::{missing_pane_binaries, worktree_builtins};
 
 /// How long a status command may run before its process group is killed.
 ///
@@ -846,7 +846,7 @@ fn resolve_within(root: &str, path: &str) -> Option<String> {
     // directory — so without this an activation carrying `"file": ""` opened the
     // whole worktree, silently, against a contract that says every mismatch is
     // refused. The UI cannot produce it (`findFilePaths` never yields an empty
-    // path), but this endpoint is reachable from any page a local run serves.
+    // path), but any script on a Veld origin can reach this endpoint.
     if path.is_empty() {
         return None;
     }
@@ -2363,7 +2363,7 @@ mod tests {
         use serde_json::Value;
         use tower::ServiceExt;
 
-        use crate::feedback_server::desktop::routes;
+        use crate::http_server::desktop::routes;
 
         /// Seeds a repo with exactly one worktree, `is_main: false` — the shape
         /// a bare primary clone produces (`parse_worktree_list` consumes
@@ -2385,7 +2385,7 @@ mod tests {
             // that `remove_var` landing mid-request made the handler open a different
             // database and answer 404. Exactly one acquire per test — the mutex is
             // not reentrant.
-            let env = crate::feedback_server::lock_db_env();
+            let env = crate::http_server::lock_db_env();
             let db_dir = tempfile::TempDir::new().expect("tempdir");
             // SAFETY: the guard above is what makes this the only writer.
             unsafe { std::env::set_var("VELD_DB_PATH", db_dir.path().join("t.db")) };

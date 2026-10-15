@@ -336,8 +336,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     id: "switch-view",
     category: "layout",
     title: "Switch IDE / Runs view",
-    // Not ⌘⇧V — the veld feedback overlay claims that chord for its own
-    // toolbar toggle.
     combos: [{ mod: true, shift: true, keys: ["X"] }],
   },
   // ---- run --------------------------------------------------------------
@@ -380,11 +378,9 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "general",
     title: "Command palette",
     description: "Search everything and jump anywhere.",
-    // Used to also have a Ctrl/⌘+Shift+P second accelerator, for reaching it
-    // from a focused terminal on Linux/Windows where Ctrl+K belongs to
-    // readline — removed because it collided with the veld feedback
-    // overlay's own mod+Shift+P binding, and ⌘K already covers every other
-    // case (macOS terminals included, since xterm never claims meta combos).
+    // No second accelerator for a focused terminal on Linux/Windows, where
+    // Ctrl+K belongs to readline: ⌘K covers every other case (macOS terminals
+    // included, since xterm never claims meta combos).
     combos: [{ mod: true, keys: ["K"] }],
   },
   {
@@ -398,8 +394,6 @@ export const SHORTCUTS: ShortcutDef[] = [
     category: "general",
     title: "Toggle focus mode",
     description: "Turn focus mode's notification silencing on or off.",
-    // Not ⌘⇧F — the veld feedback overlay claims that chord for its own
-    // "select an element" mode.
     combos: [{ mod: true, shift: true, keys: ["L"] }],
   },
   {

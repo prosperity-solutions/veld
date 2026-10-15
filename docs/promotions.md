@@ -291,7 +291,7 @@ Veld's — kebab-case admits no `:`, so a Veld id can never be written in namesp
 form (`a_veld_promotion_id_can_never_occupy_a_namespace` fails if that is ever
 loosened). Moving a checkout on disk re-shows that project's live cards once,
 which is the same thing that already happens to its machine-var overrides, runs,
-logs, stats and feedback — all keyed by a raw path. A loud, bounded, self-healing
+logs and stats — all keyed by a raw path. A loud, bounded, self-healing
 failure was preferred to author-chosen global ids, whose cross-repo collisions are
 silent and permanent.
 

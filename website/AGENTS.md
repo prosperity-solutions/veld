@@ -116,8 +116,7 @@ The root `veld.json` serves this directory locally via browser-sync:
 veld orchestrator start website:local --name dev
 ```
 
-This gives an HTTPS URL like `https://website.dev.veld.localhost`. Use the
-feedback overlay to collaborate on design changes with a human reviewer.
+This gives an HTTPS URL like `https://website.dev.veld.localhost`.
 
 ## Production serving
 

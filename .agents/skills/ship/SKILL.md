@@ -497,7 +497,7 @@ Three rules that make it worth the spend rather than theatre:
 - Build, then `rustup update stable` (CI uses floating stable — drift blocks it),
   `cargo clippy --workspace --all-targets`, `cargo fmt --all`, and run the tests
   as you go. For a JS/TS change, run the Biome `lint` + `typecheck`/`test` in the
-  affected surface too (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`)
+  affected surface too (`desktop/`, `crates/veld-daemon/ui`)
   — `just lint` and `just test` cover all of it in one command each.
 - **Leave the worktree clean before you stop.** Building and running tests
   drifts `Cargo.lock`, and experiment scaffolding lands untracked (`.idea/`,
@@ -639,8 +639,7 @@ user-visible capability, decide whether it belongs on `website/index.html`
 diagram) and update it — plus `website/llms-full.txt` — if so. The site should
 stay a current picture of what veld does, not drift behind the CLI. State your
 call either way. When the change is website-facing, prefer serving it locally
-(`veld orchestrator start website:local`) and collaborating through `veld feedback` before
-shipping.
+(`veld orchestrator start website:local`) before shipping.
 
 ### Should this be promoted?
 

@@ -49,7 +49,7 @@ JOB = "publish"
 # The env the step must hand the script. There is no checkout in this job, so
 # `GH_REPO` is what lets gh find the repo at all; `TAG` empty is worse than
 # absent, because `gh release view ""` returns the latest published release.
-REQUIRED_ENV = {"GH_TOKEN", "GH_REPO", "TAG"}
+REQUIRED_ENV = {"GH_TOKEN", "GH_REPO", "TAG", "BUILT_VERSION"}
 
 # Release state is a TSV of name/size/state so an asset can be present-but-wrong
 # — `starter`, or short — which is what a name-only check waves through.
@@ -230,7 +230,7 @@ ARTIFACTS = ["veld-1.2.3-linux-amd64.tar.gz", "veld-desktop-1.2.3-mac-x64.zip",
 STUB_VARS = {"FAIL_FILES", "FAIL_UNTIL", "FAIL_MODE", "FAIL_VIEW", "FAIL_EDIT_UNTIL",
              "EDIT_SILENT", "STAT_FAIL", "FAIL_PROBE_UNTIL", "PROBES", "STATE", "DRAFTF", "GHLOG", "SLEEPLOG",
              "TIMEOUTLOG", "ATTEMPT", "EDITS", "NOTESF", "LATESTF", "CREATEDRAFTF",
-             "TAG", "GH_REPO"}
+             "TAG", "GH_REPO", "BUILT_VERSION"}
 
 
 def publish_step() -> dict:
@@ -309,6 +309,9 @@ def run(script: str, env_overrides: dict[str, str] | None = None,
         env.update({
             "PATH": f"{binw}{os.pathsep}{os.environ['PATH']}",
             "TAG": tag,
+            # The version the artifacts were built as. Matches the tag unless a
+            # scenario overrides it; see `scenario_refused_inputs`.
+            "BUILT_VERSION": tag.removeprefix("v"),
             "GH_REPO": "example/veld",
             "STATE": str(files["state"]), "DRAFTF": str(files["draft"]),
             "GHLOG": str(files["gh"]), "SLEEPLOG": str(files["sleep"]),
@@ -498,6 +501,9 @@ def scenario_refused_inputs(script: str) -> None:
         ("an empty tag", dict(tag=""), "would otherwise read the latest published release"),
         ("no artifacts", dict(artifacts=[]), "an empty release"),
         ("a nested artifacts/ directory", dict(subdir=True), "a re-rooted upload glob"),
+        ("a tag that is not the version the artifacts were built as",
+         dict(env_overrides={"BUILT_VERSION": "1.2.4"}),
+         "a merge landed between plan and release; install.sh would 404"),
     ]
     # Names GitHub or gh would not round-trip. Each uploads fine and then can
     # never be matched back, so the job would spend all five upload rounds and
@@ -586,6 +592,55 @@ def scenario_step_env(step: dict) -> None:
     tag = (step.get("env") or {}).get("TAG", "")
     check("TAG is wired to the release job's tag output",
           "new_release_git_tag" in str(tag), str(tag))
+    built = (step.get("env") or {}).get("BUILT_VERSION", "")
+    check("BUILT_VERSION is wired to the plan job's version, which named the artifacts",
+          "needs.plan.outputs.new_release_version" in str(built), str(built))
+
+
+GUARD_STEP = "Refuse a tag the artifacts were not built as"
+
+
+def scenario_release_tag_guard() -> None:
+    """The `release` job's guard is the only step in either workflow that deletes
+    a tag, so its wiring and its three outcomes are pinned here: a mis-wired
+    `BUILT_VERSION` would otherwise take back every release it ever made."""
+    doc = yaml.safe_load(WORKFLOW.read_text())
+    job = doc["jobs"].get("release") or {}
+    step = next((s for s in job.get("steps") or [] if s.get("name") == GUARD_STEP), None)
+    if step is None:
+        check(f"the release job carries {GUARD_STEP!r}", False, "step missing")
+        return
+    env = step.get("env") or {}
+    check("the guard runs only when semantic-release tagged something",
+          "new_release_git_tag != ''" in str(step.get("if", "")), str(step.get("if")))
+    check("the guard reads this job's tag",
+          "steps.semantic.outputs.new_release_git_tag" in str(env.get("TAG")), str(env.get("TAG")))
+    check("the guard compares against plan's version, which named the artifacts",
+          "needs.plan.outputs.new_release_version" in str(env.get("BUILT_VERSION")),
+          str(env.get("BUILT_VERSION")))
+    check("the release job needs plan, so that version is there to read",
+          "plan" in (job.get("needs") or []), str(job.get("needs")))
+    # And what the script does, against a stub `git` that records its argv.
+    for label, built, want_code, want_delete in (
+        ("a matching tag passes and deletes nothing", "1.2.3", 0, False),
+        ("a mismatched tag is deleted and fails the job", "1.2.4", 1, True),
+        ("an empty plan version fails without deleting anything", "", 1, False),
+    ):
+        with tempfile.TemporaryDirectory() as tmp:
+            bindir, log = Path(tmp) / "bin", Path(tmp) / "git.log"
+            bindir.mkdir()
+            stub = bindir / "git"
+            stub.write_text(f'#!/bin/sh\necho "$*" >> "{log}"\n')
+            stub.chmod(0o755)
+            proc = subprocess.run(
+                [BASH, "-e", "-c", step["run"]],
+                env={"PATH": f"{bindir}{os.pathsep}{os.environ['PATH']}",
+                     "TAG": "v1.2.3", "BUILT_VERSION": built},
+                capture_output=True, text=True)
+            calls = log.read_text() if log.exists() else ""
+            deleted = "push origin --delete v1.2.3" in calls
+            check(label, proc.returncode == want_code and deleted == want_delete,
+                  f"code={proc.returncode} git={calls.strip()!r}")
 
 
 def selftest(script: str) -> None:
@@ -645,6 +700,7 @@ def main() -> int:
     scenario_every_github_call_is_capped(script)
     scenario_probe_retries(script)
     scenario_step_env(step)
+    scenario_release_tag_guard()
 
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s):")

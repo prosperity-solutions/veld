@@ -57,7 +57,7 @@ pub async fn install(
     // tag. The app passes an explicit one when it was offered a release the CLI has
     // not caught up to yet — otherwise it would be reinstalled at the CLI's version
     // and offered the newer one again on every launch.
-    let version = version.unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let version = version.unwrap_or_else(|| veld_core::VERSION.to_string());
 
     // The bundle the app is running from, not wherever an installer would guess.
     // Passed as `process.execPath`, which is
@@ -581,7 +581,7 @@ fn can_hand_off_full_update(exe: &Path) -> bool {
 /// known) and that veld does not update it. It used to say "Veld Desktop is not
 /// installed." on a Linux box with a `.deb` installed, which is simply false.
 pub async fn status(json: bool) -> i32 {
-    let cli_version = env!("CARGO_PKG_VERSION");
+    let cli_version = veld_core::VERSION;
 
     if std::env::consts::OS != "macos" {
         return status_unmanaged(json, cli_version);

@@ -87,8 +87,6 @@ The same applies to anything else that reads the file as strict JSON — `veld o
 | `url_template`      | string | No       | URL template for services (see [URL Templates])   |
 | `presets`           | object | No       | Named shortcuts for node:variant selections (see [Presets](#presets)) |
 | `default_preset`    | string | No       | Preset used when `veld orchestrator start` is given nothing (see [`default_preset`](#default_preset)) |
-| `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
-| `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
 | `vars`              | object | No       | One definition point per value, referenced as `${vars.<name>}` (see [`vars`](#vars)). A var may declare itself [machine-overridable](#machine-overridable-vars) |
@@ -96,8 +94,6 @@ The same applies to anything else that reads the file as strict JSON — `veld o
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
-
-[Client-Side Log Levels]: #client-side-log-levels
 
 [URL Templates]: #url-templates
 
@@ -154,70 +150,6 @@ Defines how Veld generates HTTPS URLs for your services. See the full [URL Templ
 ```
 
 **Default:** `{service}.{run}.{project}.localhost`
-
-### `client_log_levels`
-
-Controls which browser console levels Veld captures from `long_running` nodes. Veld injects a small script into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`. Captured logs are sent to the Veld daemon and appear in `veld orchestrator logs` and the management UI alongside server logs.
-
-```json
-"client_log_levels": ["log", "warn", "error"]
-```
-
-**Valid values:** `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`
-
-**Default:** `["log", "warn", "error"]`
-
-Unhandled exceptions and promise rejections are always captured regardless of this setting.
-
-The setting cascades: variant-level overrides node-level overrides project-level. Set it to an empty array to capture only unhandled exceptions.
-
-```json
-{
-  "client_log_levels": ["warn", "error"],
-  "nodes": {
-    "frontend": {
-      "client_log_levels": ["log", "warn", "error", "info"],
-      "variants": {
-        "local": {
-          "client_log_levels": ["debug", "log", "warn", "error", "info"]
-        }
-      }
-    }
-  }
-}
-```
-
-### `features`
-
-Controls which Veld capabilities are injected into `long_running` nodes' HTML responses. Each feature defaults to `true` (enabled). Set a feature to `false` to disable it. The same override hierarchy applies: variant > node > project.
-
-| Feature             | Type    | Default | Description |
-|---------------------|---------|---------|-------------|
-| `feedback_overlay`  | boolean | `true`  | Inject the feedback overlay toolbar (FAB, screenshot, comments) |
-| `client_logs`       | boolean | `true`  | Inject the client-side log collector |
-| `inject`            | boolean | `true`  | Auto-inject bootstrap scripts into HTML responses. When `false`, `/__veld__/*` routes are still available for manual `<script>` tags. |
-
-```json
-{
-  "features": {
-    "feedback_overlay": false
-  },
-  "nodes": {
-    "api": {
-      "features": { "client_logs": false },
-      "variants": {
-        "local": {
-          "features": { "feedback_overlay": true }
-        }
-      }
-    }
-  }
-}
-```
-
-In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
-
-**The machine can override all of this.** The `feedback.suppressOverlay` Veld setting (`veld self settings set feedback.suppressOverlay true`) forces the feedback overlay off on every routed site, for every project and node, even one whose config asks for it back on — for setups that use Veld purely as an orchestrator and don't collect feedback. It applies to routed sites you start after changing it, and leaves the client-log collector and the `/__veld__/*` routes alone.
 
 ### `proxy`
 
@@ -451,28 +383,6 @@ When set to `true`, the node is excluded from `veld orchestrator nodes` output. 
 }
 ```
 
-### `client_log_levels` (node-level)
-
-Overrides the project-level `client_log_levels` for all variants of this node. See [Client-Side Log Levels](#client-side-log-levels) for details.
-
-```json
-"frontend": {
-  "client_log_levels": ["log", "warn", "error", "info"],
-  "variants": { ... }
-}
-```
-
-### `features` (node-level)
-
-Overrides the project-level `features` for all variants of this node. See [Features](#features) for details.
-
-```json
-"api": {
-  "features": { "feedback_overlay": false },
-  "variants": { ... }
-}
-```
-
 ### `proxy` (node-level)
 
 Overrides the project-level `proxy` for all variants of this node. See [`proxy`](#proxy) for the field reference and merge semantics.
@@ -522,8 +432,6 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `url_template`      | string           | No       | `long_running` | URL template override for this variant                |
 | `on_stop`           | object           | No       | All            | Teardown command (`{ "argv": … }` / `{ "shell": … }`) run when the run ends — a stop, a crash, a failed start, or a replacement |
 | `skip_if`           | object           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
-| `client_log_levels` | array of strings | No       | `long_running` | Browser log levels override for this variant          |
-| `features`          | object           | No       | `long_running` | Feature toggles override for this variant             |
 | `proxy`             | object           | No       | `long_running` | Reverse-proxy header rules override for this variant (see [Proxy](#proxy)) |
 | `share`             | object           | No       | any (inert on `command`) | Sharing opt-in for this variant (see [Sharing](#sharing)) |
 
@@ -1418,8 +1326,8 @@ segments. Dotfiles are not matched by a bare `*`. Matches load in sorted order, 
 errors are deterministic.
 
 `vars`, `presets`, `env`, `setup`, `teardown`, `hooks`, and `ide` may appear in any
-file. Other project-level settings (`url_template`, `default_preset`, `features`,
-`proxy`, `sharing`, `client_log_levels`) are read from the root file. So a preset
+file. Other project-level settings (`url_template`, `default_preset`,
+`proxy`, `sharing`) are read from the root file. So a preset
 may be declared in any file, but which one is the default is decided in one
 place.
 
@@ -1464,18 +1372,18 @@ written in that node, and `rg API_URL` still finds the line that sets it. There 
 from somewhere else.
 
 Hoistable: `type`, `argv`/`shell`, `cwd`, `env`, `ports`, `files`, `depends_on`,
-`probes`, `outputs`, `on_stop`, `share`, `features`, `proxy`,
-`client_log_levels`, `url_template`.
+`probes`, `outputs`, `on_stop`, `share`, `proxy`,
+`url_template`.
 
 ### The merge table
 
-There are **three** distinct strategies, plus `proxy`'s pre-existing one. They are
+There are **two** distinct strategies — per key and wholesale — plus `proxy`'s
+pre-existing one. They are
 deliberately not unified.
 
 | Field | Node → variant | How a variant removes it |
 |---|---|---|
 | `env`, `ports`, `depends_on`, `files` (maps) | **Additive per key**; the variant wins on collision | `"KEY": null`, or `"ports": null` for every port at once |
-| `features` | Per field; the variant wins field by field | — |
 | `probes.readiness`, `probes.liveness` | **Replace the whole probe object** | `"liveness": null` |
 | `share` | Replace wholesale | `"share": null` |
 | `outputs` | Replace wholesale | `"outputs": null` |
@@ -1486,8 +1394,7 @@ deliberately not unified.
 
 Two of these are worth the words:
 
-- **`probes` replaces per probe** — a deliberate exception to the per-field
-  pattern `features` uses. A probe is a tagged union, so field-by-field merging
+- **`probes` replaces per probe**, not field by field. A probe is a tagged union, so field-by-field merging
   would let a variant switch `type: "http"` to `type: "command"` and silently
   inherit a stale `path`, producing a probe that checks the wrong thing forever.
 - **`share` replaces wholesale** — sharing is a consent decision, and a
@@ -2321,7 +2228,7 @@ The rules around it, each of which exists to stop a specific mistake:
 | Permission | Default | Why |
 |---|---|---|
 | `fullscreen`, `pointer-lock` | **allow** | Every browser grants these on a user gesture without asking, and both are reversible with Escape. Prompting would make a pane worse than the browser it embeds. **`keyboard-lock` is deliberately not here** — capturing Escape is what it does, so the justification does not extend to it |
-| `display-capture` | **allow at an origin veld serves**, otherwise ask | A pane only ever captures *its own frame*, which is what `preferCurrentTab` asks for — and it is what makes `veld feedback` screenshots work inside a pane. At any other origin it prompts |
+| `display-capture` | **allow at an origin veld serves**, otherwise ask | A pane only ever captures *its own frame*, which is what `preferCurrentTab` asks for — so a page at an origin veld serves can screenshot itself inside a pane. At any other origin it prompts |
 | everything else | **ask** | |
 
 Nothing else is granted behind your back. Two permissions — sanitized clipboard

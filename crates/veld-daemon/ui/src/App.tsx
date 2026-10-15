@@ -2046,8 +2046,7 @@ function AppInner(props: {
   // Pushed from here because this is what knows both halves: the rules are the
   // selected worktree's `ide.permissions`, and the trusted origins are the URLs
   // veld itself serves for its run — the only origins a pane may capture its own
-  // contents at without asking, which is what makes `veld feedback` screenshots
-  // work inside a pane. Re-sent whenever either changes; a no-op in the browser
+  // contents at without asking. Re-sent whenever either changes; a no-op in the browser
   // build, which has no panes to govern.
   const permissionRules = worktree?.ide.permissions ?? [];
   /**
@@ -3523,9 +3522,8 @@ function AppInner(props: {
   //     claims meta combos), but on Linux/Windows the palette has no chord
   //     that reaches it from inside a focused terminal — `mod` there is
   //     Ctrl, and Ctrl+K belongs to the shell. Accepted trade-off: it used to
-  //     have a Ctrl/⌘+Shift+P second accelerator for exactly this gap, removed
-  //     because it collided with the veld feedback overlay's own binding and
-  //     ⌘K already covers every other case.
+  //     have a Ctrl/⌘+Shift+P second accelerator for exactly this gap; ⌘K
+  //     covers every other case.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
@@ -3701,13 +3699,6 @@ function AppInner(props: {
         // Focus mode is a plain settings toggle with nothing worktree- or
         // view-specific about it, so it carries no `chromeless`/`mode` guard —
         // it means the same thing everywhere.
-        // **⌘⇧L, not ⌘⇧F.** The veld feedback overlay's own keydown listener
-        // (`feedback-overlay/keyboard.ts`) binds mod+Shift+F itself (its
-        // "select an element" mode) on a **capture-phase** document listener,
-        // which always runs before this bubble-phase one and neither side
-        // calls `stopPropagation` — the overlay's chord wins outright, by
-        // design (the overlay keeps its own shortcuts), so this one has to
-        // live somewhere else.
         if (e.key === "l" || e.key === "L") {
           e.preventDefault();
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
@@ -3792,8 +3783,6 @@ function AppInner(props: {
         // Switching view is the one worktree-scoped chord that must keep
         // working from *both* views — that is its whole job — so it is
         // guarded on `chromeless` alone, never on `mode`.
-        // **⌘⇧X, not ⌘⇧V** — the feedback overlay claims mod+Shift+V for its
-        // own toolbar toggle, the same collision as ⌘⇧F above.
         if (e.key === "x" || e.key === "X") {
           e.preventDefault();
           if (chromeless) return;

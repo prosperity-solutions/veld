@@ -141,7 +141,7 @@ impl LogWriter {
         Ok(())
     }
 
-    /// Write a line with an explicit timestamp (client logs carry their own).
+    /// Write a line with an explicit timestamp.
     pub fn write_with_ts(&self, ts: chrono::DateTime<Utc>, line: &str) -> Result<(), LogError> {
         let run_id = self.run_id.map(|id| id.to_string());
         self.db.append_log(

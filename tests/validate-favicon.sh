@@ -22,9 +22,6 @@
 # and its built single-file bundle is checked too whenever one exists — Vite
 # copies the tag through untouched today, and this is what would notice if a
 # future Vite stopped doing that.
-# Deliberately out of scope: the feedback overlay (it is injected into someone
-# else's page and must never touch that page's icon) and
-# crates/veld-daemon/frontend/dev/index.html (a dev harness, never served).
 #
 # The Desktop waiting screen is listed even though an Electron BrowserWindow
 # renders no page favicon at all: the copy is inert today, and it is here so the

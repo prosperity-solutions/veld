@@ -100,7 +100,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn queries_answer_with_the_engines_own_messages() {
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
         // SAFETY: lock_db_env serialises every writer of these variables.
         unsafe { std::env::set_var("VELD_DB_PATH", dir.path().join("t.db")) };

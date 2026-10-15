@@ -2,9 +2,8 @@
 //!
 //! One database file per user (default `<data_dir>/veld/veld.db`, override
 //! with `VELD_DB_PATH`) holds everything that used to live in scattered JSON
-//! files: run state, the global project registry, service logs, feedback
-//! threads, relay auth tokens, and small key/value state (hints, update/GC
-//! stamps).
+//! files: run state, the global project registry, service logs, relay auth
+//! tokens, and small key/value state (hints, update/GC stamps).
 //!
 //! Concurrency: the database runs in WAL mode with a busy timeout, so the
 //! CLI, the daemon, and detached log-writer processes can read and write
@@ -17,7 +16,6 @@
 
 pub mod backup;
 pub mod engine_actions;
-pub(crate) mod feedback;
 mod handoffs;
 mod import;
 mod kv;
@@ -1240,6 +1238,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "engine-actions",
         apply: migrate_v19_engine_actions,
     },
+    Migration {
+        version: 20,
+        name: "drop-feedback",
+        apply: migrate_v20_drop_feedback,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2088,6 +2091,25 @@ fn migrate_v19_engine_actions(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// The in-browser review overlay is gone (#424): its four tables, its one setting
+/// and the browser-console log lines its collector wrote go with it — those would
+/// otherwise read as server output until they age out, with nothing left to
+/// label them. v1 stays as written (migrations are history), so every database
+/// reaching this step has the tables; `IF EXISTS` only keeps a hand-repaired one
+/// from failing the whole open.
+fn migrate_v20_drop_feedback(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        DROP TABLE IF EXISTS feedback_threads;
+        DROP TABLE IF EXISTS feedback_events;
+        DROP TABLE IF EXISTS feedback_sessions;
+        DROP TABLE IF EXISTS feedback_screenshots;
+        DELETE FROM settings WHERE key = 'feedback.suppressOverlay';
+        DELETE FROM log_lines WHERE stream = 'client';
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2858,6 +2880,60 @@ mod tests {
         .unwrap();
         let wts = db.sync_worktrees(root, &[main, x]).unwrap();
         assert!(wts.iter().all(|w| w.adopted), "{wts:?}");
+    }
+
+    /// v20 against a real v19 database holding everything the overlay left
+    /// behind: its tables (with a screenshot), its setting, and a client log line.
+    /// Everything else — another setting, a server log line — survives, and a
+    /// second open leaves it all as it was.
+    #[test]
+    fn v19_v20_upgrade_drops_the_overlay_and_nothing_else() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            for m in MIGRATIONS.iter().take_while(|m| m.version <= 19) {
+                (m.apply)(&conn).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 19).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO feedback_threads (project_root, run_name, id, payload, created_at, updated_at)
+                  VALUES ('/p', 'r', 't1', '{}', 'x', 'x');
+                INSERT INTO feedback_screenshots (project_root, run_name, filename, data, created_at)
+                  VALUES ('/p', 'r', 's.png', x'00', 'x');
+                INSERT INTO settings (scope, key, value, updated_at)
+                  VALUES ('global', 'feedback.suppressOverlay', 'true', 'x'),
+                         ('global', 'terminal.fontSize', '14', 'x');
+                INSERT INTO log_lines (project_root, run_name, stream, ts, line)
+                  VALUES ('/p', 'r', 'client', 'x', 'console'),
+                         ('/p', 'r', 'server', 'x', 'server');
+                "#,
+            )
+            .unwrap();
+        }
+
+        for _ in 0..2 {
+            let db = Db::open_at(&path).unwrap();
+            assert_eq!(db.schema_version().unwrap(), 20);
+        }
+        let conn = Connection::open(&path).unwrap();
+        let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            count("SELECT COUNT(*) FROM sqlite_master WHERE name LIKE 'feedback_%'"),
+            0
+        );
+        assert_eq!(
+            count("SELECT COUNT(*) FROM settings WHERE key LIKE 'feedback.%'"),
+            0
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM settings"), 1);
+        assert_eq!(
+            count("SELECT COUNT(*) FROM log_lines WHERE stream = 'client'"),
+            0
+        );
+        assert_eq!(count("SELECT COUNT(*) FROM log_lines"), 1);
     }
 
     /// v14 against a real v13 database holding a node row from before per-port

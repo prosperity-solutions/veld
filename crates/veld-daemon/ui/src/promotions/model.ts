@@ -218,7 +218,7 @@ const U64 = 0xffffffffffffffffn;
  * data is polled by every window and forbidden from spawning subprocesses. So:
  * the root path, which the client already has. Moving a checkout re-shows that
  * project's live cards once — the same thing that already happens to its machine
- * var overrides, runs, logs, stats and feedback, all keyed by a raw path. That
+ * var overrides, runs, logs and stats, all keyed by a raw path. That
  * failure is loud, bounded by the live-item cap, and self-healing; the
  * alternative of author-chosen global ids fails the other way, silently
  * suppressing one repo's card because an unrelated repo shipped the same slug

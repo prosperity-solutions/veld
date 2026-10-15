@@ -9,7 +9,7 @@ const RUNNING_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 
 /// Print version information for all Veld binaries.
 pub async fn print_version() {
-    let cli_version = env!("CARGO_PKG_VERSION");
+    let cli_version = veld_core::VERSION;
 
     let daemon_version = find_and_query_version("veld-daemon");
 
@@ -187,7 +187,7 @@ enum HelperVersionSource {
 /// names which one was read, because "veld-helper is v16.74.0" with no source
 /// left a user unable to tell a stale file from a stale process.
 pub async fn check_version_mismatch() -> Result<(), String> {
-    let cli_version = env!("CARGO_PKG_VERSION");
+    let cli_version = veld_core::VERSION;
     let mut mismatches: Vec<String> = Vec::new();
 
     // The running helper is asked only in privileged mode: that is where the

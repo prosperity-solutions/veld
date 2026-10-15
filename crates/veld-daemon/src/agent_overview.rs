@@ -183,7 +183,7 @@ pub(crate) fn overview(live: HashSet<String>) -> Result<Overview, String> {
         })
         .collect();
     Ok(Overview {
-        version: env!("CARGO_PKG_VERSION").to_owned(),
+        version: veld_core::VERSION.to_owned(),
         started_at: STARTED_AT.to_rfc3339_opts(SecondsFormat::Secs, true),
         runs,
         agents,

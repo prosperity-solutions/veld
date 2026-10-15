@@ -37,7 +37,6 @@ fn source_name(s: SourceFilter) -> &'static str {
     match s {
         SourceFilter::All => "all",
         SourceFilter::Server => "server",
-        SourceFilter::Client => "client",
         SourceFilter::Setup => "setup",
         SourceFilter::Internal => "internal",
     }
@@ -205,10 +204,6 @@ fn to_row(line: &LogLine) -> LogRow {
 /// `logging::format_ts`. The `--json` path never comes through here.
 fn format_row(row: &LogRow, tz: LogTimeZone) -> String {
     let label = match (&row.node, row.stream.as_str()) {
-        (Some(node), "client") => output::cyan(&format!(
-            "{node}:{}:client",
-            row.variant.as_deref().unwrap_or("?")
-        )),
         (Some(node), _) => {
             output::cyan(&format!("{node}:{}", row.variant.as_deref().unwrap_or("?")))
         }

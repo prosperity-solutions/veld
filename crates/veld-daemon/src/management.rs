@@ -78,7 +78,7 @@ pub fn routes() -> Router {
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": veld_core::VERSION,
         // The database this daemon's engine drives. A CLI built against a
         // different one refuses to use this daemon rather than start and stop
         // runs it cannot see (#306's class of bug: a cargo-built CLI on the dev
@@ -281,13 +281,13 @@ fn endpoint_infos(ns: &NodeState) -> Vec<EndpointInfo> {
 /// `None` if the project has no readable config — the dashboard then simply
 /// shows no actions.
 ///
-/// Read through the stat-validated [`config_cache`](crate::feedback_server::config_cache)
+/// Read through the stat-validated [`config_cache`](crate::http_server::config_cache)
 /// rather than parsed fresh: this runs for every registry entry on every poll,
 /// and a fresh parse is an include-glob walk, a JSONC strip, a hash and a serde
 /// pass per project. Display-only — see [`load_project_config_fresh`] for the
 /// caller that acts on the result.
 fn load_project_config(project_root: &std::path::Path) -> Option<config::VeldConfig> {
-    crate::feedback_server::config_cache::parse_config(&config::root_config_in(project_root)?)
+    crate::http_server::config_cache::parse_config(&config::root_config_in(project_root)?)
 }
 
 /// [`load_project_config`] parsed fresh, for the one path that *acts* on the
@@ -961,7 +961,7 @@ struct LogQuery {
     #[serde(default = "default_lines")]
     lines: usize,
     node: Option<String>,
-    /// Filter by source: "all" (default), "server" (node output), "client",
+    /// Filter by source: "all" (default), "server" (node output),
     /// "setup" (project setup/teardown steps, alias "teardown"), or "internal"
     /// (alias "veld"). Mirrors `veld orchestrator logs --source`.
     #[serde(default = "default_source")]
@@ -1084,7 +1084,6 @@ fn get_logs_blocking(
 
     let lines_limit = q.lines.clamp(1, 5000);
     let include_server = q.source == "all" || q.source == "server";
-    let include_client = q.source == "all" || q.source == "client";
     let include_internal = q.source == "all" || q.source == "internal" || q.source == "veld";
     // Project setup/teardown steps: run-level rows that carry a pseudo-node
     // (`setup`/`teardown`) rather than a real one, so they are not reachable
@@ -1177,15 +1176,6 @@ fn get_logs_blocking(
                 variant: ns.variant.clone(),
                 source: "server".to_owned(),
                 lines: tail(Some(&ns.node_name), Some(&ns.variant), LogStream::Server),
-            });
-        }
-
-        if include_client {
-            nodes.push(NodeLogs {
-                node: ns.node_name.clone(),
-                variant: ns.variant.clone(),
-                source: "client".to_owned(),
-                lines: tail(Some(&ns.node_name), Some(&ns.variant), LogStream::Client),
             });
         }
     }

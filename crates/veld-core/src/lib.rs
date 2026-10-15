@@ -1,3 +1,8 @@
+/// The version every veld binary reports: the newer of `Cargo.toml`'s version and
+/// the newest release tag the build saw. See `build.rs` for why it is not simply
+/// `CARGO_PKG_VERSION`.
+pub const VERSION: &str = env!("VELD_VERSION");
+
 pub mod agent;
 pub mod config;
 pub use uuid;
@@ -5,7 +10,6 @@ pub mod console;
 pub mod db;
 pub mod desktop_pref;
 pub mod engine_lock;
-pub mod feedback;
 pub mod files;
 pub mod graph;
 pub mod health;
@@ -24,6 +28,8 @@ pub mod port;
 pub mod presets;
 pub mod process;
 pub mod project_id;
+#[doc(hidden)]
+pub mod release_version;
 pub mod sensitive;
 pub mod setup;
 pub mod share;

@@ -158,7 +158,6 @@ def selftest(binary: str) -> int:
         "`veld update --wait-pid` is what the app spawns",
         "`veld agent-state` from hooks written before the update",
         "the pre-#423 `veld start` printed this",
-        "`veld feedback next`",
         "`veld orchestrator runs list`",
         "`veld self settings get terminal.shell`",
         '"$VELD" orc start web:local',

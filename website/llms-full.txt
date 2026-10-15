@@ -164,7 +164,7 @@ veld orchestrator stop --name dev
 
 ## CLI Reference
 
-Every command is `veld <part> <verb>`. There are five parts: `orchestrator` (alias `orc`) runs environments, `ide` drives the Veld window, `agent` is for coding agents, `network` shares environments, and `self` looks after veld itself. `veld feedback` stays at the top level. Bare `veld` prints an overview of what is up and running, `veld --help` lists the parts, and `veld --help-all` lists every command. A retired name (the old top-level start, say) prints that it moved, for example: that is veld orchestrator start now. It exits 2.
+Every command is `veld <part> <verb>`. There are five parts: `orchestrator` (alias `orc`) runs environments, `ide` drives the Veld window, `agent` is for coding agents, `network` shares environments, and `self` looks after veld itself. Bare `veld` prints an overview of what is up and running, `veld --help` lists the parts, and `veld --help-all` lists every command. A retired name (the old top-level start, say) prints that it moved, for example: that is veld orchestrator start now. It exits 2.
 
 | Command | Description |
 |---------|-------------|
@@ -193,7 +193,7 @@ Every command is `veld <part> <verb>`. There are five parts: `orchestrator` (ali
 | `veld ide worktree new --branch <B> [--prompt <TEXT>\|--prompt-file <PATH\|->] --name <TITLE> [--agent <PANE>] [--group <G>] [--from-here] [--json]` | Hand a task off to a new worktree of the project the cwd is in, titled `--name` (required, at most 18 columns so it fits the sidebar). With a prompt it lands in the IDE rail's "Waiting for you" section (or the existing group named by `--group`), marked as not started, and the first window that opens it starts an agent pane (`--agent`, else the user's usual one) with the prompt as its first message; the human takes it from there and nothing reports back. An existing branch, unknown group (exit 4) or undeclared agent (exit 5) is refused before anything is created; exit 3 outside a worktree Veld knows; exit 6 means no answer yet — it may still be created, do not retry. `veld agent skills ide` documents it |
 | `veld ide worktree name <TITLE> [--json]` | Retitle the worktree this runs in (at most 18 columns) |
 | `veld ide worktree groups [--json]` | The groups `veld ide worktree new --group` can file into |
-| `veld agent skills [TOPIC] [--json]` | Veld's own agent documentation, carried by the binary. No topic lists the fourteen; a topic prints it. Works with no project, no config and no daemon |
+| `veld agent skills [TOPIC] [--json]` | Veld's own agent documentation, carried by the binary. No topic lists the thirteen; a topic prints it. Works with no project, no config and no daemon |
 | `veld network share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld network join` command). `--web`: publish via the configured gateway and print public URLs (password-protected by default) |
 | `veld network join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved). `--no-remember`: don't cache a relay auth token entered at the prompt |
 | `veld network list [--json]` | List active shares, joins, and pending join requests; each live tunnel shows its transport (`direct`, or `relayed via <relay>` + RTT) |
@@ -210,8 +210,6 @@ Every command is `veld <part> <verb>`. There are five parts: `orchestrator` (ali
 | `veld self backup list [--dir D] [--json]` | Every copy of veld's own state database: when it was taken, its schema version, its size, and — checked, not assumed — whether it can actually be restored. Warns above the table when nothing has been written for two intervals (`overdue` in `--json`). Works when the database itself will not open |
 | `veld self backup now [--dir D] [--json]` | Take a copy immediately, outside the daemon's schedule. Retention still applies |
 | `veld self backup restore [PATH] [--dir D] [--force] [-y] [--json]` | Put a copy back. With no `PATH`, the newest **usable** one rather than simply the newest file. The database being replaced is renamed, never deleted. Refuses while the daemon is running unless `--force` |
-| `veld feedback threads [--name <n>]` | List this run's feedback threads |
-| `veld feedback next [--wait] [--timeout <s>] [--name <n>] [--json]` | The next item to work on (agent-facing, no cursor). `--wait` blocks up to `--timeout` (240s) and then returns `result: "timeout"` — call it again; `"ended"` means the reviewer clicked Done |
 
 Most commands take `--json` for structured output, making veld scriptable and CI/agent-friendly. The exceptions are the ones with nothing to serialise (`graph`, `init`, `gc`, `ui`, `version`, `uninstall`, `open-url`); `veld self update --json` needs `--status` alongside it.
 
@@ -227,11 +225,11 @@ Three binaries work together:
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
-All CLI/daemon state (run state, project registry, service logs, feedback threads and screenshots, relay auth tokens) lives in one SQLite database at `<data_dir>/veld/veld.db` (override with `VELD_DB_PATH`; `0600`, WAL mode — concurrent access without file locking). The schema is versioned and migrates forward automatically on upgrade, so a CLI update never stops running environments because the data shape changed.
+All CLI/daemon state (run state, project registry, service logs, relay auth tokens) lives in one SQLite database at `<data_dir>/veld/veld.db` (override with `VELD_DB_PATH`; `0600`, WAL mode — concurrent access without file locking). The schema is versioned and migrates forward automatically on upgrade, so a CLI update never stops running environments because the data shape changed.
 
-Because all of that is one file, the daemon copies it. Every `backup.intervalMinutes` (60 by default) it writes a compact copy into `<data_dir>/veld-backups` — a **sibling** of the data directory rather than a child, so removing veld's own folder does not take the copies with it — keeping `backup.keep` recent ones (12) plus one per day for `backup.keepDaily` days (14). `backup.dir` points them anywhere else, which is the only honest answer to off-disk: no local default survives the disk itself failing. A copy is a real `veld.db` at the current schema, so restoring is a file move rather than an import, and it omits the tables that make the live file large — log lines, resource samples, feedback screenshots, all of which the housekeeping pass already prunes on age — which is why a copy is a few megabytes against a live file that can reach hundreds. It is taken inside a single deferred read transaction rather than with `cp`, since a plain copy of a live SQLite file is not guaranteed consistent and can produce exactly the kind of unopenable file this exists to prevent; each finished copy is then re-opened and its row counts re-counted, because a backup that opens and is empty is the failure mode that actually happened. `veld self backup list` lists what is there and whether each copy can actually be restored — not the same question, since the newest file can be the one that copied the damage — and `veld self backup restore` puts the newest restorable one back, checked with SQLite's full integrity check rather than the cheap one the listing uses, and renames the database it replaced rather than deleting it, because that file is the only evidence of what went wrong. Retention never deletes a copy veld cannot read, for the same reason: a damaged header may still be recoverable. All of it works when the database itself will not open, which is the only day it matters; `veld self doctor` reports the newest usable copy and its age beside its database check. Retention only ever deletes files veld wrote itself and veld never changes the folder's own permissions, so it is safe to share. Each copy carries everything the database does, including relay auth tokens: veld writes one readable only by its owner, warns when the filesystem cannot express that (FAT, a network share), and `veld self uninstall` removes the *default* backup folder for the same reason it removes the database — a `backup.dir` pointed somewhere else is the user's own folder and is left alone.
+Because all of that is one file, the daemon copies it. Every `backup.intervalMinutes` (60 by default) it writes a compact copy into `<data_dir>/veld-backups` — a **sibling** of the data directory rather than a child, so removing veld's own folder does not take the copies with it — keeping `backup.keep` recent ones (12) plus one per day for `backup.keepDaily` days (14). `backup.dir` points them anywhere else, which is the only honest answer to off-disk: no local default survives the disk itself failing. A copy is a real `veld.db` at the current schema, so restoring is a file move rather than an import, and it omits the tables that make the live file large — log lines and resource samples, both of which the housekeeping pass already prunes on age — which is why a copy is a few megabytes against a live file that can reach hundreds. It is taken inside a single deferred read transaction rather than with `cp`, since a plain copy of a live SQLite file is not guaranteed consistent and can produce exactly the kind of unopenable file this exists to prevent; each finished copy is then re-opened and its row counts re-counted, because a backup that opens and is empty is the failure mode that actually happened. `veld self backup list` lists what is there and whether each copy can actually be restored — not the same question, since the newest file can be the one that copied the damage — and `veld self backup restore` puts the newest restorable one back, checked with SQLite's full integrity check rather than the cheap one the listing uses, and renames the database it replaced rather than deleting it, because that file is the only evidence of what went wrong. Retention never deletes a copy veld cannot read, for the same reason: a damaged header may still be recoverable. All of it works when the database itself will not open, which is the only day it matters; `veld self doctor` reports the newest usable copy and its age beside its database check. Retention only ever deletes files veld wrote itself and veld never changes the folder's own permissions, so it is safe to share. Each copy carries everything the database does, including relay auth tokens: veld writes one readable only by its owner, warns when the filesystem cannot express that (FAT, a network share), and `veld self uninstall` removes the *default* backup folder for the same reason it removes the database — a `backup.dir` pointed somewhere else is the user's own folder and is left alone.
 
-Backing the file up is only half of it, because a damaged SQLite file does not announce itself: most of it keeps working, since only the statements that touch the damaged page fail. That is not hypothetical — one page of one table went bad on a maintainer's machine, the daemon logged the same `database disk image is malformed` 440 times over 17 hours, no copy was written in all of it, and the only visible symptom was a single project labelled `unavailable` in the IDE. Opening the file is no test either; it opened fine the whole time, which is why `veld self doctor` reported `Database OK`. So the daemon asks instead of waiting to trip over it: SQLite's own `quick_check` against the live database at startup and then hourly (every five minutes while a fault is recorded), which finds damage in a table nothing happens to be reading, and errors that other parts of the daemon hit are folded in so the first symptom of a fault a user *does* touch is recorded immediately. Backup health is judged by whether attempts are succeeding rather than by how old the newest file is — every attempt records its outcome including the one that cannot open the database at all, the arm whose silence hid that incident — so a broken schedule surfaces within an interval instead of after half a day. The IDE carries an undismissable banner naming the fault, what is at risk and how old the newest usable copy is, with a one-click restore beside it; a system notification is raised the first time, claimed daemon-side so several open windows produce one banner between them rather than one each. Restoring puts back the newest copy that passes the *full* integrity check, states that copy's age because everything learned since is lost, and then restarts the daemon — leaving terminals alone, since their PTYs belong to their own holder processes — onto the restored file. It runs only when a fault is actually recorded and only after a confirmation in a native OS dialog, because the IDE shares an origin with any page a veld run serves: replacing the whole database is not something a page may do on its own, and on a machine that cannot show a dialog the endpoint refuses and points at `veld self backup restore`. `GET /api/db-health` is the machine-readable form. And a repository being unavailable is now strictly different from the database being damaged: `repository unavailable` means the checkout is gone from disk or git cannot read it, and never that a write failed.
+Backing the file up is only half of it, because a damaged SQLite file does not announce itself: most of it keeps working, since only the statements that touch the damaged page fail. That is not hypothetical — one page of one table went bad on a maintainer's machine, the daemon logged the same `database disk image is malformed` 440 times over 17 hours, no copy was written in all of it, and the only visible symptom was a single project labelled `unavailable` in the IDE. Opening the file is no test either; it opened fine the whole time, which is why `veld self doctor` reported `Database OK`. So the daemon asks instead of waiting to trip over it: SQLite's own `quick_check` against the live database at startup and then hourly (every five minutes while a fault is recorded), which finds damage in a table nothing happens to be reading, and errors that other parts of the daemon hit are folded in so the first symptom of a fault a user *does* touch is recorded immediately. Backup health is judged by whether attempts are succeeding rather than by how old the newest file is — every attempt records its outcome including the one that cannot open the database at all, the arm whose silence hid that incident — so a broken schedule surfaces within an interval instead of after half a day. The IDE carries an undismissable banner naming the fault, what is at risk and how old the newest usable copy is, with a one-click restore beside it; a system notification is raised the first time, claimed daemon-side so several open windows produce one banner between them rather than one each. Restoring puts back the newest copy that passes the *full* integrity check, states that copy's age because everything learned since is lost, and then restarts the daemon — leaving terminals alone, since their PTYs belong to their own holder processes — onto the restored file. It runs only when a fault is actually recorded and only after a confirmation in a native OS dialog, because any script running on the IDE's origin is same-origin with the daemon: replacing the whole database is not something a page may do on its own, and on a machine that cannot show a dialog the endpoint refuses and points at `veld self backup restore`. `GET /api/db-health` is the machine-readable form. And a repository being unavailable is now strictly different from the database being damaged: `repository unavailable` means the checkout is gone from disk or git cannot read it, and never that a write failed.
 
 An experimental second-generation management UI is served at `/ide` on the same daemon (worktree mode: import git repositories, manage `git worktree` checkouts, drive veld runs per worktree). It is also the web core of Veld Desktop, an Electron shell that wraps it. On macOS the app is **optional and remembered**: the install script asks once, records the answer in `~/.veld/desktop.json`, and every later install and update obeys it — so somebody who drives veld purely as an orchestrator stops paying a ~113 MB download on every `veld self update`. Three states, not two: yes, no, and never asked, the last being where every machine that installed veld before this starts (the app on disk, never chosen), which the next interactive run asks about once. A run with nobody to ask never guesses expensively: an already-installed app is kept in step, one that has never been installed is not downloaded. `veld self desktop install` records yes, `veld self desktop uninstall` removes the app and records no (it works with no app installed too, which is how an orchestrator-only machine opts out up front), `veld self desktop status` reports the answer as `preference`, and `VELD_DESKTOP=0` skips the app for one run without recording anything. Installing through the CLI is also what avoids Gatekeeper's first-launch refusal: a browser marks a download with `com.apple.quarantine` and macOS then blocks an app that is not notarized, while curl sets no such flag. `veld self update` moves both halves to the same version, and so does the app's own update: the dialog offers the release rather than the app ("veld 16.8.0 is available", "Quit and Update veld") and hands the whole thing to `veld self update` — the app quits, the CLI updates itself, the daemon, the helper and the bundle, and the app reopens — since a running Electron app cannot replace its own bundle. That replaces an older two-step shape in which the app updated itself and a version-skew notice then asked the user to go and run `veld self update` in a terminal. The route is chosen by capability, not by version number: `veld self desktop status --json` reports a `capabilities` list, and a CLI that does not advertise `full-update-handoff` gets the app-only `veld self desktop update` instead, with the dialog saying so. Going the other way, `veld self update` typed into a terminal finds a running app and asks before closing it ("Nothing is lost: terminal sessions belong to the daemon … reattach with their scrollback when it reopens"), quitting it over an Apple Event so `before-quit` persists the window layout, falling back to `SIGTERM` and never to `SIGKILL`; an app that will not quit is left alone, a non-interactive run (no TTY, or `VELD_NON_INTERACTIVE`) never closes it at all, and `VELD_DESKTOP=0` means it is never asked about. The app names the bundle to replace so the copy that gets updated is the one that was running, it is reopened on every exit path including the failures, the installer restores the previous bundle if it is interrupted mid-swap, and everything the handed-off update says goes to `~/.veld/desktop-update.log` so a failure reaches the user as a dialog rather than as an app that quietly reopened on the old version. The handed-off update runs in a **terminal window** rather than as an invisible detached child, because the app has quit and there is therefore neither a surface to show one to four minutes of progress on nor a controlling terminal for `sudo` to ask for a password on the one path that still needs one, a `/usr/local` install — with none, only `sudo -n` is ever tried and it fails silently. The privileged *helper restart* needs no password at all: `veld self update` asks the root helper to restart itself over the Unix socket it already exposes to the unprivileged CLI, and it exits leaving Caddy running so launchd relaunches it on the new binary with no live URL blinking; a helper too old to understand the request falls back to its own binary watcher, which reaches the same state within about twelve seconds, and sudo is offered only after both have had their full budget and the helper is still not back. The installer and the CLI also no longer talk over each other: `veld self update` runs `install.sh` with `VELD_EMBEDDED=1`, which suppresses the script's progress chatter, next-steps footer and success banner so one command prints one summary at the true end of the run rather than three "installed successfully!" banners and a first-install footer halfway through an update; `veld self update --verbose` turns that off and shows the raw installer stream. The CLI writes a small script into `~/.veld` and opens it with a bare `open` on macOS, so LaunchServices routes it to whatever the user registered for `.command` files (Terminal.app unless they chose otherwise, `open -a Terminal` as the floor), and on Linux through `$TERMINAL`, `x-terminal-emulator` or the first emulator it finds, never without a display. A launcher exiting zero is not evidence a window appeared, so the app's side waits for the window's `veld self update` to actually claim the update lock and otherwise runs the update headless exactly as before — the terminal makes an update visible and answerable, it never makes one fail. Only one update runs at a time: `veld self update` takes a lock directory at `~/.veld/update.lock` and publishes its pid, origin, target version and current phase into it, a second one refuses with exit 75 (`EX_TEMPFAIL`) naming the holder and its phase, every other veld command outside a small allow-list (`update`, `doctor`, `version`, `config`, `lint`, `init`, and the internal log sinks running environments depend on) refuses the same way while binaries are being swapped and services restarted, and Veld Desktop reads the same file at startup and quits with an explanation rather than opening over its own bundle swap. The lock is written off when its holder's process is gone or when it has not changed phase in thirty minutes — both conditions, because a liveness check cannot see a run wedged at an unanswered `sudo` prompt and a timeout cannot tell a crash from a slow download — with `veld self update --force` to take over sooner, `veld self update --status [--json]` to read the state without installing anything, and the same summary at the top of `veld self doctor`, where it also explains why the versions below it disagree with each other mid-update.
 
@@ -260,40 +258,6 @@ The dock holds the run's diagnostics as two more pane kinds. A Logs pane is the 
 ### Environments and runs
 
 An **environment** is the durable named slot `--name` addresses; a **run** is one execution instance of it. Ended runs — stopped, failed, crashed, replaced, or completed (`--oneshot`) — persist as history (last 10 per environment, up to 7 days) with their logs, an explicit end reason, and machine-readable failure detail, so "why did last night's run die?" stays answerable after the fact. `veld orchestrator runs list` lists the history; `veld orchestrator logs --run <id-prefix>` (or `-p` for the previous run) reads a past run's logs; `veld orchestrator status`/`veld orchestrator runs list --json` expose `end_reason`/`end_detail` for agents. Crashes are detected by the daemon and recorded as `crashed` — distinguishable from a clean stop. The dashboard defaults to live environments (a top-level Active | History switcher); ended environments live under History with their last outcome, a run picker in the Logs tab, and one-click Restart. A history horizon setting hides ended runs older than a chosen number of days from History and from the past-run pickers, reporting how many it hid; it defaults to 3 days, can be cleared to show everything, filters the view and deletes nothing, and its maximum is 7 days because that is where housekeeping removes ended runs anyway. Each run also stores a **graph snapshot** taken at start — raw pre-interpolation command strings, env variable names (never values), cwd, URL templates, and a veld.json hash — so `veld orchestrator runs show <id>` reconstructs what a run was started with and `veld orchestrator runs diff` answers "what changed in the config between the run that worked and the run that didn't?"
-
----
-
-## Feedback System
-
-veld includes a built-in feedback overlay for human-AI collaboration. When an AI agent is iterating on UI work, humans can give structured feedback through an in-browser overlay injected into veld-served pages.
-
-### How it works
-
-1. When a `long_running` service is running, veld can inject a feedback overlay into the served pages
-2. Humans open the feedback overlay in their browser and leave comments
-3. AI agents receive the feedback via `veld feedback next --wait`, which blocks until new feedback arrives
-4. The agent reads the structured feedback and iterates
-
-### CLI Commands
-
-| Command | Description |
-|---------|-------------|
-| `veld feedback threads [--name <n>]` | List this run's feedback threads |
-| `veld feedback next [--wait] [--timeout <s>] [--name <n>] [--json]` | The next item to work on (agent-facing, no cursor). `--wait` blocks up to `--timeout` (240s) and then returns `result: "timeout"` — call it again; `"ended"` means the reviewer clicked Done |
-
-### Feedback API
-
-The feedback server runs per-run and exposes:
-
-- `POST /feedback` — Submit feedback `{ "comment": "text", "selector": "css-selector" }`
-- `GET /feedback` — Get all feedback for current run
-- `WS /feedback/ws` — Real-time feedback stream
-
-The feedback overlay automatically captures React and Vue component stack traces when available, providing agents with component-level context (not just CSS selectors) for precise modifications.
-
-The overlay survives full page reloads: when the agent's fix hot-reloads the page or the reviewer refreshes, it restores in-progress state (a half-typed element or page comment and the element it targets, the open panel/tab and scroll position, and unsent replies) from tab-local session storage — so an agent can push a fix mid-review without discarding the comment the reviewer was writing. (A screenshot comment in progress is not restored — its captured frame can't be reconstructed after a reload.)
-
-This makes veld uniquely suited for agentic workflows where AI agents build UI and humans provide iterative feedback without context-switching.
 
 ---
 
@@ -393,14 +357,11 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 ---
 
-## Client-Side Log Collection
+## Logs
 
-Veld automatically captures browser console output from `long_running` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
-
-Captured logs appear alongside server logs in `veld orchestrator logs` and the management UI. Filter by source:
+Logs appear in `veld orchestrator logs` and the management UI. Filter by source:
 
 ```sh
-veld orchestrator logs --source client          # Browser logs only
 veld orchestrator logs --source server          # Node output — servers and `command` nodes alike
 veld orchestrator logs --source setup           # Project setup/teardown step output
 veld orchestrator logs --source internal        # Liveness probe & recovery logs
@@ -413,27 +374,7 @@ Every step's output is collected, not just a server's: a `command` node (a
 `docker build`, a `pnpm install`) logs to that node's stream, and project
 `setup`/`teardown` steps to the run's, labelled `setup:<step name>`.
 
-### Configuration
-
-Control which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
-
-```json
-"client_log_levels": ["log", "warn", "error", "info", "debug"]
-```
-
-Valid levels: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Default: `["log", "warn", "error"]`. Unhandled exceptions and promise rejections are always captured regardless of this setting.
-
-The management UI also provides source filter controls (All / Server / Client) in the Logs tab.
-
-### Feature Toggles
-
-Control which Veld capabilities are injected into `long_running` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
-
-```json
-"features": { "feedback_overlay": false, "client_logs": true }
-```
-
-Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector), `inject` (auto-inject bootstrap scripts). All default to `true`.
+The management UI also provides source filter controls (All / Server / Setup / Internal) in the Logs tab.
 
 ### Proxy Header Rules
 
@@ -464,8 +405,6 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
 | `default_preset` | string | No | Preset used when `veld orchestrator start` is given nothing. Must name a defined preset |
-| `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
-| `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs`, `inject` (all default `true`, cascade: variant > node > project) |
 | `proxy` | object | No | Reverse-proxy header rules (`request`/`response`, each with `remove`/`set`); applies to the local proxy + web gateway (cascade: variant > node > project; `remove` unions, `set` merges) |
 | `env` | object | No | Global environment variables inherited by all nodes (cascade: variant > node > project, per-key merge) |
 | `setup` | array | No | Lifecycle steps before graph execution (see Setup & Teardown) |
@@ -789,8 +728,6 @@ selections provided".
 | `skip_if` | object | `command` only | Idempotency check (exit 0 = skip), as `{"argv": …}` / `{"shell": …}`. Alias: `verify` |
 | `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
-| `client_log_levels` | array | `long_running` | Browser log levels override (variant > node > project) |
-| `features` | object | `long_running` | Feature toggles override (variant > node > project) |
 | `proxy` | object | `long_running` | Reverse-proxy header rules override (variant > node > project; `remove` unions, `set` merges) |
 | `cwd` | string | All | Working directory (relative paths resolve from project root). Cascade: variant > node. Supports `${...}` substitution. |
 | `hidden` (node-level) | boolean | All | Hide from `veld orchestrator nodes` output |
@@ -865,22 +802,19 @@ Veld ships skills for AI coding agents. Install them so your agent knows how to 
 npx skills add prosperity-solutions/veld
 ```
 
-This installs two skills:
+This installs one skill, **veld**: CLI usage, `veld.json` configuration and IDE customization.
 
-- **veld** — the general one: CLI usage, `veld.json` configuration, IDE customization, and the human-in-the-loop feedback workflow
-- **veld-launch-feedback-loop** — parks an agent on `veld feedback next` to work in-browser review comments one at a time
-
-Both are **pointers, a few kilobytes each**. The documentation lives in the veld binary and is served by `veld agent skills`, so an agent reads the docs for the veld actually installed rather than for whichever version was current when the skill was added — which is also why the skills never need re-adding.
+It is a **pointer, a few kilobytes**. The documentation lives in the veld binary and is served by `veld agent skills`, so an agent reads the docs for the veld actually installed rather than for whichever version was current when the skill was added — which is also why the skill never needs re-adding.
 
 ```sh
-veld agent skills              # the index: fourteen topics, one line each
+veld agent skills              # the index: thirteen topics, one line each
 veld agent skills basics       # the command surface and the traps
 veld agent skills config       # the full veld.json reference, when authoring one
 ```
 
 Nothing loads up front. Project state is fetched the same way, when a question needs it: `veld orchestrator presets`, `veld orchestrator nodes`, `veld orchestrator status`.
 
-Reading this without a veld installed? The fourteen topic documents are in the repository at `crates/veld/src/commands/skills/` — `basics.md` is the one to start with. They describe whatever veld is on `main`, which is the caveat `veld agent skills` exists to remove.
+Reading this without a veld installed? The thirteen topic documents are in the repository at `crates/veld/src/commands/skills/` — `basics.md` is the one to start with. They describe whatever veld is on `main`, which is the caveat `veld agent skills` exists to remove.
 
 Works with Claude Code, Cursor, Codex, Windsurf, Cline, GitHub Copilot, and [40+ more agents](https://github.com/vercel-labs/skills#supported-agents).
 
