@@ -47,8 +47,6 @@ where it moved to (``that is `veld orchestrator start` now``) and exits 2. The s
 | `network` | `share`, `join`, `list`, `unshare`, `leave`, `approve`, `deny` |
 | `self` | `setup`, `doctor`, `update`, `desktop`, `settings list`/`get`/`set`/`unset`/`describe`, `backup list`/`now`/`restore`, `projects list`, `gc`, `version`, `uninstall` |
 
-`veld feedback` (work with a human) stays at the top level.
-
 ## Five things agents get wrong
 
 **1. A preset is `--preset`, never a positional.** `veld orchestrator start` positionals are

@@ -35,15 +35,16 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 3: Install daemon (user-level — feedback server, health monitor, GC)
+    // Step 3: Install daemon (user-level — the engine, dashboard, health monitor, GC)
     print_step(3, total, "Installing Veld daemon...");
     match veld_core::setup::install_daemon().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
-            // Non-fatal — daemon is optional for core functionality
+            // Non-fatal, so the steps after it still run — but nothing starts
+            // without it: the engine lives in the daemon (#422).
             eprintln!(
-                "  Feedback overlay may not work. You can retry with: veld self setup unprivileged"
+                "  Runs and the dashboard need the daemon. Retry with: veld self setup unprivileged"
             );
         }
     }

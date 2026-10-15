@@ -707,7 +707,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_worker_without_its_lock_is_lost_only_after_the_grace() {
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
         // SAFETY: lock_db_env serialises every writer of these variables.
         unsafe {
@@ -792,7 +792,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn events_resume_after_a_seq_and_end_after_finished() {
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
         // SAFETY: lock_db_env serialises every writer of this variable.
         unsafe { std::env::set_var("VELD_DB_PATH", dir.path().join("t.db")) };
@@ -839,7 +839,7 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
     async fn a_stop_cannot_be_cancelled_and_node_actions_do_not_gate_recovery() {
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
         // SAFETY: lock_db_env serialises every writer of these variables.
         unsafe {

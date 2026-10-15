@@ -18,7 +18,7 @@ use parts::self_::{DesktopCommand, SelfCmd, UpdateArgs};
 #[derive(Parser)]
 #[command(
     name = "veld",
-    version = env!("CARGO_PKG_VERSION"),
+    version = veld_core::VERSION,
     about = "An operating system for agentic development",
     after_help = "Every command is `veld <part> <verb>`. Bare `veld` shows what is up; \
                   `veld --help-all` lists every command.",
@@ -79,15 +79,6 @@ enum Command {
     Myself {
         #[command(subcommand)]
         command: SelfCmd,
-    },
-
-    /// Bidirectional feedback threads with the in-browser overlay.
-    ///
-    /// Left at the top level on purpose: #424 deletes the whole feedback system,
-    /// so giving it a part for one release would only move it twice.
-    Feedback {
-        #[command(subcommand)]
-        command: commands::feedback::FeedbackCommand,
     },
 
     // ---- Pre-#423 names that installed code still calls --------------------
@@ -184,6 +175,20 @@ enum Command {
 ///
 /// The names installed code still calls — `update`, `desktop`, `agent-*`,
 /// `open-url` — are not here: they still work (see `Command`).
+/// Whether `args` (argv without the program name) names `veld feedback`, which
+/// #424 removed with nothing to rename it to — `veld help feedback` included.
+/// Skills installed before the removal still call it.
+fn removed_command(args: &[String]) -> bool {
+    let mut words = args
+        .iter()
+        .map(String::as_str)
+        .filter(|a| !a.starts_with('-'));
+    match words.next() {
+        Some("help") => words.next() == Some("feedback"),
+        first => first == Some("feedback"),
+    }
+}
+
 fn retired_command(args: &[String]) -> Option<String> {
     // `--debug` is global and may come first; nothing else at the root takes a
     // value, so the first word that is not a flag is the command.
@@ -318,6 +323,11 @@ fn main() {
         .skip(1)
         .map(|a| a.to_string_lossy().into_owned())
         .collect();
+    // A removed command, not a renamed one: there is no new name to point at.
+    if removed_command(&args) {
+        eprintln!("{}", commands::skills::FEEDBACK_REMOVED);
+        std::process::exit(2);
+    }
     if let Some(new) = retired_command(&args) {
         // Asked for help on an old name: point at the new name's help, which is
         // the thing they were after.
@@ -455,7 +465,6 @@ async fn run(command: Command) {
         Command::Agent { command } => parts::agent::run(command),
         Command::Network { command } => parts::network::run(command).await,
         Command::Myself { command } => parts::self_::run(command).await,
-        Command::Feedback { command } => commands::feedback::run(command).await,
 
         // Normally answered in `main`, before any runtime exists; kept so the match
         // stays exhaustive and a future caller of `run` gets the same behaviour.
@@ -566,7 +575,7 @@ fn command_survives_an_update(command: &Command) -> bool {
         Command::LegacyDesktop { command } => parts::self_::desktop_survives_an_update(command),
         Command::Ide { command } => parts::ide::survives_an_update(command),
         Command::Network { command } => parts::network::survives_an_update(command),
-        Command::Feedback { .. } | Command::LegacyOpenUrl(_) | Command::InternalCliDump => false,
+        Command::LegacyOpenUrl(_) | Command::InternalCliDump => false,
     }
 }
 
@@ -676,7 +685,7 @@ async fn maybe_show_update_banner(db: &veld_core::db::Db) {
     // Show banner from cache.
     if let Ok(Some(latest)) = db.kv_get(KV_UPDATE_LATEST) {
         let latest = latest.trim();
-        let current = env!("CARGO_PKG_VERSION");
+        let current = veld_core::VERSION;
         if !latest.is_empty() && veld_core::setup::is_newer(latest, current) {
             eprintln!();
             eprintln!(
@@ -1037,7 +1046,38 @@ mod update_gate_tests {
             }
         }
         assert!(retired_command(&[]).is_none());
+        assert!(retired_command(&["feedback".into()]).is_none());
         assert!(retired_command(&["orchestrator".into(), "start".into()]).is_none());
+    }
+
+    /// `veld feedback` is gone with no new name (#424), so it answers before clap
+    /// — in every spelling an installed skill or a person might use — and nothing
+    /// that merely mentions the word later in the line is caught.
+    #[test]
+    fn the_removed_feedback_command_is_answered_not_misparsed() {
+        let argv = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+        for hit in [
+            &["feedback"][..],
+            &["feedback", "next", "--json"],
+            &["--debug", "feedback", "listen", "--name", "x"],
+            &["help", "feedback"],
+        ] {
+            assert!(removed_command(&argv(hit)), "{hit:?}");
+        }
+        for miss in [
+            &[][..],
+            &["orchestrator", "start", "feedback"],
+            &["agent", "skills", "feedback"],
+            &["help"],
+        ] {
+            assert!(!removed_command(&argv(miss)), "{miss:?}");
+        }
+        // The skills topic answers the same way, so a stale skill reading it learns
+        // the same thing.
+        assert_eq!(
+            commands::skills::unknown_topic_message_for_test("feedback"),
+            commands::skills::FEEDBACK_REMOVED
+        );
     }
 
     /// The root `--json` belongs to bare `veld`; with a command it is refused, not
@@ -1051,7 +1091,7 @@ mod update_gate_tests {
     }
 
     /// `--help` lists parts only (#423): every visible top-level command is a
-    /// part, plus `feedback` until #424 deletes it.
+    /// part.
     #[test]
     fn help_lists_parts_only() {
         let mut visible: Vec<String> = Cli::command()
@@ -1063,7 +1103,6 @@ mod update_gate_tests {
         let mut expected: Vec<String> = commands::overview::PARTS
             .iter()
             .map(|s| s.to_string())
-            .chain(["feedback".to_string()])
             .collect();
         expected.sort();
         assert_eq!(visible, expected);

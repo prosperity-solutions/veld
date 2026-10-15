@@ -1337,7 +1337,7 @@ mod tests {
 
     /// The claim endpoint's input is checked against the set the daemon mints,
     /// not against a length — the file it keys is rewritten whole and re-parsed
-    /// on every poll, and this router is same-origin with any page a run serves.
+    /// on every poll, and any script on a Veld origin is same-origin with this router.
     #[test]
     fn only_the_daemons_own_notification_ids_are_accepted() {
         for id in NOTIFY_IDS {

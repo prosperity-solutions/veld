@@ -5,7 +5,6 @@ pub mod cli_dump;
 pub mod config;
 pub mod desktop;
 pub mod doctor;
-pub mod feedback;
 pub mod gc;
 pub mod graph;
 pub mod helper_install;

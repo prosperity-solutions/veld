@@ -1613,9 +1613,8 @@ Six calls, recorded because each has an obvious alternative:
   of the two the thing nobody chose: default-notify trains the human to ignore the
   book glyph; default-quiet makes "please read this before I go on" invisible.
   The error message *is* the usage help an agent gets, so it names both.
-- **Notes and annotations are deferred to a unified "feedback anywhere" design.**
-  The feedback overlay already lets a human comment on a page; the file pane wants
-  the same on a line, the terminal arguably on output. Building a second,
+- **Notes and annotations are deferred.** A human commenting on a line of a file,
+  a page or some terminal output is one problem across three surfaces, and a
   file-only tray now would make three stores later. v1 ships *Copy reference* —
   `path:12-18` plus the excerpt — which an agent reads with no new protocol, and
-  the tray waits for one design that covers all three surfaces.
+  the tray waits for one design that covers all of them.

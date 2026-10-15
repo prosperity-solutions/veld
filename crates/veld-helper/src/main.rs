@@ -16,7 +16,7 @@ use tokio::net::UnixListener;
 use tracing::{debug, error, info, warn};
 use veld_core::helper_gate::{Gate, GateSource};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = veld_core::VERSION;
 
 /// This helper's version, as data inside the binary the org signs (#262).
 ///

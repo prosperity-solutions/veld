@@ -151,7 +151,7 @@ git log --oneline -- <touched paths>
 ```
 
 Plus, when the diff touches them: `npm run typecheck` / `npm run lint` / `npm test`
-in the affected JS surface (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`),
+in the affected JS surface (`desktop/`, `crates/veld-daemon/ui`),
 and any schema or license drift gate the change is near. `just lint` / `just test`
 run the whole static + test pass for both Rust and JS.
 Capture output verbatim.
@@ -170,7 +170,7 @@ Capture output verbatim.
   `just commit-subjects` before pushing. Both used to fail on the first draft
   push, in seconds, on a Linux runner; both are draft-guarded now and first report
   *after* the PR is marked ready — so a malformed commit subject or an unguarded
-  new job is discovered only once the five macOS legs have already dispatched.
+  new job is discovered only once the four macOS legs have already dispatched.
   `just workflow-gates` is the sole thing standing between an unguarded job and a
   draft that quietly runs it, because the gate's CI home (the `schema` job) is
   draft-guarded too. It now carries a second gate in the same recipe:

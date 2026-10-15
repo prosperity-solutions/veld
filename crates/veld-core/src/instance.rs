@@ -23,8 +23,8 @@
 
 use std::path::PathBuf;
 
-/// The installed instance's daemon HTTP port (management UI, feedback,
-/// client-logs, share control API).
+/// The installed instance's daemon HTTP port (management UI, share control
+/// API).
 pub const DEFAULT_DAEMON_PORT: u16 = 19899;
 
 /// Hostname the installed instance's dashboard is served on, through Caddy.
@@ -83,9 +83,8 @@ pub fn daemon_base() -> String {
     format!("http://127.0.0.1:{}", daemon_port())
 }
 
-/// Upstream (`host:port`) baked into Caddy routes for feedback/client-log
-/// traffic — runs started by a dev-instance CLI route their overlay traffic
-/// to the dev daemon.
+/// Upstream (`host:port`) a Caddy route uses to reach this instance's daemon —
+/// a dev instance's dashboard route points at the dev daemon.
 pub fn daemon_upstream() -> String {
     format!("localhost:{}", daemon_port())
 }

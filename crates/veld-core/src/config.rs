@@ -138,11 +138,28 @@ impl Finding {
 
     /// An unrecognised top-level key.
     ///
-    /// An error, because the cause is nearly always a typo and silently ignoring
+    /// An error (except for a key veld used to read, which warns — see below),
+    /// because the cause is nearly always a typo and silently ignoring
     /// it is how `"noeds"` costs someone an afternoon. But a *reported* error, not
     /// a load failure: see [`crate::include::Document`] for why the loader must
     /// stay lenient about this.
     pub(crate) fn unknown_top_level_key(location: &str, key: &str) -> Self {
+        // Not a typo but a key veld used to read (#424): both configured what Caddy
+        // injected into every routed page, and that is gone. A warning, not the
+        // error a typo gets — the key is inert, and a team whose members run
+        // different veld versions needs it to keep working on the older ones
+        // (`"features": {"inject": false}` was how an app opted out) without
+        // blocking `start` on the newer ones.
+        if key == "features" || key == "client_log_levels" {
+            return Self::warning(
+                "removed-top-level-key",
+                location,
+                format!(
+                    "\"{key}\" no longer does anything: veld stopped injecting scripts into \
+                     the pages it serves. Delete it once nobody on the project runs an older veld."
+                ),
+            );
+        }
         // `"//"` was the way to comment a JSON config before veld accepted real
         // comments, so it is the single likeliest unknown key in an older project.
         // Say what to do instead rather than only refusing.
@@ -327,17 +344,6 @@ pub struct VeldConfig {
     /// the most common thing a coding agent is asked to do — without a guess.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_preset: Option<String>,
-
-    /// Client-side log levels to capture (project-level default).
-    /// Supported values: "log", "warn", "error", "info", "debug".
-    /// "exception" is always captured regardless of this setting.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_log_levels: Option<Vec<String>>,
-
-    /// Feature toggles (project-level defaults).
-    /// Overridable at node and variant level.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<FeaturesConfig>,
 
     /// Reverse-proxy header rules (project-level defaults).
     /// Applied by the local Caddy proxy and the public web gateway.
@@ -948,11 +954,11 @@ pub type NullableMap<T> = HashMap<String, Option<T>>;
 /// Merge `project → node → variant` layers of a [`NullableMap`], most specific
 /// last, then drop the keys a layer erased with `null`.
 ///
-/// This is the **per-key override** strategy — one of the three distinct merge
+/// This is the **per-key override** strategy — one of the two distinct merge
 /// strategies in the resolved config (see the merge table in
 /// `docs/configuration.md`). It is used by `env`, `ports`, and `depends_on`.
-/// Do not try to unify it with the others: `features` is per *field*, and
-/// `probes`/`share`/`outputs` replace wholesale, deliberately.
+/// Do not try to unify it with the others: `probes`/`share`/`outputs` replace
+/// wholesale, deliberately.
 fn merge_nullable_maps<T: Clone>(
     layers: [Option<&NullableMap<T>>; 3],
 ) -> Option<HashMap<String, T>> {
@@ -2081,14 +2087,6 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
 
-    /// Client-side log levels override for all variants of this node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_log_levels: Option<Vec<String>>,
-
-    /// Feature toggles override for all variants of this node.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<FeaturesConfig>,
-
     /// Reverse-proxy header rules override for all variants of this node.
     /// Overrides project-level `proxy`. Overridable at variant level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2332,14 +2330,6 @@ pub struct VariantConfig {
     )]
     pub on_stop: Option<Option<CommandSpec>>,
 
-    /// Client-side log levels override for this specific variant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_log_levels: Option<Vec<String>>,
-
-    /// Feature toggles override for this specific variant.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub features: Option<FeaturesConfig>,
-
     /// Reverse-proxy header rules override for this specific variant.
     /// Overrides node- and project-level `proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2419,77 +2409,6 @@ impl<'de> Deserialize<'de> for Outputs {
                 "outputs must be an array of strings or an object of string values",
             )),
         }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Features
-// ---------------------------------------------------------------------------
-
-/// Per-node feature toggles. All fields are optional — `None` means "inherit
-/// from the parent level". The resolution order is variant > node > project,
-/// with the built-in defaults as final fallback.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeaturesConfig {
-    /// Inject the feedback overlay toolbar into HTML responses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub feedback_overlay: Option<bool>,
-
-    /// Inject the client-side log collector into HTML responses.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub client_logs: Option<bool>,
-
-    /// Automatically inject bootstrap scripts into HTML responses. When `false`,
-    /// the `/__veld__/*` proxy routes are still created so you can manually add
-    /// `<script src="/__veld__/...">` tags in your app. Default: `true`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inject: Option<bool>,
-}
-
-/// Resolved (concrete) feature flags — no more `Option`s.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ResolvedFeatures {
-    pub feedback_overlay: bool,
-    pub client_logs: bool,
-    pub inject: bool,
-}
-
-impl Default for ResolvedFeatures {
-    fn default() -> Self {
-        Self {
-            feedback_overlay: true,
-            client_logs: true,
-            inject: true,
-        }
-    }
-}
-
-/// Resolve feature flags using the most specific override:
-/// variant > node > project > default (`true`).
-pub fn resolve_features(
-    project: Option<&FeaturesConfig>,
-    node: Option<&FeaturesConfig>,
-    variant: Option<&FeaturesConfig>,
-) -> ResolvedFeatures {
-    let layers: &[Option<&FeaturesConfig>] = &[variant, node, project];
-    let defaults = ResolvedFeatures::default();
-
-    ResolvedFeatures {
-        feedback_overlay: layers
-            .iter()
-            .filter_map(|l| l.and_then(|f| f.feedback_overlay))
-            .next()
-            .unwrap_or(defaults.feedback_overlay),
-        client_logs: layers
-            .iter()
-            .filter_map(|l| l.and_then(|f| f.client_logs))
-            .next()
-            .unwrap_or(defaults.client_logs),
-        inject: layers
-            .iter()
-            .filter_map(|l| l.and_then(|f| f.inject))
-            .next()
-            .unwrap_or(defaults.inject),
     }
 }
 
@@ -2881,11 +2800,10 @@ fn default_max_recoveries() -> u32 {
 /// (RC5). So the orchestrator, the graph, the daemon monitor and the share flow
 /// read `ResolvedVariant`, not `VariantConfig`.
 ///
-/// The three merge strategies below are deliberately distinct and are not
+/// The merge strategies below are deliberately distinct and are not
 /// unified — see the merge table in `docs/configuration.md`:
 /// - **per key** (`env`, `ports`, `depends_on`) — additive, variant wins, `null`
 ///   erases.
-/// - **per field** (`features`) — variant wins field by field.
 /// - **wholesale replace** (`probes` per probe, `share`, `outputs`) — a variant
 ///   that states one replaces the node's entirely.
 /// - `proxy` keeps its pre-existing union-with-cross-key-rule, untouched.
@@ -2917,9 +2835,7 @@ pub struct ResolvedVariant {
     /// `share`, of the same type, sitting one level up from the real one is an
     /// invitation to gate an exposure on it. Nothing may.
     pub share_as_written: Option<SharePolicy>,
-    pub features: ResolvedFeatures,
     pub proxy: ResolvedProxy,
-    pub client_log_levels: Vec<String>,
 }
 
 /// Resolve one node+variant against its node and the project.
@@ -3025,20 +2941,10 @@ pub fn resolve_variant(
         // is the same three-way rule already used for `outputs` and `share`.
         on_stop: replace(node.on_stop.as_ref(), variant.on_stop.as_ref()),
         share_as_written: node_share,
-        features: resolve_features(
-            project.features.as_ref(),
-            node.features.as_ref(),
-            variant.features.as_ref(),
-        ),
         proxy: resolve_proxy(
             project.proxy.as_ref(),
             node.proxy.as_ref(),
             variant.proxy.as_ref(),
-        ),
-        client_log_levels: resolve_client_log_levels(
-            project.client_log_levels.as_deref(),
-            node.client_log_levels.as_deref(),
-            variant.client_log_levels.as_deref(),
         ),
     }
 }
@@ -3254,8 +3160,6 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "url_template",
     "presets",
     "default_preset",
-    "client_log_levels",
-    "features",
     "proxy",
     "env",
     "vars",
@@ -5894,47 +5798,6 @@ pub fn parse_config_from_cwd() -> Result<(PathBuf, VeldConfig), ConfigError> {
     Ok((path, config))
 }
 
-/// Default client log levels when none are configured.
-pub const DEFAULT_CLIENT_LOG_LEVELS: &[&str] = &["log", "warn", "error"];
-
-/// Valid client log level values.
-const VALID_CLIENT_LOG_LEVELS: &[&str] = &["log", "warn", "error", "info", "debug"];
-
-/// Resolve the effective client log levels for a given node+variant,
-/// using the most specific override: variant > node > project > default.
-/// Invalid level values are silently filtered out.
-pub fn resolve_client_log_levels(
-    project_levels: Option<&[String]>,
-    node_levels: Option<&[String]>,
-    variant_levels: Option<&[String]>,
-) -> Vec<String> {
-    let raw = if let Some(levels) = variant_levels {
-        levels.to_vec()
-    } else if let Some(levels) = node_levels {
-        levels.to_vec()
-    } else if let Some(levels) = project_levels {
-        levels.to_vec()
-    } else {
-        return DEFAULT_CLIENT_LOG_LEVELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-    };
-    // Filter to only valid values. If nothing remains, fall back to defaults.
-    let filtered: Vec<String> = raw
-        .into_iter()
-        .filter(|l| VALID_CLIENT_LOG_LEVELS.contains(&l.as_str()))
-        .collect();
-    if filtered.is_empty() {
-        DEFAULT_CLIENT_LOG_LEVELS
-            .iter()
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        filtered
-    }
-}
-
 /// Resolve the effective working directory for a node+variant.
 /// Uses the most specific override: variant > node > project root.
 /// Relative paths are resolved against the project root.
@@ -6953,6 +6816,37 @@ mod tests {
         assert!(hit.message.contains("hooks"), "{hit:?}");
         // …and it blocks `veld orchestrator start`.
         assert!(error_summary(&findings).is_some());
+    }
+
+    /// The keys the removed page injection read (#424) warn rather than fail, so
+    /// a config shared with older veld versions still starts.
+    #[test]
+    fn a_removed_top_level_key_warns_and_does_not_block_start() {
+        for key in ["features", "client_log_levels"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("veld.json");
+            let value = if key == "features" {
+                r#"{"inject": false}"#
+            } else {
+                "[]"
+            };
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{ "schemaVersion": "3", "name": "t", "{key}": {value}, "nodes": {{}} }}"#
+                ),
+            )
+            .unwrap();
+            let config = parse_config(&path).expect("parses");
+            let findings = validate(&config);
+            let hit = findings
+                .iter()
+                .find(|f| f.rule == "removed-top-level-key")
+                .unwrap_or_else(|| panic!("expected the rule to fire for {key}: {findings:?}"));
+            assert_eq!(hit.severity, Severity::Warning);
+            assert!(hit.message.contains(key), "{hit:?}");
+            assert!(error_summary(&findings).is_none(), "{findings:?}");
+        }
     }
 
     // -- F4: vars (a failing case per rule) ------------------------------------
@@ -8562,142 +8456,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn test_resolve_client_log_levels_defaults() {
-        let result = resolve_client_log_levels(None, None, None);
-        assert_eq!(result, vec!["log", "warn", "error"]);
-    }
-
-    #[test]
-    fn test_resolve_client_log_levels_project_override() {
-        let project = vec!["warn".to_string(), "error".to_string()];
-        let result = resolve_client_log_levels(Some(&project), None, None);
-        assert_eq!(result, vec!["warn", "error"]);
-    }
-
-    #[test]
-    fn test_resolve_client_log_levels_node_overrides_project() {
-        let project = vec!["warn".to_string()];
-        let node = vec!["log".to_string(), "info".to_string()];
-        let result = resolve_client_log_levels(Some(&project), Some(&node), None);
-        assert_eq!(result, vec!["log", "info"]);
-    }
-
-    #[test]
-    fn test_resolve_client_log_levels_variant_overrides_all() {
-        let project = vec!["warn".to_string()];
-        let node = vec!["log".to_string()];
-        let variant = vec!["debug".to_string()];
-        let result = resolve_client_log_levels(Some(&project), Some(&node), Some(&variant));
-        assert_eq!(result, vec!["debug"]);
-    }
-
-    #[test]
-    fn test_resolve_client_log_levels_filters_invalid() {
-        let project = vec!["log".to_string(), "bogus".to_string(), "error".to_string()];
-        let result = resolve_client_log_levels(Some(&project), None, None);
-        assert_eq!(result, vec!["log", "error"]);
-    }
-
-    #[test]
-    fn test_resolve_client_log_levels_all_invalid_falls_back_to_default() {
-        let project = vec!["bogus".to_string(), "invalid".to_string()];
-        let result = resolve_client_log_levels(Some(&project), None, None);
-        assert_eq!(result, vec!["log", "warn", "error"]);
-    }
-
-    // -- Features resolution tests --------------------------------------------
-
-    #[test]
-    fn test_resolve_features_defaults() {
-        let result = resolve_features(None, None, None);
-        assert!(result.feedback_overlay);
-        assert!(result.client_logs);
-        assert!(result.inject);
-    }
-
-    #[test]
-    fn test_resolve_features_project_override() {
-        let project = FeaturesConfig {
-            feedback_overlay: Some(false),
-            client_logs: None,
-            inject: None,
-        };
-        let result = resolve_features(Some(&project), None, None);
-        assert!(!result.feedback_overlay);
-        assert!(result.client_logs);
-        assert!(result.inject);
-    }
-
-    #[test]
-    fn test_resolve_features_node_overrides_project() {
-        let project = FeaturesConfig {
-            feedback_overlay: Some(false),
-            client_logs: Some(false),
-            inject: None,
-        };
-        let node = FeaturesConfig {
-            feedback_overlay: Some(true),
-            client_logs: None,
-            inject: None,
-        };
-        let result = resolve_features(Some(&project), Some(&node), None);
-        assert!(result.feedback_overlay); // node wins
-        assert!(!result.client_logs); // falls through to project
-    }
-
-    #[test]
-    fn test_resolve_features_variant_overrides_all() {
-        let project = FeaturesConfig {
-            feedback_overlay: Some(true),
-            client_logs: Some(true),
-            inject: Some(true),
-        };
-        let node = FeaturesConfig {
-            feedback_overlay: Some(true),
-            client_logs: Some(true),
-            inject: Some(true),
-        };
-        let variant = FeaturesConfig {
-            feedback_overlay: Some(false),
-            client_logs: Some(false),
-            inject: Some(false),
-        };
-        let result = resolve_features(Some(&project), Some(&node), Some(&variant));
-        assert!(!result.feedback_overlay);
-        assert!(!result.client_logs);
-        assert!(!result.inject);
-    }
-
-    #[test]
-    fn test_resolve_features_inject_false_keeps_features() {
-        let project = FeaturesConfig {
-            feedback_overlay: None,
-            client_logs: None,
-            inject: Some(false),
-        };
-        let result = resolve_features(Some(&project), None, None);
-        assert!(result.feedback_overlay); // still true
-        assert!(result.client_logs); // still true
-        assert!(!result.inject); // injection disabled
-    }
-
-    #[test]
-    fn test_resolve_features_inject_variant_overrides_project() {
-        let project = FeaturesConfig {
-            feedback_overlay: None,
-            client_logs: None,
-            inject: Some(false),
-        };
-        let variant = FeaturesConfig {
-            feedback_overlay: None,
-            client_logs: None,
-            inject: Some(true),
-        };
-        let result = resolve_features(Some(&project), None, Some(&variant));
-        assert!(result.inject); // variant wins
-    }
-
     // -- cwd resolution tests -------------------------------------------------
 
     #[test]
@@ -9231,27 +8989,6 @@ mod tests {
             !deps.contains_key("cache"),
             "a variant can drop an inherited dependency"
         );
-    }
-
-    /// **Merge table: `features` is per field**, not wholesale — the other
-    /// strategy, kept distinct on purpose.
-    #[test]
-    fn features_merge_per_field() {
-        let r = resolve(
-            r#"{"schemaVersion":"3","name":"t",
-                "features":{"feedback_overlay":false,"client_logs":false},
-                "nodes":{"a":{
-                  "features":{"client_logs":true},
-                  "variants":{"dev":{"type":"start_server","shell":"x",
-                    "features":{"inject":false}}}
-                }}}"#,
-            "a",
-            "dev",
-        );
-        // Each field resolves independently at its own most-specific level.
-        assert!(!r.features.feedback_overlay, "from project");
-        assert!(r.features.client_logs, "from node");
-        assert!(!r.features.inject, "from variant");
     }
 
     /// **Merge table: `share` and `outputs` replace wholesale**, and `null`

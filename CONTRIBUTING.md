@@ -23,11 +23,15 @@ Why? Because that's how this project was built, and it's how we believe modern s
 ```sh
 git clone https://github.com/prosperity-solutions/veld.git
 cd veld
-just setup-frontend   # install Node.js dependencies (once)
-just setup-ui         # deps for the /ide management UI + desktop shell (also
+# A fork: also fetch upstream's release tags. The version a build reports and the
+# signing-key tests both read the newest one, and a fork does not get new tags
+# when it syncs.
+#   git remote add upstream https://github.com/prosperity-solutions/veld.git
+#   git fetch upstream --tags
+just setup-ui         # Node.js deps for the /ide management UI + desktop shell (also
                       # refreshes them after a bump; the ui/desktop recipes
                       # install what they need on their own)
-just build            # build Rust + frontend
+just build            # build the management UI + Rust
 just test             # run all tests
 ```
 
@@ -45,7 +49,7 @@ The workspace has four crates:
 | `veld` | CLI binary |
 | `veld-core` | Shared library (config, orchestrator, state, health checks) |
 | `veld-helper` | Privileged daemon for DNS/Caddy management |
-| `veld-daemon` | User-space daemon for health monitoring, feedback overlay, and GC |
+| `veld-daemon` | User-space daemon for health monitoring and GC |
 
 ## Local development
 
@@ -177,16 +181,15 @@ just dev-daemon                            # daemon from source, ALONGSIDE the i
 installed 19899), own socket, and its own dashboard at
 **https://veld-dev.localhost** (the route is self-registered with the shared
 Caddy on startup and removed on Ctrl-C). Runs started with `just dev` mint
-routes pointing at the dev daemon, so their feedback overlay/client logs land
-in the dev instance too.
+routes pointing at the dev daemon.
 
 The helper/Caddy/DNS layer is *not* instanced — it's a singleton owning
 443/18443 and system DNS; both instances share it. And the installed daemon
 only watches the real DB: dev runs get no crash detection unless
 `just dev-daemon` is running.
 
-To point the source-built CLI at the **real** DB — e.g. a feedback loop
-against a run the installed veld started — use `just dev-real <args>`. It
+To point the source-built CLI at the **real** DB — e.g. to drive
+a run the installed veld started — use `just dev-real <args>`. It
 refuses to run when the branch's schema is ahead of the real DB (that's the
 migration trap above); in that case test via `just dev` + `just dev-daemon`
 or `just dev-install`.
@@ -213,7 +216,7 @@ veld-dev status
 Rebuilds: `veld-dev` executes `target/debug/veld` directly, so a plain
 `cargo build` in the repo refreshes it — no re-link needed.
 
-### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)
+### Tier 2: Daemon changes (health monitoring, HTTP server, GC)
 
 ```sh
 just dev-install-daemon    # builds, installs to ~/.local/lib/veld/, restarts service
@@ -244,7 +247,7 @@ just dev-restore    # runs veld self update
 | `just dev-install` | CLI + daemon | No |
 | `just dev-install-all` | CLI + daemon + helper | Yes |
 | `just dev-restore` | Restore to released version | No |
-| `just build` | Build Rust + frontend | No |
+| `just build` | Build the management UI + Rust | No |
 | `just test` | Run all tests | No |
 | `just lint` | Clippy + rustfmt + TypeScript type check + JS/TS Biome lint | No |
 | `just workflow-gates` | Two workflow gates: no CI job can run on a draft PR, and `release.yml`'s publish script cannot ship an incomplete release or leave a complete one a draft. Run it whenever you touch `.github/workflows/`. Needs PyYAML: `python3 -m pip install --user pyyaml` | No |
@@ -264,7 +267,7 @@ just dev-restore    # runs veld self update
 - Don't break existing behavior without discussion.
 - Add tests where it makes sense, but don't over-test trivial code.
 - If CI fails after you've marked the PR ready, fix it before asking for a human review.
-- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. A run occupies five macOS jobs alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to mean 20 full runs of that — runner time and macOS concurrency that queues ahead of everyone else's work. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready.
+- **Draft PRs don't run CI.** Every job in `ci.yml` skips while a PR is a draft, and marking it ready for review is what starts them. A run occupies four macOS jobs alongside a four-target release build matrix, so a branch that gets 20 intermediate pushes while it's being written used to mean 20 full runs of that — runner time and macOS concurrency that queues ahead of everyone else's work. Keep the work in draft, run `just lint`/`just test` locally as you go, and flip to ready when it's genuinely ready.
 - **A skipped check shows up as a passing one.** So a draft PR looks green even though nothing ran — don't read that tick as a pass. `gh pr checks --json name,bucket,workflow` puts skipped ones in the `skipping` bucket; that's the only thing that distinguishes them. Note that the `Release` workflow's jobs are *supposed* to be skipped on a PR, so check the `CI` workflow's jobs specifically. And don't rely on that bucket check alone: a skipped **matrix** job reports its name as the literal un-expanded template string, so it never lines up with the ready run's expanded names and the bucket never empties on a PR that was ever a draft. The unambiguous answer is the ready run's own jobs — `gh run view <ready-run-id> --json jobs` (see AGENTS.md's CI cost convention).
 
 ## License

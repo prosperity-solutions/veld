@@ -113,10 +113,6 @@ function isShiftEnter(e: KeyboardEvent): boolean {
  * and the page tabs through its focusable elements anyway. Measured, not
  * assumed.
  *
- * `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F and
- * mod+Shift+V for its own bindings, so `App.tsx` moved focus mode and the
- * view switch off them — see the matching comment there.
- *
  * Matched on `e.key`, never `e.code`, for every letter here — mirroring
  * exactly what `App.tsx`'s own handler tests, since a mismatch here would
  * swallow the key on one layout while the window listener expects a different

@@ -210,8 +210,7 @@ learn. Relative paths (`cwd`, `script`, output paths) stay relative to the
 
 Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge across files:
 each entry has an owning file, so there is nothing to arbitrate. The project-level
-singletons — `url_template`, `default_preset`, `features`, `proxy`, `sharing`,
-`client_log_levels` — are read from the root file only, because a single value
+singletons — `url_template`, `default_preset`, `proxy`, `sharing` — are read from the root file only, because a single value
 would need a precedence rule. Declaring one in an included file is a `root-only-key` error rather than a
 silent no-op.
 

@@ -31,7 +31,7 @@
       { "origin": "http://localhost:*", "allow": ["geolocation", "clipboard-read"] },
       { "origin": "http://[::1]:5173", "allow": ["camera", "microphone"] },
       // `deny` withdraws a default: veld otherwise lets a pane capture its own
-      // contents, which is what makes `veld feedback` screenshots work in a pane.
+      // contents.
       { "origin": "https://staging.example.com", "deny": ["display-capture"] }
     ]
   },

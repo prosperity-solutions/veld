@@ -272,8 +272,7 @@ pub struct StartShareRequest {
     /// globally — two repos both on `main` each have an environment called
     /// `main` — so a name alone can resolve to the wrong project's URLs, and
     /// this is a *share*: the wrong resolution publishes them. Callers that
-    /// know their project root (the CLI, and the overlay via Caddy's
-    /// `X-Veld-Project` header) send it; `None` falls back to name-only
+    /// know their project root (the CLI) send it; `None` falls back to name-only
     /// resolution, which the daemon rejects when the name is ambiguous.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_root: Option<String>,
@@ -401,8 +400,8 @@ pub struct ShareInfo {
     /// Number of consumers currently connected (hosted shares only).
     #[serde(default)]
     pub joiners: usize,
-    /// Public URLs minted by the gateway (hosted web shares only). The overlay
-    /// uses this hostname → public-URL map for "Copy public URL".
+    /// Public URLs minted by the gateway (hosted web shares only), as a
+    /// hostname → public-URL map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub public_urls: Vec<GatewayPublicUrl>,
     /// The share password (password-protected hosted web shares only), so

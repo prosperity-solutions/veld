@@ -260,9 +260,8 @@ const INTERCEPT_TTL: Duration = Duration::from_secs(10);
 /// [`check_csrf`] means a cross-origin caller cannot reach it at all, since the
 /// custom header forces a preflight it cannot pass.
 ///
-/// The header alone does not bound a **same-origin** caller, and same-origin is not
-/// a small set: a developer's own app reaches this daemon through the helper's
-/// `/__veld__` proxy. So the result is also single-flighted and cached for
+/// The header alone does not bound a **same-origin** caller: any script running on
+/// a Veld origin can send it. So the result is also single-flighted and cached for
 /// [`INTERCEPT_TTL`] — the lock is held across the probe, so a hundred concurrent
 /// requests produce one shell and ninety-nine clones of its answer.
 async fn post_shell_intercept(headers: HeaderMap) -> Result<Json<Value>, StatusCode> {
@@ -500,7 +499,7 @@ fn after_settings_write(db: &veld_core::db::Db) -> Result<Value, ApiError> {
     // Detached and unconditional, for the same reason as the line above: the
     // reconcile returns early when nothing is held and nothing is shared, which
     // is cheaper than a second place that has to know these five key names.
-    tokio::spawn(crate::feedback_server::caffeinate::settings_changed());
+    tokio::spawn(crate::http_server::caffeinate::settings_changed());
     // Echo the full effective document back, so the caller applies exactly what
     // was stored rather than what it asked for — the clamp is invisible otherwise
     // and a slider would sit at a value the daemon never accepted.
@@ -693,7 +692,7 @@ mod tests {
         // otherwise write the developer's dev DB.
         // Held for the whole test: `VELD_DB_PATH` is process-wide, and `extensions`
         // has its own tests that set and clear it. See `lock_db_env`.
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let dir = tempfile::TempDir::new().unwrap();
         // SAFETY: the lock above is what makes this the only writer of the variable.
         unsafe { std::env::set_var("VELD_DB_PATH", dir.path().join("t.db")) };
@@ -753,7 +752,7 @@ mod catalog_tests {
         // disagree and fails here with no hint that the environment moved. Seen
         // once in a full `just test` run, green on its own immediately after.
         // Exactly one acquire per test — the mutex is not reentrant.
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let res = routes()
             .oneshot(
                 Request::builder()
@@ -964,7 +963,7 @@ mod catalog_tests {
         // sets and clears that process-wide variable. Two reads of env-derived
         // state that must agree need the lock whether or not *this* test is the
         // one writing. Measured: 3 failures in 12 filtered runs without it.
-        let _env = crate::feedback_server::lock_db_env();
+        let _env = crate::http_server::lock_db_env();
         let ours = veld_core::db::Db::default_path().unwrap();
         let encoded = veld_core::percent::encode_component(&ours.to_string_lossy());
         assert!(

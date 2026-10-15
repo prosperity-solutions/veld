@@ -2,8 +2,8 @@ mod backup;
 mod broadcaster;
 mod dbhealth;
 mod engine_worker;
-mod feedback_server;
 mod gc;
+mod http_server;
 mod monitor;
 mod offload;
 mod share;
@@ -15,7 +15,7 @@ use tokio::net::UnixListener;
 use tokio::signal;
 use tracing::{info, warn};
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
+const VERSION: &str = veld_core::VERSION;
 const DEFAULT_SOCKET: &str = "~/.veld/daemon.sock";
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ async fn run(args: Args) -> Result<()> {
     // opens no database, and starts no background task. Dispatched before any of
     // that so nothing below can mistake it for a second instance.
     if args.pty_holder {
-        return feedback_server::run_pty_holder().await;
+        return http_server::run_pty_holder().await;
     }
     // Nor is an engine worker: one action, then exit.
     if args.engine_worker {
@@ -407,17 +407,17 @@ async fn run(args: Args) -> Result<()> {
     }
 
     // Local files, on their own listener and their own origin — see
-    // `feedback_server::files`. Spawned rather than awaited: registering its Caddy
+    // `http_server::files`. Spawned rather than awaited: registering its Caddy
     // route retries with backoff, and nothing else here waits on the helper.
-    tokio::spawn(feedback_server::files::start());
+    tokio::spawn(http_server::files::start());
 
     // Collect stderr captures left by a previous daemon that was killed between
     // spawning a `veld` command and reaping it.
-    feedback_server::management::sweep_spawn_logs();
+    http_server::management::sweep_spawn_logs();
 
     // The engine's supervisor: adopts the workers a previous daemon left running
     // (they outlive it by design) and marks the ones that died as lost.
-    tokio::spawn(feedback_server::engine::supervise());
+    tokio::spawn(http_server::engine::supervise());
 
     // Spawn background tasks.
     let monitor_broadcaster = broadcaster.clone();
@@ -502,7 +502,7 @@ async fn run(args: Args) -> Result<()> {
     // kept current, because the `Origin` gate on the terminal and IDE-channel
     // upgrades is synchronous and cannot ask — and the setup mode file it would
     // otherwise infer from can disagree with the helper in front.
-    let dashboard_ports_handle = tokio::spawn(feedback_server::track_dashboard_ports());
+    let dashboard_ports_handle = tokio::spawn(http_server::track_dashboard_ports());
 
     // Resource-stats sampling runs on its own timer, deliberately separate from
     // the health monitor: liveness probes there can block for tens of seconds,
@@ -511,9 +511,9 @@ async fn run(args: Args) -> Result<()> {
         stats::run_stats_sampler().await;
     });
 
-    let feedback_manager = std::sync::Arc::clone(&share_manager);
-    let feedback_handle = tokio::spawn(async move {
-        feedback_server::run_feedback_server(feedback_manager).await;
+    let http_manager = std::sync::Arc::clone(&share_manager);
+    let http_handle = tokio::spawn(async move {
+        http_server::run_http_server(http_manager).await;
     });
 
     let accept_broadcaster = broadcaster.clone();
@@ -545,7 +545,7 @@ async fn run(args: Args) -> Result<()> {
     // not an addressable instance, or the port was squatted — still connects to the
     // helper and issues a DELETE that Caddy refuses, taking its reload lock and
     // logging an error for a route nobody made.
-    if feedback_server::files::is_ready()
+    if http_server::files::is_ready()
         && let Ok(helper) = veld_core::helper::HelperClient::connect().await
     {
         let _ = helper
@@ -560,7 +560,7 @@ async fn run(args: Args) -> Result<()> {
     // still ends a shell is an explicit `DELETE`, the detach reaper, or the
     // holder's own orphan grace. Ordered before the aborts because it needs the
     // runtime to still be turning.
-    feedback_server::shutdown_terminal_sessions().await;
+    http_server::shutdown_terminal_sessions().await;
 
     // Abort background tasks.
     monitor_handle.abort();
@@ -572,7 +572,7 @@ async fn run(args: Args) -> Result<()> {
     user_path_handle.abort();
     project_path_warm_handle.abort();
     accept_handle.abort();
-    feedback_handle.abort();
+    http_handle.abort();
 
     // Clean up the socket file.
     let _ = tokio::fs::remove_file(&args.socket_path).await;

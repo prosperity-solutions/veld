@@ -267,8 +267,7 @@ async fn scan_and_update(
                     // `management::delegate_teardown` for why it is a delegate
                     // and not an in-process hook run. `finalize_crashed` above
                     // is the election that keeps it to one spawn per crash.
-                    crate::feedback_server::management::delegate_teardown(project_root, run_name)
-                        .await;
+                    crate::http_server::management::delegate_teardown(project_root, run_name).await;
                 }
                 continue; // Skip liveness checks for a run that just ended.
             }
@@ -593,7 +592,7 @@ async fn run_liveness_checks(
                             "timestamp": chrono::Utc::now().to_rfc3339(),
                         });
                         broadcaster.broadcast(&event).await;
-                    } else if crate::feedback_server::engine::has_running_action(
+                    } else if crate::http_server::engine::has_running_action(
                         db,
                         project_root,
                         run_name,
@@ -908,7 +907,7 @@ fn liveness_http_client() -> Result<&'static reqwest::Client, reqwest::Error> {
 fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
     // `root_config_in` already proved the file exists.
     let config_path = veld_core::config::root_config_in(project_root)?;
-    crate::feedback_server::config_cache::parse_config(&config_path)
+    crate::http_server::config_cache::parse_config(&config_path)
 }
 
 /// Restart a run through the engine and wait for it to finish.
@@ -929,7 +928,7 @@ async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Opt
         }
     };
     note(format!("[recovery] restarting '{run_name}'")).await;
-    let id = match crate::feedback_server::engine::spawn_daemon_action(
+    let id = match crate::http_server::engine::spawn_daemon_action(
         project_root,
         veld_engine::api::ActionKind::Restart {
             run: run_name.to_owned(),
@@ -944,7 +943,7 @@ async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Opt
             return;
         }
     };
-    let ended = crate::feedback_server::engine::await_action(&id, Duration::from_secs(300)).await;
+    let ended = crate::http_server::engine::await_action(&id, Duration::from_secs(300)).await;
     // What the restart said — teardown warnings, released shares, the failure —
     // into the run's own log, as the `veld orchestrator restart` output used to be. Progress
     // stays in the action's event log.

@@ -768,16 +768,6 @@ impl SettingKey {
                 },
                 requires: None,
             },
-            Self::FeedbackSuppressOverlay => toggle(
-                "Hide the feedback overlay in routed sites",
-                "By default Veld injects a feedback overlay into every site it reverse-proxies, \
-                 so you can leave comments in the browser. Turn this on to stop that injection \
-                 everywhere, for every project, even one whose veld.json asks for the overlay \
-                 back on — for setups that use Veld purely as an orchestrator and don't collect \
-                 feedback. It applies to routed sites you start after changing it; the client-\
-                 log collector and the /__veld__/* routes are unaffected.",
-                General,
-            ),
             Self::DesktopUpdateFrequency => Spec {
                 title: "How eagerly to offer updates",
                 help: "Veld Desktop checks for new releases in the background and asks before \

@@ -130,7 +130,7 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     // Ensure Caddy is installed.
     let caddy = crate::paths::caddy_bin();
     if !caddy.exists() {
-        eprintln!("  Downloading Caddy...");
+        eprintln!("  Checking Caddy...");
         install_caddy(false)
             .await
             .context("failed to install Caddy during auto-bootstrap")?;
@@ -2077,7 +2077,7 @@ const GITHUB_REPO: &str = "prosperity-solutions/veld";
 /// Check for available updates. Returns `Some(version)` if a newer version
 /// exists on GitHub releases, or `None` if we're already up to date.
 pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
-    let current = env!("CARGO_PKG_VERSION");
+    let current = crate::VERSION;
 
     let client = reqwest::Client::builder()
         .user_agent(format!("veld/{current}"))
@@ -2576,7 +2576,7 @@ async fn run_install_script(
             let install_url = "https://veld.oss.life.li/get".to_string();
 
             let client = reqwest::Client::builder()
-                .user_agent(format!("veld/{}", env!("CARGO_PKG_VERSION")))
+                .user_agent(format!("veld/{}", crate::VERSION))
                 .timeout(Duration::from_secs(30))
                 .build()
                 .context("failed to build HTTP client")?;

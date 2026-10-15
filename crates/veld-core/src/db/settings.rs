@@ -422,8 +422,7 @@ pub const DEFAULT_BACKUP_KEEP: i64 = 12;
 pub const MIN_BACKUP_KEEP_DAILY: i64 = 0;
 pub const MAX_BACKUP_KEEP_DAILY: i64 = 365;
 
-/// A fortnight of dailies. Each is a few megabytes, so the whole tail is smaller
-/// than one screenshot-heavy feedback thread.
+/// A fortnight of dailies. Each is a few megabytes.
 pub const DEFAULT_BACKUP_KEEP_DAILY: i64 = 14;
 
 /// Longest accepted `backup.dir`. Same reasoning and same bound as
@@ -756,7 +755,6 @@ pub enum SettingKey {
     BackupKeep,
     BackupKeepDaily,
     BackupDir,
-    FeedbackSuppressOverlay,
     DesktopMenuBarIcon,
     DesktopUpdateFrequency,
     /// What the Dock icon carries while something is unread: `count`, `dot` or `off`.
@@ -797,7 +795,6 @@ impl SettingKey {
         Self::UiShowNextUnread,
         Self::UiShowProjectNews,
         Self::NewsSource,
-        Self::FeedbackSuppressOverlay,
         Self::DesktopMenuBarIcon,
         Self::DesktopDockBadge,
         Self::DesktopUpdateFrequency,
@@ -973,7 +970,6 @@ impl SettingKey {
             Self::BackupKeep => "backup.keep",
             Self::BackupKeepDaily => "backup.keepDaily",
             Self::BackupDir => "backup.dir",
-            Self::FeedbackSuppressOverlay => "feedback.suppressOverlay",
             Self::DesktopMenuBarIcon => "desktop.menuBarIcon",
             Self::DesktopUpdateFrequency => "desktop.updateFrequency",
             Self::DesktopDockBadge => "desktop.dockBadge",
@@ -1058,7 +1054,6 @@ impl SettingKey {
             "backup.keep" => Self::BackupKeep,
             "backup.keepDaily" => Self::BackupKeepDaily,
             "backup.dir" => Self::BackupDir,
-            "feedback.suppressOverlay" => Self::FeedbackSuppressOverlay,
             "desktop.menuBarIcon" => Self::DesktopMenuBarIcon,
             "desktop.updateFrequency" => Self::DesktopUpdateFrequency,
             "desktop.dockBadge" => Self::DesktopDockBadge,
@@ -1183,7 +1178,6 @@ impl SettingKey {
             | Self::KeepAwakeSharingOnBattery
             | Self::KeepAwakeManualOnBattery
             | Self::BackupEnabled
-            | Self::FeedbackSuppressOverlay
             | Self::DesktopMenuBarIcon
             | Self::FilesViewWebPages
             | Self::FilesViewImages
@@ -1556,9 +1550,9 @@ impl SettingKey {
             // `font-family: ${rawOptions.fontFamily};` inside a stylesheet's
             // textContent — so a `}` closes the rule and everything after it is
             // appended as arbitrary CSS to every `/ide` window, persistently,
-            // because it is stored. The daemon is reachable same-origin from a
-            // developer's own app through the helper's `/__veld__` proxy, so
-            // "only our own UI writes this" is not true.
+            // because it is stored. Any script that runs on a Veld origin is
+            // same-origin with the daemon and can write it too, so "only our own
+            // UI writes this" is not a guarantee.
             //
             // Bounded rather than escaped: a font-family list needs none of these
             // characters, and a validator that tries to neutralise CSS is a
@@ -2204,11 +2198,6 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // the machine and a value baked into one user's database would be wrong
         // on the next one they restore it onto.
         (SettingKey::BackupDir, Value::from("")),
-        // Off — the default is today's behaviour: the feedback overlay is injected
-        // into every routed site. The switch exists for someone who uses Veld
-        // purely as an orchestrator and does not collect feedback; see the accessor
-        // for what turning it on does.
-        (SettingKey::FeedbackSuppressOverlay, Value::from(false)),
         // On — the menu-bar icon is how Veld Desktop says it is running, and it
         // is the only place a run's status is visible with no window open. Off is
         // for a crowded menu bar: the app is still reachable from its Dock icon,
@@ -2543,25 +2532,6 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_bool())
             .unwrap_or(true)
-    }
-
-    /// Whether the global feedback-overlay opt-out is on.
-    ///
-    /// When it is, the orchestrator forces `features.feedback_overlay` off on
-    /// every routed site — even one whose `veld.json` asks for the overlay back
-    /// on — so the overlay is never injected into a reverse-proxied page. The
-    /// per-machine answer for a setup that uses Veld purely as an orchestrator
-    /// and does not collect feedback; the client-log collector and the
-    /// `/__veld__/*` routes are unaffected.
-    ///
-    /// Read by both the CLI and the daemon (each can run the orchestrator),
-    /// which is why it lives here beside the catalog rather than in the bundle.
-    pub fn feedback_overlay_suppressed(&self) -> bool {
-        self.setting(&SettingKey::FeedbackSuppressOverlay)
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
     }
 
     /// The five keep-awake settings, read in one go.

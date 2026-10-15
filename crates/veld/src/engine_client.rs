@@ -159,7 +159,7 @@ impl EngineClient {
                      the engine yet. It restarts onto the new version on its own after an \
                      update; if it does not, run `veld self doctor`.",
                     self.daemon_version,
-                    env!("CARGO_PKG_VERSION")
+                    veld_core::VERSION
                 ),
             },
             other => other,

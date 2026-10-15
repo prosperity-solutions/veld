@@ -5,10 +5,7 @@ description: >
   start, stop, or restart services; check run status or logs; configure veld.json
   (nodes, services, dependencies, presets, health checks, ports, URL templates); or
   debug environment issues like port conflicts or health-check failures. Also use when
-  the user wants to show their UI to a human for review, get visual feedback on
-  changes, watch for comments, or run a feedback loop — even if they say
-  "let me check," "show the user," "wait for feedback," or "let them review it."
-  Also use when they want to customize the Veld IDE for a project — add a status
+  they want to customize the Veld IDE for a project — add a status
   badge (pull request state, CI, a deploy tag), a button that opens the worktree in
   an editor, a menu of project actions, a terminal pane that runs a coding agent, a
   picker that offers that agent's earlier sessions to resume, or tell the team
@@ -26,13 +23,6 @@ triggers:
   - resume an earlier agent session
   - list past session ids in a pane
   - start the environment
-  - show the user
-  - get feedback
-  - listen for comments
-  - wait for feedback
-  - let them review
-  - preview the UI
-  - feedback loop
   - "*.localhost"
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
@@ -53,14 +43,14 @@ documentation, so what you read describes **the veld installed here** rather
 than whichever version this file was written against:
 
 ```sh
-veld agent skills            # the index: fourteen topics, one line each
+veld agent skills            # the index: thirteen topics, one line each
 veld agent skills basics     # start here — the command surface and the traps
 veld agent skills <topic>    # the one you need, when you need it
 ```
 
 Read `veld agent skills basics` before your first `veld` command. Fetch any other
 topic only when the task reaches it; each one is a full reference and there is
-no reason to pay for all fourteen.
+no reason to pay for all thirteen.
 
 **Do not load project state up front either.** Nothing about *this* project —
 its presets, nodes, ports or config — belongs in your context until you have a

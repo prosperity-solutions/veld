@@ -124,8 +124,8 @@ mod tests {
         assert_eq!(subs["orc"], subs["orchestrator"]);
         assert_eq!(subs["orchestrator"]["subcommand_required"], true);
 
-        // `veld feedback` alone is refused by clap; the gate has to know that.
-        assert_eq!(subs["feedback"]["subcommand_required"], true);
+        // `veld network` alone is refused by clap; the gate has to know that.
+        assert_eq!(subs["network"]["subcommand_required"], true);
         assert_eq!(orc["start"]["subcommand_required"], false);
 
         // Flags are per-node, and a hidden one is reported — which is the whole

@@ -88,10 +88,6 @@ describe("handleKeyEvent", () => {
     // acts on it is `isEditableTarget`'s xterm-textarea exemption, asserted
     // separately where that function lives.
     for (const mod of ["ctrl", "meta"] as const) {
-      // `l`/`x`, not `f`/`v`: the veld feedback overlay claims mod+Shift+F/V
-      // for its own bindings, so App.tsx moved focus mode and the view
-      // switch off them — see the matching comment there and in
-      // `isAppShortcutChord`.
       for (const letter of ["l", "x", "u", "o", "k"]) {
         const r = run({ code: `Key${letter.toUpperCase()}`, key: letter, shift: true, [mod]: true });
         expect(r.handled, `${mod}+shift+${letter} must pass through`).toBe(false);

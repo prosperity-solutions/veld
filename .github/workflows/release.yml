@@ -56,29 +56,12 @@ jobs:
         if: github.event_name == 'pull_request'
         run: git checkout -B main
 
-      # The maintainer's lock (scripts/dev/lock.sh). While it is on, its ruleset
-      # would reject semantic-release's push to `main`, so stand down instead of
-      # building four targets to fail at the tag: with no `new_release_*`
-      # outputs every later job skips, and the next merge after the lock lifts
-      # releases what was merged under it.
-      - name: Is the repo locked?
-        id: lock
-        if: github.event_name == 'push'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if bash scripts/dev/lock.sh locked; then
-            echo "locked=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::veld is locked — no release until it is unlocked"
-          fi
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: "22"
 
       - uses: cycjimmy/semantic-release-action@16ca923e6ccbb50770c415a0ccd43709a8c5f7a4
         id: semantic
-        if: steps.lock.outputs.locked != 'true'
         with:
           dry_run: true
           # conventional-changelog-conventionalcommits is pinned to v9:
@@ -90,8 +73,6 @@ jobs:
           # NOTE: keep this list free of "#" comments — the action runs
           # `npm install` on every non-empty line verbatim.
           extra_plugins: |
-            @semantic-release/exec
-            @semantic-release/git
             conventional-changelog-conventionalcommits@^9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -151,7 +132,7 @@ jobs:
         with:
           node-version: '22'
           cache: 'npm'
-          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
+          cache-dependency-path: crates/veld-daemon/ui/package-lock.json
       # First, before twenty minutes of compiling: a missing, mistyped or
       # nearly-expired certificate should fail the release here, not after the
       # build. **Fail closed, deliberately** — there is no ad-hoc fallback. One
@@ -160,7 +141,7 @@ jobs:
       # twice; a red release is the cheaper outcome by far.
       #
       # Check only: the keychain is deleted again at once. `npm ci`, every
-      # crate's build script and proc-macros, and xcaddy all run below; this
+      # crate's build script and proc-macros, and the Caddy fetch all run below; this
       # keeps the identity out of reach while they run, so none of them can
       # simply call codesign as the team. "Developer ID-sign the macOS
       # binaries" imports it again after the last build and deletes it in the
@@ -181,10 +162,7 @@ jobs:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
 
       - name: Install frontend dependencies
-        run: cd crates/veld-daemon/frontend && npm ci
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version: '1.26'
+        run: cd crates/veld-daemon/ui && npm ci
 
       - name: Install cross-compilation tools
         if: matrix.cross
@@ -202,15 +180,10 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Build Caddy with veld_inject
-        run: |
-          export PATH="$(go env GOPATH)/bin:$PATH"
-          XCADDY_VERSION=$(cat .xcaddy-version)
-          go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
-          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} xcaddy build \
-            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-            --output dist/caddy
-          chmod +x dist/caddy
+      # Stock Caddy, unchanged from its upstream release, checked against the
+      # SHA-512 pinned in scripts/release/caddy.sha512.
+      - name: Fetch stock Caddy
+        run: scripts/release/fetch-caddy.sh ${{ matrix.goos }} ${{ matrix.goarch }} dist/caddy
 
       # Every macOS binary the release ships, signed in place: the packaging
       # steps below copy them, and the signature travels inside the Mach-O.
@@ -496,9 +469,8 @@ jobs:
   # version *per run*; nothing here serializes runs, so two overlapping releases
   # are the pre-existing hole, and one this diff widens to a second manifest
   # rather than opens. The version is
-  # written into package.json here for the same reason Cargo.toml's is: this all
-  # runs *before* semantic-release commits the bump, so the checkout is still on
-  # the previous version.
+  # written into package.json here for the same reason Cargo.toml's is: a release
+  # is a tag only (#424), so the checkout never carries the version it ships as.
   #
   # macOS is Developer ID signed, notarized and stapled, so the app keeps one
   # code identity (dev.veld.desktop + the team) across updates — see
@@ -771,23 +743,50 @@ jobs:
         with:
           node-version: "22"
 
-      # The `prepareCmd` regenerates Cargo.lock (`cargo update -w`) for the
-      # version bump, so cargo must be available here. Pin the same toolchain
-      # the build job uses. This is the `release` job only — the `plan` job's
-      # dry run never runs `prepare`, so it needs no toolchain.
-      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
-
+      # A release is a tag and nothing else (#424): no version-bump commit goes
+      # back to `main`. The binaries carry the version because `build` stamps it
+      # in from `plan`, and a tag is all semantic-release needs to find the last
+      # release next time. So the release never needs to write to `main` — which
+      # is what lets it run while the maintainer's lock (scripts/dev/lock.sh)
+      # holds `main` shut, and what removes the race two quick merges used to run
+      # over that bump commit.
       - uses: cycjimmy/semantic-release-action@16ca923e6ccbb50770c415a0ccd43709a8c5f7a4
         id: semantic
         with:
           # Pin conventional-changelog-conventionalcommits to v9 — see the plan
           # job above for why (preset v10+ breaks release notes with writer@8).
           extra_plugins: |
-            @semantic-release/exec
-            @semantic-release/git
             conventional-changelog-conventionalcommits@^9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The artifacts were stamped and named with `plan`'s version; the tag comes
+      # from this job's own run of semantic-release. They differ when an older
+      # merge's run tagged after this run's `plan` read the tags: this run then
+      # computes the version after the one it built. A tag naming a version
+      # nothing was built as would strand every install (install.sh builds asset
+      # names from the tag) and become the "latest release" that `git describe`
+      # and the signing checks read. So take it back and stop — `publish` and
+      # `docker-gateway` need this job. This merge is then released by the next
+      # one, or by "Re-run all jobs" here (re-running only the failed jobs keeps
+      # the stale `plan` and refuses again).
+      - name: Refuse a tag the artifacts were not built as
+        if: steps.semantic.outputs.new_release_git_tag != ''
+        env:
+          TAG: ${{ steps.semantic.outputs.new_release_git_tag }}
+          BUILT_VERSION: ${{ needs.plan.outputs.new_release_version }}
+        run: |
+          # An empty BUILT_VERSION is a wiring fault, not a mismatch: deleting on
+          # it would take back every release this job ever made.
+          if [ -z "${BUILT_VERSION:-}" ]; then
+            echo "::error::plan produced no version to compare $TAG against"
+            exit 1
+          fi
+          if [ "$TAG" != "v$BUILT_VERSION" ]; then
+            echo "::error::tagged $TAG but the artifacts were built as v$BUILT_VERSION; deleting the tag"
+            git push origin --delete "$TAG"
+            exit 1
+          fi
 
   # ── Attach pre-built artifacts to the release ──────────────────────
   publish:
@@ -873,6 +872,7 @@ jobs:
           # There is no checkout in this job, so gh cannot infer the repo.
           GH_REPO: ${{ github.repository }}
           TAG: ${{ needs.release.outputs.new_release_git_tag }}
+          BUILT_VERSION: ${{ needs.plan.outputs.new_release_version }}
         run: |
           set -euo pipefail
 
@@ -882,6 +882,14 @@ jobs:
           # and report success having published nothing.
           if [ -z "${TAG:-}" ]; then
             echo "::error::the release job produced no tag"
+            exit 1
+          fi
+
+          # Second line of the check `release` already makes ("Refuse a tag the
+          # artifacts were not built as"): install.sh builds asset names from the
+          # tag, so a release under the wrong one would 404 on every asset.
+          if [ "$TAG" != "v${BUILT_VERSION:-}" ]; then
+            echo "::error::tag $TAG does not match the version these artifacts were built as (v${BUILT_VERSION:-})"
             exit 1
           fi
 

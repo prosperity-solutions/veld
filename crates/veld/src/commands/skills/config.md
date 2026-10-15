@@ -243,7 +243,6 @@ Declare any variant field once on the node; any variant overrides it.
 | Field group | Node → variant | Variant removes it with |
 |---|---|---|
 | `env`, `ports`, `depends_on`, `files` | additive per key, variant wins | `"KEY": null` |
-| `features` | per field, variant wins | — |
 | `probes.readiness`, `probes.liveness` | **replace the whole probe object** | `"liveness": null` |
 | `share`, `outputs` | replace wholesale | `"share": null` |
 | `type`, `cwd`, `argv`, `shell`, `url_template` | replace | — |
@@ -720,8 +719,6 @@ strand `veld orchestrator stop`. The pre-JSONC `"//": "…"` comment idiom lands
 real `//` comment.
 | `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld orchestrator nodes` output |
-| `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
-| `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. The machine-wide `feedback.suppressOverlay` setting (`veld self settings list`) forces `feedback_overlay` off on every routed site regardless of this. |
 | `proxy` | project, node, variant | `{request?: {remove?: [str], set?: {k: v}}, response?: {...}}`. Reverse-proxy header rules for the local Caddy proxy + web gateway (NOT peer shares). Cascades: `remove` lists union, `set` maps merge (variant > node > project). Absent = no manipulation. See [Proxy](#proxy). |
 | `type` | node, variant | `long_running` (alias: `start_server`) or `command`. Lifecycle only — ports decide whether the node serves anything. Declare once on the node if all its variants agree. |
 | `argv` / `shell` | node, variant | What to run — exactly one of them. |
@@ -934,8 +931,7 @@ of the three layers are not in this file:
    browser grants them on a gesture, and Escape undoes both — which is why
    `keyboard-lock`, whose whole job is capturing Escape, is *not* in that set and
    asks like anything else); `display-capture` is allowed
-   **at an origin veld serves** — which is what makes `veld feedback` screenshots
-   work inside a pane — and asks anywhere else; everything else asks. A `deny`
+   **at an origin veld serves** and asks anywhere else; everything else asks. A `deny`
    withdraws any of these.
 
 **Anything malformed is dropped and reported by `veld orchestrator lint` as a warning, never a

@@ -24,7 +24,7 @@ Install skills so your coding agent knows how to use Veld:
 npx skills add prosperity-solutions/veld
 ```
 
-Installs: **veld-config** (write veld.json), **veld-feedback** (human-in-the-loop reviews), **veld-usage** (CLI reference). Works with Claude Code, Cursor, Codex, Windsurf, and 40+ more agents.
+Installs: **veld** (CLI usage, veld.json configuration, IDE customization). Works with Claude Code, Cursor, Codex, Windsurf, and 40+ more agents.
 
 ## Optional
 

@@ -26,8 +26,8 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::config::{
-    ConfigError, ConfigValue, FeaturesConfig, NodeConfig, NullableMap, ProxyConfig, SetupStep,
-    SharingConfig, VarDecl, VeldConfig,
+    ConfigError, ConfigValue, NodeConfig, NullableMap, ProxyConfig, SetupStep, SharingConfig,
+    VarDecl, VeldConfig,
 };
 use crate::presets::PresetDef;
 
@@ -70,10 +70,6 @@ pub struct Document {
     /// Root-file only, like every other project-level setting.
     #[serde(default)]
     pub default_preset: Option<String>,
-    #[serde(default)]
-    pub client_log_levels: Option<Vec<String>>,
-    #[serde(default)]
-    pub features: Option<FeaturesConfig>,
     #[serde(default)]
     pub proxy: Option<ProxyConfig>,
     #[serde(default)]
@@ -260,7 +256,8 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
         }
     }
 
-    // Unknown top-level keys: an error, but reported rather than fatal. Collected
+    // Unknown top-level keys: an error (a removed one only warns), reported rather
+    // than fatal. Collected
     // before `merge` consumes the documents.
     let unknown_findings: Vec<crate::config::Finding> = docs
         .iter()
@@ -440,10 +437,8 @@ fn merge(
         if *file_index != 0 {
             for (key, present) in [
                 ("url_template", doc.url_template.is_some()),
-                ("features", doc.features.is_some()),
                 ("proxy", doc.proxy.is_some()),
                 ("sharing", doc.sharing.is_some()),
-                ("client_log_levels", doc.client_log_levels.is_some()),
                 ("default_preset", doc.default_preset.is_some()),
                 ("name", doc.name.is_some()),
             ] {
@@ -528,8 +523,6 @@ fn merge(
             .unwrap_or_else(crate::config::default_url_template),
         presets: (!presets.is_empty()).then_some(presets),
         default_preset: root.default_preset.clone(),
-        client_log_levels: root.client_log_levels.clone(),
-        features: root.features.clone(),
         proxy: root.proxy.clone(),
         env: (!env.is_empty()).then_some(env),
         vars: (!vars.is_empty()).then_some(vars),
@@ -1007,7 +1000,7 @@ mod tests {
                 "schemaVersion" | "name" | "url_template" | "$schema" | "default_preset" => {
                     "\"x\"".to_owned()
                 }
-                "include" | "client_log_levels" => "[]".to_owned(),
+                "include" => "[]".to_owned(),
                 "setup" | "teardown" => "[]".to_owned(),
                 _ => "{}".to_owned(),
             };
@@ -1091,8 +1084,7 @@ mod tests {
                 continue;
             }
             let value = match *key {
-                "client_log_levels" => "[]",
-                "features" | "proxy" | "sharing" => "{}",
+                "proxy" | "sharing" => "{}",
                 // url_template, default_preset, name
                 _ => "\"x\"",
             };

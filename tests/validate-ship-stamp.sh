@@ -32,12 +32,11 @@
 #     gate that cannot run is neither. Collapsing them meant a mid-PR branch
 #     rename produced "you skipped the workflow" — a false accusation, on a
 #     message that tells the reader not to investigate.
-# One thing this gate deliberately is NOT: a required status check on `main`.
-# Requiring it would reject `@semantic-release/git`'s direct push, and the
-# GitHub Actions identity cannot be put on a repository ruleset's bypass list.
-# So a red result here blocks nothing by itself — it is a signal a maintainer
-# acts on. AGENTS.md → Agent Skills carries the measurements and what it would
-# take to change that; do not enable the ruleset without reading it.
+# One thing this gate is NOT (yet): a required status check on `main`. So a red
+# result here blocks nothing by itself — it is a signal a maintainer acts on.
+# Releases no longer push to `main` (#424), so requiring it is now only a
+# ruleset setting; AGENTS.md → Agent Skills carries the measurements. The
+# maintainer decides that, not an agent.
 set -euo pipefail
 
 HELPER=scripts/dev/prmeta.sh

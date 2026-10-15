@@ -8,8 +8,8 @@ sentence promising `--json` on every command, a table row putting a flag on the
 wrong node. **The five it does catch, and was written for, are the ones somebody
 would paste:** a `--detach`/`-d` pair that never existed and was documented as
 the default when the opposite is true (twice), `veld orchestrator logs dev-daemon` as a
-positional where there is none, and a bare `veld feedback [--name <n>]`, which
-clap refuses on both counts (twice). Six lines across the corpus, and each
+positional where there is none, and a bare call of a command that has since been
+removed, which clap refused on both counts (twice). Six lines across the corpus, and each
 survived because the only reader who would notice is an agent, at which point
 the cost has already been paid.
 
@@ -88,9 +88,9 @@ def candidate_lines(text):
 
     `runnable` separates a fenced line — something written to be run, so an
     incomplete one is a defect — from an inline span, where naming a command
-    family is ordinary prose. "Collaborate through `veld feedback`" is correct
-    English about a command that requires a subcommand, and six files write it;
-    a fenced `veld feedback` on its own is a line somebody will paste.
+    family is ordinary prose. "Manage checkouts through `veld ide worktree`" is correct
+    English about a command that requires a subcommand; a fenced
+    `veld ide worktree` on its own is a line somebody will paste.
     """
     out = []
     for block in FENCE.findall(text):
@@ -206,8 +206,8 @@ SELFTEST_BAD = [
     "veld orchestrator vars set website_log_level debug --nope",
     # The four the help-parsing version could not see at all.
     "veld orchestrator logs dev-daemon --follow",
-    "veld feedback --name dev",
-    "veld feedback",  # in a fence: a line somebody pastes
+    "veld ide worktree --json",
+    "veld ide worktree",  # in a fence: a line somebody pastes
     "veld nosuchsubcommand",
     # A flag that is real, but on a different node.
     "veld orchestrator runs show a3f8c12 --pin",
@@ -225,7 +225,6 @@ SELFTEST_GOOD = [
     "veld self desktop update --wait-pid 42 --relaunch",  # a hidden flag is still real
     "veld orchestrator runs show a3f8c12 --json",
     "veld orchestrator vars set website_reload_delay 300 --worktree",
-    "veld feedback next --wait --name dev --json",
     "veld network share my-feature --node frontend --ttl 3600 --json",
     "veld agent skills config --json",
     "veld orchestrator action psql --node database --print",
@@ -239,9 +238,9 @@ SELFTEST_GOOD = [
     "veld self backup now --dir /tmp/x --json",  # …and be inherited by a descendant
 ]
 # Prose that names a command family. Legal inline, a defect in a fence — the
-# `veld feedback` entry above is the same string on the other side of that line.
+# `veld ide worktree` entry above is the same string on the other side of that line.
 SELFTEST_GOOD_INLINE_ONLY = [
-    "veld feedback",
+    "veld ide worktree",
     "veld orchestrator runs show",
 ]
 

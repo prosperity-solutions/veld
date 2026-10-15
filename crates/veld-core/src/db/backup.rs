@@ -84,7 +84,6 @@ pub const EXCLUDED_TABLES: &[&str] = &[
     "log_lines",
     "node_stats",
     "node_process_stats",
-    "feedback_screenshots",
     "engine_actions",
     "engine_action_events",
 ];
@@ -865,7 +864,7 @@ fn copy_tables(
     let meta = serde_json::json!({
         "takenAt": now.to_rfc3339(),
         "schemaVersion": schema_version,
-        "veldVersion": env!("CARGO_PKG_VERSION"),
+        "veldVersion": crate::VERSION,
         "excludedTables": EXCLUDED_TABLES,
         "rows": rows,
     });
@@ -1382,7 +1381,7 @@ mod tests {
         let raw = db.kv_get(META_KEY).unwrap().expect("no provenance row");
         let meta: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(meta["schemaVersion"], report.schema_version);
-        assert_eq!(meta["veldVersion"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(meta["veldVersion"], crate::VERSION);
         assert!(
             meta["excludedTables"]
                 .as_array()

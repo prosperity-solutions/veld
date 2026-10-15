@@ -2000,8 +2000,7 @@ function wirePermissionHandlers(ses, partition) {
   // Without this handler Electron rejects `getDisplayMedia` outright, whatever
   // the permission says: there is no built-in picker for it to fall back on. The
   // grant is deliberately narrow — the requesting frame itself, which is exactly
-  // what `preferCurrentTab` asks for, and what veld's own feedback overlay uses.
-  // Nothing outside the pane is ever offered, so there is no picker to show.
+  // what `preferCurrentTab` asks for. Nothing outside the pane is ever offered, so there is no picker to show.
   ses.setDisplayMediaRequestHandler((request, callback) => {
     const wc = request.frame ? allWebContents.fromFrame(request.frame) : null;
     const pane = paneOf(wc);
@@ -2022,8 +2021,8 @@ function wirePermissionHandlers(ses, partition) {
     });
     if (outcome.verdict !== "allow") {
       // The one place a denial is worth a line even when the policy meant it:
-      // `veld feedback` screenshots run through here, and "the overlay says
-      // denied" is otherwise a dead end.
+      // a page's own screenshot runs through here, and "the page says denied"
+      // is otherwise a dead end.
       warnDenied("display-capture", `policy says ${outcome.verdict} for ${permissions.originKey(origin)}`);
       return callback({});
     }
@@ -2151,9 +2150,8 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
    *
    * The main-frame assertion is what the (window id, view id) keying alone does
    * not give: today the isolation rests on pane views having no preload, so no
-   * pane content can reach IPC at all. The moment one gets a preload — injecting
-   * veld's own overlay into a previewed page is the obvious next increment —
-   * arbitrary web content would inherit its host window's whole view set,
+   * pane content can reach IPC at all. The moment one gets a preload, arbitrary
+   * web content would inherit its host window's whole view set,
    * including its siblings' cookie jars. Electron recommends this check for
    * exactly that reason.
    */

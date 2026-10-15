@@ -26,10 +26,9 @@ Do not try to satisfy that CI gate without running the workflow. It is not a for
 veld/
 ├── crates/
 │   ├── veld/              # CLI binary — a thin client of the engine in the daemon
-│   ├── veld-core/         # Shared types, database, feedback protocol
+│   ├── veld-core/         # Shared types, database
 │   ├── veld-engine/       # The engine: orchestrator, preflight, action runner, status/log queries. No HTTP or CLI code
 │   ├── veld-daemon/       # User-space daemon (health, GC, state, engine routes + workers)
-│   │   ├── frontend/      # npm: feedback overlay + client-log bundles (esbuild)
 │   │   └── ui/            # npm: management UI (React+Mantine), served at /ide
 │   ├── veld-helper/       # Privileged daemon (DNS, Caddy routes)
 │   ├── veld-share/        # Shared P2P transport (iroh) — used by daemon + gateway
@@ -64,13 +63,13 @@ cargo build --release
 
 ## Serving the Website Locally
 
-The root `veld.json` serves the website for local development and feedback:
+The root `veld.json` serves the website for local development:
 
 ```sh
 veld orchestrator start website:local --name dev     # or: veld orchestrator start --preset website
 ```
 
-This starts a local HTTP server for the `website/` directory with an HTTPS URL like `https://website.dev.veld.localhost`. You can use `veld feedback` to leave feedback on the website via the in-browser overlay, enabling human-agent collaboration on design and content changes.
+This starts a local HTTP server for the `website/` directory with an HTTPS URL like `https://website.dev.veld.localhost`.
 
 Two knobs on that server are **machine-overridable vars** — the root `veld.json` declares them, your answers live in Veld's database, and they are shared across every worktree of this repo rather than asked for in each one. Defaults reproduce browser-sync's own behaviour, so a fresh clone needs no setup:
 
@@ -84,20 +83,11 @@ veld orchestrator vars unset website_log_level           # back to the default
 
 Change them with `veld orchestrator vars set`, **never by editing `veld.json`** — the declaration is committed and shared, your answer is not.
 
-### Feedback workflow
-
-1. Start the website: `veld orchestrator start website:local --name dev`
-2. Open the URL in your browser
-3. Use the feedback overlay to leave comments on the website
-4. The agent pulls the next item: `veld feedback next --wait --name dev --json`
-5. The agent fixes it, then `veld feedback reply <thread-id> "..."` and loops
-6. Repeat until the reviewer clicks "Done" (`result: "ended"`)
-
 ## Agent Skills
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-**A shipped skill is a pointer, and the documentation lives in the binary.** The fourteen topics `veld agent skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld agent skills`. Three reasons, and the first is the one that decided it:
+**A shipped skill is a pointer, and the documentation lives in the binary.** The thirteen topics `veld agent skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` is a ~2-4KB shell that say to run `veld agent skills`. Three reasons, and the first is the one that decided it:
 
 - **An installed skill is a copy, frozen the day somebody ran `npx skills add`.** Documentation for a CLI, living in that copy, describes whichever veld they had then. The same text inside the binary describes the veld they are running, which is the only version whose behaviour makes the answer right or wrong. It also means the shells never need re-adding, and `.releaserc.json` no longer touches `skills/veld/SKILL.md` at all: the `compatibility:` pin is gone (pinning the current release made every user on a slightly older build read a false "your veld is too old"), and so is the release-time rewrite of `metadata.version`, which now belongs to the *shell* and is bumped by hand on the rare occasion the pointer itself changes. A release that rewrote the shell would contradict the claim on the website that it never changes.
 - **A skill's whole body enters context the moment the skill matches**, needed or not. The previous `skills/veld/SKILL.md` was 100KB, its `reference/` another 136KB, and six `!`-prefixed shell invocations in the body ran `veld -V`, `veld orchestrator config`, `veld orchestrator nodes`, `veld orchestrator presets`, `veld orchestrator runs list` and `veld --help` at load time — in this repo `veld orchestrator config` alone is 35KB of JSONC. An index plus the one topic a task reaches is the same information for a fraction of it, and the *state* half is better fetched when the question is asked, since by then it is also current. **Do not reintroduce a `!`-prefixed command in a shipped skill**; `commands/skills.rs`'s `the_installed_skill_shells_stay_shells` test fails on one, and on a shell over 6KB.
@@ -122,14 +112,12 @@ Gemini CLI reads neither `AGENTS.md` nor `.agents/skills/`, so `.gemini/settings
 
 Renovate and Dependabot are exempt by exact login (`renovate[bot]`, `dependabot[bot]`) — the bare names are not, since those are registrable. `github-actions[bot]` is deliberately absent: a pull request opened with the default `GITHUB_TOKEN` fires no `pull_request` event, so that arm could never be reached. A maintainer's `no-ship` label is the only other way through, and applying one needs write access. **The label must exist in the repo** (`gh label create no-ship`); without it a maintainer honouring a `SHIP-OVERRIDE` request gets "not found".
 
-**`ship` is deliberately NOT a required status check, and this is the reason.** Making it one would break releases, and the fix is not available at repository level. Measured, not assumed:
+**`ship` is NOT a required status check.** It used to be impossible: releases pushed a `chore(release)` bump commit straight to `main` as `GITHUB_TOKEN`, a required check rejects direct pushes too, and GitHub Actions cannot sit on a ruleset's bypass list. Since #424 a release is a **tag only** — nothing writes to `main` but merges — so that obstacle is gone. Measured, not assumed:
 
-- `main` has no branch protection and *Main Protection* is `enforcement: disabled` — `gh api repos/:owner/:repo/rules/branches/main` returns `[]`. So nothing currently blocks a merge; the check going red is the whole signal. The one exception is the maintainer's *Lock* ruleset (`scripts/dev/lock.sh`): normally `disabled`, and while it is active only its bypass team can update `main` — which also rejects the release push, so `release.yml` stands down for as long as it is on.
-- A ruleset's `required_status_checks` rule blocks **direct ref updates**, not just PR merges. Probed on a throwaway branch: creating the branch was accepted, the second push was rejected with `remote: error: GH013: Repository rule violations found`.
-- `@semantic-release/git` pushes `chore(release): vX [skip ci]` **directly to `main`** on every release, authenticated as `secrets.GITHUB_TOKEN`. So requiring the check would reject every release push.
-- That push cannot be exempted here. A repository ruleset's bypass list accepts repository admins, the maintain/write roles, teams, **GitHub Apps** and Dependabot — [not GitHub Actions](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository). The API says so too: adding it returns `Actor GitHub Actions integration must be part of the ruleset source or owner organization`.
+- `main` has no branch protection and *Main Protection* is `enforcement: disabled` — `gh api repos/:owner/:repo/rules/branches/main` returns `[]`. So nothing currently blocks a merge; the check going red is the whole signal. The one exception is the maintainer's *Lock* ruleset (`scripts/dev/lock.sh`): normally `disabled`, and while it is active only its bypass team can update `main`. Releases are unaffected: a tag is not an update to `main`.
+- A ruleset's `required_status_checks` rule blocks **direct ref updates**, not just PR merges. Probed on a throwaway branch: creating the branch was accepted, the second push was rejected with `remote: error: GH013: Repository rule violations found`. With no release push left, that only matters for a human pushing to `main` directly.
 
-**What it would take**, if the check should ever become required: give semantic-release a **GitHub App** token instead of `GITHUB_TOKEN` and put that app in the bypass list, or drop `@semantic-release/git` so releases stop pushing to `main` at all. Both are their own change. Until then, keep the wording in this file, `CLAUDE.md`, `CONTRIBUTING.md` and the workflow at "goes red and stays red" — an earlier revision claimed "cannot be merged", which a review angle correctly called out as telling agents something false as their reason to comply.
+**Making it required** is now a ruleset setting and nothing else — the maintainer's call, not an agent's. Until it is made, keep the wording in this file, `CLAUDE.md`, `CONTRIBUTING.md` and the workflow at "goes red and stays red" — an earlier revision claimed "cannot be merged", which a review angle correctly called out as telling agents something false as their reason to comply.
 
 **Every skill under `.claude/skills/` or `.agents/skills/` must carry
 `metadata.internal: true` in its SKILL.md frontmatter.** The `npx skills` CLI
@@ -151,7 +139,7 @@ Follow this workflow for every feature or fix:
 2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
 3. **Review loop (autonomous, multi-angle, staged)** — Run the loop in [docs/agentic-review.md](docs/agentic-review.md) on the diff: pre-pass (`just lint` + `just test` — cargo clippy+fmt, tsc, and Biome over the JS/TS surfaces) → context pack → staged angles as parallel background subagents with explicit per-angle model tiering → verify each critical/major yourself → fix → re-review the fix delta. Loop until the doc's exit criteria hold or a cap/hard stop fires. Do not run separate single-reviewer warm-up rounds — the multi-angle pass replaces them. Diffs under ~50 lines with no stakes flag take the doc's trivia clause (§11); the stakes override (§3.3) is never downgradable.
 4. **Push to draft PR** — Push the branch and open a draft PR on GitHub. **CI does not run while a PR is a draft** (see the CI cost convention below), so do not push intermediate commits expecting a signal from GitHub — the local pre-pass is your only signal at this stage, which is what makes it load-bearing rather than advisory.
-5. **Mark ready for review — only after the review loop is done.** `gh pr ready` is what actually spends runner minutes, so it is a deliberate step, not a formality. Do not flip a PR ready until step 3's exit criteria hold *and* the local pre-pass is green. The pre-pass is `just lint` + `just test` — for a JS/TS change that means `npm run lint` (Biome) and `npm run typecheck`/`npm test` in the affected surface (`desktop/`, `crates/veld-daemon/ui`, `crates/veld-daemon/frontend`). A draft that has not been locally reviewed has not earned a CI run. (The repo ships a lefthook `pre-push` hook that runs `just lint` automatically, so a red diff normally can't reach a draft; bypass deliberately with `--no-verify` when that is the call.)
+5. **Mark ready for review — only after the review loop is done.** `gh pr ready` is what actually spends runner minutes, so it is a deliberate step, not a formality. Do not flip a PR ready until step 3's exit criteria hold *and* the local pre-pass is green. The pre-pass is `just lint` + `just test` — for a JS/TS change that means `npm run lint` (Biome) and `npm run typecheck`/`npm test` in the affected surface (`desktop/`, `crates/veld-daemon/ui`). A draft that has not been locally reviewed has not earned a CI run. (The repo ships a lefthook `pre-push` hook that runs `just lint` automatically, so a red diff normally can't reach a draft; bypass deliberately with `--no-verify` when that is the call.)
 6. **Wait for CI** — All checks must be green, and no *CI* job may be skipped. A skipped job reports as a passing check, so a draft's checks look successful; `gh pr checks` will exit 0 and say "All checks were successful" on a PR where nothing ran. Confirm `isDraft: false` and read the **CI** workflow's jobs from the ready-for-review run — `gh run view <ready-run-id> --json jobs`, scoped so every job has `conclusion: "success"` — rather than the `gh pr checks` rollup, which never empties on a PR that was ever a draft (a skipped matrix job reports its literal un-expanded template name; commands in the CI cost convention below). `release.yml`'s push-only jobs are always skipped on a PR, so "nothing skipped" is the wrong test. Never assume checks are missing just because they haven't started yet — but if none appear after marking ready, the PR is probably `CONFLICTING`, which stops `pull_request` events firing entirely.
 7. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
 
@@ -165,7 +153,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 |------|----------------|
 | `README.md` | Features list, CLI reference table, Configuration section |
 | `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
-| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld agent skills`.** Fourteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
+| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld agent skills`.** Thirteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
 | `skills/*/SKILL.md` | The shipped skill **shells**. Rarely — they say to run `veld agent skills` and little else, and a change here is a change to the pointer, not to the documentation. Keep them under 6KB and free of `!`-prefixed commands; a test enforces both |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
@@ -287,8 +275,8 @@ and several were paid for in this codebase already.
   halves are required, because with the guard and without the type a PR flipped
   from draft to ready would fire nothing at all and sit with no checks forever.
   Pushes to a draft still create a workflow run, but every job in it skips. The
-  reason is what a `pull_request` run occupies: **five macOS legs**
-  (`integration`, `injection-test`, the mac leg of `desktop-package`, and both
+  reason is what a `pull_request` run occupies: **four macOS legs**
+  (`integration`, the mac leg of `desktop-package`, and both
   darwin legs of `release-build`) plus a four-target release build matrix — all of
   which an agent was previously re-running on every intermediate commit of a
   branch nobody had reviewed yet. Standard macOS runners are free on public
@@ -479,14 +467,9 @@ run, while a plain terminal in the same app works perfectly.
   rather than a leftover tree. The split is by extension rather than a global
   `environment: "jsdom"` because a global one costs every suite jsdom's per-file
   construction — measured at 4.3s → 11.2s across this package's node suites —
-  for no coverage a `.tsx` test does not already give. The sibling package
-  `crates/veld-daemon/frontend` reaches the same place with a per-file
-  `// @vitest-environment jsdom` docblock; both are fine, and neither is a
-  global flip. One assertion in each of the two projects (`typeof document`)
-  pins that split, because nothing else would notice a later global flip —
-  the doc would just go quietly false. The two packages also track different
-  `jsdom` majors on purpose rather than by drift: `ui` is on `^30`, `frontend`
-  still on `^29`, and there is no reason to move the latter until Renovate does.
+  for no coverage a `.tsx` test does not already give. One assertion in each of the two
+  projects (`typeof document`) pins that split, because nothing else would
+  notice a later global flip — the doc would just go quietly false.
   jsdom 30's floor is unusually narrow (`^22.22.2 || ^24.15.0 || >=26`), so the
   `ui` package carries an `engines.node` of its own rather than leaving that
   floor implied by a transitive dependency — CI's `node-version: '22'` clears it

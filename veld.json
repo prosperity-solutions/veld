@@ -27,8 +27,7 @@
       // default) uses 18443, where `https://*.veld.localhost` matches nothing at
       // all and the grant silently never applies.
       //
-      // `display-capture` is already veld's default at an origin veld serves —
-      // it is what makes `veld feedback` screenshots work inside a browser pane.
+      // `display-capture` is already veld's default at an origin veld serves.
       // Written out anyway, because a default is invisible and this file is where
       // someone looks to find out what the project granted.
       {
@@ -489,7 +488,7 @@
     "website": {
       "key": 5,
       "selections": ["website:local"],
-      "when_to_use": "Just the marketing site, for `veld feedback` on copy and design."
+      "when_to_use": "Just the marketing site, for working on copy and design."
     }
   },
   "nodes": {

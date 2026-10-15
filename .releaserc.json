@@ -2,13 +2,6 @@
   "branches": ["main"],
   "plugins": [
     ["@semantic-release/commit-analyzer", { "preset": "conventionalcommits" }],
-    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
-    ["@semantic-release/exec", {
-      "prepareCmd": "sed -i'' -e \"s/^version = \\\"[^\\\"]*\\\"/version = \\\"${nextRelease.version}\\\"/\" Cargo.toml && cargo update -w && (cd desktop && npm version --no-git-tag-version --allow-same-version ${nextRelease.version})"
-    }],
-    ["@semantic-release/git", {
-      "assets": ["Cargo.toml", "Cargo.lock", "desktop/package.json", "desktop/package-lock.json"],
-      "message": "chore(release): v${nextRelease.version} [skip ci]"
-    }]
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }]
   ]
 }

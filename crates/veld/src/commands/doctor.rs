@@ -140,7 +140,7 @@ impl Diagnostics {
     // -- Installation --------------------------------------------------------
 
     async fn gather_installation(&mut self) {
-        let cli_version = env!("CARGO_PKG_VERSION").to_string();
+        let cli_version = veld_core::VERSION.to_string();
 
         // Binary
         self.binary_path = std::env::current_exe()
@@ -543,7 +543,7 @@ impl Diagnostics {
 
     async fn gather_checks(&mut self) {
         // 0. Central database opens and is at a supported schema version.
-        // Everything (run state, logs, feedback, tokens) lives here now, so a
+        // Everything (run state, logs, tokens) lives here now, so a
         // corrupt/locked/newer-than-supported database must be visible in the
         // one diagnostic command.
         //
@@ -726,7 +726,7 @@ impl Diagnostics {
                          you are already on the latest release",
                         tilde_path(&path),
                         describe_org_key(verdict.key),
-                        env!("CARGO_PKG_VERSION"),
+                        veld_core::VERSION,
                         veld_core::signing::INSTALLER_COMMAND
                     ),
                 }),
@@ -919,22 +919,22 @@ impl Diagnostics {
             });
         }
 
-        // 6. Feedback server responding. Name the port so a contributor
+        // 6. The daemon's HTTP server responding. Name the port so a contributor
         // running a dev instance (VELD_DAEMON_PORT) can tell WHICH daemon
         // this green/red check is about.
         let daemon_port = veld_core::instance::daemon_port();
-        let feedback_ok = tcp_connect_ok("127.0.0.1", daemon_port).await;
+        let http_ok = tcp_connect_ok("127.0.0.1", daemon_port).await;
         let instance_note = if daemon_port == veld_core::instance::DEFAULT_DAEMON_PORT {
             String::new()
         } else {
             format!(" (dev instance, port {daemon_port})")
         };
         self.checks.push(Check {
-            pass: feedback_ok,
-            label: if feedback_ok {
-                format!("Feedback server responding{instance_note}")
+            pass: http_ok,
+            label: if http_ok {
+                format!("Daemon HTTP server responding{instance_note}")
             } else {
-                format!("Feedback server not responding{instance_note}")
+                format!("Daemon HTTP server not responding{instance_note}")
             },
         });
 
@@ -1005,7 +1005,7 @@ impl Diagnostics {
         // died after an update" had nowhere to look. This names the directory and
         // counts what is in it; a socket nobody answers is a holder that is gone
         // and gets swept at the next daemon start.
-        self.checks.push(self.terminal_holders_check(feedback_ok));
+        self.checks.push(self.terminal_holders_check(http_ok));
 
         // 11. The terminal-URL shims.
         //

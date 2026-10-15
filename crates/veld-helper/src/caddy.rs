@@ -17,7 +17,7 @@ const CADDY_ADMIN_API: &str = "http://localhost:2019";
 // terminal and IDE channel is refused — exactly the fault this coupling closes.
 use veld_core::instance::MANAGEMENT_HOST;
 
-/// Port the daemon's HTTP server listens on (feedback + management).
+/// Port the daemon's HTTP server listens on (the management UI).
 const DAEMON_HTTP_PORT: u16 = 19899;
 
 /// Overall timeout for a single Caddy admin API request. A half-dead Caddy
@@ -238,7 +238,12 @@ impl CaddyManager {
         // Bring routes stored by a pre-#170 helper onto the hostname-keyed id
         // format. Safe to run on every boot: the canonical id is a function of
         // the entry's own hostname, so re-keying is idempotent.
-        if canonicalize_route_keys(&mut routes) > 0 {
+        let rekeyed = canonicalize_route_keys(&mut routes);
+        // Routes stored before #424 carry the `veld_inject` handler, which stock
+        // Caddy does not have: one of them in the replayed config makes Caddy
+        // refuse the whole load, and every site goes down with it.
+        let stripped = strip_injection(&mut routes);
+        if rekeyed + stripped > 0 {
             write_route_store_blocking(&store_path, &routes);
         }
         Self {
@@ -464,10 +469,9 @@ impl CaddyManager {
         route_id: &str,
         hostname: &str,
         upstream: &str,
-        feedback: Option<FeedbackConfig<'_>>,
         proxy: &veld_core::config::ResolvedProxy,
     ) -> Result<()> {
-        let route = build_route_json(route_id, hostname, upstream, feedback, proxy);
+        let route = build_route_json(route_id, hostname, upstream, proxy);
 
         // Record in the durable store first (and persist) so the route is
         // replayed on any future reload/restart even if the live reload below
@@ -1132,6 +1136,44 @@ fn stored_route_hostname(route: &serde_json::Value) -> Option<&str> {
     route.get("match")?.get(0)?.get("host")?.get(0)?.as_str()
 }
 
+/// Remove what a pre-#424 helper wrote into each stored route for the in-browser
+/// overlay, returning how many routes changed.
+///
+/// Two parts, both from the same `if let Some(fb)` branch of the old
+/// `build_route_json`: a `/__veld__/*` subroute proxying to the daemon, and a
+/// `veld_inject` handler ahead of the app's `reverse_proxy`. Stock Caddy knows no
+/// `veld_inject` module, so a stored route still carrying one makes Caddy refuse
+/// the *whole* replayed config. What is left is exactly the route the current
+/// `build_route_json` writes, so this is safe to run on every boot.
+fn strip_injection(routes: &mut HashMap<String, serde_json::Value>) -> usize {
+    let mut changed = 0;
+    for route in routes.values_mut() {
+        let Some(subroutes) = route
+            .pointer_mut("/handle/0/routes")
+            .and_then(|v| v.as_array_mut())
+        else {
+            continue;
+        };
+        let before = subroutes.len();
+        subroutes.retain(|r| {
+            r.pointer("/match/0/path/0").and_then(|p| p.as_str()) != Some("/__veld__/*")
+        });
+        let mut touched = subroutes.len() != before;
+        for sub in subroutes.iter_mut() {
+            if let Some(handlers) = sub.get_mut("handle").and_then(|h| h.as_array_mut()) {
+                let n = handlers.len();
+                handlers
+                    .retain(|h| h.get("handler").and_then(|v| v.as_str()) != Some("veld_inject"));
+                touched |= handlers.len() != n;
+            }
+        }
+        if touched {
+            changed += 1;
+        }
+    }
+    changed
+}
+
 /// Re-key persisted routes to `veld_core::url::run_route_id(hostname)`,
 /// returning how many entries moved.
 ///
@@ -1248,26 +1290,6 @@ async fn persist_route_store(snapshot: &RouteSnapshot) {
     if let Err(e) = tokio::fs::rename(&tmp, &snapshot.path).await {
         warn!(error = %e, "failed to move routes store into place");
     }
-}
-
-// ---------------------------------------------------------------------------
-// Feedback config
-// ---------------------------------------------------------------------------
-
-/// Configuration for feedback overlay / client-side injection on a route.
-pub struct FeedbackConfig<'a> {
-    pub upstream: &'a str,
-    pub run_name: &'a str,
-    pub project_root: &'a str,
-    /// Comma-separated client log levels (e.g. "log,warn,error").
-    pub client_log_levels: &'a str,
-    /// Whether to automatically inject bootstrap scripts into HTML responses.
-    /// When `false`, the `/__veld__/*` routes are still created for manual injection.
-    pub inject: bool,
-    /// Whether to inject the feedback overlay toolbar.
-    pub inject_feedback_overlay: bool,
-    /// Whether to inject the client-side log collector.
-    pub inject_client_logs: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,17 +1509,6 @@ fn build_base_config(
     config
 }
 
-/// Build a single route entry with hostname matching, TLS, and reverse proxy.
-///
-/// When feedback is configured:
-/// 1. `/__veld__/*` routes to the daemon's feedback HTTP server (API + assets)
-///    with `X-Veld-Run` and `X-Veld-Project` headers injected by Caddy.
-/// 2. The main app proxy uses the `veld_inject` Caddy handler to prepend a
-///    bootstrap `<script>` tag to HTML responses. The handler streams the
-///    response without buffering — it writes the prefix before the first body
-///    chunk and passes the rest through. This enables streaming SSR, WebSocket
-///    upgrades, and SSE without any bypass routes (the handler properly
-///    delegates Flusher and Hijacker).
 // Route ids starting with the given prefix, taken from a Caddy routes array.
 fn filter_route_ids_by_prefix(routes: &serde_json::Value, prefix: &str) -> Vec<String> {
     routes
@@ -1551,15 +1562,13 @@ fn caddy_proxy_headers(proxy: &veld_core::config::ResolvedProxy) -> Option<serde
     Some(serde_json::Value::Object(headers))
 }
 
+/// Build a single route entry: hostname matching and a plain reverse proxy.
 fn build_route_json(
     route_id: &str,
     hostname: &str,
     upstream: &str,
-    feedback: Option<FeedbackConfig<'_>>,
     proxy: &veld_core::config::ResolvedProxy,
 ) -> serde_json::Value {
-    let mut subroutes = Vec::new();
-
     // Caddy `reverse_proxy` header manipulation, built from the resolved
     // `proxy` config. `None` when there are no rules — the `headers` key is
     // then omitted entirely and headers pass through untouched (the default;
@@ -1573,90 +1582,17 @@ fn build_route_json(
     // "align" the two by re-adding an unconditional Origin rewrite/strip.
     let proxy_headers = caddy_proxy_headers(proxy);
 
-    if let Some(fb) = feedback {
-        // /__veld__/* → strip prefix, proxy to daemon with context headers.
-        subroutes.push(serde_json::json!({
-            "match": [{ "path": ["/__veld__/*"] }],
-            "handle": [
-                {
-                    "handler": "rewrite",
-                    "strip_path_prefix": "/__veld__"
-                },
-                {
-                    "handler": "reverse_proxy",
-                    "headers": {
-                        "request": {
-                            "set": {
-                                "X-Veld-Run": [fb.run_name],
-                                "X-Veld-Project": [fb.project_root]
-                            }
-                        }
-                    },
-                    "upstreams": [{ "dial": fb.upstream }]
-                }
-            ]
-        }));
-
-        let bootstrap = if fb.inject {
-            build_bootstrap_script(&fb)
-        } else {
-            String::new()
-        };
-
-        // Accept-Encoding: identity is set by the veld_inject handler itself
-        // (not the proxy config) so non-HTML requests get normal compression.
-
-        if bootstrap.is_empty() {
-            // No injection (either inject:false or both features disabled).
-            // Plain reverse proxy, but /__veld__/* routes above are still active
-            // for manual script tag usage.
-            let mut handler = serde_json::json!({
-                "handler": "reverse_proxy",
-                "flush_interval": -1,
-                "upstreams": [{ "dial": upstream }]
-            });
-            if let Some(h) = &proxy_headers {
-                handler["headers"] = h.clone();
-            }
-            subroutes.push(serde_json::json!({ "handle": [handler] }));
-        } else {
-            // veld_inject prepends the bootstrap script to text/html responses
-            // without buffering. Accept-Encoding: identity ensures the upstream
-            // sends uncompressed HTML (can't prepend to gzipped bytes).
-            // flush_interval: -1 disables response buffering so that React
-            // streaming hydration (chunked transfer-encoding) works correctly.
-            let mut handler = serde_json::json!({
-                "handler": "reverse_proxy",
-                "flush_interval": -1,
-                "upstreams": [{ "dial": upstream }]
-            });
-            if let Some(h) = &proxy_headers {
-                handler["headers"] = h.clone();
-            }
-            subroutes.push(serde_json::json!({
-                "handle": [
-                    {
-                        "handler": "veld_inject",
-                        "prefix": bootstrap
-                    },
-                    handler
-                ]
-            }));
-        }
-    } else {
-        // No feedback — plain reverse proxy.
-        // flush_interval: -1 passes through chunked/streamed responses
-        // immediately (required for React streaming hydration, SSE, etc.).
-        let mut handler = serde_json::json!({
-            "handler": "reverse_proxy",
-            "flush_interval": -1,
-            "upstreams": [{ "dial": upstream }]
-        });
-        if let Some(h) = &proxy_headers {
-            handler["headers"] = h.clone();
-        }
-        subroutes.push(serde_json::json!({ "handle": [handler] }));
+    // flush_interval: -1 passes through chunked/streamed responses
+    // immediately (required for React streaming hydration, SSE, etc.).
+    let mut handler = serde_json::json!({
+        "handler": "reverse_proxy",
+        "flush_interval": -1,
+        "upstreams": [{ "dial": upstream }]
+    });
+    if let Some(h) = proxy_headers {
+        handler["headers"] = h;
     }
+    let subroutes = vec![serde_json::json!({ "handle": [handler] })];
 
     serde_json::json!({
         "@id": route_id,
@@ -1671,123 +1607,6 @@ fn build_route_json(
         ],
         "terminal": true
     })
-}
-
-/// Build the inline bootstrap `<script>` tag that is injected into HTML
-/// responses by the `veld_inject` Caddy handler.
-///
-/// The script is prepended to the response body (after any `<!DOCTYPE>`
-/// declaration). It runs before any app code, immediately intercepts
-/// console methods to capture early logs, then dynamically loads the full
-/// client-log collector and/or feedback overlay assets once the DOM is ready.
-fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
-    if !fb.inject_client_logs && !fb.inject_feedback_overlay {
-        return String::new();
-    }
-
-    let mut js = String::from(
-        "(function(){\"use strict\";\
-         if(window.__veld_cl)return;\
-         window.__veld_cl=1;",
-    );
-
-    // --- Immediate console interception (before any app code) ---
-    if fb.inject_client_logs {
-        // Escape levels for safe embedding in JS string.
-        let levels = escape_js_string(fb.client_log_levels);
-        js.push_str(&format!(
-            "var V={levels}.split(','),B=window.__veld_early_logs=[],O={{}};\
-             V.forEach(function(n){{\
-             var o=console[n];if(typeof o!=='function')return;\
-             O[n]=o;\
-             console[n]=function(){{\
-             B.push({{l:n,a:Array.from(arguments),t:Date.now()}});\
-             o.apply(console,arguments);\
-             }};}});\
-             window.__veld_early_originals=O;\
-             window.addEventListener('error',function(e){{\
-             try{{B.push({{l:'exception',m:e.message||String(e),\
-             s:e.error&&e.error.stack?e.error.stack:'',t:Date.now()}});\
-             }}catch(_){{}}\
-             }});\
-             window.addEventListener('unhandledrejection',function(e){{\
-             try{{var r=e.reason;\
-             B.push({{l:'exception',m:'Unhandled Promise rejection: '+(r instanceof Error?r.message:String(r||'')),\
-             s:r instanceof Error&&r.stack?r.stack:'',t:Date.now()}});\
-             }}catch(_){{}}\
-             }});",
-            levels = levels,
-        ));
-    }
-
-    // --- Dynamic asset loading ---
-    // Assets are loaded after React hydration completes. DOMContentLoaded fires
-    // before hydration, so loading then causes React to remove our elements.
-    // requestIdleCallback fires when the main thread is idle (after hydration).
-    // Fallback to setTimeout(fn, 0) for browsers without requestIdleCallback.
-    js.push_str(
-        "function E(t,a){var e=document.createElement(t);\
-         for(var k in a)e.setAttribute(k,a[k]);\
-         (document.head||document.documentElement).appendChild(e);return e;}\
-         function R(fn){document.readyState==='loading'?\
-         document.addEventListener('DOMContentLoaded',function(){W(fn)}):W(fn);}\
-         function W(fn){typeof requestIdleCallback!=='undefined'?\
-         requestIdleCallback(fn):setTimeout(fn,0);}R(function(){",
-    );
-
-    if fb.inject_client_logs {
-        let levels = escape_js_string_bare(fb.client_log_levels);
-        js.push_str(&format!(
-            "E('script',{{'src':'/__veld__/api/client-log.js','data-veld-levels':'{levels}'}});",
-            levels = levels,
-        ));
-    }
-
-    if fb.inject_feedback_overlay {
-        // CSS is bundled into the JS and injected via Shadow DOM — no <link> needed.
-        js.push_str("E('script',{'src':'/__veld__/feedback/script.js'});");
-    }
-
-    js.push_str("});");
-
-    // Self-remove the bootstrap <script> tag from the DOM before React (or any
-    // other hydration-checking framework) walks the live DOM. The browser's
-    // HTML5 parser relocates a stray <script> between <!DOCTYPE> and <html>
-    // into <head>; Next.js app-router hydrates from the <html> root and would
-    // see an extra child not present in the React tree, causing a hydration
-    // mismatch. `document.currentScript` is set during synchronous script
-    // execution, so removal here runs before hydration. Side effects (console
-    // interception, error listeners, and the requestIdleCallback-deferred
-    // asset loads) survive removal because they're attached to window/console.
-    js.push_str(
-        "var s=document.currentScript;if(s&&s.parentNode)s.parentNode.removeChild(s);})();",
-    );
-
-    format!("<script>{js}</script>")
-}
-
-/// Escape a string for safe embedding inside a JavaScript single-quoted string.
-/// Returns the value wrapped in single quotes: `'escaped'`.
-fn escape_js_string(s: &str) -> String {
-    format!("'{}'", escape_js_string_bare(s))
-}
-
-/// Escape a string for safe embedding in JS without adding outer quotes.
-/// Use this when the string will be placed inside an already-quoted context.
-fn escape_js_string_bare(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '\'' => out.push_str("\\'"),
-            '\\' => out.push_str("\\\\"),
-            '<' => out.push_str("\\x3c"), // prevent </script> injection
-            '>' => out.push_str("\\x3e"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -1840,7 +1659,6 @@ mod tests {
             "r",
             "app.test.localhost",
             "localhost:3000",
-            None,
             &veld_core::config::ResolvedProxy::default(),
         );
         let proxy = &route["handle"][0]["routes"][0]["handle"][0];
@@ -1860,7 +1678,7 @@ mod tests {
             },
             response: Default::default(),
         };
-        let route = build_route_json("r", "app.test.localhost", "localhost:3000", None, &proxy);
+        let route = build_route_json("r", "app.test.localhost", "localhost:3000", &proxy);
         let handler = &route["handle"][0]["routes"][0]["handle"][0];
         assert_eq!(handler["headers"]["request"]["delete"][0], "Origin");
     }
@@ -1892,7 +1710,6 @@ mod tests {
             "test-route",
             "app.test.localhost",
             "localhost:3000",
-            None,
             &veld_core::config::ResolvedProxy::default(),
         );
         assert_eq!(route["@id"], "test-route");
@@ -1902,242 +1719,6 @@ mod tests {
         assert_eq!(subroutes[0]["handle"][0]["handler"], "reverse_proxy");
         assert!(
             subroutes[0]["match"].is_null(),
-            "catch-all route has no matcher"
-        );
-    }
-
-    #[test]
-    fn test_build_route_json_with_feedback() {
-        let route = build_route_json(
-            "test-route",
-            "app.test.localhost",
-            "localhost:3000",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "my-run",
-                project_root: "/tmp/project",
-                client_log_levels: "log,warn,error",
-                inject: true,
-                inject_feedback_overlay: true,
-                inject_client_logs: true,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        // /__veld__/* + veld_inject catch-all (no bypass routes needed).
-        assert_eq!(subroutes.len(), 2);
-
-        // First subroute: feedback API.
-        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
-        let fb_proxy = &subroutes[0]["handle"][1];
-        assert_eq!(
-            fb_proxy["headers"]["request"]["set"]["X-Veld-Run"][0],
-            "my-run"
-        );
-        assert_eq!(
-            fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
-            "/tmp/project"
-        );
-
-        // Second subroute: veld_inject + reverse_proxy.
-        let handlers = subroutes[1]["handle"].as_array().unwrap();
-        assert_eq!(handlers.len(), 2);
-        assert_eq!(handlers[0]["handler"], "veld_inject");
-        assert!(handlers[0]["prefix"].as_str().unwrap().contains("<script>"));
-        assert_eq!(handlers[1]["handler"], "reverse_proxy");
-        // Accept-Encoding: identity is now set by veld_inject handler, not proxy config.
-        assert!(handlers[1]["headers"]["request"]["set"]["Accept-Encoding"].is_null());
-        assert_eq!(handlers[1]["upstreams"][0]["dial"], "localhost:3000");
-
-        // Verify bootstrap script contains both features.
-        let prefix = handlers[0]["prefix"].as_str().unwrap();
-        assert!(prefix.contains("client-log.js"), "should load client-log");
-        assert!(
-            prefix.contains("__veld_early_logs"),
-            "should buffer early logs"
-        );
-        assert!(
-            prefix.contains("feedback/script.js"),
-            "should load overlay JS (CSS bundled in)"
-        );
-        assert!(
-            prefix.contains("feedback/script.js"),
-            "should load overlay JS"
-        );
-        // font-face is now bundled in Shadow DOM CSS, not in bootstrap
-    }
-
-    #[test]
-    fn test_build_route_json_feedback_overlay_only() {
-        let route = build_route_json(
-            "test-route",
-            "app.test.localhost",
-            "localhost:3000",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "my-run",
-                project_root: "/tmp/project",
-                client_log_levels: "log,warn,error",
-                inject: true,
-                inject_feedback_overlay: true,
-                inject_client_logs: false,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        assert_eq!(subroutes.len(), 2);
-        let prefix = subroutes[1]["handle"][0]["prefix"].as_str().unwrap();
-        assert!(
-            prefix.contains("feedback/script.js"),
-            "should load overlay JS (CSS bundled in)"
-        );
-        assert!(
-            prefix.contains("feedback/script.js"),
-            "should load overlay JS"
-        );
-        assert!(
-            !prefix.contains("client-log.js"),
-            "should NOT load client-log"
-        );
-        assert!(
-            !prefix.contains("__veld_early_logs"),
-            "should NOT intercept console"
-        );
-    }
-
-    #[test]
-    fn test_build_route_json_client_logs_only() {
-        let route = build_route_json(
-            "test-route",
-            "app.test.localhost",
-            "localhost:3000",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "my-run",
-                project_root: "/tmp/project",
-                client_log_levels: "warn,error",
-                inject: true,
-                inject_feedback_overlay: false,
-                inject_client_logs: true,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        assert_eq!(subroutes.len(), 2);
-        let prefix = subroutes[1]["handle"][0]["prefix"].as_str().unwrap();
-        assert!(prefix.contains("client-log.js"), "should load client-log");
-        assert!(
-            prefix.contains("__veld_early_logs"),
-            "should intercept console"
-        );
-        assert!(
-            !prefix.contains("feedback/script.js"),
-            "should NOT load overlay JS"
-        );
-        assert!(
-            !prefix.contains("feedback/script.js"),
-            "should NOT load overlay JS"
-        );
-    }
-
-    #[test]
-    fn test_build_route_json_all_features_disabled() {
-        let route = build_route_json(
-            "test-route",
-            "app.test.localhost",
-            "localhost:3000",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "my-run",
-                project_root: "/tmp/project",
-                client_log_levels: "log,warn,error",
-                inject: true,
-                inject_feedback_overlay: false,
-                inject_client_logs: false,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        // /__veld__/* + plain proxy (no veld_inject).
-        assert_eq!(subroutes.len(), 2);
-        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
-        let handlers = subroutes[1]["handle"].as_array().unwrap();
-        assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0]["handler"], "reverse_proxy");
-        assert!(
-            subroutes[1]["match"].is_null(),
-            "catch-all route has no matcher"
-        );
-    }
-
-    #[test]
-    fn test_build_route_json_inject_false_keeps_veld_routes() {
-        // inject: false should disable the veld_inject handler but keep
-        // the /__veld__/* proxy routes for manual script tag usage.
-        let route = build_route_json(
-            "test-route",
-            "app.test.localhost",
-            "localhost:3000",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "my-run",
-                project_root: "/tmp/project",
-                client_log_levels: "log,warn,error",
-                inject: false,
-                inject_feedback_overlay: true,
-                inject_client_logs: true,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        // /__veld__/* route still present + plain proxy (no veld_inject).
-        assert_eq!(subroutes.len(), 2);
-        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
-        // Second subroute: plain reverse proxy, no veld_inject.
-        let handlers = subroutes[1]["handle"].as_array().unwrap();
-        assert_eq!(handlers.len(), 1);
-        assert_eq!(handlers[0]["handler"], "reverse_proxy");
-    }
-
-    /// Verify the veld_inject route is structurally correct: it uses
-    /// veld_inject + reverse_proxy (no bypass routes), proxies to the app
-    /// upstream, and sets Accept-Encoding: identity.
-    #[test]
-    fn test_veld_inject_route_structure() {
-        let route = build_route_json(
-            "inject-test",
-            "app.test.localhost",
-            "localhost:5555",
-            Some(FeedbackConfig {
-                upstream: "localhost:19899",
-                run_name: "run",
-                project_root: "/tmp",
-                client_log_levels: "log",
-                inject: true,
-                inject_feedback_overlay: true,
-                inject_client_logs: true,
-            }),
-            &veld_core::config::ResolvedProxy::default(),
-        );
-        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-
-        // Only 2 subroutes: /__veld__/* and catch-all. No bypass routes.
-        assert_eq!(subroutes.len(), 2);
-        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
-
-        // Catch-all has exactly 2 handlers: veld_inject + reverse_proxy.
-        let handlers = subroutes[1]["handle"].as_array().unwrap();
-        assert_eq!(handlers.len(), 2);
-        assert_eq!(handlers[0]["handler"], "veld_inject");
-        assert!(!handlers[0]["prefix"].as_str().unwrap().is_empty());
-        assert_eq!(handlers[1]["handler"], "reverse_proxy");
-        assert_eq!(handlers[1]["upstreams"][0]["dial"], "localhost:5555");
-        // Accept-Encoding: identity is now set by veld_inject handler, not proxy config.
-        assert!(handlers[1]["headers"]["request"]["set"]["Accept-Encoding"].is_null());
-
-        // No matcher on the catch-all route.
-        assert!(
-            subroutes[1]["match"].is_null(),
             "catch-all route has no matcher"
         );
     }
@@ -2159,7 +1740,6 @@ mod tests {
                 "veld-run-b",
                 "b.dev.localhost",
                 "localhost:3001",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2169,7 +1749,6 @@ mod tests {
                 "veld-run-a",
                 "a.dev.localhost",
                 "localhost:3000",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2223,7 +1802,6 @@ mod tests {
                 "veld-run-a",
                 "a.dev.localhost",
                 "localhost:3000",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2254,10 +1832,74 @@ mod tests {
             &id,
             hostname,
             "localhost:3000",
-            None,
             &veld_core::config::ResolvedProxy::default(),
         );
         (id, route)
+    }
+
+    /// A route a pre-#424 helper stored, exactly as its `build_route_json` wrote it
+    /// with the overlay on: the `/__veld__/*` subroute, then `veld_inject` ahead of
+    /// the app's proxy.
+    fn injected_entry() -> serde_json::Value {
+        serde_json::json!({
+            "@id": "veld-route-app-localhost",
+            "match": [{ "host": ["app.localhost"] }],
+            "handle": [{
+                "handler": "subroute",
+                "routes": [
+                    {
+                        "match": [{ "path": ["/__veld__/*"] }],
+                        "handle": [
+                            { "handler": "rewrite", "strip_path_prefix": "/__veld__" },
+                            { "handler": "reverse_proxy", "upstreams": [{ "dial": "localhost:19899" }] }
+                        ]
+                    },
+                    {
+                        "handle": [
+                            { "handler": "veld_inject", "prefix": "<script></script>" },
+                            { "handler": "reverse_proxy", "flush_interval": -1, "upstreams": [{ "dial": "localhost:3000" }] }
+                        ]
+                    }
+                ]
+            }],
+            "terminal": true
+        })
+    }
+
+    #[test]
+    fn strip_injection_turns_a_stored_overlay_route_into_todays_route() {
+        let mut routes = HashMap::from([("veld-route-app-localhost".to_owned(), injected_entry())]);
+        assert_eq!(strip_injection(&mut routes), 1);
+        let want = build_route_json(
+            "veld-route-app-localhost",
+            "app.localhost",
+            "localhost:3000",
+            &veld_core::config::ResolvedProxy::default(),
+        );
+        assert_eq!(routes["veld-route-app-localhost"], want);
+        assert!(
+            !serde_json::to_string(&routes)
+                .unwrap()
+                .contains("veld_inject")
+        );
+        // Idempotent: a second boot finds nothing to do.
+        assert_eq!(strip_injection(&mut routes), 0);
+    }
+
+    #[test]
+    fn strip_injection_leaves_current_and_unreadable_routes_alone() {
+        let current = build_route_json(
+            "veld-route-b-localhost",
+            "b.localhost",
+            "localhost:4000",
+            &veld_core::config::ResolvedProxy::default(),
+        );
+        let mut routes = HashMap::from([
+            ("veld-route-b-localhost".to_owned(), current.clone()),
+            ("odd".to_owned(), serde_json::json!({ "@id": "odd" })),
+        ]);
+        assert_eq!(strip_injection(&mut routes), 0);
+        assert_eq!(routes["veld-route-b-localhost"], current);
     }
 
     #[test]
@@ -2333,7 +1975,6 @@ mod tests {
                 "veld-join-join_a1b2c3d4-app",
                 "app.joined.localhost",
                 "localhost:3000",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2344,7 +1985,6 @@ mod tests {
                 "veld-mgmt-veld-dev.localhost",
                 "veld-dev.localhost",
                 "localhost:19898",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2391,7 +2031,6 @@ mod tests {
                 "veld-mgmt-veld-dev.localhost",
                 "veld-dev.localhost",
                 "localhost:19898",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2548,7 +2187,6 @@ mod tests {
                     id,
                     host,
                     "localhost:3000",
-                    None,
                     &veld_core::config::ResolvedProxy::default(),
                 ),
             );
@@ -2577,7 +2215,6 @@ mod tests {
                 "veld-run-collides",
                 MANAGEMENT_HOST,
                 "localhost:3000",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2589,7 +2226,6 @@ mod tests {
                 "veld-run-twin-a",
                 "twin.dev.localhost",
                 "localhost:3001",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -2599,7 +2235,6 @@ mod tests {
                 "veld-run-twin-b",
                 "twin.dev.localhost",
                 "localhost:3002",
-                None,
                 &veld_core::config::ResolvedProxy::default(),
             ),
         );
@@ -3137,272 +2772,5 @@ mod tests {
             .unwrap();
         assert_eq!(listen[0], ":18443");
         assert_eq!(listen[1], ":18080");
-    }
-
-    // -----------------------------------------------------------------------
-    // Bootstrap script tests
-    // -----------------------------------------------------------------------
-
-    fn make_fb<'a>(overlay: bool, logs: bool, levels: &'a str) -> FeedbackConfig<'a> {
-        FeedbackConfig {
-            upstream: "localhost:19899",
-            run_name: "run",
-            project_root: "/tmp",
-            client_log_levels: levels,
-            inject: true,
-            inject_feedback_overlay: overlay,
-            inject_client_logs: logs,
-        }
-    }
-
-    #[test]
-    fn test_bootstrap_script_both_features() {
-        let script = build_bootstrap_script(&make_fb(true, true, "log,warn,error"));
-        assert!(script.starts_with("<script>"));
-        assert!(script.ends_with("</script>"));
-        // Console interception.
-        assert!(script.contains("__veld_early_logs"));
-        assert!(script.contains("__veld_cl"));
-        // Dynamic asset loading.
-        assert!(script.contains("client-log.js"));
-        assert!(script.contains("feedback/script.js"));
-        // CSS is now bundled inside the JS (Shadow DOM), no separate style.css
-        assert!(!script.contains("style.css"));
-    }
-
-    #[test]
-    fn test_bootstrap_script_overlay_only() {
-        let script = build_bootstrap_script(&make_fb(true, false, "log,warn,error"));
-        assert!(script.contains("feedback/script.js"));
-        assert!(!script.contains("client-log.js"));
-        assert!(!script.contains("__veld_early_logs"));
-    }
-
-    #[test]
-    fn test_bootstrap_script_logs_only() {
-        let script = build_bootstrap_script(&make_fb(false, true, "warn,error"));
-        assert!(script.contains("client-log.js"));
-        assert!(script.contains("__veld_early_logs"));
-        assert!(!script.contains("feedback/script.js"));
-    }
-
-    #[test]
-    fn test_bootstrap_script_neither_feature() {
-        let script = build_bootstrap_script(&make_fb(false, false, "log"));
-        assert!(script.is_empty());
-    }
-
-    #[test]
-    fn test_bootstrap_script_custom_levels() {
-        let script = build_bootstrap_script(&make_fb(false, true, "debug,info"));
-        assert!(script.contains("debug,info"));
-    }
-
-    #[test]
-    fn test_bootstrap_script_escaping() {
-        // Levels with special chars should be escaped safely.
-        let script = build_bootstrap_script(&make_fb(false, true, "log'</script>"));
-        assert!(!script.contains("'</script>'"));
-        assert!(script.contains("\\x3c/script\\x3e"));
-        assert!(script.contains("\\'"));
-    }
-
-    #[test]
-    fn test_escape_js_string() {
-        assert_eq!(escape_js_string("hello"), "'hello'");
-        assert_eq!(escape_js_string("it's"), "'it\\'s'");
-        assert_eq!(escape_js_string("a\\b"), "'a\\\\b'");
-        assert_eq!(escape_js_string("<script>"), "'\\x3cscript\\x3e'");
-        assert_eq!(escape_js_string("a\nb"), "'a\\nb'");
-        assert_eq!(escape_js_string("a\rb"), "'a\\rb'");
-    }
-
-    #[test]
-    fn test_bootstrap_script_is_valid_html() {
-        let script = build_bootstrap_script(&make_fb(true, true, "log"));
-        // Must be a single script tag.
-        assert_eq!(
-            script.matches("<script>").count(),
-            1,
-            "should have exactly one opening script tag"
-        );
-        assert_eq!(
-            script.matches("</script>").count(),
-            1,
-            "should have exactly one closing script tag"
-        );
-    }
-
-    #[test]
-    fn test_bootstrap_script_dedup_guard() {
-        let script = build_bootstrap_script(&make_fb(true, true, "log"));
-        // Guard prevents double execution.
-        assert!(script.contains("if(window.__veld_cl)return"));
-        assert!(script.contains("window.__veld_cl=1"));
-    }
-
-    /// The bootstrap script must remove its own <script> tag from the DOM
-    /// after running, to prevent React hydration mismatches in Next.js
-    /// app-router and similar frameworks that hydrate from the <html> root.
-    #[test]
-    fn test_bootstrap_script_self_removes() {
-        let configs = [
-            make_fb(true, true, "log,warn,error"), // both
-            make_fb(true, false, "log"),           // overlay only
-            make_fb(false, true, "log"),           // logs only
-        ];
-        for fb in &configs {
-            let script = build_bootstrap_script(fb);
-            assert!(
-                script.contains("document.currentScript"),
-                "script must reference document.currentScript for self-removal"
-            );
-            assert!(
-                script.contains("removeChild"),
-                "script must call removeChild to detach itself from the DOM"
-            );
-        }
-    }
-
-    #[test]
-    fn test_bootstrap_script_error_handlers() {
-        let script = build_bootstrap_script(&make_fb(false, true, "log"));
-        // Should capture unhandled errors and promise rejections.
-        assert!(script.contains("addEventListener('error'"));
-        assert!(script.contains("addEventListener('unhandledrejection'"));
-    }
-
-    /// Regression: the bootstrap script must not have duplicate variable/function
-    /// names. Previously `L` was used for both the levels array and the DOM
-    /// element helper, causing `Uncaught SyntaxError: Unexpected identifier`.
-    #[test]
-    fn test_bootstrap_script_no_duplicate_identifiers() {
-        // Test all feature combinations that produce a non-empty script.
-        let configs = [
-            make_fb(true, true, "log,warn,error"),
-            make_fb(true, false, "log"),
-            make_fb(false, true, "log"),
-        ];
-        for fb in &configs {
-            let script = build_bootstrap_script(fb);
-            let js = script
-                .strip_prefix("<script>")
-                .unwrap()
-                .strip_suffix("</script>")
-                .unwrap();
-
-            let mut decls: std::collections::HashMap<char, usize> =
-                std::collections::HashMap::new();
-            for pattern in ["var ", "function "] {
-                let mut search_from = 0;
-                while let Some(pos) = js[search_from..].find(pattern) {
-                    let abs = search_from + pos + pattern.len();
-                    if let Some(ch) = js[abs..].chars().next() {
-                        if ch.is_ascii_uppercase() {
-                            *decls.entry(ch).or_default() += 1;
-                        }
-                    }
-                    search_from = abs + 1;
-                }
-            }
-            for (name, count) in &decls {
-                assert_eq!(
-                    *count, 1,
-                    "identifier '{name}' declared {count} times (overlay={}, logs={})",
-                    fb.inject_feedback_overlay, fb.inject_client_logs
-                );
-            }
-        }
-    }
-
-    /// Regression: the data-veld-levels attribute value must not have nested
-    /// quotes. Previously `escape_js_string` wrapped the value in quotes,
-    /// then it was placed inside an already-quoted JS object literal property,
-    /// producing `'data-veld-levels':''log,warn,error''`.
-    #[test]
-    fn test_bootstrap_script_no_nested_quotes_in_attributes() {
-        let script = build_bootstrap_script(&make_fb(true, true, "log,warn,error"));
-        // The attribute value should be 'log,warn,error' not ''log,warn,error''
-        assert!(
-            !script.contains("':''"),
-            "attribute value has nested quotes — would produce invalid JS"
-        );
-        assert!(
-            script.contains("'data-veld-levels':'log,warn,error'"),
-            "attribute value should be properly single-quoted"
-        );
-    }
-
-    /// Verify that the bootstrap script's IIFE is properly closed for all
-    /// feature combinations — unbalanced parens would cause a SyntaxError.
-    #[test]
-    fn test_bootstrap_script_balanced_structure() {
-        let configs = [
-            make_fb(true, true, "log,warn,error"),
-            make_fb(true, false, "log"),
-            make_fb(false, true, "warn"),
-        ];
-        for fb in &configs {
-            let script = build_bootstrap_script(fb);
-            let js = script
-                .strip_prefix("<script>")
-                .unwrap()
-                .strip_suffix("</script>")
-                .unwrap();
-
-            // Count parens, braces, brackets — they must balance.
-            let mut parens = 0i32;
-            let mut braces = 0i32;
-            let mut brackets = 0i32;
-            let mut in_string = false;
-            let mut escape_next = false;
-            let mut quote_char = ' ';
-
-            for ch in js.chars() {
-                if escape_next {
-                    escape_next = false;
-                    continue;
-                }
-                if ch == '\\' && in_string {
-                    escape_next = true;
-                    continue;
-                }
-                if in_string {
-                    if ch == quote_char {
-                        in_string = false;
-                    }
-                    continue;
-                }
-                match ch {
-                    '\'' | '"' => {
-                        in_string = true;
-                        quote_char = ch;
-                    }
-                    '(' => parens += 1,
-                    ')' => parens -= 1,
-                    '{' => braces += 1,
-                    '}' => braces -= 1,
-                    '[' => brackets += 1,
-                    ']' => brackets -= 1,
-                    _ => {}
-                }
-            }
-
-            assert_eq!(
-                parens, 0,
-                "unbalanced parentheses (overlay={}, logs={})",
-                fb.inject_feedback_overlay, fb.inject_client_logs
-            );
-            assert_eq!(
-                braces, 0,
-                "unbalanced braces (overlay={}, logs={})",
-                fb.inject_feedback_overlay, fb.inject_client_logs
-            );
-            assert_eq!(
-                brackets, 0,
-                "unbalanced brackets (overlay={}, logs={})",
-                fb.inject_feedback_overlay, fb.inject_client_logs
-            );
-        }
     }
 }

@@ -434,11 +434,10 @@ const MAX_STATE_WORKTREES: usize = 256;
 /// is the credential a reconnect resumes with. Safe, so no CSRF header — and the
 /// daemon sends no `Access-Control-Allow-Origin`, so an *unrelated* origin can
 /// issue this request and never read the answer, as `get_layout` above relies on
-/// too. What that argument does **not** cover, stated because it reads as if it
-/// did: a page a veld run serves reaches this daemon same-origin through the
-/// run's own `/__veld__/*` Caddy route, so any script on the user's own dev app
-/// can read this. It says the same things `GET /api/repos` already says on that
-/// surface — paths, aliases — plus the registry's shape, and no credential.
+/// too. What that argument does **not** cover: a script running on a Veld origin
+/// itself is same-origin and can read this. It says the same things
+/// `GET /api/repos` already says there — paths, aliases — plus the registry's
+/// shape, and no credential.
 async fn get_state() -> Json<StateResponse> {
     let (clients, orphaned, interesting) = {
         let reg = REGISTRY.lock().await;
@@ -2452,8 +2451,8 @@ mod tests {
 
     /// Same rule, the other reader of the registry.
     ///
-    /// `GET /api/ide/state` is the second place a client id could leak, and it is
-    /// reachable by any page a veld run serves (see [`get_state`]) — so the
+    /// `GET /api/ide/state` is the second place a client id could leak, and any
+    /// script on a Veld origin can read it (see [`get_state`]) — so the
     /// invariant is pinned here as well as on the broadcast, rather than resting on
     /// [`ClientState`] happening to have no such field today.
     #[test]

@@ -2777,15 +2777,6 @@ impl Orchestrator {
     /// Kills any live processes, removes DNS/Caddy routes, and clears state.
     /// Errors are logged but never propagated — this is best-effort cleanup.
     async fn cleanup_stale_run(&mut self, run_name: &str) {
-        // Always clear stale feedback data so a reused run name starts fresh,
-        // even if the run was already removed from state.
-        let feedback =
-            veld_core::feedback::FeedbackStore::new(self.db.clone(), &self.project_root, run_name);
-        if feedback.has_data() {
-            tracing::info!(run_name, "clearing stale feedback data");
-            let _ = feedback.clear();
-        }
-
         let run = match self.db.get_run(&self.project_root, run_name) {
             Ok(Some(r)) => r,
             _ => return,
@@ -4114,21 +4105,6 @@ async fn execute_node_isolated(
     })
 }
 
-/// Apply the machine-wide feedback-overlay opt-out to a node's resolved feature flags.
-///
-/// When `suppressed`, the feedback overlay is forced off regardless of what the
-/// project's `veld.json` asked for — the whole point of `feedback.suppressOverlay`.
-/// The client-log collector and `/__veld__/*` routes are left alone.
-fn apply_feedback_overlay_override(
-    mut features: config::ResolvedFeatures,
-    suppressed: bool,
-) -> config::ResolvedFeatures {
-    if suppressed {
-        features.feedback_overlay = false;
-    }
-    features
-}
-
 /// Execute a `start_server` node without `&self`. Returns the `ServerHandle`.
 async fn execute_start_server_isolated(
     ctx: &NodeExecutionContext,
@@ -4236,17 +4212,6 @@ async fn execute_start_server_isolated(
     )
     .await;
 
-    // Resolve per-node feature flags (variant > node > project > default).
-    //
-    // The machine-wide opt-out wins over everything below it: `feedback.suppressOverlay`
-    // (a `veld self settings list` key) forces the feedback overlay off on every routed site,
-    // even one whose `veld.json` sets `features.feedback_overlay` back on. It is the
-    // per-machine answer for a setup that uses Veld purely as an orchestrator; the
-    // client-log collector and `/__veld__/*` routes are unaffected.
-    let features =
-        apply_feedback_overlay_override(resolved.features, ctx.db.feedback_overlay_suppressed());
-    // Resolve client log levels (variant > node > project > default).
-    let client_log_levels = resolved.client_log_levels.clone();
     // Resolve reverse-proxy header rules (variant > node > project). Only sent
     // when non-empty — an absent `proxy` key means "no manipulation" to the
     // helper, so old behavior (Origin passes through) holds by default.
@@ -4300,20 +4265,6 @@ async fn execute_start_server_isolated(
             "hostname": node_url,
             "upstream": format!("localhost:{}", endpoint.port),
         });
-
-        // Include feedback config so Caddy routes /__veld__/* to the daemon.
-        // The proxy routes are created whenever a feature is enabled, even if
-        // inject is false (manual injection mode — user adds script tags themselves).
-        if features.feedback_overlay || features.client_logs {
-            route["feedback_upstream"] = serde_json::json!(veld_core::instance::daemon_upstream());
-            route["run_name"] = serde_json::json!(&ctx.run_name);
-            route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
-        }
-
-        route["inject"] = serde_json::json!(features.inject);
-        route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
-        route["inject_client_logs"] = serde_json::json!(features.client_logs);
-        route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
 
         if !proxy.is_empty() {
             route["proxy"] = serde_json::json!(proxy);
@@ -6121,55 +6072,6 @@ mod tests {
             host: None,
             terminal_echo: None,
         }
-    }
-
-    #[test]
-    fn feedback_overlay_opt_out_forces_the_overlay_off_and_leaves_the_rest() {
-        // The `suppressed` flag is the whole machine-wide answer, so the config a
-        // node resolved is irrelevant to it — even one that explicitly asked for
-        // the overlay on has it forced off. The client-log collector and the
-        // `/__veld__/*` routes are deliberately not collateral.
-        let base = config::ResolvedFeatures {
-            feedback_overlay: true,
-            client_logs: true,
-            inject: true,
-        };
-
-        // Off (the default): nothing changes.
-        let unchanged = apply_feedback_overlay_override(base, false);
-        assert!(unchanged.feedback_overlay);
-        assert!(unchanged.client_logs);
-        assert!(unchanged.inject);
-
-        // On: the overlay is forced off even though the config asked for it on.
-        let suppressed = apply_feedback_overlay_override(base, true);
-        assert!(!suppressed.feedback_overlay);
-        assert!(suppressed.client_logs);
-        assert!(suppressed.inject);
-    }
-
-    #[test]
-    fn feedback_overlay_suppression_reads_from_the_settings_database() {
-        let tmp = tempfile::tempdir().unwrap();
-        let db = Db::open_at(&tmp.path().join("veld.db")).unwrap();
-
-        // Off by default — the switch ships as the off state so nothing moves.
-        assert!(!db.feedback_overlay_suppressed());
-
-        let set = |value: bool| {
-            let mut patch = std::collections::BTreeMap::new();
-            patch.insert(
-                "feedback.suppressOverlay".to_string(),
-                serde_json::Value::Bool(value),
-            );
-            db.patch_settings(&patch).unwrap();
-        };
-
-        set(true);
-        assert!(db.feedback_overlay_suppressed());
-
-        set(false);
-        assert!(!db.feedback_overlay_suppressed());
     }
 
     /// The `${veld.url*}` family is derived from the URL alone, so the stop path
