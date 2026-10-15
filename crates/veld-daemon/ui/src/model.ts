@@ -28,7 +28,7 @@ export function runsForWorktree(
  * in transition. Only live runs qualify — an environment's latest run keeps
  * its status (stopped, failed) as history, and binding to history would show
  * a crashed run as active forever. `null` = nothing to stop/restart (start
- * is always available when there's a veld config).
+ * is always available when there's a veld.json).
  */
 export function activeRun(runs: RunInfo[]): RunInfo | null {
   const order: Record<string, number> = {
@@ -229,7 +229,7 @@ export function proposeRunName(alias: string, runs: RunInfo[]): string {
  * "Start another run named `dev`" while a stopped `dev` sits in the list above it
  * is naming an environment that already exists, so the label is simply false.
  *
- * History counts as used. Two environments cannot share a name — `veld start`
+ * History counts as used. Two environments cannot share a name — `veld orchestrator start`
  * would take over the existing one — so a name in the list, live or ended, is not
  * available for a new one.
  */
@@ -1333,7 +1333,7 @@ export function withLaneOrder(
  * A value that changes whenever a fired action has visibly landed — what the
  * optimistic pending markers watch.
  *
- * Status alone is not enough: `veld restart` tears the run down and starts a
+ * Status alone is not enough: `veld orchestrator restart` tears the run down and starts a
  * fresh one, so a fast restart goes `running` → `running` and a status-only
  * check would never observe it (the spinner then runs until its timeout).
  * The run id covers that case, because a restart mints a new one

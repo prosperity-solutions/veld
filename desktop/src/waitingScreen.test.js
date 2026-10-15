@@ -29,7 +29,7 @@ test("a machine with no veld is told how to get it, immediately", () => {
 });
 
 test("a machine that has veld is not told to install veld", () => {
-  // The bug this file exists for: the app reopens a second after `veld update`
+  // The bug this file exists for: the app reopens a second after `veld self update`
   // restarted the daemon, and a working install is told to install itself.
   const cliPath = "/opt/homebrew/bin/veld";
   assert.equal(waitingStage({ cliPath, elapsedMs: 0 }), "starting");
@@ -40,7 +40,7 @@ test("a machine that has veld is not told to install veld", () => {
   assert.ok(html.includes("just updated"));
   assert.equal(html.includes(INSTALL_COMMAND), false);
   assert.equal(html.includes(SETUP_COMMAND), false);
-  assert.equal(html.includes("veld doctor"), false);
+  assert.equal(html.includes("veld self doctor"), false);
 });
 
 test("a minute later the same machine gets something to debug with", () => {
@@ -56,7 +56,9 @@ test("a minute later the same machine gets something to debug with", () => {
   // install that never ran setup has no daemon agent, one that did has an
   // unhealthy one.
   assert.ok(html.includes(SETUP_COMMAND));
-  assert.ok(html.includes("veld doctor"));
+  assert.ok(html.includes("veld self doctor"));
+  // The CLI found can predate the app, and a pre-17 one has no `self`.
+  assert.ok(html.includes("veld setup unprivileged")); // pre-#423 spelling, on purpose
   assert.ok(html.includes(cliPath));
   assert.ok(html.includes("127.0.0.1:19899"));
   // Still never the installer: this machine demonstrably has veld.
@@ -65,7 +67,7 @@ test("a minute later the same machine gets something to debug with", () => {
 
 test("the stall page works without a base URL to name", () => {
   const html = waitingHtml({ stage: "stalled", cliPath: "/usr/local/bin/veld" });
-  assert.ok(html.includes("veld doctor"));
+  assert.ok(html.includes("veld self doctor"));
   assert.equal(html.includes("at <code></code>"), false);
 });
 

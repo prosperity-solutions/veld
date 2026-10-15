@@ -4,7 +4,7 @@ export PATH := env("HOME") + "/.cargo/bin:" + env("PATH")
 # the veld-dev wrapper / dev-daemon) run with their own database, daemon
 # port, and daemon socket — never the installed veld's. Dev builds carry
 # newer schema migrations, and letting one loose on the real DB would migrate
-# it forward and blind the installed daemon (NewerSchema) until `veld update`.
+# it forward and blind the installed daemon (NewerSchema) until `veld self update`.
 # The dev daemon runs ALONGSIDE the installed one and serves its own
 # dashboard at https://veld-dev.localhost.
 # NOTE: the helper/Caddy/DNS layer is NOT instanced — it is a singleton
@@ -69,7 +69,7 @@ clear_stack_env := "VELD_PORT= VELD_URL= VELD_PROXY_ORIGINS= VELD_PTY_DIR="
 # defeats the backstop whose entire job is stopping `cargo test` from writing
 # "the database a running dev daemon owns". `just test` in such a pane migrated
 # the live run's database. Same leak, milder symptom, for the other two: a bare
-# `veld status` there silently addresses the dev instance.
+# `veld orchestrator status` there silently addresses the dev instance.
 #
 # Separate from `clear_stack_env` on purpose: `dev` and `dev-daemon` assign
 # `VELD_DB_PATH` deliberately, and a command-prefix assignment later in the line
@@ -83,9 +83,9 @@ clear_instance_env := "VELD_DB_PATH= VELD_DAEMON_PORT= VELD_DAEMON_SOCK= VELD_PT
 # HMR, and the Electron shell — is a veld environment declared in the root
 # veld.json:
 #
-#   veld start --preset dev            this worktree's stack, parallel-safe
-#   veld start --preset dev-headless   the same without Electron
-#   veld status / veld logs / veld stop
+#   veld orchestrator start --preset dev            this worktree's stack, parallel-safe
+#   veld orchestrator start --preset dev-headless   the same without Electron
+#   veld orchestrator status / veld orchestrator logs / veld orchestrator stop
 #
 # Everything there is keyed off the run: its own allocated ports, its own
 # database under .veld-dev/<run>/, its own hostnames, and its own
@@ -93,7 +93,7 @@ clear_instance_env := "VELD_DB_PATH= VELD_DAEMON_PORT= VELD_DAEMON_SOCK= VELD_PT
 #
 # What follows is the BOOTSTRAP tier, and it is a deliberate singleton — one
 # worktree at a time, on fixed ports. It exists because you need a way to run
-# the daemon when the thing you broke is `veld start` itself, and because a
+# the daemon when the thing you broke is `veld orchestrator start` itself, and because a
 # first clone has nothing to start a veld run with. Reach for it in that case;
 # otherwise use the preset above.
 #
@@ -161,7 +161,7 @@ dev-daemon:
 # runs the installed veld started (e.g. feedback loops on a shared run).
 # ⚠ ONLY safe when your branch adds no schema migration: a schema-ahead dev
 # binary MIGRATES the real DB forward on open, and the installed veld/daemon
-# then fail with NewerSchema until `veld update`. If in doubt, don't — use
+# then fail with NewerSchema until `veld self update`. If in doubt, don't — use
 # `just dev` + `just dev-daemon`, or `just dev-install`.
 dev-real *ARGS:
     #!/usr/bin/env bash
@@ -195,7 +195,7 @@ dev-real *ARGS:
 #
 # Bootstrap-tier databases only. A veld-run dev stack keeps its database under
 # `.veld-dev/<run>/`, which belongs to that run and is reset by naming the
-# variant instead — `veld start dev-db:fresh dev-electron dev-link`. Wiping
+# variant instead — `veld orchestrator start dev-db:fresh dev-electron dev-link`. Wiping
 # those from here would delete the state of a stack that is currently up.
 # `just dev-db-list` shows them.
 dev-db-reset:
@@ -205,7 +205,7 @@ dev-db-reset:
     @echo "Per-run dev stack DBs are untouched — see 'just dev-db-list'."
 
 # Every per-run dev database in this worktree, with its schema version.
-# The counterpart to `veld status`: these outlive a stopped run on purpose, so
+# The counterpart to `veld orchestrator status`: these outlive a stopped run on purpose, so
 # stopping the stack does not throw away the state you were debugging.
 dev-db-list:
     #!/usr/bin/env bash
@@ -217,7 +217,7 @@ dev-db-list:
         echo "$run  v$(sqlite3 "$db" 'PRAGMA user_version;' 2>/dev/null || echo '?')  $db"
         found=1
     done
-    [ "$found" = 1 ] || echo "No per-run dev databases yet. Start one with 'veld start --preset dev'."
+    [ "$found" = 1 ] || echo "No per-run dev databases yet. Start one with 'veld orchestrator start --preset dev'."
 
 # Snapshot the REAL installed DB into the dev DB — migration rehearsal:
 # the next `just dev <cmd>` migrates the COPY forward while the real file
@@ -298,7 +298,7 @@ dev-install-daemon:
     if curl -sf http://127.0.0.1:19899/api/environments >/dev/null 2>&1; then
         echo "✓ Daemon running"
     else
-        echo "✗ Daemon not responding — run 'veld doctor'"
+        echo "✗ Daemon not responding — run 'veld self doctor'"
     fi
 
 # --- Tier 3: Install helper (privileged, requires sudo) ---
@@ -342,13 +342,13 @@ dev-install-helper:
         echo "Restarting unprivileged helper..."
         launchctl kickstart -k "gui/$(id -u)/dev.veld.helper"
     else
-        echo "⚠ No helper service found — run 'veld setup'"
+        echo "⚠ No helper service found — run 'veld self setup'"
         exit 1
     fi
 
     sleep 1
     echo "✓ Helper restarted."
-    echo "  Restart your runs to pick up the new helper: veld restart --name <run>"
+    echo "  Restart your runs to pick up the new helper: veld orchestrator restart --name <run>"
 
 # --- Tier 4: Build and install Caddy with local veld_inject module ---
 
@@ -393,7 +393,7 @@ dev-install-all:
 
 # Restore to the released version.
 dev-restore:
-    veld update
+    veld self update
 
 # --- Build / Test / Lint ---
 

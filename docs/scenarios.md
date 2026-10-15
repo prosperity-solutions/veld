@@ -311,8 +311,8 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
 
 **What happens:**
 
-- `veld start --preset fullstack` resolves `frontend:local` -> `backend:local` -> `database:docker`. The full stack runs locally.
-- `veld start --preset ui-only` resolves `frontend:staging` -> `backend:staging`. The staging variant is a `command` node that just emits the remote URL. No database starts. The frontend runs locally but talks to the staging API.
+- `veld orchestrator start --preset fullstack` resolves `frontend:local` -> `backend:local` -> `database:docker`. The full stack runs locally.
+- `veld orchestrator start --preset ui-only` resolves `frontend:staging` -> `backend:staging`. The staging variant is a `command` node that just emits the remote URL. No database starts. The frontend runs locally but talks to the staging API.
 
 Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:staging.BACKEND_URL}`. Because two variants of `backend` exist in the config, Veld requires disambiguation even though only one runs at a time per preset.
 
@@ -382,7 +382,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
 }
 ```
 
-**What happens:** The `clone-db` node depends on `postgres:docker`. Before running the expensive `pg_dump | psql` pipeline, Veld executes the `skip_if` command. If the `users` table already has data (`SELECT 1` succeeds), the clone is skipped entirely. On the first run, the clone executes. On subsequent runs, it is a no-op. The `hidden: true` flag keeps `clone-db` out of `veld nodes` output since it is an internal concern.
+**What happens:** The `clone-db` node depends on `postgres:docker`. Before running the expensive `pg_dump | psql` pipeline, Veld executes the `skip_if` command. If the `users` table already has data (`SELECT 1` succeeds), the clone is skipped entirely. On the first run, the clone executes. On subsequent runs, it is a no-op. The `hidden: true` flag keeps `clone-db` out of `veld orchestrator nodes` output since it is an internal concern.
 
 ---
 
@@ -646,7 +646,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
 4. Once both `seed-db` and `generate-certs` finish, `backend:local` starts.
 5. Finally, `frontend:local` starts.
 
-The `skip_if` commands on the setup nodes make subsequent `veld start` calls fast -- if certs exist, migrations are current, and seed data is present, all three setup steps are skipped in milliseconds.
+The `skip_if` commands on the setup nodes make subsequent `veld orchestrator start` calls fast -- if certs exist, migrations are current, and seed data is present, all three setup steps are skipped in milliseconds.
 
 ---
 
@@ -805,7 +805,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
 - On branch `fix/auth-bug`, it becomes `https://frontend.fix-auth-bug.crm.localhost`.
 - If not in a git repo, it falls back to the run name.
 
-Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and database name, so branch data never collides. When you switch branches and run `veld start`, you get a completely isolated environment.
+Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and database name, so branch data never collides. When you switch branches and run `veld orchestrator start`, you get a completely isolated environment.
 
 ---
 
@@ -917,9 +917,9 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
 
 **What happens:** The `provision-db` script creates a temporary database and emits connection strings. The `fetch-api-keys` step reads secrets from Vault. Both declare `sensitive_outputs`, which means:
 
-- All six output values are masked as `[REDACTED]` in terminal output, `veld logs`, and debug logs.
+- All six output values are masked as `[REDACTED]` in terminal output, `veld orchestrator logs`, and debug logs.
 - Values are encrypted at rest using a machine-local key.
-- The `veld graph` command never shows these values.
+- The `veld orchestrator graph` command never shows these values.
 
 The `api` node receives the secrets as environment variables at runtime.
 
@@ -985,7 +985,7 @@ The `api` node receives the secrets as environment variables at runtime.
 
 **What happens:** Veld generates URLs like `https://api.feature-auth.saas-platform.test` and `https://admin.feature-auth.saas-platform.test`. Because `.test` is not `.localhost`, Veld manages DNS entries via `veld-helper` (writing exact host entries, never wildcards).
 
-**Requirement:** Custom apex domains require `veld setup privileged`. If you are in unprivileged mode, `veld start` will exit with an error explaining that non-`.localhost` domains need privileged setup for `/etc/hosts` access. The error message tells you exactly what to run.
+**Requirement:** Custom apex domains require `veld self setup privileged`. If you are in unprivileged mode, `veld orchestrator start` will exit with an error explaining that non-`.localhost` domains need privileged setup for `/etc/hosts` access. The error message tells you exactly what to run.
 
 The `admin` node uses a node-level `url_template` override to produce a different URL shape than the project default — for example, `admin.saas-platform.test` instead of the default `{service}.{branch ?? run}.saas-platform.test` pattern.
 
@@ -1289,7 +1289,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
 
 With `--preset api-only`, only the API and its infrastructure dependencies start. No worker, no scheduler.
 
-**A cross-reference has to hold in every preset that includes the referencing node.** `api` cannot read `${nodes.worker.url}` here, however tempting a worker-dashboard link is: `--preset full` would resolve it and `--preset api-only` would die with `unresolved variable reference`. `veld lint` reports that combination as `preset-missing-node-ref`, naming the preset -- it is the one thing you cannot see by reading a single node file. If the API genuinely needs the worker, add `worker:local` to the preset or give `api` a `depends_on` so every plan that includes it pulls the worker in too.
+**A cross-reference has to hold in every preset that includes the referencing node.** `api` cannot read `${nodes.worker.url}` here, however tempting a worker-dashboard link is: `--preset full` would resolve it and `--preset api-only` would die with `unresolved variable reference`. `veld orchestrator lint` reports that combination as `preset-missing-node-ref`, naming the preset -- it is the one thing you cannot see by reading a single node file. If the API genuinely needs the worker, add `worker:local` to the preset or give `api` a `depends_on` so every plan that includes it pulls the worker in too.
 
 All three application nodes are `long_running` with health check endpoints, so Veld monitors them and reports if any crashes.
 
@@ -1563,6 +1563,6 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
 1. Veld runs setup steps sequentially: checks that Docker is running, verifies Node version, creates the shared Docker network, ensures the cache directory exists.
 2. If Docker is not running, startup aborts with: `"Docker must be running — start Docker Desktop and try again"`.
 3. If all checks pass, the node graph executes normally — Postgres on the shared network, then backend.
-4. On `veld stop`, after per-node `on_stop` hooks (which stop the Postgres container), the project-level teardown removes the shared Docker network.
+4. On `veld orchestrator stop`, after per-node `on_stop` hooks (which stop the Postgres container), the project-level teardown removes the shared Docker network.
 
 Setup steps are not nodes — they have no variants, no health checks, and no outputs. They are a gate that runs before the graph and a cleanup bracket that runs after.

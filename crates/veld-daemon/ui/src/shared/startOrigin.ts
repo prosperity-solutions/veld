@@ -31,7 +31,7 @@ export type PresetState =
    *
    * Its own case rather than folded into `redefined`, because they are different
    * claims: "this name means something else now" versus "this name means nothing
-   * resolvable". `veld status` says `cannot be expanded — see \`veld lint\``, and
+   * resolvable". `veld orchestrator status` says `cannot be expanded — see \`veld orchestrator lint\``, and
    * two surfaces describing one config state differently is how a reader ends up
    * trusting the wrong one.
    */
@@ -40,7 +40,7 @@ export type PresetState =
    * Nothing is known: the caller has no config to compare against, or the daemon
    * did not expand this preset on this poll.
    *
-   * Deliberately *not* `unexpandable`. That label points at `veld lint`, and
+   * Deliberately *not* `unexpandable`. That label points at `veld orchestrator lint`, and
    * sending a reader to a check that passes is worse than saying nothing — missing
    * data must never be rendered as a finding about their config.
    */
@@ -120,10 +120,10 @@ export function startOriginLabel(
       return `preset ${origin.preset} (redefined since start)`;
     case "removed":
       return `preset ${origin.preset} (no longer defined)`;
-    // Same wording as `veld status`'s `start_origin_label`, on purpose: one config
+    // Same wording as `veld orchestrator status`'s `start_origin_label`, on purpose: one config
     // state must not be described two ways by two surfaces.
     case "unexpandable":
-      return `preset ${origin.preset} (cannot be expanded — see \`veld lint\`)`;
+      return `preset ${origin.preset} (cannot be expanded — see \`veld orchestrator lint\`)`;
     // Reached when the listing skipped this preset. Rendered exactly as an
     // unreadable config is, because it is the same thing from the reader's side:
     // we do not know.

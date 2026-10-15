@@ -516,9 +516,9 @@ Three rules that make it worth the spend rather than theatre:
   table:
 
   ```sh
-  veld start --preset dev-headless    # this worktree's daemon + /ide + database
-  veld-dev-<worktree> <anything>      # your build, your daemon, your database
-  veld urls                           # the /ide to open in a browser tab
+  veld orchestrator start --preset dev-headless  # this worktree's daemon + /ide + database
+  veld-dev-<worktree> <anything>                 # your build, your daemon, your database
+  veld orchestrator urls                         # the /ide to open in a browser tab
   ```
 
   `dev-link` writes that wrapper on every start and removes it at stop, so the
@@ -537,7 +537,7 @@ Three rules that make it worth the spend rather than theatre:
 
   Two traps worth knowing before you start:
 
-  - **`dev` and `dev-headless` include `dev-db:fresh`, so `veld restart` empties
+  - **`dev` and `dev-headless` include `dev-db:fresh`, so `veld orchestrator restart` empties
     that database.** State you set up for a test is gone after a restart that
     looked routine, and the conclusion you drew from it silently inverts — a
     restore verified before the restart reads as failed after it. Use `dev-keep`
@@ -554,6 +554,60 @@ Three rules that make it worth the spend rather than theatre:
   review*, or the two-checkpoint variant: this is **checkpoint one**. Finish the
   whole feature (including the docs audit in Step 3), leave it building and
   runnable, then hand over per **Checkpointed autonomy** and wait.
+
+### Adding a command
+
+Every command is `veld <part> <verb>` (#423). There are no top-level verbs, and
+the CLI stays that way only if each new command lands where the next person
+would look for it. Decide in this order:
+
+1. **Pick the part by what the command acts on, not by who calls it.**
+
+   | It acts on… | Part |
+   |---|---|
+   | the run graph: environments, nodes, presets, logs, `veld.json`, its vars | `orchestrator` (alias `orc`) |
+   | the Veld window: panes, files, worktrees, the dashboard | `ide` |
+   | coding agents: their sessions, state, docs, memory | `agent` |
+   | another machine reaching this one: shares, joins, relays, tunnels | `network` |
+   | Veld itself: install, update, setup, settings, its database | `self` |
+   | secrets / remote machines / extensions | `vault` / `machine` / `extensions` — each is created by its own Veld OS sub-issue (#420), not on the side |
+
+   Nothing fits? A new part is a **Vision call** — ask. Never add a top-level
+   verb, and never park a command in the nearest part because it was close.
+2. **A verb, not a noun.** A collection gets `list`, `show <id>`, `set`/`unset`,
+   `rm <id>` under a noun: `veld orchestrator runs list`, not `veld orchestrator
+   runs`. A bare noun prints its help; it never quietly lists. The exceptions
+   are things that are not collections and whose bare form only *reports*
+   (`veld self setup`, `veld self desktop`).
+3. **Engine first.** The command calls a typed function in `veld-engine` (or the
+   daemon's `/api/engine/*`); the CLI parses, calls, prints. No logic lives in
+   `crates/veld/src/parts/` or `commands/` that another face would have to copy.
+4. **Agent-ready.** `--json` on anything that prints, stable field names,
+   non-zero exit on failure, nothing interactive an agent cannot answer by flag.
+5. **Plumbing is hidden.** Called only by hooks, shims, the app or a script →
+   `hide = true`. Once code outside this binary calls a name — a hook written into
+   a running terminal, Veld Desktop, `install.sh` — renaming it needs a hidden
+   alias at the old name, because that caller can be older than the CLI it runs
+   against. That is physics, not parity; see `Command`'s legacy block in
+   `crates/veld/src/main.rs`.
+6. **Wire it everywhere in the same diff.** The part's module in
+   `crates/veld/src/parts/`: clap tree, dispatch, and its exhaustive
+   `survives_an_update` (blocked by default, allowed only with a reason
+   beside it) — in `orchestrator`, also `talks_to_the_daemon` (version check,
+   auto-GC, update banner) and `wants_json` (keeps the banner off `--json`).
+   Those matches are exhaustive so a new verb does not compile until each is
+   decided. A new *part* also needs its `Command` variant and dispatch arm in
+   `crates/veld/src/main.rs` and an entry in `PARTS`
+   (`commands/overview.rs`), which `help_lists_parts_only` checks. Then
+   `veld agent skills` topics, README, website and `llms-full.txt` (Step 3),
+   which `tests/validate-doc-commands.py` checks against the real clap tree —
+   and every hint string, CI step and script that names the command, which
+   `tests/validate-cli-call-sites.py` checks (`validate-doc-commands.py` reads Markdown only).
+   Renaming or removing a command also adds its old name to `retired_command`
+   in `main.rs`, so a typed old name answers `that is \`veld …\` now` —
+   **except** a name item 5 keeps as a hidden alias: `retired_command` runs
+   before clap, so a name in both places never reaches its alias, and the hook,
+   app or script calling it breaks silently.
 
 ## Step 3 — Docs audit
 
@@ -585,7 +639,7 @@ user-visible capability, decide whether it belongs on `website/index.html`
 diagram) and update it — plus `website/llms-full.txt` — if so. The site should
 stay a current picture of what veld does, not drift behind the CLI. State your
 call either way. When the change is website-facing, prefer serving it locally
-(`veld start website:local`) and collaborating through `veld feedback` before
+(`veld orchestrator start website:local`) and collaborating through `veld feedback` before
 shipping.
 
 ### Should this be promoted?

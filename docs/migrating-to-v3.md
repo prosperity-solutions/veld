@@ -16,10 +16,10 @@ semantic change, and the whole thing is usually a handful of lines.
 ```
 Migrate my veld.json to schemaVersion "3", following the rules in
 https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md
-Then run `veld lint` and fix everything it reports.
+Then run `veld orchestrator lint` and fix everything it reports.
 ```
 
-`veld lint` is the check that makes this safe to delegate: it reads the migrated
+`veld orchestrator lint` is the check that makes this safe to delegate: it reads the migrated
 config with the real parser and reports every remaining problem with a file, line,
 and rule name. Verify the result, don't trust the rewrite.
 
@@ -68,7 +68,7 @@ Outputs are reachable as:
 - `${output.KEY}` — this node's own outputs
 - `${nodes.<node>.KEY}` — any node's
 
-`veld lint` and `veld start` reject any `${veld.*}` name that is not a builtin,
+`veld orchestrator lint` and `veld orchestrator start` reject any `${veld.*}` name that is not a builtin,
 **and any real builtin written where it is not populated** — `${veld.url}` on a
 `command` node, `${veld.node}` in a `setup` step, `${veld.port}` in a `vars`
 value. Both are caught **before a run starts** rather than at teardown — which
@@ -183,9 +183,9 @@ editors pick JSONC mode from the extension — or map the `.json` names to the
 ```
 
 Rename rather than copy: in a directory holding both, `veld.json` wins and
-`veld lint` errors with `ambiguous-root-config`, so `veld start` refuses until you
-delete one. (`veld stop` keeps working — that is a lint finding, not a load
-failure, so teardown hooks still run.) `veld init` still writes `veld.json`.
+`veld orchestrator lint` errors with `ambiguous-root-config`, so `veld orchestrator start` refuses until you
+delete one. (`veld orchestrator stop` keeps working — that is a lint finding, not a load
+failure, so teardown hooks still run.) `veld orchestrator init` still writes `veld.json`.
 
 ### Splitting the config across files
 
@@ -215,7 +215,7 @@ singletons — `url_template`, `default_preset`, `features`, `proxy`, `sharing`,
 would need a precedence rule. Declaring one in an included file is a `root-only-key` error rather than a
 silent no-op.
 
-`veld config --files` prints the glob → file → node chain, which is the fastest
+`veld orchestrator config --files` prints the glob → file → node chain, which is the fastest
 way to find out why a node seems missing.
 
 ### Node-level defaults
@@ -251,7 +251,7 @@ One definition point per value:
 ```
 
 A var holds a *value*, not a config fragment, and may not reference another var.
-`veld config --why <pointer>` shows where an effective value came from.
+`veld orchestrator config --why <pointer>` shows where an effective value came from.
 
 A var literal may use the **run-scoped** built-ins — `${veld.run}`, `run_id`,
 `name`, `project`, `root`, `worktree`, `branch`, `username`. The per-node ones
@@ -259,7 +259,7 @@ A var literal may use the **run-scoped** built-ins — `${veld.run}`, `run_id`,
 because a var is one value for the whole run; compose those at the use site. A var
 backed by a `file` / `env` / `argv` / `shell` source is resolved only when the
 plan reaches it, so a credential helper behind a var is not run by a
-`veld start docs`.
+`veld orchestrator start docs`.
 
 ### Machine-overridable vars
 
@@ -280,7 +280,7 @@ need a hand-set env var or a gitignored file the project parses itself:
 ```
 
 The declaration is committed; each developer answers it once with
-`veld config set container_runtime podman`. The answer is stored per machine and
+`veld orchestrator vars set container_runtime podman`. The answer is stored per machine and
 **shared across every worktree of the repo**, so it is not asked again in each
 checkout — `--worktree` narrows it when one checkout genuinely differs.
 
@@ -355,7 +355,7 @@ would commit.
 
 ### Presets gained keys and metadata
 
-**Read this even if you change nothing: the numbers in the `veld start` picker
+**Read this even if you change nothing: the numbers in the `veld orchestrator start` picker
 move once, on upgrade.**
 
 They used to be positions in an *alphabetically sorted* list. They are now keys,
@@ -374,12 +374,12 @@ different preset:
 
 That is a one-time change, and it is the point: a position renumbers every time
 someone adds a preset, which is the bug being fixed. But it does mean a runbook
-or a habit that says "run `veld start`, press 2" needs re-checking once. After
+or a habit that says "run `veld orchestrator start`, press 2" needs re-checking once. After
 upgrading:
 
 ```sh
-veld presets              # the numbers as they now stand
-veld presets --pin        # a block to paste that freezes them for good
+veld orchestrator presets              # the numbers as they now stand
+veld orchestrator presets --pin        # a block to paste that freezes them for good
 ```
 
 Pin the numbers people actually type and they will not move again.
@@ -402,19 +402,19 @@ array; **the array form stays valid and is not deprecated**, so no existing
 "default_preset": "core"
 ```
 
-Worth adopting if the numbering at `veld start` has ever shifted under someone,
+Worth adopting if the numbering at `veld orchestrator start` has ever shifted under someone,
 or if a preset list has grown past what a newcomer can identify:
 
 - `key` pins the number typed at the picker so it stops moving. Unpinned presets
   take the lowest unclaimed number in declaration order, so appending a preset —
   or pinning one at the number it already shows — changes nothing for anyone else.
-  `veld presets --pin` prints the current numbering as a block to paste.
+  `veld orchestrator presets --pin` prints the current numbering as a block to paste.
 - `label` / `when_to_use` / `group` make the list pickable by people who did not
-  write the config, and by coding agents reading `veld presets`.
-- `default_preset` gives a bare `veld start` a defined answer, including in a
+  write the config, and by coding agents reading `veld orchestrator presets`.
+- `default_preset` gives a bare `veld orchestrator start` a defined answer, including in a
   non-interactive shell where it previously failed with "No selections provided".
 
-`veld lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
+`veld orchestrator lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
 and — once, at eight or more presets with no metadata at all — a notice suggesting
 the object form.
 
@@ -432,16 +432,16 @@ there is no v4, and no config that loads today stops loading tomorrow.
 
 Not a migration, and it applies to a v1 or v2 config exactly as it does to v3 —
 worth reading anyway if you have a container node, because it changes what your
-existing hook does. `on_stop` used to be wired to `veld stop` alone: a run that
+existing hook does. `on_stop` used to be wired to `veld orchestrator stop` alone: a run that
 crashed, a start that failed and aborted, and a run replaced by a new start all
 killed processes and cleaned up routes without running a single hook. So the
 container a node started outlived its run, and because the name usually
 interpolates `${veld.run}` — the *environment* name, not a per-run id — the next
-`veld start` failed with `container … already exists` until somebody removed it
+`veld orchestrator start` failed with `container … already exists` until somebody removed it
 by hand.
 
 All of those paths now run the hook, and when veld itself was killed outright
-(so nothing could run anything at the time) the next `veld start` for that
+(so nothing could run anything at the time) the next `veld orchestrator start` for that
 project runs it before creating anything of its own. A node's hook runs at most
 once per teardown pass: an interrupted teardown is resumed, not restarted,
 though two passes of one run can overlap, so keep hooks idempotent. Two smaller
@@ -458,7 +458,7 @@ swallowed) it will now simply be called in the cases it was always meant for.
 `ide.news[]` is new: a short card your project shows its own team in the Veld IDE,
 merged with the change it describes and shown once to each teammate who pulls it.
 Five fields, all capped (a headline and one sentence), at most five live items, and
-`veld lint` reports anything malformed rather than failing the load. The date is
+`veld orchestrator lint` reports anything malformed rather than failing the load. The date is
 required and gates the card, so a teammate who joined after it never sees it.
 Purely
 additive — a config without it is unaffected — and see
@@ -473,7 +473,7 @@ falls through to each machine's `sharing.peerTtlMinutes` / `sharing.webTtlMinute
 setting, which carries the defaults — 240 peer, 120 web. Those are **longer than
 the constants they replace** (120 / 60), so a default share link now lives twice
 as long; the keep-awake caps are unchanged, and being the shorter pair they are
-now what ends the hold. `veld share --ttl` still overrides both
+now what ends the hold. `veld network share --ttl` still overrides both
 for one share. See
 [configuration.md](configuration.md#sharingpeer_ttl_minutes--sharingweb_ttl_minutes),
 which also explains why this is the deadline that usually ends a share and how it
@@ -494,17 +494,17 @@ click that focuses the pane — terminal ergonomics, not a persisted inbox.
 opt-in. It is gone, and there is no alias.
 
 **Delete the line, whichever value it held.** The pane itself is never at risk:
-an unknown key under `ide.panes[]` is a `veld lint` warning naming the retired
+an unknown key under `ide.panes[]` is a `veld orchestrator lint` warning naming the retired
 key and its replacement, never a load error, and the pane keeps working. But the
 schema's terminal branch is closed (`additionalProperties: false`), so the key
-that only *warns* in `veld lint` is a hard **error** in an editor and in any
+that only *warns* in `veld orchestrator lint` is a hard **error** in an editor and in any
 schema check a project runs in CI — which is why even the `true` case, the value
 the shipped example recommended, has to go.
 
 Behaviour changes for exactly one config: a pane that set the key to `false`.
 Write `"fixed_label": true` on it to keep the fixed tab name. A pane that set it
 to `true` already had the behaviour that is now the default. Note that the
-`veld lint` warning only appears when somebody runs `veld lint` — the IDE does
+`veld orchestrator lint` warning only appears when somebody runs `veld orchestrator lint` — the IDE does
 not surface it — so this paragraph, not a notice in the app, is what tells a
 project with a pinned pane to act.
 
@@ -517,7 +517,7 @@ when the command actually found something, so a worktree with no history opens
 the pane exactly as before. What it launches is the pane's existing `resume` with
 `${veld.pane.token}` set to the picked value. It needs `resume`, and needs that `resume` to reference the token — a
 `codex resume --last` shape cannot deliver a pick, so declaring both is a
-`veld lint` problem and the picker is dropped. Note this is the first thing in
+`veld orchestrator lint` problem and the picker is dropped. Note this is the first thing in
 `ide.panes` that runs a command *before you click a pane*; it happens once while
 the pane chooser is on screen, under the same bounds and the same
 `extensions.autoRefresh` off switch as `ide.extensions`.
@@ -537,7 +537,7 @@ works, which is the same additive path every other new pane field took. See
 
 `ide.worktreeName` was added and then removed: a worktree is now named by the
 agent working in it, with `veld ide worktree name`. A config that still carries
-the key keeps loading; `veld lint` reports it as no longer read.
+the key keeps loading; `veld orchestrator lint` reports it as no longer read.
 
 `ide.extensions[]` is new and additive: badges, buttons and menus a project
 contributes to the IDE's top bar, each backed by an `argv`/`shell` command veld
@@ -564,7 +564,7 @@ It has its own page, because it is a menu rather than a migration:
 Read at least its [behaviour
 changes](adopting-long-running-and-ports.md#behaviour-changes-worth-a-veld-lint)
 section — the only part that can move under a config you never
-touch. `veld lint` reports every one of them.
+touch. `veld orchestrator lint` reports every one of them.
 
 ---
 
@@ -576,7 +576,7 @@ since this version reads only `schemaVersion: "3"`.
 
 One thing worth knowing before you upgrade veld itself, independent of migrating a
 config: an unrecognised top-level key — most often the pre-JSONC `"//": "…"`
-comment idiom — used to be ignored silently and is now reported by `veld lint` and
-refused by `veld start`. It is deliberately **not** a load error, so `veld stop`
-keeps working against an already-running environment. Run `veld lint` once after
+comment idiom — used to be ignored silently and is now reported by `veld orchestrator lint` and
+refused by `veld orchestrator start`. It is deliberately **not** a load error, so `veld orchestrator stop`
+keeps working against an already-running environment. Run `veld orchestrator lint` once after
 upgrading; if it is quiet, nothing here affects you.

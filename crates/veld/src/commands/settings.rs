@@ -1,4 +1,4 @@
-//! `veld settings` — read and write user preferences from the CLI.
+//! `veld self settings` — read and write user preferences from the CLI.
 //!
 //! # Why this exists
 //!
@@ -16,7 +16,7 @@
 //!
 //! A **read** has no side effects and must work when the daemon is down, which is
 //! exactly when someone is most likely to be asking what a setting says. It opens
-//! the database directly, the way `veld config vars` does.
+//! the database directly, the way `veld orchestrator vars list` does.
 //!
 //! A **write** has two side effects that live in the daemon's process and cannot
 //! be performed from here: re-publishing `terminal.shell` into
@@ -68,7 +68,7 @@ use crate::output;
 const FROM_SET: &str = "set";
 const FROM_DEFAULT: &str = "default";
 
-/// `veld settings [prefix]` — every setting, or those under one key prefix.
+/// `veld self settings list [prefix]` — every setting, or those under one key prefix.
 pub async fn list(prefix: Option<String>, json: bool) -> i32 {
     let Some(db) = crate::commands::open_db(json) else {
         return 1;
@@ -83,9 +83,9 @@ pub async fn list(prefix: Option<String>, json: bool) -> i32 {
 
     let entries = catalog();
     let matches = |key: &str| match prefix.as_deref() {
-        // A bare prefix matches the segment, not the substring: `veld settings
+        // A bare prefix matches the segment, not the substring: `veld self settings list
         // terminal` must not also return `terminal.shell`'s neighbours by
-        // accident, and more importantly `veld settings ui` must not match
+        // accident, and more importantly `veld self settings list ui` must not match
         // nothing while `ui.` does.
         Some(p) => key == p || key.starts_with(&format!("{}.", p.trim_end_matches('.'))),
         None => true,
@@ -163,13 +163,15 @@ pub async fn list(prefix: Option<String>, json: bool) -> i32 {
         })
         .collect();
     output::print_table(&["SETTING", "VALUE", "FROM", "WHAT IT IS"], &table);
-    output::print_info("veld settings describe <setting> explains one, with its allowed values.");
+    output::print_info(
+        "veld self settings describe <setting> explains one, with its allowed values.",
+    );
     0
 }
 
-/// `veld settings get <key>` — one effective value, and nothing else on stdout.
+/// `veld self settings get <key>` — one effective value, and nothing else on stdout.
 ///
-/// Bare on purpose: `FONT=$(veld settings get terminal.fontFamily)` is the shape
+/// Bare on purpose: `FONT=$(veld self settings get terminal.fontFamily)` is the shape
 /// this is for, so a scalar prints unquoted with no decoration. `--json` gives the
 /// same value with its provenance.
 pub async fn get(key: String, json: bool) -> i32 {
@@ -202,7 +204,7 @@ pub async fn get(key: String, json: bool) -> i32 {
     0
 }
 
-/// `veld settings describe <key>` — what it is, what it accepts, what it defaults
+/// `veld self settings describe <key>` — what it is, what it accepts, what it defaults
 /// to.
 ///
 /// The half that makes the rest usable without guessing. Without the allowed
@@ -214,7 +216,7 @@ pub async fn describe(key: String, json: bool) -> i32 {
         // value (an unknown key is preserved), it just cannot be described.
         output::print_error(
             &format!(
-                "{}\nveld settings get {key} still reads it if a newer veld wrote it.",
+                "{}\nveld self settings get {key} still reads it if a newer veld wrote it.",
                 unknown_key(&key)
             ),
             json,
@@ -327,7 +329,7 @@ pub async fn describe(key: String, json: bool) -> i32 {
     0
 }
 
-/// `veld settings set <key> <value>`.
+/// `veld self settings set <key> <value>`.
 pub async fn set(key: String, raw: String, json: bool) -> i32 {
     let entry = catalog().into_iter().find(|e| e.key == key);
     let Some(entry) = entry else {
@@ -375,7 +377,7 @@ pub async fn set(key: String, raw: String, json: bool) -> i32 {
     output::print_success(&format!("{key} = {}", render(&stored)));
     if clamped {
         output::print_info(&format!(
-            "{} was adjusted to {} — see veld settings describe {key}",
+            "{} was adjusted to {} — see veld self settings describe {key}",
             render(&value),
             render(&stored)
         ));
@@ -383,7 +385,7 @@ pub async fn set(key: String, raw: String, json: bool) -> i32 {
     0
 }
 
-/// `veld settings unset <key>` — back to the default.
+/// `veld self settings unset <key>` — back to the default.
 pub async fn unset(key: String, json: bool) -> i32 {
     // Unknown keys are unsettable on purpose: a preference a newer veld wrote is
     // still this user's, and refusing to clear it would leave them with no way to
@@ -463,7 +465,7 @@ async fn write(what: Write, json: bool) -> Result<Written, String> {
             // keep-awake hold to reconcile, and re-reads both when it starts.
             // `eprintln!` rather than `output::print_info`, which is a `println!`
             // — this note must not land on stdout, where `--json` output and
-            // `veld settings get`'s bare value live. The `!json` guard is a
+            // `veld self settings get`'s bare value live. The `!json` guard is a
             // second belt, not the reason.
             if !json {
                 eprintln!(
@@ -472,7 +474,7 @@ async fn write(what: Write, json: bool) -> Result<Written, String> {
                         DaemonError::OlderDaemon =>
                             "Your veld daemon is older than this veld and cannot apply this \
                              change itself; writing it directly. Restart the daemon (or finish \
-                             `veld update`) for it to take full effect.",
+                             `veld self update`) for it to take full effect.",
                         _ =>
                             "No running veld daemon owns this settings database; writing it \
                              directly.",
@@ -540,7 +542,7 @@ enum DaemonError {
 ///   port is reading it too; or
 /// - a port was named explicitly, which by this repo's dev-stack convention means
 ///   the caller was handed a matching `VELD_DB_PATH` (`just dev`, and every node
-///   of `veld start --preset dev`).
+///   of `veld orchestrator start --preset dev`).
 ///
 /// Everything else — most importantly a bare `cargo run`, which resolves to
 /// `.veld-dev/veld-cargo.db` while the default port answers from the *real* one —
@@ -562,7 +564,7 @@ async fn send_to_daemon(what: &Write) -> Result<Written, DaemonError> {
     let request = match what {
         Write::Patch(patch) => client.patch(format!("{base}/api/settings")).json(patch),
         // Percent-encoded because a key is a path segment and this one is user
-        // input — `veld settings unset ../../something` must reach the handler as
+        // input — `veld self settings unset ../../something` must reach the handler as
         // a key, not as a path.
         Write::Delete(key) => client.delete(delete_url(&base, key)),
     };
@@ -608,7 +610,7 @@ async fn send_to_daemon(what: &Write) -> Result<Written, DaemonError> {
         // 404/405 mean the same thing for a different reason: `DELETE
         // /api/settings/{key}` is new in this change, so a daemon from before it
         // has no such route. `PATCH` has always existed, so only the unset can
-        // land here — and refusing would leave `veld settings unset` broken for
+        // land here — and refusing would leave `veld self settings unset` broken for
         // anyone whose daemon has not been restarted since the update, which is
         // everybody for the first minutes after one.
         if status == reqwest::StatusCode::CONFLICT {
@@ -663,7 +665,7 @@ async fn send_to_daemon(what: &Write) -> Result<Written, DaemonError> {
 /// Where a `DELETE` for one setting goes.
 ///
 /// Its own function so a test can pin it. The key is user input and a path
-/// segment, so it is percent-encoded — `veld settings unset ../../something` has
+/// segment, so it is percent-encoded — `veld self settings unset ../../something` has
 /// to reach the handler as a key, not as a path. Inlining this made the test that
 /// claimed to check it pass while only re-testing the encoder.
 fn delete_url(base: &str, key: &str) -> String {
@@ -696,7 +698,7 @@ fn from_of(key: &str, stored: &[String]) -> &'static str {
 ///
 /// The point of doing this from the catalog's `type` rather than guessing: a
 /// bool wants `true`, not `"true"`, and a caller should not have to know that
-/// `veld settings set terminal.cursorBlink true` is a JSON document. Scalars are
+/// `veld self settings set terminal.cursorBlink true` is a JSON document. Scalars are
 /// therefore written bare, and only a list needs JSON syntax.
 fn coerce(raw: &str, entry: &CatalogEntry) -> Result<Value, String> {
     let shape = entry.value_type;
@@ -736,7 +738,7 @@ fn coerce(raw: &str, entry: &CatalogEntry) -> Result<Value, String> {
 
 /// A scalar prints bare; anything else prints as JSON.
 ///
-/// `veld settings get terminal.fontFamily` in a shell substitution must not come
+/// `veld self settings get terminal.fontFamily` in a shell substitution must not come
 /// back wrapped in quotes it would then carry into a config file.
 ///
 /// Neutralised through [`output::one_line`], which is not belt-and-braces: this
@@ -745,7 +747,7 @@ fn coerce(raw: &str, entry: &CatalogEntry) -> Result<Value, String> {
 /// written by a newer veld) is stored verbatim with only a length limit, and the
 /// daemon is reachable same-origin from a developer's own app through the
 /// helper's `/__veld__` proxy — so a script on that origin can `PATCH` a key or
-/// value containing `ESC`, and `veld settings` would then replay it into the
+/// value containing `ESC`, and `veld self settings list` would then replay it into the
 /// terminal of whoever ran it, or of an agent. `terminal.fontFamily`'s validator
 /// already bounds characters for exactly this reason, one interpolation site
 /// earlier; this is the same rule for the fourth site.
@@ -758,7 +760,7 @@ fn render(value: &Value) -> String {
 }
 
 fn unknown_key(key: &str) -> String {
-    format!("veld has no setting called {key:?}. Run veld settings to see them all.")
+    format!("veld has no setting called {key:?}. Run veld self settings list to see them all.")
 }
 
 fn to_json(value: &Value) -> String {

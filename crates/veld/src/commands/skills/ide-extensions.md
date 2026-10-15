@@ -71,7 +71,7 @@ The four things that decide whether it works:
    (`"argv": ["gh", "pr", "view", "${veld.branch_raw}"]`). The slugging on
    `${veld.branch}` is deliberate: the branch name belongs to whoever opened the
    pull request you checked out, so a `shell` command interpolating it raw would be
-   running their string — and `veld lint` refuses `${veld.branch_raw}` in `shell`
+   running their string — and `veld orchestrator lint` refuses `${veld.branch_raw}` in `shell`
    for the same reason (`git check-ref-format --branch` accepts `foo$(id)` and
    `foo'bar`, so no quoting closes that hole; `argv` closes it because the element
    count is fixed before substitution). A branch starting with `-` is different:
@@ -91,18 +91,18 @@ with the label kept as the accessible name (a badge is a real `<button>`) and th
 tooltip's fallback. Falls back to `text` if there is no glyph to show. Overridable
 per value the same way `open_in` is.
 
-Then verify — `veld lint` is the **only** check that a declaration took, because
+Then verify — `veld orchestrator lint` is the **only** check that a declaration took, because
 everything under `ide` is lenient by design (a malformed entry is a warning and a
 dropped entry, never a load error):
 
 ```sh
-veld lint                       # unknown key, dangling reference, bad variable, clamped interval
+veld orchestrator lint                       # unknown key, dangling reference, bad variable, clamped interval
 ./scripts/veld/pr-badge.sh      # run it yourself: is stdout one JSON object?
 ```
 
 **Full authoring guide — worked adapters, the tone and icon vocabularies, grouping,
 and the bounds veld enforces (only the visible worktree, one child process across
-windows, 20s deadline, 24 extensions max, the `extensions.autoRefresh` switch) — follows below.** Field table: `veld skills config`.
+windows, 20s deadline, 24 extensions max, the `extensions.autoRefresh` switch) — follows below.** Field table: `veld agent skills config`.
 
 ### Letting a pane resume an earlier session
 
@@ -124,14 +124,14 @@ the first row, and the pick fills `${veld.pane.token}` in the pane's **own**
 --resume` with no argument and `codex resume` both open their own, and a plain
 pane running that is less to maintain. **Full guide, worked adapters for Claude
 Code and Codex, the stdout contract, the value charset and the bounds veld
-enforces — is in `veld skills ide-panes`.**
-Field table: `veld skills config`.
+enforces — is in `veld agent skills ide-panes`.**
+Field table: `veld agent skills config`.
 
 
 ## Customizing the Veld IDE: `ide.extensions`
 
 Authoring reference for the badges, buttons and menus a project contributes to the
-Veld IDE's top bar. The field table is in `veld skills config`; this
+Veld IDE's top bar. The field table is in `veld agent skills config`; this
 page is how to **decide what to write**, plus adapters you can copy.
 
 Read [Before you add one](#before-you-add-one) first. The commonest mistake is not a
@@ -149,7 +149,7 @@ malformed config, it is adding four badges nobody needed to a 42px bar.
   control whose members are `action` entries).
 - An `action` can carry **`accepts: "file"`** instead of a `slot`, which offers it
   on a file path clicked in terminal output — listed under Veld's own *View in
-  Veld* — and hands it the path as `$1` and the line as `$2`. See `veld skills
+  Veld* — and hands it the path as `$1` and the line as `$2`. See `veld agent skills
   ide-extensions` → Opening a clicked file.
 - A badge's command **prints a small JSON contract on stdout** and veld renders it.
   That is the whole extension mechanism: **veld never learns your code host's
@@ -309,7 +309,7 @@ while green and a number while red, or vice versa.
 
 Tooltip text this badge relies on more than a `text`-mode one is worth writing
 with line breaks (`tooltip` allows up to 400 characters and preserves `\n`) —
-see `veld skills config` for the field limits.
+see `veld agent skills config` for the field limits.
 
 ### `requires_bin` — and when not to use it
 
@@ -357,7 +357,7 @@ abuse that: `hint` for something optional is a nag with no off switch.
 `${veld.root}` (worktree path), `${veld.branch}`, `${veld.branch_raw}` (`argv`
 only), `${veld.worktree}` (slug), `${veld.project}`, `${veld.username}`.
 Anything else — including `${veld.port}`, `${output.*}` and the `pane.*` family
-— is a **`veld lint` problem**, not a runtime failure, so `veld lint` is the
+— is a **`veld orchestrator lint` problem**, not a runtime failure, so `veld orchestrator lint` is the
 check that a command will resolve.
 
 **`${veld.branch}` is slugified — it is not a git ref.** `feat/foo` arrives as
@@ -373,7 +373,7 @@ reports no pull request and offers to create a second one. Use
 (The slugging on `${veld.branch}` is deliberate: the branch name is chosen by
 whoever opened the pull request you checked out, so a `shell` command
 interpolating it raw would be running their string. `${veld.branch_raw}` is
-the escape hatch, but `veld lint` refuses it in `shell` for the same reason —
+the escape hatch, but `veld orchestrator lint` refuses it in `shell` for the same reason —
 `git check-ref-format --branch` accepts `foo$(id)` and `foo'bar` as valid
 branch names, so a `shell` string built from one is command execution on
 checkout, and no quoting closes that; `argv` closes it because the element
@@ -472,7 +472,7 @@ The second one is worth studying: `2>/dev/null` plus a missing file gives exit
 ## Opening a clicked file
 
 Veld underlines file paths in terminal output. A click offers **View in Veld**
-first — Veld's own read-only file pane (see `veld skills ide`) — and then every
+first — Veld's own read-only file pane (see `veld agent skills ide`) — and then every
 `action` declaring `accepts: "file"`, which is how a project adds "open in my
 editor". The path arrives as `$1`, absolute; the line as `$2`.
 
@@ -525,7 +525,7 @@ and `shell` when it wants them joined (`code -g file:line`).
 **Do not write `$1` or `$2` in an `argv` element.** There is no shell there to bind
 one, so it reaches the command as those literal characters *and* the real values
 arrive after it — `["code", "-g", "$1:$2"]` runs `code -g $1:$2 <path> <line>`, and
-the editor is what complains. `veld lint` refuses it.
+the editor is what complains. `veld orchestrator lint` refuses it.
 
 **`$1` can be a directory** (`ls some/dir/` prints them). Veld does not branch for
 you, because `code -g dir:1` is wrong where `code dir` is right and only the
@@ -594,12 +594,12 @@ looks like a bug:
 ## Checking your work
 
 ```sh
-veld lint                      # unknown key, bad reference, bad variable, clamped interval
+veld orchestrator lint                      # unknown key, bad reference, bad variable, clamped interval
 ./scripts/veld/pr-badge.sh     # run the command yourself; is stdout one JSON object?
 echo $?                        # 0 with output = badge, 0 with none = hidden, non-zero = red
 ```
 
-`veld lint` is the only check that a declaration **took**. Everything under `ide` is
+`veld orchestrator lint` is the only check that a declaration **took**. Everything under `ide` is
 lenient by design — a malformed entry is a warning and a dropped entry, never a
 load error — so a silent typo shows up there and nowhere else.
 
@@ -612,4 +612,4 @@ Two failure modes worth reproducing on purpose before you commit:
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

@@ -7,7 +7,7 @@
 //! # Versioning is load-bearing here
 //!
 //! A holder outlives the daemon that spawned it — that is the entire point — so
-//! after `veld update` the daemon is the *new* binary while every holder still
+//! after `veld self update` the daemon is the *new* binary while every holder still
 //! runs the old one. The two therefore negotiate: the holder's first frame is a
 //! [`Hello`] carrying [`PROTOCOL`], and a daemon that does not recognise the
 //! version must treat the session as gone rather than guess at the framing.
@@ -24,7 +24,7 @@
 //! Concretely, the contract a hangup-only caller relies on is: **connect, write
 //! the five bytes, and you may close immediately.** The holder spawns its frame
 //! reader before it writes its own greeting precisely so that this works — three
-//! callers depend on it (`veld uninstall`'s sweep, the recovery test's cleanup
+//! callers depend on it (`veld self uninstall`'s sweep, the recovery test's cleanup
 //! guard, and the daemon refusing an unrecognised version), and greeting-first
 //! made all three silently ineffective: the peer had already gone, the greeting
 //! failed EPIPE, and the hangup was never read while the shell kept running.
@@ -667,7 +667,7 @@ mod tests {
     /// A greeting from a holder that predates a capability flag must default it
     /// to false, not fail to parse.
     ///
-    /// This is the `veld update` path, and it is the whole reason both flags
+    /// This is the `veld self update` path, and it is the whole reason both flags
     /// exist: after an update the daemon is the new binary while every holder
     /// still runs the old one, so the *old* greeting is what the *new* daemon
     /// reads. A field without `#[serde(default)]` makes that greeting

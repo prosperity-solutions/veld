@@ -3,11 +3,11 @@
 //! Veld ships as two halves of one release — the CLI and the macOS app — and for
 //! a long time an install brought both without asking. That is right for someone
 //! who uses Veld as an IDE and wrong for someone who uses it purely as an
-//! orchestrator: they paid a ~113 MB download on every single `veld update` for
+//! orchestrator: they paid a ~113 MB download on every single `veld self update` for
 //! an app they never opened. So the app half is now a recorded answer, and this
 //! module is where that answer lives.
 //!
-//! **A file, not the database, and not a `veld settings` key.** Two reasons, both
+//! **A file, not the database, and not a `veld self settings list` key.** Two reasons, both
 //! structural rather than preference:
 //!
 //! - `install.sh` has to read it. That script is the fresh-install path, where
@@ -44,8 +44,8 @@
 //! installed again, with every suite green.
 //!
 //! **Only an explicit human act ever writes this.** Answering the prompt in
-//! `veld update` or `install.sh`, or running `veld desktop install` /
-//! `veld desktop uninstall`. Nothing infers it — not a handoff from the running
+//! `veld self update` or `install.sh`, or running `veld self desktop install` /
+//! `veld self desktop uninstall`. Nothing infers it — not a handoff from the running
 //! app, not an ambient `VELD_DESKTOP=0`, not a fresh database. An inferred answer
 //! is one the user never gets asked for and cannot remember giving.
 
@@ -74,7 +74,7 @@ impl DesktopChoice {
         matches!(self, DesktopChoice::Wanted)
     }
 
-    /// For `--json` consumers and `veld doctor`.
+    /// For `--json` consumers and `veld self doctor`.
     pub fn as_str(self) -> &'static str {
         match self {
             DesktopChoice::Wanted => "wanted",

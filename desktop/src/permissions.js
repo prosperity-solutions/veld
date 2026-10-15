@@ -23,7 +23,7 @@
 //   3. veld's defaults — what a browser would do without asking
 //
 // A config grant is deliberately powerful: a repo that can already run arbitrary
-// commands through `veld start` is not meaningfully constrained by withholding
+// commands through `veld orchestrator start` is not meaningfully constrained by withholding
 // camera access from its own dev server. What it is *not* is invisible — every
 // config-sourced grant shows in the pane's per-site panel labelled as coming from
 // veld.json, and a user answer always outranks it.
@@ -38,7 +38,7 @@
  * schema is the one source; the other three are gated against it.
  *
  * Two prose copies are **not** gated — `docs/configuration.md` and
- * `crates/veld/src/commands/skills/config.md` (what `veld skills config` prints)
+ * `crates/veld/src/commands/skills/config.md` (what `veld agent skills config` prints)
  * both list the ids for a reader. Adding an id means editing those by hand.
  */
 const VELD_PERMISSIONS = [
@@ -187,7 +187,7 @@ function originKey(origin) {
  *
  * The pattern arrives already normalised from the daemon
  * (`veld_core::ide::OriginPattern`), so this is comparison only — deliberately, so
- * that what `veld lint` accepted and what the matcher applies cannot drift apart.
+ * that what `veld orchestrator lint` accepted and what the matcher applies cannot drift apart.
  * `port: null` is the pattern's `*`; a pattern with a number matches that port
  * only.
  *

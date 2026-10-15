@@ -1,6 +1,6 @@
 # veld-gateway — operator guide
 
-`veld-gateway` is the self-hosted server that makes `veld share --web` work:
+`veld-gateway` is the self-hosted server that makes `veld network share --web` work:
 a headless Veld peer that joins a developer's share over iroh and
 reverse-proxies the tunneled service onto a real public URL
 (`https://<slug>.<your-domain>`). One instance serves a whole org; many
@@ -37,7 +37,7 @@ point at the gateway:
   "sharing": {
     "relays": ["https://relay.acme.internal"],
     // The token is resolved in the DAEMON's environment, not your shell — an
-    // `export … && veld share` won't reach a background daemon. For a quick
+    // `export … && veld network share` won't reach a background daemon. For a quick
     // start use a literal ("token": "…"); for real deployments prefer
     // { "file": "/run/secrets/gw-token" }. See "Injecting the token" below.
     "gateway": { "url": "https://share.acme.internal", "token": { "file": "/run/secrets/gw-token" } }
@@ -54,7 +54,7 @@ point at the gateway:
 ```
 
 ```sh
-veld share --web            # prints https://<slug>.share.acme.internal + a viewer password
+veld network share --web            # prints https://<slug>.share.acme.internal + a viewer password
 ```
 
 Web shares are **password-protected by default** — see
@@ -138,7 +138,7 @@ File form (all fields optional, `SecretSource` accepted for secrets):
 - **Registration API** (apex only): `POST /api/v1/shares` with the share
   ticket, Bearer-authenticated. The same call is the heartbeat — idempotent,
   refreshes the lease. `DELETE /api/v1/shares/{id}` unregisters (also
-  idempotent). Driven entirely by `veld share --web`; you never call it by
+  idempotent). Driven entirely by `veld network share --web`; you never call it by
   hand.
 - **Browser-facing pages are branded**: the apex `/` serves a small index
   page identifying the server as a Veld gateway; unknown slugs answer a
@@ -179,13 +179,13 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   debugger) has none of that, and a browser — the entire audience of a public
   URL — could not speak the protocol even if the gateway forwarded the bytes.
   This is what the `web` audience *is*, not a feature gap: sharing a raw port
-  is the `peer` audience's job (`veld share`, which reproduces it as a local
-  TCP port on the joiner). Three gates keep it out — `veld lint`'s
+  is the `peer` audience's job (`veld network share`, which reproduces it as a local
+  TCP port on the joiner). Three gates keep it out — `veld orchestrator lint`'s
   `web-share-needs-http` rejects the config, the origin daemon refuses the port
-  at `veld share --web` time and names it, and the gateway itself drops any
+  at `veld network share --web` time and names it, and the gateway itself drops any
   non-routed manifest entry at registration rather than publishing it as an
   HTTP origin. An operator therefore never sees one; if a share seems to be
-  missing a service, check the developer's `veld share --web` output for the
+  missing a service, check the developer's `veld network share --web` output for the
   exclusion line.
 - **Cleanup is layered**: the moment a developer unshares / stops the run /
   loses the daemon, the tunnel closes and the URLs die (the live connection is
@@ -227,7 +227,7 @@ Two consequences to know before sharing a non-trivial app:
   and ~15 s later `share tunnel path settled` with the post-hole-punching
   state plus `rtt_ms`. A tunnel that stays `relayed` is capped by that relay's
   throughput (n0's public relays throttle) — the first thing to check when a
-  share feels slow. The developer sees the same picture in `veld shares` and
+  share feels slow. The developer sees the same picture in `veld network list` and
   the management UI (the in-page toolbar's Sharing menu deliberately omits
   transport detail — it just starts/stops/copies).
 - **Health**: `GET /livez` (liveness — the process is up) and `GET /readyz`

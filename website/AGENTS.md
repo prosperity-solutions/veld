@@ -113,7 +113,7 @@ website/
 The root `veld.json` serves this directory locally via browser-sync:
 
 ```sh
-veld start website:local --name dev
+veld orchestrator start website:local --name dev
 ```
 
 This gives an HTTPS URL like `https://website.dev.veld.localhost`. Use the

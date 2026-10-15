@@ -76,7 +76,7 @@ pub async fn run(binary: PathBuf) -> i32 {
                 &format!(
                     "the privileged veld-helper is not answering ({e}), and its binary lives in a \
                      root-owned directory this installer cannot write. Run \
-                     `sudo veld setup privileged` to reinstall it."
+                     `sudo veld self setup privileged` to reinstall it."
                 ),
                 false,
             );
@@ -119,7 +119,7 @@ pub async fn run(binary: PathBuf) -> i32 {
 /// `setup::which_self` looks in the lib dir, then beside the CLI, then returns a
 /// bare `"veld-helper"`. **Every already-shipped CLI has that behaviour and
 /// cannot be changed.** So an older `veld` — a second copy in `/usr/local/bin`,
-/// one left by a pinned downgrade — running `sudo veld setup privileged` on a
+/// one left by a pinned downgrade — running `sudo veld self setup privileged` on a
 /// machine where the lib-dir copy had been removed would boot out the working
 /// root job and write `<string>veld-helper</string>` into the plist: a service
 /// launchd cannot exec, with no binary left on disk for a retry to find, and no

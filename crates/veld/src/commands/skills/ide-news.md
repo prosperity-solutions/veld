@@ -53,7 +53,7 @@ that is documentation, and the docs already have it.
 **Rules with teeth:**
 
 - **Five live items, maximum.** Over the cap, the entries with the **oldest
-  `since`** are dropped with a `veld lint` warning naming them — so a card dated
+  `since`** are dropped with a `veld orchestrator lint` warning naming them — so a card dated
   today survives and you never have to delete a good one to make room. By date, not
   by position, so a backdated entry can be the one dropped. **Retiring an item is deleting it** — when you add one, delete anything
   that has stopped being news.
@@ -73,11 +73,11 @@ that is documentation, and the docs already have it.
   (Settings → General, `main` by default) makes this switchable — `worktree`
   unions every checked-out worktree's own `ide.news` instead, for previewing a
   card before it merges.
-- **`veld lint` reports every mistake here**; nothing under `ide.news` can fail a
+- **`veld orchestrator lint` reports every mistake here**; nothing under `ide.news` can fail a
   config load.
 
-Field table: `veld skills config`.
+Field table: `veld agent skills config`.
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

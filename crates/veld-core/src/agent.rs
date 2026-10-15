@@ -99,7 +99,7 @@
 //!    the time you read it; the compiler enforces exhaustiveness, this comment does
 //!    not. `shim_name` is the command the wrapper stands in front of.
 //! 2. A `<tool>_state(&HookPayload) -> State` beside [`claude_state`]/[`codex_state`],
-//!    and an arm in `veld agent-state`'s `match tool` (`crates/veld/src/commands/agent.rs`).
+//!    and an arm in `veld agent state`'s `match tool` (`crates/veld/src/commands/agent.rs`).
 //! 3. A `<tool>_settings_doc`/`<tool>_notify_config` beside [`claude_settings_doc`]/
 //!    [`codex_notify_config`], depending on [`Injection`] — see below. `prepare_in` in
 //!    `veld-daemon/src/pty/shims.rs` already generates one wrapper per `AgentTool::ALL`,
@@ -109,7 +109,7 @@
 //!    [`AgentTool`]) — easy to miss since it lives well below [`Injection`] itself.
 //! 4. Whatever [`HookPayload`] is missing for the new tool's schema — every field is
 //!    optional and unknown fields are ignored, so adding one cannot break an existing tool.
-//! 5. Docs: the two settings rows, README, the relevant `veld skills` topic
+//! 5. Docs: the two settings rows, README, the relevant `veld agent skills` topic
 //!    (`crates/veld/src/commands/skills/`), `llms-full.txt`.
 //!
 //! ## The five traps, each already paid for once
@@ -124,7 +124,7 @@
 //!   the trap does not disappear, it just moves to whichever tool arrives blocking next.
 //! - **Do not assume stdin.** Claude pipes the payload as JSON on stdin; **Codex's
 //!   `notify` hook appends the event JSON as the final `argv` entry instead.** This is
-//!   why `veld agent-state`'s payload parse lives in the CLI (`crates/veld/src/commands/agent.rs`)
+//!   why `veld agent state`'s payload parse lives in the CLI (`crates/veld/src/commands/agent.rs`)
 //!   and not in the daemon, and why its clap definition carries a trailing positional
 //!   for the argument-borne payload alongside the stdin path.
 //! - **Never merge into a user's config file.** The ephemeral `--settings` shape exists
@@ -526,7 +526,7 @@ pub fn is_launch_prompt_name(name: &str) -> bool {
 /// Claim a launch prompt, at most once across every process that tries.
 ///
 /// **One prompt, two claimants, and exactly one of them may win.** The agent wrapper
-/// claims it at launch (through `veld agent-prompt --take`); the window claims it once
+/// claims it at launch (through `veld agent prompt --take`); the window claims it once
 /// the agent has opened its input, and types it in if it got it — which it only can
 /// if no wrapper took it first. A prompt neither sent nor typed is lost, and one both
 /// sent and typed is a second turn the user never asked for, so the claim is a
@@ -599,14 +599,14 @@ pub fn deliver_launch_prompt(
 
 /// The two shapes a tool's ephemeral hook configuration can take, and therefore the
 /// two things `agent_script` (`veld-daemon/src/pty/shims.rs`) has to do differently
-/// after calling `veld agent-settings`.
+/// after calling `veld agent settings`.
 ///
-/// Claude has no CLI override for `--settings`'s contents, so `agent-settings`
+/// Claude has no CLI override for `--settings`'s contents, so `agent settings`
 /// writes a **file** and prints its *path*; the wrapper only injects once that path
 /// actually exists on disk, because a script that failed midway must not hand a
 /// nonexistent path to `--settings` and get a hard error instead of a quiet
 /// passthrough. Codex's `-c key=value` takes a literal value on the command line, so
-/// `agent-settings` prints the *value* directly and there is no file to check.
+/// `agent settings` prints the *value* directly and there is no file to check.
 ///
 /// Injecting an empty string is not the only failure mode here, though it looked that
 /// way at first: Codex parses a malformed `-c` value as TOML and, on a parse failure,
@@ -615,18 +615,18 @@ pub fn deliver_launch_prompt(
 /// empty check catches "nothing printed"; it does not catch "printed garbage".
 /// `ConfigOverride`'s `key_prefix` is the cheap guard for that second case: the
 /// wrapper checks the printed value actually starts with the key this tool's
-/// `agent-settings` arm is supposed to set, and drops it otherwise (belt-and-braces
-/// alongside `agent-settings`'s own correctness, the same relationship `sh_quote` has
+/// `agent settings` arm is supposed to set, and drops it otherwise (belt-and-braces
+/// alongside `agent settings`'s own correctness, the same relationship `sh_quote` has
 /// to its callers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Injection {
-    /// `agent-settings` writes a file and prints its path; inject only once that
+    /// `agent settings` writes a file and prints its path; inject only once that
     /// file exists.
     SettingsFile,
-    /// `agent-settings` prints a literal value with no file behind it; inject once
+    /// `agent settings` prints a literal value with no file behind it; inject once
     /// it starts with `key_prefix` (e.g. `"notify="`), the wrapper's cheap check that
     /// what it is about to hand the real binary is shaped like the value this tool's
-    /// `agent-settings` arm actually produces.
+    /// `agent settings` arm actually produces.
     ConfigOverride { key_prefix: &'static str },
 }
 
@@ -699,7 +699,7 @@ pub enum State {
     /// Told something we do not understand — **or something we understand and have
     /// chosen not to report**, which is the larger population. Produces no inbox event
     /// and touches no state: silence beats a badge the user cannot act on. See
-    /// [`claude_state`] for both kinds, and `veld agent-state` for the early return
+    /// [`claude_state`] for both kinds, and `veld agent state` for the early return
     /// that makes this reach nothing at all.
     Unknown,
 }
@@ -1160,7 +1160,7 @@ pub fn pi_state(payload: &HookPayload) -> State {
 #[must_use]
 pub fn claude_settings_doc(cli: &Path, session_id: &str) -> serde_json::Value {
     let command = format!(
-        "{} agent-state --tool claude --session {}",
+        "{} agent state --tool claude --session {}",
         sh_quote(cli.as_os_str().to_string_lossy().as_ref()),
         sh_quote(session_id),
     );
@@ -1192,7 +1192,7 @@ pub fn claude_settings_doc(cli: &Path, session_id: &str) -> serde_json::Value {
 /// it has is `-c key=value`, which overrides one config key for one invocation. That
 /// is the same property `--settings` gives Claude — nothing of the user's is
 /// touched — so [`AgentTool::injection`] treats it as [`Injection::ConfigOverride`]
-/// rather than leaving Codex unsupported: `veld agent-settings` prints this value
+/// rather than leaving Codex unsupported: `veld agent settings` prints this value
 /// directly instead of a file path, and the wrapper passes it straight through.
 ///
 /// # Why the array elements are JSON-escaped, not TOML-escaped
@@ -1219,7 +1219,8 @@ pub fn claude_settings_doc(cli: &Path, session_id: &str) -> serde_json::Value {
 pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
     let tokens = [
         cli.as_os_str().to_string_lossy().into_owned(),
-        "agent-state".to_owned(),
+        "agent".to_owned(),
+        "state".to_owned(),
         "--tool".to_owned(),
         "codex".to_owned(),
         "--session".to_owned(),
@@ -1261,7 +1262,7 @@ pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
 ///
 /// The generated handler calls `child_process.execFile` and returns without awaiting
 /// the callback, so the handler's own promise resolves immediately regardless of how
-/// long (or whether) the spawned `veld agent-state` finishes — the same trade
+/// long (or whether) the spawned `veld agent state` finishes — the same trade
 /// [`codex_notify_config`] takes for the same reason, just enforced in JS rather than
 /// by Codex's own `spawn()` never being awaited. That holds for every event here:
 /// `agent_start`/`agent_settled` are run lifecycle events, and `session_shutdown` is
@@ -1274,8 +1275,8 @@ pub fn codex_notify_config(cli: &Path, session_id: &str) -> String {
 ///
 /// Nothing here reads anybody else's schema — this module writes both the extension
 /// and [`pi_state`]'s reader — so the payload shape is a free choice, made to match
-/// Codex's rather than Claude's: a small JSON object as `agent-state`'s final
-/// argument, never on stdin. `veld agent-state`'s stdin path stays Claude-only.
+/// Codex's rather than Claude's: a small JSON object as `agent state`'s final
+/// argument, never on stdin. `veld agent state`'s stdin path stays Claude-only.
 ///
 /// # Escaping
 ///
@@ -1301,7 +1302,7 @@ function report(event, reason) {{
   const body = JSON.stringify(reason === undefined ? {{ event }} : {{ event, reason }});
   execFile(
     CLI,
-    ["agent-state", "--tool", "pi", "--session", SESSION, body],
+    ["agent", "state", "--tool", "pi", "--session", SESSION, body],
     {{ timeout: {timeout_ms} }},
     () => {{}},
   );
@@ -1339,7 +1340,7 @@ export default function (pi) {{
 /// problem because they name the daemon's own CLI by absolute path; this now does the
 /// same. It varies by instance only, so the cache argument above still holds.
 ///
-/// Short, and it points at `skills ide` rather than explaining: this is paid for on
+/// Short, and it points at `agent skills ide` rather than explaining: this is paid for on
 /// every turn by every session, including the ones that never open a file.
 #[must_use]
 pub fn agent_context(cli: &str) -> String {
@@ -1360,7 +1361,7 @@ pub fn agent_context(cli: &str) -> String {
          finish that reply with one short question asking whether to hand it off as a new \
          worktree. Ask even when they told you to leave it alone; leaving it is their call. \
          Only once they agree, run `{cli} ide worktree new` (see its `--help`): it creates a \
-         worktree where an agent starts on a prompt you write. Details: `{cli} skills ide`."
+         worktree where an agent starts on a prompt you write. Details: `{cli} agent skills ide`."
     )
 }
 
@@ -1455,7 +1456,7 @@ pub fn context_cli_word(cli: &Path, installed: bool) -> String {
 /// (`VELD_AGENT_CONTEXT` for this one) and its own argv.
 ///
 /// Unlike the hooks, the text is the same for every session of a daemon, so it is baked
-/// into the generated wrapper at daemon start instead of fetched from `veld agent-settings` at
+/// into the generated wrapper at daemon start instead of fetched from `veld agent settings` at
 /// launch — one fewer process on the launch path and nothing that can print garbage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextInjection {
@@ -1541,7 +1542,7 @@ export default function (pi) {{
 /// Where [`pi_context_extension_doc`] is written, inside this daemon's shim directory.
 ///
 /// **Not under `agent/`**: that directory is swept of files older than
-/// [`SETTINGS_MAX_AGE`] by `veld agent-settings`, and this one is written once per
+/// [`SETTINGS_MAX_AGE`] by `veld agent settings`, and this one is written once per
 /// daemon start, so a daemon up for a week would lose it.
 #[must_use]
 pub fn context_extension_path(shim_dir: &Path) -> PathBuf {
@@ -1593,7 +1594,7 @@ pub const CLAUDE_PLUGIN_DIRS_ENV: &str = "CLAUDE_CODE_PLUGIN_DIRS";
 /// Where [`claude_mod_files`] are written, inside this daemon's shim directory, so an
 /// installed daemon and a dev one each name their own.
 ///
-/// Not under `agent/`, which `veld agent-settings` sweeps by age, for the reason
+/// Not under `agent/`, which `veld agent settings` sweeps by age, for the reason
 /// [`context_extension_path`] gives. Claude Code writes type declarations into
 /// `.claude-plugin/types/` here when it loads the mod; they are its own and harmless.
 #[must_use]
@@ -1605,7 +1606,7 @@ pub fn claude_mod_dir(shim_dir: &Path) -> PathBuf {
 /// contents)`.
 ///
 /// `daemon` is this daemon's base URL (the module posts each state to the same
-/// `agent-state` endpoint `veld agent-state` does) and `context` the text
+/// `agent-state` endpoint `veld agent state` does) and `context` the text
 /// [`agent_context`] produced for this daemon. Both are baked in, so the files are
 /// static per daemon instance and per version, like the wrappers.
 ///
@@ -1863,7 +1864,7 @@ pub const HOOK_REQUEST_TIMEOUT_MS: u64 = 1_000;
 /// characters. Real ids are `Uuid::simple()` hex.
 ///
 /// One rule for both sides: the daemon checks client-chosen ids with it before using
-/// one as a map key or in a log line, and the `agent-state` hook checks with it before
+/// one as a map key or in a log line, and the `agent state` hook checks with it before
 /// interpolating one into a raw HTTP request line, where a `\r\n` would inject
 /// headers. Two copies could drift, and a hook whose id the daemon would accept but it
 /// refuses fails silently.
@@ -2009,7 +2010,7 @@ mod tests {
         assert_eq!(files.last().unwrap().0, ".claude-plugin/plugin.json");
     }
 
-    /// The module reports with the same wire spellings `veld agent-state` uses, so the
+    /// The module reports with the same wire spellings `veld agent state` uses, so the
     /// daemon cannot tell the two apart — and a state renamed here fails this test
     /// rather than a badge.
     #[test]
@@ -2248,7 +2249,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
     /// `Unknown` and not some new state on purpose: the CLI drops `Unknown` without
     /// contacting the daemon, so this is the only answer that touches neither the inbox
     /// nor the pane's working flag. Asserted as the *state* rather than as "no request"
-    /// because that is where the decision lives; `agent-state`'s own early return is what
+    /// because that is where the decision lives; `agent state`'s own early return is what
     /// turns it into silence.
     #[test]
     fn a_subagent_ending_reports_nothing_but_one_asking_still_does() {
@@ -2317,7 +2318,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
     #[test]
     fn the_reported_cycle_covers_launch_to_exit() {
         // Launch — the wrapper, not a hook. No event, but it claims the pane.
-        // (`State::Ready` is produced by `veld agent-state --launched`, so there is no
+        // (`State::Ready` is produced by `veld agent state --launched`, so there is no
         // payload to map; this asserts the vocabulary round-trips it.)
         assert_eq!(State::parse("ready"), Some(State::Ready));
         // A turn begins.
@@ -2412,7 +2413,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
             assert!(command.contains("--session 'pane-7'"), "{event}: {command}");
             assert!(command.contains("--tool claude"), "{event}: {command}");
             assert!(
-                command.starts_with("'/opt/veld/bin/veld' agent-state"),
+                command.starts_with("'/opt/veld/bin/veld' agent state"),
                 "{event}: the CLI is named by absolute path, so a dev daemon's \
                  terminals reach its own CLI: {command}"
             );
@@ -2451,7 +2452,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         let value = codex_notify_config(Path::new("/opt/veld/bin/veld"), "pane-7");
         assert_eq!(
             value,
-            r#"notify=["/opt/veld/bin/veld","agent-state","--tool","codex","--session","pane-7"]"#
+            r#"notify=["/opt/veld/bin/veld","agent","state","--tool","codex","--session","pane-7"]"#
         );
     }
 
@@ -2462,7 +2463,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         let value = codex_notify_config(Path::new("/a b/veld"), r#"it"s"#);
         assert_eq!(
             value,
-            r#"notify=["/a b/veld","agent-state","--tool","codex","--session","it\"s"]"#
+            r#"notify=["/a b/veld","agent","state","--tool","codex","--session","it\"s"]"#
         );
     }
 
@@ -2551,8 +2552,8 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
             );
         }
         assert!(
-            doc.contains("agent-state"),
-            "the generated command must call agent-state: {doc}"
+            doc.contains(r#""agent", "state""#),
+            "the generated command must call agent state: {doc}"
         );
         assert!(
             doc.contains("--tool") && doc.contains("\"pi\""),
@@ -2785,7 +2786,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
 
         let text = agent_context(&context_cli_word(dev, false));
         assert!(text.contains(&format!("`{} ide open <path-or-url>", dev.display())));
-        assert!(text.contains(&format!("`{} skills ide`", dev.display())));
+        assert!(text.contains(&format!("`{} agent skills ide`", dev.display())));
         assert!(text.contains("--quiet") && text.contains("--notify"));
         assert!(text.contains(&format!("`{} ide worktree new`", dev.display())));
         assert!(text.contains(&format!("`{} ide worktree name ", dev.display())));
@@ -2794,7 +2795,9 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
             "no bare word left for a dev instance: {text}"
         );
         let installed = agent_context("veld");
-        assert!(installed.contains("`veld ide open ") && installed.contains("`veld skills ide`"));
+        assert!(
+            installed.contains("`veld ide open ") && installed.contains("`veld agent skills ide`")
+        );
         // Static per instance: the same input is the same bytes, every time.
         assert_eq!(installed, agent_context(&context_cli_word(dev, true)));
     }

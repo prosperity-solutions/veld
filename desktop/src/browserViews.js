@@ -2738,7 +2738,7 @@ function registerBrowserViewIpc(resolveWindow, opts = {}) {
     // Filtered to this machine, not merely parsed. These origins get
     // `display-capture` with no prompt on the premise that they are "origins veld
     // itself serves" — but they are built from the project's own `url_template`,
-    // and a non-`.localhost` template is only *warned* about by `veld start`,
+    // and a non-`.localhost` template is only *warned* about by `veld orchestrator start`,
     // never refused. Without this filter a repo could put a public origin into
     // the silent-capture set by editing one config line.
     const trustedOrigins = Array.isArray(args?.trustedOrigins)

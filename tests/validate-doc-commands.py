@@ -7,7 +7,7 @@ wrong claims about the CLI. Half of those are prose this gate cannot judge — a
 sentence promising `--json` on every command, a table row putting a flag on the
 wrong node. **The five it does catch, and was written for, are the ones somebody
 would paste:** a `--detach`/`-d` pair that never existed and was documented as
-the default when the opposite is true (twice), `veld logs dev-daemon` as a
+the default when the opposite is true (twice), `veld orchestrator logs dev-daemon` as a
 positional where there is none, and a bare `veld feedback [--name <n>]`, which
 clap refuses on both counts (twice). Six lines across the corpus, and each
 survived because the only reader who would notice is an agent, at which point
@@ -17,7 +17,7 @@ The CLI is learned from `veld _cli-dump` — clap's own tree as JSON — never b
 parsing `--help` prose. The first version of this gate did parse help, and
 `crates/veld/src/commands/cli_dump.rs` records the three ways that went wrong;
 the shortest of them is that a hyphenated word in a description became a flag,
-so a documented `veld logs --pin` would have *passed*.
+so a documented `veld orchestrator logs --pin` would have *passed*.
 
 Three checks, all exact rather than heuristic:
 
@@ -27,7 +27,7 @@ Three checks, all exact rather than heuristic:
 3. a node that requires a subcommand must be given one.
 
 What it deliberately does NOT check: whether a positional *value* is sensible.
-`veld start dev-headless` is a well-formed command line and a wrong one (that is
+`veld orchestrator start dev-headless` is a well-formed command line and a wrong one (that is
 a preset, and presets go behind `--preset`), and nothing about the CLI's shape
 distinguishes it from a node veld has not heard of. That class is answered in
 the binary instead — `start.rs`'s `with_preset_hint` says so at the moment
@@ -78,8 +78,8 @@ def load_tree(veld):
     # rename would break every one of them silently: the reader gets "Unknown
     # skill topic" at the moment it needed the document. Attached to the tree so
     # `check` stays a pure function of (line, tree).
-    r = subprocess.run([veld, "skills", "--json"], capture_output=True, text=True, check=True)
-    tree["subcommands"]["skills"]["values"] = [t["name"] for t in json.loads(r.stdout)]
+    r = subprocess.run([veld, "agent", "skills", "--json"], capture_output=True, text=True, check=True)
+    tree["subcommands"]["agent"]["subcommands"]["skills"]["values"] = [t["name"] for t in json.loads(r.stdout)]
     return tree
 
 
@@ -139,12 +139,12 @@ def check(line, tree, runnable=True):
     i = 1
     while i < len(tokens):
         tok = clean(tokens[i])
-        # A global flag may precede the subcommand — `veld --debug start …` is
+        # A global flag may precede the subcommand — `veld --debug orchestrator start …` is
         # accepted by clap, and breaking here left `node` at the root so every
         # later flag was reported as unknown. Scoped to *before* any subcommand
         # is consumed, and to the root's own flags: past that point a `-` token
         # is followed by its value, and skipping the flag would feed the value
-        # to the positional check below (`veld logs --node dev-daemon` would
+        # to the positional check below (`veld orchestrator logs --node dev-daemon` would
         # have failed on `dev-daemon`). The root's only such flag is the boolean
         # `--debug`, so there is no value to step over here.
         if not path and tok in set(tree["flags"]) | UNIVERSAL_FLAGS:
@@ -160,7 +160,7 @@ def check(line, tree, runnable=True):
         where = "veld " + " ".join(path) if path else "veld"
         if not node["takes_positional"]:
             # Not a subcommand, and nothing here accepts a bare word — clap
-            # refuses this outright. This is `veld logs dev-daemon`.
+            # refuses this outright. This is `veld orchestrator logs dev-daemon`.
             known = ", ".join(sorted(subs)) if subs else "none"
             return (
                 f"`{where}` takes no positional argument, and `{tok}` is not one of "
@@ -198,51 +198,51 @@ def check(line, tree, runnable=True):
 # anybody noticing — `validate-workflow-gates.py` makes the same argument, and
 # a corpus that has just been cleaned reports "0 failing" either way.
 SELFTEST_BAD = [
-    "veld start --preset fullstack --name my-feature -d",
-    "veld start --preset fullstack --name my-feature --detach",
-    "veld logs --run/--previous",
-    "veld desktop --json",
-    "veld runs --nosuchflag",
-    "veld config set website_log_level debug --nope",
+    "veld orchestrator start --preset fullstack --name my-feature -d",
+    "veld orchestrator start --preset fullstack --name my-feature --detach",
+    "veld orchestrator logs --run/--previous",
+    "veld self desktop --json",
+    "veld orchestrator runs list --nosuchflag",
+    "veld orchestrator vars set website_log_level debug --nope",
     # The four the help-parsing version could not see at all.
-    "veld logs dev-daemon --follow",
+    "veld orchestrator logs dev-daemon --follow",
     "veld feedback --name dev",
     "veld feedback",  # in a fence: a line somebody pastes
     "veld nosuchsubcommand",
     # A flag that is real, but on a different node.
-    "veld runs show a3f8c12 --pin",
+    "veld orchestrator runs show a3f8c12 --pin",
     # A topic that does not exist — what a rename leaves behind everywhere.
-    "veld skills configuration",
-    "veld skills panes --json",
+    "veld agent skills configuration",
+    "veld agent skills panes --json",
 ]
 SELFTEST_GOOD = [
-    "veld start --preset fullstack --name my-feature --attach",
-    "veld start api:local web:local --name dev",
-    "veld start e2e --oneshot --all-logs",
-    "veld logs --node dev-daemon --follow",
-    "veld logs --run a3f8c12 -C 3 --utc",
-    "veld desktop status --json",
-    "veld desktop update --wait-pid 42 --relaunch",  # a hidden flag is still real
-    "veld runs show a3f8c12 --json",
-    "veld config set website_reload_delay 300 --worktree",
+    "veld orchestrator start --preset fullstack --name my-feature --attach",
+    "veld orchestrator start api:local web:local --name dev",
+    "veld orchestrator start e2e --oneshot --all-logs",
+    "veld orchestrator logs --node dev-daemon --follow",
+    "veld orchestrator logs --run a3f8c12 -C 3 --utc",
+    "veld self desktop status --json",
+    "veld self desktop update --wait-pid 42 --relaunch",  # a hidden flag is still real
+    "veld orchestrator runs show a3f8c12 --json",
+    "veld orchestrator vars set website_reload_delay 300 --worktree",
     "veld feedback next --wait --name dev --json",
-    "veld share my-feature --node frontend --ttl 3600 --json",
-    "veld skills config --json",
-    "veld action psql --node database --print",
-    "veld presets --pin",
+    "veld network share my-feature --node frontend --ttl 3600 --json",
+    "veld agent skills config --json",
+    "veld orchestrator action psql --node database --print",
+    "veld orchestrator presets --pin",
     # Placeholder-laden reference rows must pass untouched.
-    "veld share [RUN] [--node <n>]... [--ttl <secs>] [--json]",
-    "veld settings set <key> <value> [--json]",
-    "veld start [NODE:VARIANT...] --name <n>",
-    "veld skills [TOPIC] [--json]",  # an upper-case bare word is a placeholder
-    "veld --debug start --preset fullstack",  # a global may precede the subcommand
-    "veld backup now --dir /tmp/x --json",  # …and be inherited by a descendant
+    "veld network share [RUN] [--node <n>]... [--ttl <secs>] [--json]",
+    "veld self settings set <key> <value> [--json]",
+    "veld orchestrator start [NODE:VARIANT...] --name <n>",
+    "veld agent skills [TOPIC] [--json]",  # an upper-case bare word is a placeholder
+    "veld --debug orchestrator start --preset fullstack",  # a global may precede the subcommand
+    "veld self backup now --dir /tmp/x --json",  # …and be inherited by a descendant
 ]
 # Prose that names a command family. Legal inline, a defect in a fence — the
 # `veld feedback` entry above is the same string on the other side of that line.
 SELFTEST_GOOD_INLINE_ONLY = [
     "veld feedback",
-    "veld runs show",
+    "veld orchestrator runs show",
 ]
 
 

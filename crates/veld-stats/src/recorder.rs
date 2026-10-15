@@ -17,9 +17,9 @@
 //! That distinction is the whole design. A stats row is a *time series* — "at
 //! time T, node K's tree looked like this" — a historical fact that is still
 //! true afterwards. `NodeState.pid` is a claim about the *present*, read by
-//! `veld stop`, the health monitor, the GC and the orphan reaper; a finished
+//! `veld orchestrator stop`, the health monitor, the GC and the orphan reaper; a finished
 //! build's PID sitting there would make a run that is still legitimately coming
-//! up look like one that spawned and died, and would eventually have `veld stop`
+//! up look like one that spawned and died, and would eventually have `veld orchestrator stop`
 //! signal whatever recycled the number.
 
 use std::collections::HashMap;
@@ -405,7 +405,7 @@ mod tests {
         let _ = sibling.kill().await;
     }
 
-    /// Dropping the recorder must stop the task; otherwise a `veld stop` or a
+    /// Dropping the recorder must stop the task; otherwise a `veld orchestrator stop` or a
     /// failed run would leave a sampler writing rows for a run that has ended.
     #[tokio::test]
     async fn dropping_the_recorder_stops_sampling() {

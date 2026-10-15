@@ -115,7 +115,7 @@ function offsetLabel(d: Date): string {
  * so both rendered lines truncate the microseconds veld actually stored, and two rows
  * 200 µs apart would tooltip identically. The CLI keeps that precision
  * (`logging::format_ts`), so without this line `/ide` would show `.123` where
- * `veld logs --utc` shows `.123456`, and a reader correlating the two — or pasting a
+ * `veld orchestrator logs --utc` shows `.123456`, and a reader correlating the two — or pasting a
  * timestamp into a bug report — would be working from a rounded value.
  */
 export function fmtTsFull(iso: string, tz: LogTimeZone): string {

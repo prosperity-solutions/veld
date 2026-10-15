@@ -16,6 +16,7 @@ pub mod list;
 pub mod logs;
 pub mod nodes;
 pub mod open_url;
+pub mod overview;
 pub mod presets;
 pub mod restart;
 pub mod runs;
@@ -39,7 +40,7 @@ use crate::output;
 /// Clean up the Spoon left behind by the Hammerspoon menu bar integration veld
 /// used to ship, and report what it did.
 ///
-/// Shared by `veld update` and `veld uninstall`. It lives in the CLI rather than
+/// Shared by `veld self update` and `veld self uninstall`. It lives in the CLI rather than
 /// in `veld_core::setup::uninstall()` because the useful half is the *report*: a
 /// `hs.loadSpoon("Veld")` line left in the user's `init.lua` errors on every
 /// Hammerspoon reload, and veld never edits a user's config, so saying so is the
@@ -135,7 +136,7 @@ pub fn start_origin_label(
         Err(veld_core::graph::GraphError::UnknownPreset(ref missing)) if missing == preset => {
             " (no longer defined)"
         }
-        Err(_) => " (cannot be expanded — see `veld lint`)",
+        Err(_) => " (cannot be expanded — see `veld orchestrator lint`)",
     };
     Some(format!("preset `{preset}`{qualifier} — {selections}"))
 }
@@ -144,9 +145,9 @@ pub fn start_origin_label(
 /// Otherwise look at the project state, two-tiered: if exactly one environment
 /// has a *live* run (starting/running/stopping), use that; only when zero are
 /// live, fall back to a sole environment (stopped ones persist as history now,
-/// so `veld restart`/`veld stop` can find last night's crashed environment).
+/// so `veld orchestrator restart`/`veld orchestrator stop` can find last night's crashed environment).
 /// The tiers are deliberately not collapsed — a crashed `dev` next to a
-/// running `staging` must not turn a bare `veld stop` into an ambiguity error.
+/// running `staging` must not turn a bare `veld orchestrator stop` into an ambiguity error.
 pub fn resolve_run_name(
     name: Option<String>,
     project_state: &veld_core::state::ProjectState,
@@ -278,7 +279,7 @@ mod tests {
         let label = super::start_origin_label(Some(&origin(Some("stack"), &["api:local"])), &cfg);
         assert_eq!(
             label.as_deref(),
-            Some("preset `stack` (cannot be expanded — see `veld lint`) — api:local")
+            Some("preset `stack` (cannot be expanded — see `veld orchestrator lint`) — api:local")
         );
     }
 

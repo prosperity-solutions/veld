@@ -78,7 +78,7 @@ pub enum OrchestratorError {
         failure_message: Option<String>,
     },
 
-    #[error("environment '{0}' was replaced by another `veld start` while starting")]
+    #[error("environment '{0}' was replaced by another `veld orchestrator start` while starting")]
     Superseded(String),
 
     /// Semantic config problems, from `config::validate`. Reachable only from
@@ -91,9 +91,9 @@ pub enum OrchestratorError {
         "hostname {hostname} is already served by run '{run_name}' of {project_name} \
          ({project_root}) — two checkouts that share a project name and a run name mint \
          the same URL, and only one of them can be routed. Start this one under a \
-         different name (`veld start --name <other>`), or stop the other run first \
-         (`veld stop --name {run_name}` in {project_root}). If that run is actually \
-         gone, `veld gc` clears the stale record."
+         different name (`veld orchestrator start --name <other>`), or stop the other run first \
+         (`veld orchestrator stop --name {run_name}` in {project_root}). If that run is actually \
+         gone, `veld self gc` clears the stale record."
     )]
     HostnameClaimed {
         hostname: String,
@@ -159,7 +159,7 @@ pub enum StopResult {
 ///   is now dead — it got underway, then its process died.
 ///
 /// A `Starting` run that has never spawned is left alone: it leaks no processes
-/// or routes, and a same-name `veld start` (`cleanup_stale_run`) or `veld stop`
+/// or routes, and a same-name `veld orchestrator start` (`cleanup_stale_run`) or `veld orchestrator stop`
 /// clears it. Any other status is never reaped here: `Stopping` belongs to an
 /// ender that is still tearing down (the daemon's grace-gated stale-`stopping`
 /// reaper covers a SIGKILLed one), and terminal runs are history.
@@ -179,10 +179,10 @@ fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -
 ///
 /// A teardown hook is the last thing between a run and history, so a hook that
 /// never returns is a run that never *ends*: it sits in `stopping` with its
-/// PIDs already dead, `veld start` refuses the name, and the user's only way
+/// PIDs already dead, `veld orchestrator start` refuses the name, and the user's only way
 /// out is to SIGKILL the stopper — which then loses every hook the loop had
 /// not reached yet. `process::run_command` waits for the child unconditionally,
-/// so before this bound the failure was reachable from an ordinary `veld stop`
+/// so before this bound the failure was reachable from an ordinary `veld orchestrator stop`
 /// against a container runtime that had stopped answering.
 ///
 /// 30s is measured against the slow-but-real case this exists for — a
@@ -218,7 +218,7 @@ const TEARDOWN_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// that exits non-zero, or that hangs and is killed at
 /// `TEARDOWN_HOOK_TIMEOUT`, is still recorded — so nothing retries it. The
 /// alternative is worse: a hook against a permanently wedged runtime would be
-/// retried by every later `veld start` for the project, taxing each one by the
+/// retried by every later `veld orchestrator start` for the project, taxing each one by the
 /// full timeout and never succeeding. Teardown is best-effort, and veld says so
 /// loudly on the stream the user reads when a hook is skipped or killed; what a
 /// failed hook left behind is the user's to remove. Retry-on-failure would be a
@@ -227,7 +227,7 @@ const TEARDOWN_HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// ledger written only at the end records nothing about a teardown that died in
 /// the middle, which is precisely the case it exists for — a stopper SIGKILLed
 /// after tearing down two of five nodes, resumed later by the daemon's
-/// stale-`stopping` reaper or by the next `veld stop`.
+/// stale-`stopping` reaper or by the next `veld orchestrator stop`.
 ///
 /// `Pending` is skipped because it never ran and has nothing to tear down.
 /// Everything else owes a hook — `Failed` included, since a node that spawned a
@@ -496,10 +496,10 @@ struct HostnameClaim {
 ///   ports are already going away.
 /// - Compared case-insensitively, because DNS and Caddy host matching are.
 ///
-/// Not a lock: two `veld start`s racing in two checkouts of one repo are both
+/// Not a lock: two `veld orchestrator start`s racing in two checkouts of one repo are both
 /// `Starting`, so neither sees the other and both register the same route id.
 /// That lands on the pre-#170 behaviour for that pair — last write wins, and the
-/// first `veld stop` removes the route the other still needs. Closing it needs a
+/// first `veld orchestrator stop` removes the route the other still needs. Closing it needs a
 /// claim registered before the check, which is a bigger change than the window
 /// justifies; a sequential second start is refused normally.
 ///
@@ -646,7 +646,7 @@ fn build_graph_snapshot(
         })
         .collect();
     // `config.vars` is a HashMap, so without this the list's order would change
-    // between runs and `veld runs diff` would report a difference that is only
+    // between runs and `veld orchestrator runs diff` would report a difference that is only
     // hash iteration order.
     var_overrides.sort_by(|a, b| a.name.cmp(&b.name));
     // Always `Some` from a run this binary started, even when empty — that is
@@ -752,7 +752,7 @@ pub fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
 /// `"url.hostname"`, …), so the port-scoped family has to *replace* that prefix
 /// rather than nest under it — building `format!("urls.{name}.{key}")` from its
 /// output yields `urls.admin.url.hostname`, which nothing resolves. That was a
-/// real bug, invisible to `veld lint` (the name is well-formed and the validator
+/// real bug, invisible to `veld orchestrator lint` (the name is well-formed and the validator
 /// only checks the *reference*, not what the orchestrator publishes) and caught
 /// only by running an environment. Both the cross-node `all_outputs` map and the
 /// node's own `var_ctx` go through here so they cannot drift apart again.
@@ -790,7 +790,7 @@ pub fn env_suffix(port_name: &str) -> String {
 
 /// The veld-owned context every surface of a node is built from, so the same
 /// `VELD_*` variables reach the node process, its readiness probe, its
-/// `on_stop` hook, and `veld action`.
+/// `on_stop` hook, and `veld orchestrator action`.
 #[derive(Debug, Clone)]
 pub struct NodeEnvContext {
     /// `VELD_RUN` — the run name.
@@ -818,7 +818,7 @@ pub struct NodeEnvContext {
 
 impl NodeEnvContext {
     /// From a persisted [`veld_core::state::NodeState`] — used by the `on_stop`
-    /// hook, the liveness monitor, and `veld action`, which have the node's
+    /// hook, the liveness monitor, and `veld orchestrator action`, which have the node's
     /// recorded port, url and endpoints rather than the pre-computed start-time
     /// server info.
     pub fn from_node_state(
@@ -983,7 +983,7 @@ struct NodeExecutionContext {
     checkpoint: Arc<std::sync::Mutex<CheckpointState>>,
     /// Told when a `command` step's process starts and stops, so the CLI can
     /// sample the resource usage of a build or an install while it runs. `None`
-    /// everywhere except a real `veld start` — see [`stats::StepObserver`].
+    /// everywhere except a real `veld orchestrator start` — see [`stats::StepObserver`].
     step_observer: Option<Arc<dyn stats::StepObserver>>,
 }
 
@@ -1005,7 +1005,7 @@ struct NodeExecutionResult {
 /// Where an in-effect machine-var answer came from.
 ///
 /// `has_row` is the question every consumer actually asks — "can a later
-/// `veld stop`, running in a fresh process that reads only the store, resolve
+/// `veld orchestrator stop`, running in a fresh process that reads only the store, resolve
 /// this?" — so it is derived here rather than tracked in a second collection
 /// that has to be kept in step. Three review rounds produced a bug in that seam;
 /// this type is what makes the bug unrepresentable.
@@ -1077,7 +1077,7 @@ pub struct Orchestrator {
     /// When set, this `command` node is the run's terminal one-off: it is NOT
     /// executed during the normal startup stages (its dependencies are), and is
     /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
-    /// the run (see `veld start --oneshot`).
+    /// the run (see `veld orchestrator start --oneshot`).
     terminal_node: Option<NodeSelection>,
     /// What this project is called for override purposes — one value across every
     /// worktree of the repo. See [`veld_core::project_id`].
@@ -1103,7 +1103,7 @@ pub struct Orchestrator {
     resolved_vars: Option<Arc<HashMap<String, String>>>,
     /// Which run `resolved_vars` was resolved *for*.
     ///
-    /// One `Orchestrator` does not always mean one run: `veld stop --all` builds a
+    /// One `Orchestrator` does not always mean one run: `veld orchestrator stop --all` builds a
     /// single instance and loops `stop()` over every run name. A var may read
     /// `${veld.run}` or `${veld.run_id}`, so reusing the first run's map for the
     /// second would have its `teardown` remove the first run's container — the
@@ -1145,7 +1145,7 @@ impl Orchestrator {
         // Read once, here, so every path through this orchestrator sees the same
         // answers — including `stop`, which builds a fresh instance in a
         // different process. Teardown therefore reads the store and never asks:
-        // a `veld stop` that prompted, or that failed because a var had no
+        // a `veld orchestrator stop` that prompted, or that failed because a var had no
         // answer, would leak the containers it exists to remove.
         let project_id = veld_core::project_id::project_id_for(&project_root);
         let stored = db
@@ -1208,7 +1208,7 @@ impl Orchestrator {
         &self.project_id
     }
 
-    /// Supply per-run var answers (`veld start --var NAME=VALUE`).
+    /// Supply per-run var answers (`veld orchestrator start --var NAME=VALUE`).
     ///
     /// These sit **above** the stored machine answers. Whether they were also
     /// *written* to the store is the caller's business and is expressed by the
@@ -1249,16 +1249,16 @@ impl Orchestrator {
         ))
     }
 
-    /// `--var` answers that a later `veld stop` will need and cannot get.
+    /// `--var` answers that a later `veld orchestrator stop` will need and cannot get.
     ///
-    /// A flag answer lives only in this process. `veld stop` runs in a *new* one,
+    /// A flag answer lives only in this process. `veld orchestrator stop` runs in a *new* one,
     /// rebuilds the orchestrator, and reads the store — so a var answered only by
     /// `--var` and referenced from `teardown` or `on_stop` is unresolvable at
     /// stop time. That is not a small loss: one unresolvable var makes
     /// [`Self::ensure_stop_vars`] warn and skip **every** `${vars.*}` teardown
     /// step, so a container the teardown exists to remove is left running.
     ///
-    /// Named at start, where the user can still choose `veld config set` instead,
+    /// Named at start, where the user can still choose `veld orchestrator vars set` instead,
     /// rather than discovered at stop when the environment is already up.
     pub fn flag_answers_needed_at_teardown(&self, selections: &[NodeSelection]) -> Vec<String> {
         // Expanded, exactly as `unanswered_vars` expands — and for the identical
@@ -1279,8 +1279,8 @@ impl Orchestrator {
             .iter()
             // `!has_row` is the whole condition: a var backed by a row — whether
             // it was stored before this run or saved during its prompt — is one
-            // `veld stop` can resolve from the store, so warning about it would
-            // send the user to `veld config set` for something already set.
+            // `veld orchestrator stop` can resolve from the store, so warning about it would
+            // send the user to `veld orchestrator vars set` for something already set.
             .filter(|(name, from)| !from.has_row() && needed.contains(name.as_str()))
             // A var with a default is fine: stop falls back to it.
             .filter(|(name, _)| {
@@ -1383,7 +1383,7 @@ impl Orchestrator {
     /// live and the point of the record is to make that detectable later.
     ///
     /// `None` means "not known", and is not the same as an empty origin. `veld
-    /// restart` passes the previous run's origin through unchanged — including its
+    /// orchestrator restart` passes the previous run's origin through unchanged — including its
     /// absence, for a run recorded before provenance existed — rather than
     /// rebuilding one from node rows, which are the dependency closure and would
     /// record a wider selection set than anyone asked for.
@@ -1394,8 +1394,8 @@ impl Orchestrator {
         origin: Option<veld_core::state::StartOrigin>,
     ) -> Result<RunState, OrchestratorError> {
         // Semantic validation runs HERE, not in `parse_config`: a typo must not
-        // strand `veld stop` against a running environment (its `on_stop` hooks
-        // are read from the on-disk config at stop time). `veld lint` runs the
+        // strand `veld orchestrator stop` against a running environment (its `on_stop` hooks
+        // are read from the on-disk config at stop time). `veld orchestrator lint` runs the
         // same rules and additionally reports warnings.
         if let Some(msg) = config::error_summary(&config::validate(&self.config)) {
             return Err(OrchestratorError::ConfigInvalid(msg));
@@ -1415,7 +1415,7 @@ impl Orchestrator {
         // and the next start does it anyway — and before the internal log writer
         // exists, so a refusal is reported to the caller (and, for a
         // daemon-spawned start, logged from its stderr) rather than to
-        // `veld logs --source internal`.
+        // `veld orchestrator logs --source internal`.
         //
         // And `url_ctx` is now sampled BEFORE `setup` steps run, where it used to
         // be sampled after. A setup step that switches branch therefore no longer
@@ -1501,7 +1501,7 @@ impl Orchestrator {
 
         let mut run = RunState::new(run_name, &self.config.name);
         // Forensics: record what this run is being started with, so a later
-        // `veld runs show/diff` can answer "what changed since the run that
+        // `veld orchestrator runs show/diff` can answer "what changed since the run that
         // worked" even after veld.json moved on.
         run.graph_snapshot = Some(build_graph_snapshot(
             &self.config,
@@ -1557,7 +1557,7 @@ impl Orchestrator {
         // for — "a var is resolved once per run, because two readings of a
         // rotating credential would disagree" — true across the new teardown
         // work, and stops a side-effecting `command` source running twice in
-        // one `veld start`.
+        // one `veld orchestrator start`.
         let already: HashMap<String, String> =
             if self.resolved_vars_run.as_deref() == Some(run_name) {
                 self.resolved_vars.as_deref().cloned().unwrap_or_default()
@@ -1768,7 +1768,7 @@ impl Orchestrator {
         });
 
         // Persist the run *before* the first stage kicks off so it is
-        // immediately visible in `veld status` and the management UI. Without
+        // immediately visible in `veld orchestrator status` and the management UI. Without
         // this, the earliest write is the per-node checkpoint (start_server
         // nodes only, after the process spawns) or the post-stage save that
         // runs only once stage 1 completes — so a run could not be observed
@@ -1777,7 +1777,7 @@ impl Orchestrator {
         // executes.
         //
         // Port/URL are deliberately NOT seeded here: `url` is populated only
-        // once a node actually spawns, so downstream consumers (`veld urls`,
+        // once a node actually spawns, so downstream consumers (`veld orchestrator urls`,
         // the registry URL list at db/state.rs, the management UI) keep their
         // "url present ⇒ server reachable" invariant and never advertise a
         // not-yet-listening address during startup. `execution_order` is also
@@ -1867,10 +1867,10 @@ impl Orchestrator {
                 }
 
                 // Save partial state after each stage so that Ctrl+C or crashes
-                // leave enough information for `veld stop` to find and kill PIDs.
+                // leave enough information for `veld orchestrator stop` to find and kill PIDs.
                 self.save_state(&run)?;
 
-                // A concurrent same-name `veld start` may have replaced this
+                // A concurrent same-name `veld orchestrator start` may have replaced this
                 // run mid-flight (`cleanup_stale_run`: begin_ending(replaced)
                 // + finalize) — the save above was then a silent no-op
                 // (terminal runs are immutable) and anything this start
@@ -1914,7 +1914,7 @@ impl Orchestrator {
             // are only merged into `run` on success), while the persisted state
             // holds each spawned node's real PID from its per-node checkpoint
             // (see `execute_start_server_isolated`). Saving the in-memory copy
-            // would clobber those PIDs with `None` and a later `veld stop` could
+            // would clobber those PIDs with `None` and a later `veld orchestrator stop` could
             // no longer kill the leaked process.
             //
             // Ending protocol, in order: persist the `failed` intent FIRST
@@ -2280,7 +2280,7 @@ impl Orchestrator {
         }
 
         // Store the run's outcome intent now: zero exit → completed, non-zero
-        // → failed with the code. The caller's teardown (`veld stop`) finds
+        // → failed with the code. The caller's teardown (`veld orchestrator stop`) finds
         // the run already `stopping`, loses `begin_ending`, and finalizes
         // with THIS reason — so history says "completed"/"failed (exit N)",
         // not "stopped", for oneshot runs. An agent reading `end_reason =
@@ -2478,11 +2478,11 @@ impl Orchestrator {
             //
             // But a run that ended *abnormally* still owes its `on_stop` hooks:
             // every crash detector labels the run and cleans up routes, and
-            // none of them run a hook. Until this branch did, `veld stop` on a
+            // none of them run a hook. Until this branch did, `veld orchestrator stop` on a
             // crashed environment removed its routes and left every container
             // it had started running — so the reported symptom was an
             // environment that stayed unstartable with no veld command that
-            // could fix it. Reaping here is what makes `veld stop` the cleanup
+            // could fix it. Reaping here is what makes `veld orchestrator stop` the cleanup
             // tool it already claims to be, and it is the entry point the
             // daemon's detectors delegate into.
             //
@@ -2515,7 +2515,7 @@ impl Orchestrator {
 
         // `on_stop` and the project `teardown` steps may both reference
         // `${vars.*}`. Only what the stopping nodes and the project-level surfaces
-        // can reach, for the same reason `start` is selective: a `veld stop` must
+        // can reach, for the same reason `start` is selective: a `veld orchestrator stop` must
         // not run a credential helper for a var nothing here mentions.
         let selections: Vec<graph::NodeSelection> = run
             .nodes
@@ -2626,18 +2626,18 @@ impl Orchestrator {
     ///
     /// **The abnormal-termination counterpart to [`Self::stop`]'s own loop.**
     /// Every path that ends a run *without* going through a deliberate stop — a
-    /// failed start aborting the run, a live run replaced by a new `veld start`,
+    /// failed start aborting the run, a live run replaced by a new `veld orchestrator start`,
     /// the reap-before-create sweep finding a run whose processes all died, and
     /// (by delegation) the daemon's crash detectors — used to kill PIDs and
     /// remove routes and then finalize, running no hook at all. That is a leak
-    /// with no collector: `veld gc` reaps veld's own state and logs, never the
+    /// with no collector: `veld self gc` reaps veld's own state and logs, never the
     /// container runtime's, and a container node's `on_stop` is the only thing
     /// that removes its container.
     ///
     /// It is a hard blocker rather than clutter because a container name
     /// interpolates `${veld.run}` — the *environment* name, not a per-run id —
     /// so the name is identical on every run of that environment and one
-    /// survivor makes `veld start` fail with `container ... already exists`
+    /// survivor makes `veld orchestrator start` fail with `container ... already exists`
     /// forever. (Which is also why the fix is not a per-run id in the name:
     /// that trades a hard blocker for orphans nothing ever collects.)
     ///
@@ -2854,8 +2854,8 @@ impl Orchestrator {
     ///
     /// Shares are keyed by `run_id`, and a replacement mints a new one — so
     /// without this the old run's peer/web share stays alive, pointing at
-    /// whatever now listens on that hostname, until its TTL expires. `veld stop`
-    /// and `veld restart` already do this explicitly, and the GC pass releases
+    /// whatever now listens on that hostname, until its TTL expires. `veld orchestrator stop`
+    /// and `veld orchestrator restart` already do this explicitly, and the GC pass releases
     /// runs it *finds* dead; a deliberate replacement is neither.
     ///
     /// Done through the [`crate::host::EngineHost`], which bounds it (an
@@ -2930,7 +2930,7 @@ impl Orchestrator {
             // for. Within 5s the health monitor would: save a whole-run
             // snapshot taken before the sweep began, overwriting the ledger
             // rows already written; win `finalize_crashed`, because this path
-            // had not finalized yet; and then delegate `veld stop`, which
+            // had not finalized yet; and then delegate `veld orchestrator stop`, which
             // reaps the same run concurrently with the sweep still in flight.
             // Every pending hook would run twice, at once, with the ledger no
             // longer able to stop it. `begin_ending` moves the run out of the
@@ -2955,7 +2955,7 @@ impl Orchestrator {
             // the case with no shutdown path at all — veld itself SIGKILLed, or
             // the machine rebooted, leaving a `running` run whose processes are
             // gone and whose containers are not. Nothing was in a position to
-            // run a hook at the time, so the next `veld start` for the project
+            // run a hook at the time, so the next `veld orchestrator start` for the project
             // runs them here, before it creates anything of its own. Worth
             // having *in addition to* the crash-path hooks rather than instead
             // of them: those remove the container within seconds, this one is
@@ -3002,7 +3002,7 @@ impl Orchestrator {
         // Grace-gated, for every environment except the one being started.
         // A run that ended seconds ago most likely has a teardown already in
         // flight: the daemon notices a crash within 5s and delegates
-        // `veld stop`, whose hooks only write the ledger once each *returns*.
+        // `veld orchestrator stop`, whose hooks only write the ledger once each *returns*.
         // Sweeping inside that window is how the same hook comes to run twice
         // concurrently. Past the grace the delegate has either finished or hit
         // its own timeout, so there is nothing left to collide with. The
@@ -3040,7 +3040,7 @@ impl Orchestrator {
         // Bounded as a whole, not just per hook. This sweep is project-wide and
         // runs *before* the new run is created, so without a total budget one
         // unrelated crashed environment with a wedged container runtime would
-        // tax every later `veld start` in the project by
+        // tax every later `veld orchestrator start` in the project by
         // `TEARDOWN_HOOK_TIMEOUT` per owing node — and a wedged runtime is
         // exactly the case that constant exists for, so it is not a
         // hypothetical. Past the budget the rest waits for the next start: for
@@ -3056,7 +3056,7 @@ impl Orchestrator {
                     remaining = ordered.len() - i,
                     budget_secs = sweep_budget.as_secs(),
                     "stopping the owed-teardown sweep so this start can proceed; \
-                     the rest runs on the next `veld start` for this project"
+                     the rest runs on the next `veld orchestrator start` for this project"
                 );
                 break;
             }
@@ -3091,7 +3091,7 @@ impl Orchestrator {
 
     /// Remove a node's Caddy route: the hostname-keyed id this build writes,
     /// plus the pre-#170 id, in case the route was stored by an older helper
-    /// that is still running after a `veld update` (see
+    /// that is still running after a `veld self update` (see
     /// `url::legacy_run_route_id`). Both deletes are best-effort — an id that
     /// isn't there makes the helper answer with an error we ignore.
     async fn remove_route_by_hostname(
@@ -3241,7 +3241,7 @@ impl Orchestrator {
                 // user is about to be told the environment stopped cleanly. That
                 // combination is how containers leak, so say it loudly on the
                 // stream the user actually reads rather than burying it in a
-                // tracing warning. `veld start`/`veld lint` catch the common cause
+                // tracing warning. `veld orchestrator start`/`veld orchestrator lint` catch the common cause
                 // (an unknown `${veld.*}` name — see `check_builtin_names`), but
                 // this path stays reachable for a config edited after start.
                 self.warn(format!(
@@ -3452,7 +3452,7 @@ impl Orchestrator {
     /// `teardown` step interpolates against. A local map reaches
     /// `run_on_stop_hook` and nothing else, which is how `${vars.*}` in a
     /// `teardown` step came to fail with "no var named …" on a standalone
-    /// `veld stop` while working when start and stop shared a process. It is the
+    /// `veld orchestrator stop` while working when start and stop shared a process. It is the
     /// mirror of the `setup` bug, on the other end of the run.
     ///
     /// Extends rather than replaces, so a var already resolved by `start` in this
@@ -3639,7 +3639,7 @@ impl Orchestrator {
     /// Sink for a project-level `setup`/`teardown` step's output.
     ///
     /// These steps belong to no node, so their lines go to the run-level
-    /// `setup` stream (`veld logs` reads it by default) and are attributed in
+    /// `setup` stream (`veld orchestrator logs` reads it by default) and are attributed in
     /// the UI to a pseudo-node — `setup:<step name>` — which is how a reader
     /// tells two steps apart in one interleaved stream. A `setup` step runs
     /// before the run row is written; the rows still carry the run id it is
@@ -3652,12 +3652,12 @@ impl Orchestrator {
         step_name: &str,
     ) -> process::LineSink {
         // `setup` rows are read run-level but carry a node, which is what makes
-        // two steps distinguishable in one interleaved stream: `veld logs`
+        // two steps distinguishable in one interleaved stream: `veld orchestrator logs`
         // labels them `setup:<step name>`.
         //
-        // With no run instance (a `veld stop` on an environment veld has no row
+        // With no run instance (a `veld orchestrator stop` on an environment veld has no row
         // for) nothing is written. Such rows would carry a NULL `run_id`, which
-        // every run-scoped read filters out — `veld logs --all-runs` drops the
+        // every run-scoped read filters out — `veld orchestrator logs --all-runs` drops the
         // `run_id` predicate and would surface them, but that is the only way to
         // reach them, and a line you can read only under a flag you did not know
         // to pass is not worth keeping forever. Whoever ran the `stop` sees the
@@ -3815,10 +3815,10 @@ fn probe_could_not_run(exit_code: i32) -> bool {
 /// Build the line sink for a step run through [`process::run_command`].
 ///
 /// Every line the step prints goes to up to two places: the log stream `writer`
-/// belongs to, so `veld logs` and the management UI can show it after the fact,
+/// belongs to, so `veld orchestrator logs` and the management UI can show it after the fact,
 /// and the progress channel, so it is visible while the step runs. Either may be
 /// absent — a step with no run instance to attach rows to has no writer, and a
-/// `veld stop` has no progress channel (see below) — but never both silently:
+/// `veld orchestrator stop` has no progress channel (see below) — but never both silently:
 /// with no channel the lines go to stderr. It goes to the
 /// progress channel rather than straight to the terminal because the CLI draws
 /// spinners there — a child writing to the inherited stderr (what `command`
@@ -3826,7 +3826,7 @@ fn probe_could_not_run(exit_code: i32) -> bool {
 ///
 /// With no progress channel there are no spinners to protect and nothing else
 /// to show the user the step's output live, so the lines go to stderr instead.
-/// That is the `veld stop` path: teardown steps and `on_stop` hooks used to
+/// That is the `veld orchestrator stop` path: teardown steps and `on_stop` hooks used to
 /// print straight to the terminal, and a `docker compose down` that takes
 /// twenty seconds must not become a silent pause.
 ///
@@ -4239,7 +4239,7 @@ async fn execute_start_server_isolated(
     // Resolve per-node feature flags (variant > node > project > default).
     //
     // The machine-wide opt-out wins over everything below it: `feedback.suppressOverlay`
-    // (a `veld settings` key) forces the feedback overlay off on every routed site,
+    // (a `veld self settings list` key) forces the feedback overlay off on every routed site,
     // even one whose `veld.json` sets `features.feedback_overlay` back on. It is the
     // per-machine answer for a setup that uses Veld purely as an orchestrator; the
     // client-log collector and `/__veld__/*` routes are unaffected.
@@ -4451,7 +4451,7 @@ async fn execute_start_server_isolated(
     node_state.pid = Some(pid);
 
     // Checkpoint: persist the PID immediately so Ctrl+C during health
-    // checks still allows `veld stop` to find and kill this process.
+    // checks still allows `veld orchestrator stop` to find and kill this process.
     {
         let key = RunState::node_key(&sel.node, &sel.variant);
         // The DB write happens INSIDE the checkpoint lock: `save_run` replaces
@@ -4848,7 +4848,7 @@ impl ObservedStep {
 
     /// The callback [`process::run_command_observed`] fires once the step has
     /// spawned. `None` when no observer is installed, which is every path except
-    /// a real `veld start`.
+    /// a real `veld orchestrator start`.
     fn on_spawn(&self) -> Option<Box<dyn FnOnce(u32) + Send>> {
         let observer = Arc::clone(self.observer.as_ref()?);
         let key = self.node_key.clone();
@@ -4978,7 +4978,7 @@ async fn execute_command_isolated(
     let output_file =
         logging::output_file(&ctx.project_root, &ctx.run_name, &sel.node, &sel.variant);
     // A command node's output belongs to that node's `server` stream, exactly
-    // like a `start_server` node's — same rows, so `veld logs --node <n>`, the
+    // like a `start_server` node's — same rows, so `veld orchestrator logs --node <n>`, the
     // failure tail and the management UI all show it without knowing which kind
     // of node produced it.
     let sink = step_line_sink(
@@ -5286,7 +5286,7 @@ async fn wait_for_process_exit(pid: u32) {
 /// mark them sensitive without the values themselves needing a wrapper type.
 /// Resolve a node's declared `env` map against a context — the single resolver
 /// for every surface, so a value means the same thing in the node process, its
-/// `on_stop` hook, and `veld action`.
+/// `on_stop` hook, and `veld orchestrator action`.
 pub async fn build_env(
     env_config: Option<&HashMap<String, config::ConfigValue>>,
     ctx: &VariableContext,
@@ -5438,7 +5438,7 @@ mod tests {
         );
     }
 
-    /// No observer installed is the normal case (`veld stop`, every test), and
+    /// No observer installed is the normal case (`veld orchestrator stop`, every test), and
     /// it must cost nothing — including not handing `run_command_observed` a
     /// callback that would fire into nowhere.
     #[test]
@@ -5516,7 +5516,7 @@ mod tests {
     ///
     /// Persisting one would also be a lifecycle bug well beyond the graphs:
     /// `is_reapable_orphan` would see a finished build as "spawned then died"
-    /// and reap a run that is still coming up, and `veld stop` would eventually
+    /// and reap a run that is still coming up, and `veld orchestrator stop` would eventually
     /// signal whatever recycled the number.
     ///
     /// **What this actually pins, and what it does not.** It scans *this file* —
@@ -5563,7 +5563,7 @@ mod tests {
         assert!(is_reapable_orphan(&RunStatus::Starting, false, true));
 
         // Starting that never spawned → still starting (pre-spawn / slow
-        // command stage); must NOT be reaped, or a concurrent `veld start`
+        // command stage); must NOT be reaped, or a concurrent `veld orchestrator start`
         // would delete a run that is still coming up.
         assert!(!is_reapable_orphan(&RunStatus::Starting, false, false));
 
@@ -5760,7 +5760,7 @@ mod tests {
     }
 
     /// A project `teardown` step interpolates `${vars.*}` on a standalone
-    /// `veld stop`, where nothing on the start path has populated the cache.
+    /// `veld orchestrator stop`, where nothing on the start path has populated the cache.
     ///
     /// `run_teardown_steps` reads `self.resolved_vars` through
     /// `project_step_context`, so a stop path that resolved its vars into a
@@ -5791,7 +5791,7 @@ mod tests {
         ))
         .unwrap();
 
-        // A fresh orchestrator, exactly as `veld stop` builds one: no `start` ran
+        // A fresh orchestrator, exactly as `veld orchestrator stop` builds one: no `start` ran
         // in this process, so `resolved_vars` is None.
         let mut orch = test_orchestrator(project_root, config);
         assert!(orch.resolved_vars.is_none());
@@ -5806,7 +5806,7 @@ mod tests {
         );
 
         // The `None` run id path writes no rows on purpose: they would carry a
-        // NULL `run_id`, reachable only by `veld logs --all-runs`. The step's
+        // NULL `run_id`, reachable only by `veld orchestrator logs --all-runs`. The step's
         // output is reported live instead.
         let all = LogFilter {
             streams: Some(vec![LogStream::Setup.as_str()]),
@@ -5872,7 +5872,7 @@ mod tests {
         }
     }
 
-    /// `veld stop --all` loops one `Orchestrator` over every run, so the var
+    /// `veld orchestrator stop --all` loops one `Orchestrator` over every run, so the var
     /// cache has to be keyed by run, not merely present.
     ///
     /// A var may read `${veld.run}`. Reusing the first run's map for the second
@@ -5905,7 +5905,7 @@ mod tests {
             Some("app-alpha")
         );
 
-        // Same orchestrator, second run — as `veld stop --all` does.
+        // Same orchestrator, second run — as `veld orchestrator stop --all` does.
         let second = orch.ensure_stop_vars("bravo", None, &[]).await;
         assert_eq!(
             second.get("container").map(String::as_str),
@@ -5923,7 +5923,7 @@ mod tests {
     /// runs. `unanswered_vars` therefore expands through `build_execution_plan`
     /// exactly as `start` does — and the second half of the test is the other
     /// side of the same coin: a var no selected node reaches must NOT be asked
-    /// for, or `veld start docs` demands the database password.
+    /// for, or `veld orchestrator start docs` demands the database password.
     #[tokio::test]
     async fn the_preflight_sees_dependencies_and_ignores_unrelated_nodes() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6074,11 +6074,11 @@ mod tests {
         assert_eq!(
             orch.flag_answers_needed_at_teardown(&sels),
             vec!["token".to_owned()],
-            "a per-run answer is invisible to the `veld stop` that runs later"
+            "a per-run answer is invisible to the `veld orchestrator stop` that runs later"
         );
 
         // The same value, saved to the store during this run's prompt. `veld
-        // stop` reads the store, so there is nothing to warn about — and warning
+        // orchestrator stop` reads the store, so there is nothing to warn about — and warning
         // would tell the user to set something they just set.
         let mut orch = test_orchestrator(tmp.path(), config);
         orch.set_var_answers(answer(), VarProvenance::Project);
@@ -6437,7 +6437,7 @@ mod tests {
         );
     }
 
-    /// F0.1 exit gate: `veld stop` must work against a running environment whose
+    /// F0.1 exit gate: `veld orchestrator stop` must work against a running environment whose
     /// config is semantically invalid — **and its `on_stop` hooks must still
     /// execute**.
     ///
@@ -6523,10 +6523,10 @@ mod tests {
     }
 
     /// **The regression test for the reported bug.** A node's process dies
-    /// mid-run; nothing calls `veld stop`; the containers its `on_stop` would
+    /// mid-run; nothing calls `veld orchestrator stop`; the containers its `on_stop` would
     /// have removed used to survive, and because a container name interpolates
     /// `${veld.run}` — the *environment* name, not a per-run id — one survivor
-    /// blocked every later `veld start` of that environment with
+    /// blocked every later `veld orchestrator start` of that environment with
     /// `container ... already exists`.
     ///
     /// The marker file stands in for the container: the hook is the only thing
@@ -6573,7 +6573,7 @@ mod tests {
         run.execution_order.push(key.clone());
         orch.save_state(&run).unwrap();
 
-        // What the next `veld start` does before it creates anything.
+        // What the next `veld orchestrator start` does before it creates anything.
         orch.cleanup_dead_runs("dev").await;
 
         assert_eq!(
@@ -6706,7 +6706,7 @@ mod tests {
 
     /// A hook that never returns must not hold the run open. `run_command`
     /// waits for its child unconditionally, so before the bound an ordinary
-    /// `veld stop` against a wedged container runtime parked forever with the
+    /// `veld orchestrator stop` against a wedged container runtime parked forever with the
     /// run stuck in `stopping`.
     ///
     /// Asserts both halves: the stop returns, and the *next* node's hook still

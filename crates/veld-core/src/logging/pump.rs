@@ -103,7 +103,7 @@ pub fn run_log_sink(args: LogSinkArgs) -> i32 {
     // The *default* action kills this process instantly, and it is in the
     // process group `kill_process` signals (the detached pipeline is
     // `sh -c '{ cmd; } 2>&1 | veld-daemon --log-sink …'` spawned with
-    // `process_group(0)`), so every `veld stop`, `veld restart` and
+    // `process_group(0)`), so every `veld orchestrator stop`, `veld orchestrator restart` and
     // automatic recovery destroyed the in-flight batch and everything
     // queued — the last thing a dying server said, which is the output
     // most worth keeping.
@@ -123,7 +123,7 @@ pub fn run_log_sink(args: LogSinkArgs) -> i32 {
     // the thing mid-shutdown, and it also throws away the output a
     // graceful shutdown produces — which is the output somebody stopping
     // an environment most wants. Measured on the dev stack: a real
-    // `veld stop` went from 0.49 s to 6.64 s and *lost* the daemon's
+    // `veld orchestrator stop` went from 0.49 s to 6.64 s and *lost* the daemon's
     // `shutdown signal received` / `veld-daemon stopped` lines.
     //
     // So: a real handler that records the signal, a read that is
@@ -739,7 +739,7 @@ mod log_pump_tests {
     /// The notice must be distinguishable from the queue-full one (a reader chasing
     /// lost logs needs to know whether the database or the process was the cause), and
     /// the kept tail must be ordinary `server` lines with their original timestamps —
-    /// it is the fatal error at the end of a crash loop that `veld start` and the
+    /// it is the fatal error at the end of a crash loop that `veld orchestrator start` and the
     /// orchestrator show the user.
     #[test]
     fn rate_limited_lines_are_reported_on_internal_and_the_tail_is_kept() {

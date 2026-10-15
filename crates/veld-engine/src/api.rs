@@ -37,7 +37,7 @@ pub struct ActionRequest {
     /// mean anything but "the directory whose `veld.json` to load".
     pub project_root: PathBuf,
     pub kind: ActionKind,
-    /// Verbose orchestrator diagnostics (`veld start --debug`).
+    /// Verbose orchestrator diagnostics (`veld orchestrator start --debug`).
     #[serde(default)]
     pub debug: bool,
 }
@@ -70,7 +70,7 @@ pub enum ActionKind {
     /// Stop a run and start it again from what it was started with.
     Restart { run: String },
     /// Run a configured action against a run, unattended (the IDE's action
-    /// buttons). The CLI's `veld action` resolves and runs in the user's own
+    /// buttons). The CLI's `veld orchestrator action` resolves and runs in the user's own
     /// terminal instead — see [`ResolveActionRequest`].
     Action {
         run: String,
@@ -317,7 +317,7 @@ pub enum FailureKind {
 // Preflight
 // ---------------------------------------------------------------------------
 
-/// The body of `POST /api/engine/preflight`: what `veld start`/`restart` was
+/// The body of `POST /api/engine/preflight`: what `veld orchestrator start`/`restart` was
 /// asked, before anything is spawned.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreflightRequest {
@@ -476,7 +476,7 @@ pub struct SavedVarAnswers {
 }
 
 // ---------------------------------------------------------------------------
-// `veld action` in the user's terminal
+// `veld orchestrator action` in the user's terminal
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,7 +498,7 @@ pub struct ResolveActionRequest {
 }
 
 /// What to exec. The face runs it itself, in its own terminal, with its own
-/// environment underneath `env` (`veld action` is interactive — a DB shell).
+/// environment underneath `env` (`veld orchestrator action` is interactive — a DB shell).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolvedAction {
     /// A `shell` action's script, run with `$SHELL -c`; for an `argv` action, the
@@ -538,10 +538,10 @@ pub struct EngineHealth {
 }
 
 // ---------------------------------------------------------------------------
-// Queries: `veld status` and `veld logs`
+// Queries: `veld orchestrator status` and `veld orchestrator logs`
 // ---------------------------------------------------------------------------
 
-/// What `GET /api/engine/status` answers: everything `veld status` prints, in
+/// What `GET /api/engine/status` answers: everything `veld orchestrator status` prints, in
 /// human and `--json` mode, so a face only renders.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusReport {
@@ -586,7 +586,7 @@ pub enum SourceFilter {
     Internal,
 }
 
-/// The query of `GET /api/engine/logs` (the fields of `veld logs`).
+/// The query of `GET /api/engine/logs` (the fields of `veld orchestrator logs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LogsQuery {
     pub project_root: PathBuf,
@@ -672,9 +672,126 @@ pub struct LogsPage {
     pub note: Option<String>,
 }
 
+/// One run that is up right now, as the bare `veld` overview lists it.
+///
+/// Deliberately thin: the overview answers "what is running", and a face that wants
+/// URLs or node health asks `status` for that run. `run_id` is a string so a face
+/// need not link `uuid` to print it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningRun {
+    pub project_name: String,
+    pub project_root: PathBuf,
+    /// The environment's name (`dev`, a worktree alias, ...).
+    pub name: String,
+    pub run_id: String,
+    /// A `RunStatus` spelling, as a string: this body crosses versions (an older
+    /// CLI reads a newer daemon's), and a status that CLI does not know must not
+    /// fail the whole overview.
+    pub status: String,
+}
+
+/// The `GET /api/engine/overview` body: bare `veld`'s picture of the machine.
+///
+/// One type for both ends — the daemon serializes it, the CLI deserializes it — so
+/// the two cannot drift into a body the CLI reads as "the daemon is older".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Overview {
+    pub version: String,
+    /// When this daemon started (RFC 3339). Agent state lives in its memory, so an
+    /// empty `agents` means "none reported since then", not "none".
+    pub started_at: String,
+    pub runs: Vec<RunningRun>,
+    /// Needing the human first; see [`Attention`].
+    pub agents: Vec<OverviewAgent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverviewAgent {
+    pub session_id: String,
+    pub worktree_id: i64,
+    /// The title the IDE rail shows: the free-text name, else the alias. `null`
+    /// when the worktree is no longer in the database.
+    pub worktree_name: Option<String>,
+    pub project_name: Option<String>,
+    /// `claude`, `codex` or `pi`.
+    pub tool: String,
+    /// The `veld_core::agent::State` spelling the daemon holds for the session —
+    /// the hook's report after the daemon's own reading of it (a `settled`
+    /// during a delegated wait stays `delegated`, for one).
+    pub state: String,
+    /// What `state` asks of the human. Computed by the daemon so every face reads
+    /// the same answer instead of re-deriving it from `state`.
+    pub attention: Attention,
+    pub held: bool,
+    /// When `state`/`held` last changed (RFC 3339).
+    pub since: String,
+}
+
+/// What an agent's state asks of the human, in the order the overview lists them.
+///
+/// The one definition of "needs you": `blocked` (a permission prompt, a question)
+/// stalls the agent until a person answers. An agent sitting at its prompt — its
+/// turn ended (`idle`), the reminder after an interrupted turn (`settled`), or just
+/// launched (`ready`) — is the human's turn: nothing is stuck, but nothing moves
+/// either. The IDE draws the same split: a blocked pane badges amber, an idle one
+/// files "finished".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Attention {
+    NeedsYou,
+    YourTurn,
+    Working,
+    Quiet,
+    /// A kind a newer daemon added that this build does not know. Without it one
+    /// new variant would fail the whole body, and an older CLI would report the
+    /// running runs as unknown too.
+    #[serde(other)]
+    Other,
+}
+
+impl Attention {
+    pub fn of(state: veld_core::agent::State) -> Self {
+        use veld_core::agent::State;
+        match state {
+            State::Blocked => Self::NeedsYou,
+            State::Idle | State::Settled | State::Ready => Self::YourTurn,
+            State::Working | State::Delegated => Self::Working,
+            State::Done | State::Unknown => Self::Quiet,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one definition of "needs you" (see [`Attention`]). `Attention::of` is
+    /// an exhaustive match, so a new `State` variant fails to compile there until
+    /// somebody decides what it asks of the human; this pins today's answers.
+    #[test]
+    fn only_blocked_needs_the_human() {
+        use veld_core::agent::State;
+        for (state, want) in [
+            (State::Blocked, Attention::NeedsYou),
+            (State::Idle, Attention::YourTurn),
+            (State::Settled, Attention::YourTurn),
+            (State::Ready, Attention::YourTurn),
+            (State::Working, Attention::Working),
+            (State::Delegated, Attention::Working),
+            (State::Done, Attention::Quiet),
+            (State::Unknown, Attention::Quiet),
+        ] {
+            assert_eq!(Attention::of(state), want, "{state:?}");
+        }
+        assert_eq!(
+            serde_json::to_string(&Attention::NeedsYou).unwrap(),
+            "\"needs_you\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Attention>("\"a_kind_from_the_future\"").unwrap(),
+            Attention::Other
+        );
+    }
 
     #[test]
     fn an_old_reader_survives_a_new_event_kind() {

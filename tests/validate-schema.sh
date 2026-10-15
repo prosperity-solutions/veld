@@ -136,7 +136,7 @@ echo "2) Instance validation: checking project configs against their schema vers
 while IFS= read -r config; do
   rel="${config#"$REPO_ROOT/"}"
 
-  # Comments are legal in a veld config; the validators below are not.
+  # Comments are legal in a veld.json; the validators below are not.
   plain="$WORK/$(echo "$rel" | tr '/' '_')"
   strip_jsonc "$config" > "$plain"
 
@@ -219,7 +219,7 @@ echo
 # project root must go through `config::root_config_in`, never
 # `join("veld.json")` — five daemon sites did, and each one was a `veld.jsonc`
 # project the daemon could not see: no liveness probes, no actions in the
-# dashboard, `veld share` refusing outright. Nothing in the type system catches a
+# dashboard, `veld network share` refusing outright. Nothing in the type system catches a
 # sixth, so it is caught here.
 echo -n "  no join(\"veld.json\") outside config.rs and tests ... "
 # A trailing `// root-config-gate-ok` exempts a deliberate case (a synthetic path
@@ -274,6 +274,24 @@ echo
 if [[ -x "$VELD_BIN" ]]; then
   if python3 "$REPO_ROOT/tests/validate-doc-commands.py" "$VELD_BIN" --selftest \
      && python3 "$REPO_ROOT/tests/validate-doc-commands.py" "$VELD_BIN"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "  SKIP (no veld binary here — ci.yml runs this gate in the integration job)"
+fi
+
+echo
+echo "7) Call-site gate: no code, CI step or script names a retired command"
+echo
+# Gate 6 reads Markdown only. Commands are also spelled in Rust hints, CI steps,
+# install.sh and the generated shims, and a retired name there does not fail at
+# the call site — it prints where the command went and exits 2 (#423). The binary
+# decides what is retired, so this asks it rather than keeping a list.
+if [[ -x "$VELD_BIN" ]]; then
+  if (cd "$REPO_ROOT" && python3 tests/validate-cli-call-sites.py "$VELD_BIN" --selftest \
+     && python3 tests/validate-cli-call-sites.py "$VELD_BIN"); then
     PASS=$((PASS + 1))
   else
     FAIL=$((FAIL + 1))

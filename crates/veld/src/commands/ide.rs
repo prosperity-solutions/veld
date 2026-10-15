@@ -1,7 +1,7 @@
 //! `veld ide open` — put a file or a page in front of the human, beside the
 //! terminal that asked.
 //!
-//! The deliberate counterpart to `veld open-url`. That one stands in for `open` and
+//! The deliberate counterpart to `veld ide open-url`. That one stands in for `open` and
 //! `$BROWSER`, so every path it does not handle falls through to the system opener
 //! — the only acceptable behaviour for a wrapper around a command people run all
 //! day. This one is asked for **by name**, by an agent that wants a human to look
@@ -298,7 +298,7 @@ async fn ask(
         .await
         .map_err(|e| {
             refusal(format!(
-                "could not reach the daemon ({e}) — is it running? Try `veld doctor`."
+                "could not reach the daemon ({e}) — is it running? Try `veld self doctor`."
             ))
         })?;
     let ok = resp.status().is_success();

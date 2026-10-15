@@ -120,7 +120,7 @@ interface Session {
    *
    * `paneSessions` is fetched once when a worktree is selected and never
    * again, so a pane that launched afterwards is missing from it. Without this,
-   * such a pane hitting `error` (a daemon restart mid-`veld update`, a reaped
+   * such a pane hitting `error` (a daemon restart mid-`veld self update`, a reaped
    * holder, a dropped socket) offered only "Start fresh" — which mints a new
    * token and abandons the conversation, the exact loss the resume path exists
    * to prevent.
@@ -1914,7 +1914,7 @@ if (typeof document !== "undefined") {
  * The non-destructive counterpart to [`restartTerminal`], and the one that
  * matches what the detach grace exists for: the shell is still running, we just
  * lost the pipe to it (the machine slept, the daemon was restarted mid-`veld
- * update`, a proxy timed out). Offering only Restart there would delete a live
+ * self update`, a proxy timed out). Offering only Restart there would delete a live
  * session — including the build the grace was protecting.
  */
 export function reconnectTerminal(id: string): void {

@@ -5,7 +5,7 @@ Veld orchestrates local dev environments. It starts services declared in
 `https://frontend.my-feature.myproject.localhost`.
 
 You are reading documentation carried by the `veld` binary itself, so it
-describes the veld on this machine and no other. `veld skills` lists the rest.
+describes the veld on this machine and no other. `veld agent skills` lists the rest.
 
 ## Look things up, do not memorise them
 
@@ -15,81 +15,83 @@ you context before you knew whether you needed it. Ask when you have the
 question:
 
 ```sh
-veld presets              # what this project can start, and when to use each
-veld nodes                # every node and variant, with the file and line it is defined in
-veld status               # what is running right now
-veld urls                 # the URLs of a live run
-veld config --files       # which files define which nodes (why is my node missing?)
-veld <subcommand> --help  # the flags, always current
+veld orchestrator presets              # what this project can start, and when to use each
+veld orchestrator nodes                # every node and variant, with the file and line it is defined in
+veld orchestrator status               # what is running right now
+veld orchestrator urls                 # the URLs of a live run
+veld orchestrator config --files       # which files define which nodes (why is my node missing?)
+veld <part> <verb> --help              # the flags, always current
 ```
 
-Every one of those takes `--json`. `veld presets --json` in particular carries
+Every one of those takes `--json`. `veld orchestrator presets --json` in particular carries
 each preset's `when_to_use` prose, which is the project author telling you which
 one to pick.
 
 **Do not read `veld.json` to find out what you can start.** It can be tens of
 thousands of characters, it can be split across `include` globs, and half of
-what it says is resolved at run time anyway. `veld presets` and `veld nodes` are
+what it says is resolved at run time anyway. `veld orchestrator presets` and `veld orchestrator nodes` are
 the resolved answer and cost a hundredth as much.
 
 ## The command surface
 
-`veld --help` is authoritative and short. The shape worth knowing before you
-read it:
+Every command is `veld <part> <verb>`. Bare `veld` prints an overview of what
+is up and who needs you, `veld --help` lists the parts, and `veld --help-all`
+lists every command in one go. A retired name (the old top-level start) prints
+where it moved to (``that is `veld orchestrator start` now``) and exits 2. The shape worth knowing:
 
-| Doing | Commands |
+| Part | Commands |
 |---|---|
-| Run things | `start`, `stop`, `restart` |
-| See what happened | `status`, `urls`, `logs`, `runs`, `stats` |
-| Understand the project | `presets`, `nodes`, `graph`, `config`, `lint` |
-| Act on a node | `actions`, `action` |
-| Share | `share`, `join`, `shares`, `unshare` |
-| Work with a human | `feedback`, `ide open`, `ide worktree name`, `ide worktree new` |
-| Machine setup | `setup`, `doctor`, `update`, `desktop`, `settings` |
+| `orchestrator` (alias `orc`) | `start`, `stop`, `restart`, `status`, `urls`, `logs`, `runs list`/`show`/`diff`, `stats`, `presets`, `nodes`, `graph`, `config`, `vars list`/`set`/`unset`, `lint`, `init`, `actions`, `action` |
+| `ide` | `open`, `open-url`, `dashboard`, `worktree name`, `worktree new`, `worktree groups` |
+| `agent` | `skills` (this document) |
+| `network` | `share`, `join`, `list`, `unshare`, `leave`, `approve`, `deny` |
+| `self` | `setup`, `doctor`, `update`, `desktop`, `settings list`/`get`/`set`/`unset`/`describe`, `backup list`/`now`/`restore`, `projects list`, `gc`, `version`, `uninstall` |
+
+`veld feedback` (work with a human) stays at the top level.
 
 ## Five things agents get wrong
 
-**1. A preset is `--preset`, never a positional.** `veld start` positionals are
+**1. A preset is `--preset`, never a positional.** `veld orchestrator start` positionals are
 node selections in `node:variant` form. A preset name goes behind the flag:
 
 ```sh
-veld start --preset dev-headless --name dev   # a preset
-veld start api:local web:local --name dev     # explicit selections
-veld start api --name dev                     # a node, using its default_variant
+veld orchestrator start --preset dev-headless --name dev   # a preset
+veld orchestrator start api:local web:local --name dev     # explicit selections
+veld orchestrator start api --name dev                     # a node, using its default_variant
 ```
 
-`veld start dev-headless` does not fall back to the preset — it fails as an
+`veld orchestrator start dev-headless` does not fall back to the preset — it fails as an
 unknown node. (It will tell you so and point at `--preset`, but the round trip
 is wasted.)
 
-**2. `veld start` detaches.** It returns as soon as the environment is up; it
+**2. `veld orchestrator start` detaches.** It returns as soon as the environment is up; it
 does not stream. The run belongs to veld's daemon, not to your terminal: closing
 the terminal or killing `veld` does not stop it. Pass `--attach` (`-a`) to follow
 its logs afterwards — it blocks until Ctrl+C, which stops the run, so do not use
 it in an agent shell. There is no `--detach`/`-d` — that is already what happens.
-Ctrl+C (or SIGINT) while `veld start`/`restart` is still bringing things up asks
+Ctrl+C (or SIGINT) while `veld orchestrator start`/`restart` is still bringing things up asks
 the daemon to cancel and clean up what it started, and exits `130`.
 
 **2b. The daemon starts on demand.** `start`, `stop`, `restart`, `status`,
 `logs` and `action` talk to the daemon's engine; if it is not running `veld`
 starts it and waits (so a first command can be slower). Exit `75` means an
-update is in progress — retry shortly (`veld skills gotchas`). Nodes get the
+update is in progress — retry shortly (`veld agent skills gotchas`). Nodes get the
 daemon's environment plus the login-shell `PATH`, **not** your terminal's
-environment — see `veld skills gotchas`.
+environment — see `veld agent skills gotchas`.
 
 **3. Machine-readable output is on stdout; everything else is on stderr.**
 `--json` payloads and a `--oneshot` node's own output go to stdout. Progress,
-status lines, warnings and errors go to stderr. So `veld status --json | jq`
+status lines, warnings and errors go to stderr. So `veld orchestrator status --json | jq`
 works, and a stray warning will never corrupt it.
 
 **4. A veld config is JSONC.** `veld.json` (and `veld.jsonc` — both names are
 legal, never hardcode one) may contain `//` comments and trailing commas. Strip
 them before handing the file to a strict JSON parser, or better, use
-`veld config --json`, which hands you the parsed result.
+`veld orchestrator config --json`, which hands you the parsed result.
 
-**5. Veld never rewrites a user's config.** `veld init` writes one when none
+**5. Veld never rewrites a user's config.** `veld orchestrator init` writes one when none
 exists; nothing else edits one. If a change needs a config edit, make the edit
-yourself and check it with `veld lint`.
+yourself and check it with `veld orchestrator lint`.
 
 ## Environments, runs, names
 
@@ -99,13 +101,13 @@ id, a start and end time, and an outcome that survives the run ending. When a
 project has several people or worktrees on it, `--name` is what keeps them
 apart, so pass it rather than relying on a default.
 
-`veld skills runs` has the rest, including `--oneshot` for tests and CI.
+`veld agent skills runs` has the rest, including `--oneshot` for tests and CI.
 
 ## When something does not work
 
-`veld doctor` first — it checks the daemon, ports, DNS and certificates and says
-what is wrong. Then `veld logs --node <node>`, then `veld skills troubleshooting`.
+`veld self doctor` first — it checks the daemon, ports, DNS and certificates and says
+what is wrong. Then `veld orchestrator logs --node <node>`, then `veld agent skills troubleshooting`.
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

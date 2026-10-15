@@ -1,7 +1,7 @@
 //! Node-defined actions (`actions` in veld.json): resolve one against a run, and
 //! run it unattended for a face with no terminal (the IDE's action buttons).
 //!
-//! `veld action` in a terminal does not come through here to *run*: it is
+//! `veld orchestrator action` in a terminal does not come through here to *run*: it is
 //! interactive (a DB shell), so the CLI asks for the resolved command and execs it
 //! itself, with the user's own environment underneath.
 
@@ -27,7 +27,7 @@ fn failed(message: impl Into<String>) -> ActionOutcome {
 
 /// Resolve `action_name` against a run: which node, what command (interpolated),
 /// in which directory, with which environment overlay. Errors are the exact
-/// user-facing messages `veld action` printed.
+/// user-facing messages `veld orchestrator action` printed.
 ///
 /// A stopped run's outputs are no longer live, so `run: None` never offers one.
 /// `env` is the overlay only (node env, node outputs as `$KEY`, parameters, the
@@ -137,7 +137,7 @@ pub async fn resolve(
     })
 }
 
-/// One configured action, for `veld actions` (the CLI renders it).
+/// One configured action, for `veld orchestrator actions` (the CLI renders it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActionListing {
     pub node: String,

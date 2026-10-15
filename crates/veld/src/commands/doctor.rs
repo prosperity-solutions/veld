@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Duration;
 use veld_core::helper_gate::GateSource;
 
-/// `veld doctor` — comprehensive system diagnostics.
+/// `veld self doctor` — comprehensive system diagnostics.
 pub async fn run(json: bool) -> i32 {
     let mut diag = Diagnostics::default();
     diag.gather().await;
@@ -86,11 +86,11 @@ struct Diagnostics {
     /// Reported first and loudest, because during an update most of the rest of
     /// this report is *expected* to look broken: the helper and daemon are being
     /// restarted onto new binaries and their versions disagree with the CLI's for
-    /// tens of seconds at a time. Without this line, `veld doctor` during an
+    /// tens of seconds at a time. Without this line, `veld self doctor` during an
     /// update is a page of red that invites someone to "fix" a machine that is
     /// already fixing itself. It is deliberately **not** a `Check` — an update in
     /// flight is not a failure, and pushing a failing check would make
-    /// `veld doctor` exit non-zero for it.
+    /// `veld self doctor` exit non-zero for it.
     update_in_progress: Option<veld_core::update_lock::UpdateState>,
 
     // Tip
@@ -202,11 +202,11 @@ impl Diagnostics {
         self.config_path = tilde_path(&config_path);
         self.config_mode = veld_core::setup::read_setup_mode().unwrap_or_default();
 
-        // Veld Desktop. Optional on macOS, updated by `veld update` when the user
+        // Veld Desktop. Optional on macOS, updated by `veld self update` when the user
         // wants it, and able to be stale in a way nothing else here would show —
         // the app half can lag while every binary above is current. Doctor is
         // where a user is sent when something is wrong, so a stale app belongs in
-        // the list rather than only in `veld desktop status`.
+        // the list rather than only in `veld self desktop status`.
         //
         // The recorded preference is part of the row rather than a separate one,
         // because "the app is old" and "the app is old *because you opted out*"
@@ -218,20 +218,20 @@ impl Diagnostics {
             Some((path, version)) => {
                 let version = version.unwrap_or_else(|| "unknown version".to_string());
                 let suffix = if opted_out {
-                    " — you opted out, so veld leaves it alone ('veld desktop install' to opt in)"
+                    " — you opted out, so veld leaves it alone ('veld self desktop install' to opt in)"
                         .to_string()
                 } else if version == cli_version {
                     String::new()
                 } else {
-                    format!(" — CLI is {cli_version}, run 'veld desktop update'")
+                    format!(" — CLI is {cli_version}, run 'veld self desktop update'")
                 };
                 format!("{} ({version}){suffix}", tilde_path(&path))
             }
             None if std::env::consts::OS == "macos" && opted_out => {
-                "not installed — you opted out ('veld desktop install' to opt in)".to_string()
+                "not installed — you opted out ('veld self desktop install' to opt in)".to_string()
             }
             None if std::env::consts::OS == "macos" => {
-                "not installed ('veld desktop install')".to_string()
+                "not installed ('veld self desktop install')".to_string()
             }
             // Elsewhere veld does not install the app, so it reports rather than
             // judges — and says nothing at all when it found nothing, because an
@@ -270,7 +270,7 @@ impl Diagnostics {
         // the right helper. Plain `connect()` falls through system -> user, which
         // in privileged mode would report a stray user/auto helper on :18443 when
         // the privileged LaunchDaemon is actually down, masking the real failure
-        // (and contradicting the mode-aware errors from `veld start`/`veld update`).
+        // (and contradicting the mode-aware errors from `veld orchestrator start`/`veld self update`).
         let helper_conn = match super::read_setup_mode().as_deref() {
             Some("privileged") => veld_core::helper::HelperClient::connect_to(
                 &veld_core::helper::system_socket_path(),
@@ -464,9 +464,9 @@ impl Diagnostics {
             return;
         };
         let setup_cmd = if privileged {
-            "veld setup privileged"
+            "veld self setup privileged"
         } else {
-            "veld setup unprivileged"
+            "veld self setup unprivileged"
         };
         self.checks.push(Check {
             pass: managed,
@@ -511,7 +511,7 @@ impl Diagnostics {
             // `connect_to` already *made* a status call as its liveness probe —
             // and threw the payload away. This second one is the round-trip that
             // actually carries the gate, so it can fail where the first
-            // succeeded (a helper that restarted in between, which `veld update`
+            // succeeded (a helper that restarted in between, which `veld self update`
             // makes routine). A failure here is the same "something answered and
             // the gate could not be read" as the error arms below; going silent
             // was the third instance of the disappearing-row bug this review
@@ -524,7 +524,7 @@ impl Diagnostics {
             // rejected peer gets an `ok:false` reply, so a live-but-refusing
             // helper is indistinguishable from a dead one by the error *kind* —
             // which is why the socket row above says "not reachable" and
-            // `veld start` spends 20s waiting for a helper that is already up.
+            // `veld orchestrator start` spends 20s waiting for a helper that is already up.
             // This is the one failure mode deriving the uid can introduce, so it
             // is the one this row most has to name.
             Err(veld_core::helper::HelperError::CommandError(e))
@@ -554,7 +554,8 @@ impl Diagnostics {
         if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
             self.checks.push(Check {
                 pass: true,
-                label: "Database check skipped under sudo (run `veld doctor` without sudo)".into(),
+                label: "Database check skipped under sudo (run `veld self doctor` without sudo)"
+                    .into(),
             });
         } else {
             let path = veld_core::db::Db::default_path()
@@ -586,7 +587,7 @@ impl Diagnostics {
                                 label: format!(
                                     "Database DAMAGED ({path}, schema v{version}, {size}): \
                                      {} — see the backup row below, then \
-                                     `veld backup restore`",
+                                     `veld self backup restore`",
                                     detail.lines().next().unwrap_or(&detail).trim()
                                 ),
                             });
@@ -618,7 +619,7 @@ impl Diagnostics {
                              whether the volume is mounted read-only, then try again \
                              before restoring anything"
                         }
-                        _ => "see the backup row below, then `veld backup restore`",
+                        _ => "see the backup row below, then `veld self backup restore`",
                     };
                     self.checks.push(Check {
                         pass: false,
@@ -659,7 +660,7 @@ impl Diagnostics {
 
         // The privileged helper's fail-closed signing gate (#261) refuses to
         // relaunch onto an on-disk binary without a valid org .sig — so a
-        // signature mismatch means the next `veld update` will sit on the old
+        // signature mismatch means the next `veld self update` will sit on the old
         // version. Check the SERVICE-pinned binary (the one the gate actually
         // verifies via `current_exe()`), not a lib-dir guess: on a machine
         // carrying both ~/.local and /usr/local, the guess would accuse a file
@@ -721,7 +722,7 @@ impl Diagnostics {
                          signature slot. If the running helper is this same release it will \
                          refuse to relaunch onto it, and refuse `restart` and `shutdown`, until \
                          the signature is rewritten; updates keep working either way. Repair it \
-                         with `{}` — no password, and not `veld update`, which does nothing when \
+                         with `{}` — no password, and not `veld self update`, which does nothing when \
                          you are already on the latest release",
                         tilde_path(&path),
                         describe_org_key(verdict.key),
@@ -782,8 +783,8 @@ impl Diagnostics {
                     pass: false,
                     label: format!(
                         "The privileged veld-helper service names {}, but there is no \
-                         binary there \u{2014} it cannot start. Run `veld update`, or \
-                         `sudo veld setup privileged` if that does not repair it",
+                         binary there \u{2014} it cannot start. Run `veld self update`, or \
+                         `sudo veld self setup privileged` if that does not repair it",
                         tilde_path(&path)
                     ),
                 }),
@@ -832,7 +833,7 @@ impl Diagnostics {
                         "The privileged veld-helper runs as root from {}, which you can write \
                          \u{2014} anything running as you could replace it and gain root at the \
                          next reboot. It moves itself to {} on its next restart; if this \
-                         persists, {} says why, and `sudo veld setup privileged` \
+                         persists, {} says why, and `sudo veld self setup privileged` \
                          does it now",
                         tilde_path(&path),
                         tilde_path(&veld_core::paths::privileged_helper_dir()),
@@ -904,7 +905,7 @@ impl Diagnostics {
         // other TLS check veld had was about the *CA*: whether this machine
         // trusts the authority that signs the leaves. None of them looked at a
         // leaf, which is how a Caddy serving one that expired a day earlier
-        // passed `veld doctor` while Chrome refused every URL it serves.
+        // passed `veld self doctor` while Chrome refused every URL it serves.
         if https_ok {
             let cert = veld_core::tls_health::probe(https_port).await;
             self.cert_status = describe_cert(&cert);
@@ -999,7 +1000,7 @@ impl Diagnostics {
         // 10. Terminal holder processes.
         //
         // Each open terminal in `/ide` has a process of its own holding its PTY,
-        // which is what lets a shell survive `veld update`. They are invisible to
+        // which is what lets a shell survive `veld self update`. They are invisible to
         // every other check here — not the daemon, not a run — so "my terminal
         // died after an update" had nowhere to look. This names the directory and
         // counts what is in it; a socket nobody answers is a holder that is gone
@@ -1050,7 +1051,7 @@ impl Diagnostics {
         let shim_dir = veld_core::instance::shim_dir();
         let mod_dir = veld_core::agent::claude_mod_dir(&shim_dir);
         let back =
-            "or go back to the wrapper: veld settings set terminal.claudeIntegration wrapper";
+            "or go back to the wrapper: veld self settings set terminal.claudeIntegration wrapper";
         let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
             .map(std::path::PathBuf::from)
             .or_else(|| dirs::home_dir().map(|home| home.join(".claude")));
@@ -1150,15 +1151,16 @@ impl Diagnostics {
         // leaves root-owned `veld.db`/`-wal`/`-shm` that break every later non-sudo
         // `veld` command — and `shim_dir()` is `HOME`-derived and no more
         // `SUDO_USER`-aware than the database path is, so the row would then report on
-        // *root's* `~/.veld`, find nothing there, and turn a passing `veld doctor` into
+        // *root's* `~/.veld`, find nothing there, and turn a passing `veld self doctor` into
         // a failing one. Guarding only the database left the second half live; this is
         // one condition covering both, because two guards for one hazard is how the
         // first version of this got it half right.
         if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
             return Check {
                 pass: true,
-                label: "Terminal URL check skipped under sudo (run `veld doctor` without sudo)"
-                    .to_owned(),
+                label:
+                    "Terminal URL check skipped under sudo (run `veld self doctor` without sudo)"
+                        .to_owned(),
             };
         }
         let dir = veld_core::instance::shim_dir();
@@ -1216,7 +1218,7 @@ impl Diagnostics {
                         .iter()
                         .map(|p| tilde_path(p))
                         .collect();
-                    // Reinstall, or a symlink — and not `veld setup`, which writes
+                    // Reinstall, or a symlink — and not `veld self setup`, which writes
                     // service definitions and records nothing about where the CLI
                     // is, so suggesting it here would be a repair that cannot
                     // work. A custom `VELD_INSTALL_DIR` is the case that lands
@@ -1224,7 +1226,7 @@ impl Diagnostics {
                     // somewhere the daemon has no way to derive.
                     format!(
                         "the daemon found no veld CLI to point it at (looked for {}). \
-                         Reinstall with `veld update`, or symlink your veld binary to \
+                         Reinstall with `veld self update`, or symlink your veld binary to \
                          one of those paths if it lives somewhere else",
                         looked.join(" and ")
                     )
@@ -1250,7 +1252,7 @@ impl Diagnostics {
                 if !intercept {
                     // Names the shell even here. Someone debugging "my fish
                     // aliases do not load" is asking about the shell, not about
-                    // URL routing, and this row is the only place `veld doctor`
+                    // URL routing, and this row is the only place `veld self doctor`
                     // reports which shell terminals actually open — so dropping
                     // the name on this branch sends them to read the setting in
                     // the UI to learn something the diagnostic already knew.
@@ -1329,7 +1331,7 @@ impl Diagnostics {
     /// that matter most are the ones already running when that fix ships, which
     /// keep the old binary until their shell exits and still hand the session to
     /// anything that connects. That is the bug this command was the reported
-    /// trigger for: one `veld doctor` disconnected every terminal on the machine.
+    /// trigger for: one `veld self doctor` disconnected every terminal on the machine.
     ///
     /// So the probe is skipped exactly when it could hurt: a reachable daemon is
     /// attached to these holders, and the count it would have confirmed is
@@ -1461,7 +1463,7 @@ impl Diagnostics {
                 "    {}",
                 output::dim(
                     "Versions and service status below may disagree with each other until it \
-                     finishes. Follow it with `veld update --status`."
+                     finishes. Follow it with `veld self update --status`."
                 )
             );
             println!();
@@ -1512,7 +1514,7 @@ impl Diagnostics {
                 );
                 println!(
                     "      {}",
-                    output::dim("Run `veld setup privileged` for clean URLs without :18443")
+                    output::dim("Run `veld self setup privileged` for clean URLs without :18443")
                 );
             }
             "auto" => {
@@ -1522,7 +1524,7 @@ impl Diagnostics {
                 );
                 println!(
                     "      {}",
-                    output::dim("Run `veld setup privileged` for clean URLs without :18443")
+                    output::dim("Run `veld self setup privileged` for clean URLs without :18443")
                 );
             }
             _ => {
@@ -1530,7 +1532,7 @@ impl Diagnostics {
                     "    {} {}",
                     output::cross(),
                     output::red(
-                        "Not configured — run `veld setup unprivileged` or `veld setup privileged`"
+                        "Not configured — run `veld self setup unprivileged` or `veld self setup privileged`"
                     )
                 );
             }
@@ -1661,13 +1663,13 @@ fn restart_daemon_hint() -> String {
     }
 }
 
-/// Which `veld setup <mode>` to suggest.
+/// Which `veld self setup <mode>` to suggest.
 ///
 /// `privileged` for a machine that is in that mode, since suggesting the other one
 /// would change the install rather than repair it. `unprivileged` for **everything
 /// else**, and that is a choice rather than a passthrough: `auto` and the literal
 /// "not configured" `read_mode` returns for a machine that never ran setup both land
-/// here, and neither is a mode `veld setup` takes. `unprivileged` is the no-sudo mode
+/// here, and neither is a mode `veld self setup` takes. `unprivileged` is the no-sudo mode
 /// such a machine should be in, and it is what install.sh tells it to run.
 fn setup_mode_arg(mode: &str) -> &'static str {
     match mode {
@@ -1686,7 +1688,7 @@ fn setup_mode_arg(mode: &str) -> &'static str {
 /// `tail` a file that will never exist. systemd captures a unit's output on its
 /// own, so on Linux the answer is the query rather than a path.
 ///
-/// `mode` is the setup mode from `setup.json`; `veld setup` is per-mode and running
+/// `mode` is the setup mode from `setup.json`; `veld self setup` is per-mode and running
 /// the wrong one would change the install rather than repair it.
 fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
     if cfg!(target_os = "linux") {
@@ -1699,16 +1701,16 @@ fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
     // this row reads is `HOME`-derived and none of it is `SUDO_USER`-aware. As root the
     // plist at `/var/root/Library/LaunchAgents` is absent and `read_mode` finds no
     // `setup.json`, so a healthy privileged install would be reported as "not
-    // captured" *and* handed `veld setup unprivileged` — a command that converts the
+    // captured" *and* handed `veld self setup unprivileged` — a command that converts the
     // install rather than repairing it. A row that cannot see the user's home says so
     // instead of guessing.
     if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
-        return "not checked under sudo (run `veld doctor` without it)".to_owned();
+        return "not checked under sudo (run `veld self doctor` without it)".to_owned();
     }
     // The path the plist actually names, rather than "does it mention the one we
     // would derive". The two differ on a developer machine — `just
     // dev-install-daemon` copies the binary to wherever the plist already pointed —
-    // and, more importantly, on a machine where `veld setup` deliberately wrote no
+    // and, more importantly, on a machine where `veld self setup` deliberately wrote no
     // log keys because the job could not have created the file.
     match daemon_plist()
         .as_deref()
@@ -1716,7 +1718,7 @@ fn daemon_log_row(daemon_bin: &Path, mode: &str) -> String {
     {
         Some(path) => tilde_path(Path::new(&path)),
         None => format!(
-            "not captured — run `veld setup {}` to enable it ({})",
+            "not captured — run `veld self setup {}` to enable it ({})",
             setup_mode_arg(mode),
             veld_core::paths::daemon_log_path()
                 .map(|p| tilde_path(&p))
@@ -1823,15 +1825,15 @@ fn gate_report_for_error(error: &veld_core::helper::HelperError) -> Option<GateR
 
 /// Appended to every *failing* gate row.
 ///
-/// The row runs for whoever types `veld doctor`, because the reader a
+/// The row runs for whoever types `veld self doctor`, because the reader a
 /// newly-derived gate locks out is by construction not the installing user (see
 /// [`Diagnostics::check_helper_uid_gate`]). The cost is that a second reader —
 /// someone on a shared machine whose privileged veld legitimately belongs to
 /// another account — sees the same red row, and every remedy it could offer is
-/// wrong for them: `veld setup privileged` resolves the binary through
+/// wrong for them: `veld self setup privileged` resolves the binary through
 /// `which_self`, so following it would leave a root LaunchDaemon exec'ing a
 /// binary out of *their* home directory and gate the socket to them, locking the
-/// real owner out. `veld update` is merely futile — it cannot touch somebody
+/// real owner out. `veld self update` is merely futile — it cannot touch somebody
 /// else's root service, so the row would stay red forever.
 ///
 /// Nothing here can tell the two readers apart, so every failing row says so.
@@ -1840,7 +1842,7 @@ fn gate_report_for_error(error: &veld_core::helper::HelperError) -> Option<GateR
 const NOT_YOUR_INSTALL: &str = " If this machine's privileged veld belongs to another account, \
                                 none of this is yours to fix — leave it to its owner.";
 
-/// What the privileged helper told `veld doctor` about its gate.
+/// What the privileged helper told `veld self doctor` about its gate.
 ///
 /// A type rather than a bare `Option<Value>` so the *refused* answer — which
 /// arrives as a connection error, not as data — travels the same path as every
@@ -1862,7 +1864,7 @@ enum GateReport {
 /// reachable in a test without a root helper and a socket. That matters more
 /// here than in most rows: this one is the only place an exposed root socket is
 /// reported at all, and its failure mode is a *confident wrong sentence* rather
-/// than a crash — which no amount of running `veld doctor` on a healthy machine
+/// than a crash — which no amount of running `veld self doctor` on a healthy machine
 /// would reveal.
 ///
 /// Always produces a row: by the time a [`GateReport`] exists, the helper has
@@ -1881,11 +1883,11 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
                     "Helper socket is gated to a DIFFERENT uid — it refused {me}, so no \
                      `veld` command of yours can drive it. If this machine's privileged \
                      veld belongs to another account, that is working as intended and \
-                     there is nothing for you to fix here — do NOT run `veld setup \
+                     there is nothing for you to fix here — do NOT run `veld self setup \
                      privileged`, which would repoint the system service at your install \
                      and lock the owner out. If the install IS yours, its directory is \
                      owned by another account (a restored backup, or a renumbered user); \
-                     `veld setup privileged` writes the correct uid explicitly."
+                     `veld self setup privileged` writes the correct uid explicitly."
                 ),
             };
         }
@@ -1896,7 +1898,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
                     "Helper socket uid gate cannot be confirmed — something is listening on \
                      the privileged helper's socket but the check did not complete. If the \
                      gate refused this connection, no `veld` command of yours can drive that \
-                     helper; run `veld doctor` again to tell a refusal from a restart.\
+                     helper; run `veld self doctor` again to tell a refusal from a restart.\
                      {NOT_YOUR_INSTALL}"
                 ),
             };
@@ -1932,7 +1934,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
             pass: false,
             label: format!(
                 "Helper socket uid gate cannot be confirmed — the helper reported `{}` as its \
-                 allowed uid, which this version of `veld` cannot read. Run `veld update` so \
+                 allowed uid, which this version of `veld` cannot read. Run `veld self update` so \
                  the CLI and the helper match.{NOT_YOUR_INSTALL}",
                 veld_core::helper_gate::ALLOW_UID_FIELD
             ),
@@ -1948,19 +1950,19 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
             pass: false,
             label: format!(
                 "Helper socket gated to uid 0 — that admits only root, so the `veld` CLI \
-                 cannot drive its own helper. Run `veld setup privileged` to write the \
+                 cannot drive its own helper. Run `veld self setup privileged` to write the \
                  installing user's uid.{NOT_YOUR_INSTALL}"
             ),
         },
         // Gated, but not to the user reading this. Only reachable as root
         // (every other uid is refused before it can ask), which is exactly
-        // when it is worth saying: `sudo veld doctor` is where somebody
+        // when it is worth saying: `sudo veld self doctor` is where somebody
         // investigating a locked-out CLI ends up.
         Some(uid) if gate_locks_out(uid, invoking) => Check {
             pass: false,
             label: format!(
                 "Helper socket gated to uid {uid}, but you are uid {} — your `veld` commands \
-                 cannot drive it. Run `veld setup privileged` to write the correct \
+                 cannot drive it. Run `veld self setup privileged` to write the correct \
                  uid.{NOT_YOUR_INSTALL}",
                 invoking.unwrap_or(0)
             ),
@@ -1990,7 +1992,7 @@ fn gate_check(report: &GateReport, invoking: Option<u64>) -> Check {
 /// the part somebody will "simplify". A **plain root shell** answers 0 here and
 /// is not a claim about which user the install belongs to — root is admitted by
 /// every gate anyway (`peer_allowed`), so treating 0 as a uid to match against
-/// would have bare `sudo veld doctor` report itself locked out of a perfectly
+/// would have bare `sudo veld self doctor` report itself locked out of a perfectly
 /// healthy helper. `SUDO_UID` is what lets a root invocation know who it stands
 /// in for, and [`invoking_uid`] prefers it.
 ///
@@ -2017,11 +2019,11 @@ fn ungated_reason(source: Option<GateSource>) -> &'static str {
         Some(GateSource::RefusedRootLibDir) => {
             "The helper's install directory is root-owned (a system-paths install), so the \
              installing user cannot be derived — gating to root would admit only root and \
-             lock your own CLI out. Run `veld setup privileged` to write the uid explicitly."
+             lock your own CLI out. Run `veld self setup privileged` to write the uid explicitly."
         }
         Some(GateSource::UnreadableLibDir) => {
             "The helper's install directory could not be read, so the installing user could \
-             not be derived. Run `veld setup privileged` to write the uid explicitly."
+             not be derived. Run `veld self setup privileged` to write the uid explicitly."
         }
         // `Unprivileged` means the helper does not consider itself the system
         // daemon even though it answered on the system socket — a `--socket-path`
@@ -2030,7 +2032,7 @@ fn ungated_reason(source: Option<GateSource>) -> &'static str {
         // helper knows; the remedy is the same one, and it is better than
         // guessing at a cause.
         Some(GateSource::Flag | GateSource::LibDirOwner | GateSource::Unprivileged) | None => {
-            "Run `veld setup privileged` to write the uid explicitly."
+            "Run `veld self setup privileged` to write the uid explicitly."
         }
     }
 }
@@ -2039,9 +2041,9 @@ fn ungated_reason(source: Option<GateSource>) -> &'static str {
 ///
 /// The field being **absent** means a helper predating #337. It may still be
 /// perfectly gated by an `--allow-uid` its service definition carries — every
-/// install that ran `veld setup privileged` on v16.58.x has one — so this must
+/// install that ran `veld self setup privileged` on v16.58.x has one — so this must
 /// never claim the socket is open, only that the answer is unavailable.
-/// `veld update` settles it either way: the new helper gates itself and says so,
+/// `veld self update` settles it either way: the new helper gates itself and says so,
 /// with no sudo and nothing to configure. That is #338's bar, and this row is
 /// how it gets checked.
 ///
@@ -2049,7 +2051,7 @@ fn ungated_reason(source: Option<GateSource>) -> &'static str {
 /// a full stop like [`ungated_reason`]'s strings.
 fn unreportable_gate_reason() -> &'static str {
     "this helper predates the check and cannot report it. Its socket may or may not be gated \
-     by an `--allow-uid` in its service definition. Run `veld update`; the new helper gates \
+     by an `--allow-uid` in its service definition. Run `veld self update`; the new helper gates \
      itself and reports it."
 }
 
@@ -2084,7 +2086,7 @@ fn helper_dir_is_locked(helper: &Path) -> bool {
         .is_some_and(veld_core::helper_store::is_root_owned_and_locked)
 }
 
-/// Name an org signing key for a `veld doctor` row.
+/// Name an org signing key for a `veld self doctor` row.
 ///
 /// `org key 2 of 3` — the position in `veld_core::signing::ORG_KEYS`, which is the
 /// key's permanent identity (rows are appended, never reordered), plus a short hex
@@ -2192,7 +2194,7 @@ async fn check_keep_awake() -> String {
         // ending the sharing; the setting is the default for the *next* share, and
         // `--ttl` outranks it anyway. Naming a control that cannot affect the
         // number next to it is the failure this whole change is about.
-        " — stop sharing (veld unshare), or turn the hold off in Settings → Keep awake. Future shares: veld share --ttl, or Settings → Sharing"
+        " — stop sharing (veld network unshare), or turn the hold off in Settings → Keep awake. Future shares: veld network share --ttl, or Settings → Sharing"
     } else if reason_is_sharing {
         " — stop sharing, or turn it off in Settings → Keep awake"
     } else {
@@ -2201,7 +2203,7 @@ async fn check_keep_awake() -> String {
     format!("held awake — {why}{left}{lid}{how}")
 }
 
-/// `"2d 3h"` / `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld share`'s
+/// `"2d 3h"` / `"3h 12m"` / `"12m"` / `"under a minute"`. Mirrors `veld network share`'s
 /// own, plus a day branch: certificate lifetimes are measured in days, and
 /// `"167h"` is a number a reader has to convert before it means anything.
 fn humanize_secs(seconds: i64) -> String {
@@ -2329,7 +2331,7 @@ fn check_backups() -> Check {
         .and_then(|_| veld_core::db::Db::open().ok());
 
     // Fall back to the derived default when the settings cannot be read, exactly
-    // as `veld backup` does — a database that will not open is the case this row
+    // as `veld self backup list` does — a database that will not open is the case this row
     // exists for, so it must not depend on one.
     let dir = db
         .as_ref()
@@ -2361,11 +2363,11 @@ fn check_backups() -> Check {
     // filter kept `taken_at <= now` after `newest_usable` was fixed to
     // de-prioritise a future-dated artifact rather than disqualify it, so on a
     // machine whose clock is behind its own backups doctor reported that nothing
-    // could be restored while `veld backup restore` restored one perfectly well.
+    // could be restored while `veld self backup restore` restored one perfectly well.
     //
     // **The deep check, for the one artifact this row reports on.** `inspect` is the
     // sweep's cheap `quick_check`, which does not compare index content against
-    // table content — so an artifact `veld backup restore` would refuse could be the
+    // table content — so an artifact `veld self backup restore` would refuse could be the
     // one doctor called healthy. That is the incident's second failure in a new
     // costume, and it is worth one full scan of one file to close. The *count* stays
     // shallow: it is a survey, and deep-checking a folder of hundreds is what
@@ -2435,7 +2437,7 @@ fn check_backups() -> Check {
             if stale {
                 label.push_str(
                     " — nothing has written one since; check the daemon is running \
-                     (`veld doctor` Services above) or run `veld backup now`",
+                     (`veld self doctor` Services above) or run `veld self backup now`",
                 );
             }
             if !a.owner_only {
@@ -2460,12 +2462,12 @@ fn check_backups() -> Check {
                 .map(|e| format!(" — last attempt failed: {e}"))
                 .unwrap_or_else(|| {
                     " — the daemon writes one on the backup.intervalMinutes schedule; \
-                     `veld backup now` takes one immediately"
+                     `veld self backup now` takes one immediately"
                         .to_string()
                 });
             // **"None" no longer implies "nothing is there."** `newest` is the deep
             // check and `usable` is the shallow one, so this arm is reachable with
-            // artifacts present that `veld backup` lists as `ok`: every one passes
+            // artifacts present that `veld self backup list` lists as `ok`: every one passes
             // `quick_check` and none survives `integrity_check`. Saying "no usable
             // backup" flatly would have doctor and the listing contradicting each
             // other — the failure this row keeps being rewritten to avoid. Say which
@@ -2870,7 +2872,7 @@ mod tests {
 
     /// The row names the hostname it measured. Each run URL has a certificate of
     /// its own, so a row that read as a verdict on all of them would over-claim
-    /// exactly the way the all-green `veld doctor` in the original report did.
+    /// exactly the way the all-green `veld self doctor` in the original report did.
     #[test]
     fn the_certificate_row_names_the_host_it_checked() {
         let fine = TlsHealth::Valid {
@@ -2920,7 +2922,7 @@ mod tests {
         assert!(!label.contains("veld restarts Caddy"));
     }
 
-    /// `veld doctor` must not knock on a holder that has a daemon attached.
+    /// `veld self doctor` must not knock on a holder that has a daemon attached.
     ///
     /// This command was the reported trigger for terminals dying: connecting to a
     /// holder is how a daemon arrives, and a holder that still runs the pre-fix
@@ -3032,7 +3034,7 @@ mod tests {
     ///
     /// The row is the only place an exposed root socket is reported anywhere, and
     /// its failure mode is a confident wrong sentence rather than a crash — so
-    /// running `veld doctor` on a healthy machine proves nothing about the seven
+    /// running `veld self doctor` on a healthy machine proves nothing about the seven
     /// other branches. Each assertion below pins the one thing that must not
     /// drift: whether the row passes, and whether it makes a claim it cannot
     /// support.
@@ -3077,7 +3079,7 @@ mod tests {
         assert!(!c.pass);
         assert!(!c.label.contains("NOT gated"));
         assert!(c.label.contains("cannot be confirmed"));
-        assert!(c.label.contains("`veld update`"));
+        assert!(c.label.contains("`veld self update`"));
 
         // A shape this build cannot read is also "cannot confirm", never "open".
         let c = row(
@@ -3114,7 +3116,7 @@ mod tests {
         assert!(!c.pass);
         assert!(c.label.contains("refused uid 501"));
         assert!(
-            c.label.contains("do NOT run `veld setup privileged`"),
+            c.label.contains("do NOT run `veld self setup privileged`"),
             "a reader who is not the install's owner must be told to leave it alone"
         );
 
@@ -3222,10 +3224,10 @@ mod tests {
     /// No failing gate row may hand a reader a remedy without saying it might
     /// not be theirs to run.
     ///
-    /// The row runs for whoever types `veld doctor`, and on a shared machine
+    /// The row runs for whoever types `veld self doctor`, and on a shared machine
     /// that includes somebody whose privileged veld belongs to another account.
-    /// For them `veld setup privileged` is a hijack — it repoints a root service
-    /// at their own binary and gates the socket to them — and `veld update`
+    /// For them `veld self setup privileged` is a hijack — it repoints a root service
+    /// at their own binary and gates the socket to them — and `veld self update`
     /// cannot touch the other account's service at all. An earlier fix put the
     /// caveat on the refused branch only, and the ungated branch (which every
     /// local uid reaches, because an ungated helper refuses nobody) went on
@@ -3267,7 +3269,7 @@ mod tests {
     /// cannot be "simplified" away without a red test.
     ///
     /// Dropping `me != 0` is the natural edit — the guard looks redundant — and
-    /// it silently makes bare `sudo veld doctor` (uid 0, no `SUDO_UID`) accuse a
+    /// it silently makes bare `sudo veld self doctor` (uid 0, no `SUDO_UID`) accuse a
     /// perfectly healthy helper of locking the user out.
     #[test]
     fn a_gate_only_locks_out_a_user_it_could_actually_refuse() {
@@ -3293,12 +3295,12 @@ mod tests {
         use super::{GateSource, gate_source_label, ungated_reason, unreportable_gate_reason};
 
         // The case that matters: a helper too old to report the gate. `veld
-        // update` alone fixes it — no sudo, nothing to configure. That is #338's
+        // self update` alone fixes it — no sudo, nothing to configure. That is #338's
         // bar. It must NOT claim the socket is open: an install that ran
-        // `veld setup privileged` on v16.58.x carries `--allow-uid` in its plist
+        // `veld self setup privileged` on v16.58.x carries `--allow-uid` in its plist
         // and is genuinely gated, it just cannot say so.
         let unknown = unreportable_gate_reason();
-        assert!(unknown.contains("`veld update`"));
+        assert!(unknown.contains("`veld self update`"));
         assert!(!unknown.contains("sudo"));
         assert!(
             unknown.contains("may or may not be"),
@@ -3309,7 +3311,7 @@ mod tests {
         // too old to report one, and must not borrow its text: this helper said
         // outright that its socket is ungated.
         let newer = ungated_reason(None);
-        assert!(newer.contains("`veld setup privileged`"));
+        assert!(newer.contains("`veld self setup privileged`"));
         assert!(
             !newer.contains("predates"),
             "an unknown source from a newer helper must not read as an older one: {newer}"
@@ -3322,7 +3324,7 @@ mod tests {
         ] {
             let reason = ungated_reason(Some(source));
             assert!(
-                reason.contains("`veld setup privileged`"),
+                reason.contains("`veld self setup privileged`"),
                 "{source:?} left the user with no remedy: {reason}"
             );
         }

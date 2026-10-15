@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use crate::output;
 use veld_core::helper::HelperClient;
 
-/// `veld setup privileged` -- run the privileged (sudo) setup sequence.
+/// `veld self setup privileged` -- run the privileged (sudo) setup sequence.
 ///
-/// This is the original `veld setup` behaviour: it installs the system
+/// This is the original `veld self setup` behaviour: it installs the system
 /// daemon on ports 80/443, trusts the Caddy CA, etc.
 pub async fn run(
     helper_bin: Option<PathBuf>,
@@ -36,8 +36,7 @@ pub async fn run(
 
         let status = std::process::Command::new("sudo")
             .arg(&exe)
-            .arg("setup")
-            .arg("privileged")
+            .args(["self", "setup", "privileged"])
             .arg("--helper-bin")
             .arg(&resolved_helper_bin)
             .arg("--user-socket")
@@ -212,7 +211,7 @@ pub async fn run(
     }
 
     println!();
-    output::print_success("Privileged setup complete! Run `veld start` to get going.");
+    output::print_success("Privileged setup complete! Run `veld orchestrator start` to get going.");
 
     0
 }

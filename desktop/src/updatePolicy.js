@@ -725,6 +725,8 @@ function handoffCommand({ capabilities = [], version, pid, execPath }) {
   // usage error and exit 2. The app has quit by then and no report is written,
   // so the user would reopen on the old version having been told nothing.
   const consoleHandoff = capabilities.includes(CONSOLE_HANDOFF);
+  // Old spellings on purpose (#423): the CLI on disk may be older than this app
+  // and only knows `update` / `desktop update`, not `self update`.
   const args = full
     ? [
         "update",

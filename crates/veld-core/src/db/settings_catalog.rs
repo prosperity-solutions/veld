@@ -1,5 +1,5 @@
 //! What a setting *is*, for every surface that has to describe one to a human or
-//! an agent: the `/ide` settings dialog, `veld settings`, and anything after them.
+//! an agent: the `/ide` settings dialog, `veld self settings list`, and anything after them.
 //!
 //! # Adding a setting
 //!
@@ -29,7 +29,7 @@
 //!   `other => Unknown` catch-all by design, so the key still stores and reads —
 //!   **unvalidated**, since `Unknown` accepts anything within its size bounds.
 //!
-//! The dialog then renders it and `veld settings` lists, gets, sets and describes
+//! The dialog then renders it and `veld self settings` lists, gets, sets and describes
 //! it, with no further change anywhere — for a setting whose row is a control over
 //! a value. A row whose *visibility* turns on something no catalog can state is
 //! the standing exception, and it is a bundle-side edit: a battery-only row is
@@ -192,7 +192,7 @@ impl SettingGroup {
 
 /// One option a surface may offer, with the words to offer it in.
 ///
-/// `value` is what is stored and what `veld settings set` takes; `label` is what a
+/// `value` is what is stored and what `veld self settings set` takes; `label` is what a
 /// dialog puts in front of a person. They are not interchangeable — `news.source`
 /// and `extensions.source` share a value vocabulary (`main`/`worktree`) and
 /// deliberately do *not* share labels, because "every worktree" and "this
@@ -274,7 +274,7 @@ pub enum Choices {
         /// The stepper's increment, where a sensible one exists (weeks for a
         /// retention in days). `None` means one.
         step: Option<i64>,
-        /// What the number counts, for a suffix and for `veld settings describe`.
+        /// What the number counts, for a suffix and for `veld self settings describe`.
         unit: Option<&'static str>,
         /// What an empty box means, when the low end of the range is an off
         /// switch rather than a small value (`0` = "keep until emptied").
@@ -334,7 +334,7 @@ pub struct Spec {
     pub requires: Option<Requires>,
 }
 
-/// One catalog entry as it goes over the wire and out of `veld settings --json`.
+/// One catalog entry as it goes over the wire and out of `veld self settings list --json`.
 ///
 /// The default is read from [`defaults`] rather than stored on the [`Spec`], so
 /// the catalog can never disagree with the document `GET /api/settings` returns.
@@ -703,8 +703,8 @@ impl SettingKey {
                 title: "Show log timestamps in",
                 help: "Display only — every line is stored in UTC, which is what veld sorts and \
                        interleaves by. Local is your browser's zone; hover a timestamp for the \
-                       date, both zones and the exact stored value. veld logs and veld start \
-                       --attach follow this setting too, and veld logs takes --utc / --local to \
+                       date, both zones and the exact stored value. veld orchestrator logs and veld orchestrator start \
+                       --attach follow this setting too, and veld orchestrator logs takes --utc / --local to \
                        override it for one command.",
                 group: General,
                 section: None,
@@ -790,7 +790,7 @@ impl SettingKey {
                        you pick, Check for Updates… in the menu always answers immediately and \
                        spends none of this budget, a release you have answered about stays \
                        quiet for a week, and \
-                       `veld update` in a terminal is unaffected — this is the desktop app \
+                       `veld self update` in a terminal is unaffected — this is the desktop app \
                        asking you, not the only way to get a release.",
                 group: General,
                 section: None,
@@ -907,7 +907,7 @@ impl SettingKey {
                        Worth knowing before you do: a copy carries everything the database does, \
                        including the tokens for your relays — Veld writes each one readable only \
                        by you, which a drive formatted FAT or a network share cannot honour, and \
-                       says so when that happens. `veld backup` shows what is in the folder.",
+                       says so when that happens. `veld self backup list` shows what is in the folder.",
                 group: General,
                 section: DATABASE_BACKUPS,
                 shape: ValueShape::Text,
@@ -974,7 +974,7 @@ impl SettingKey {
             Self::WorktreeStorageDir => Spec {
                 // Had no help at all while it was dialog-only: the row is hidden
                 // unless the mode above is Custom, so the mode's own help carried
-                // it. A CLI has no such adjacency — `veld settings describe` is
+                // it. A CLI has no such adjacency — `veld self settings describe` is
                 // reached by naming this key on its own.
                 title: "Custom worktree folder",
                 help: "The folder new checkouts land under when the storage location is Custom. \
@@ -1266,7 +1266,7 @@ impl SettingKey {
                        with any Claude Code. The mod is a Claude Code plugin Veld keeps in its \
                        own folder and names in the terminal's environment, so `claude` itself \
                        runs untouched; it needs a Claude Code recent enough to load mods, and \
-                       `veld doctor` says whether yours does. Under an organization's Claude \
+                       `veld self doctor` says whether yours does. Under an organization's Claude \
                        Code policy (Team and Enterprise plans) it does not see a question an \
                        MCP server asks. Neither edits your Claude settings. Codex CLI and Pi always use their wrappers. Takes effect for \
                        new terminals.",
@@ -1439,14 +1439,14 @@ impl SettingKey {
             Self::SharingPeerTtlMinutes => Spec {
                 title: "A share with another Veld user",
                 // No "above"/"below" in a spec's help: the catalog feeds `veld
-                // settings describe` as well as the dialog, and a positional
+                // self settings describe` as well as the dialog, and a positional
                 // reference is a lie on a terminal.
                 help: "How long a peer share link keeps working. This is what usually ends a \
                        share — and so what ends the automatic keep-awake with it, since the \
                        keepAwake.sharing* caps are a ceiling over this rather than a second \
                        countdown. This machine only: to change it for everyone who checks a \
                        project out, set sharing.peer_ttl_minutes in its veld.json, which wins \
-                       over this. veld share --ttl wins over both, for one share. Applies to \
+                       over this. veld network share --ttl wins over both, for one share. Applies to \
                        the next share, not one already running.",
                 group: Sharing,
                 section: SHARE_LINKS_EXPIRE,
@@ -1464,7 +1464,7 @@ impl SettingKey {
                 help: "Shorter than a peer share by default, and for a reason worth keeping: \
                        the audience is the open internet, so an idle share should die sooner. \
                        This machine only, like the peer setting: a project's \
-                       sharing.web_ttl_minutes wins over it, and veld share --ttl over both. \
+                       sharing.web_ttl_minutes wins over it, and veld network share --ttl over both. \
                        Applies to the next share, not one already running.",
                 group: Sharing,
                 section: SHARE_LINKS_EXPIRE,
@@ -1744,7 +1744,7 @@ mod tests {
     /// variant cannot compile without being given a name, a validator and a
     /// description — but `ALL` is a hand-written list, and a variant missing from
     /// it validates and stores perfectly while being invisible to `catalog()`,
-    /// the settings dialog and `veld settings`. Every other test in this
+    /// the settings dialog and `veld self settings list`. Every other test in this
     /// subsystem iterates `ALL`, so every one of them passes.
     ///
     /// Counted out of the source text rather than derived from the type, because

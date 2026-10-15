@@ -1,9 +1,9 @@
 //! Run one [`ActionRequest`] end to end.
 //!
-//! This is what used to be the body of `veld start`, `veld stop` and `veld
-//! restart`, minus everything that drew on a terminal. It runs inside the engine
+//! This is what used to be the body of `veld orchestrator start`, `veld orchestrator stop` and `veld
+//! orchestrator restart`, minus everything that drew on a terminal. It runs inside the engine
 //! worker (`veld-daemon --engine-worker`), one process per action, so a daemon
-//! restart or a `veld update` mid-start does not cut a run in half.
+//! restart or a `veld self update` mid-start does not cut a run in half.
 //!
 //! It reports through [`EventSink`] and nothing else: progress, notices,
 //! `--oneshot` output, and finally one [`ActionOutcome`]. Cancellation (the face's
@@ -206,7 +206,7 @@ fn check_answers(o: &Orchestrator, selections: &[NodeSelection]) -> Result<(), A
         Ok(missing) => Err(ActionOutcome::Failed {
             message: format!(
                 "This project needs values for {} on this machine, and nothing answered them. \
-                 Run the command again from a terminal, or set them with `veld config set`.",
+                 Run the command again from a terminal, or set them with `veld orchestrator vars set`.",
                 missing
                     .iter()
                     .map(|v| v.name.as_str())
@@ -300,7 +300,7 @@ async fn start(
     let run_state = match result {
         Ok(state) => state,
         Err(e) => {
-            // Best-effort teardown, as `veld start` always did: the orchestrator's
+            // Best-effort teardown, as `veld orchestrator start` always did: the orchestrator's
             // own failure paths reap node hooks but not the project's `teardown`
             // steps, so a setup step that created a network or a container
             // before a later one failed would leave it behind — and the retry

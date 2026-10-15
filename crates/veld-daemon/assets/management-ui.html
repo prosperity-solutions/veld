@@ -361,7 +361,7 @@ function render(data){
   if(!data.projects.length){
     content.innerHTML=joinCount>0
       ?'<div class="empty fade-in"><h2>No local environments</h2><p>You’ve joined '+joinCount+' shared environment'+(joinCount>1?'s':'')+' — see the panel above.</p></div>'
-      :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
+      :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld orchestrator start</code> in any project with a <code>veld.json</code></p></div>';
     return;
   }
   // Empty states for the selected view (there ARE environments, just not here).
@@ -465,7 +465,7 @@ function render(data){
         h+=connSpans(peerShare);
         h+='</div>';
       }
-      // Public web share strip(s) — started from the CLI (`veld share --web`);
+      // Public web share strip(s) — started from the CLI (`veld network share --web`);
       // shows the minted public URLs and a stop button. Password-protected by
       // default: the share password is shown with a copy button, and
       // password-mode URLs get a one-link copy (URL + `#veld-key=…` fragment)
@@ -1131,7 +1131,7 @@ document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-action]');if(!b)return;
   const act=b.dataset.action,H={'X-Veld-Request':'1'};
   if(act==='copy-join'){navigator.clipboard.writeText(b.dataset.joinurl);flashBtn(b,'Copied');return;}
-  if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
+  if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld network join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
   if(act==='start-share'){
     const card=b.closest('.card');
     // No silent downgrade: JSON.stringify drops an undefined value, so a

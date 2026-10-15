@@ -1,4 +1,4 @@
-//! Read-only queries over a project's runs: what `veld status` and `veld logs`
+//! Read-only queries over a project's runs: what `veld orchestrator status` and `veld orchestrator logs`
 //! show. Everything here is synchronous (SQLite, `kill(pid, 0)`); the daemon runs
 //! it through its blocking pool. Rendering — colours, tables, time zones — stays
 //! with the face.
@@ -8,13 +8,65 @@ use std::path::Path;
 
 use veld_core::db::{Db, LogFilter, LogRow, LogStream, stream_is_per_node};
 use veld_core::process;
-use veld_core::state::{NodeStatus, RunState};
+use veld_core::state::{GlobalRegistry, NodeStatus, RunState, RunStatus};
 
-use crate::api::{LogLine, LogsPage, LogsQuery, NodeOutputs, SourceFilter, StatusReport};
+use crate::api::{
+    LogLine, LogsPage, LogsQuery, NodeOutputs, RunningRun, SourceFilter, StatusReport,
+};
 use crate::preflight::resolve_run_name;
 
 fn open_db() -> Result<Db, String> {
     Db::open().map_err(|e| format!("Failed to open veld database: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// running runs
+// ---------------------------------------------------------------------------
+
+/// Every environment, across all projects, whose latest run is `running`.
+///
+/// Reads the registry's stored status without probing PIDs: the daemon's health
+/// scan is what flips a dead run to `crashed`, and the overview is a glance, not
+/// a liveness check (`status` does that per run). `starting` and `stopping` are
+/// left out on purpose: they are transitions, not something that is up.
+pub fn running_runs() -> Result<Vec<RunningRun>, String> {
+    let registry = open_db()?
+        .registry()
+        .map_err(|e| format!("Failed to load registry: {e}"))?;
+    Ok(running_in(&registry))
+}
+
+/// [`running_runs`] over an already-loaded registry. Sorted, because the registry
+/// is a `HashMap` and an overview that reshuffles between two calls reads as churn.
+fn running_in(registry: &GlobalRegistry) -> Vec<RunningRun> {
+    let mut out: Vec<RunningRun> = registry
+        .projects
+        .values()
+        .flat_map(|entry| {
+            entry
+                .runs
+                .values()
+                .filter(|run| run.status == RunStatus::Running)
+                .map(|run| RunningRun {
+                    project_name: entry.project_name.clone(),
+                    project_root: entry.project_root.clone(),
+                    name: run.name.clone(),
+                    run_id: run.run_id.to_string(),
+                    status: serde_json::to_value(run.status)
+                        .ok()
+                        .and_then(|v| v.as_str().map(str::to_owned))
+                        .unwrap_or_default(),
+                })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (&a.project_name, &a.project_root, &a.name).cmp(&(
+            &b.project_name,
+            &b.project_root,
+            &b.name,
+        ))
+    });
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -23,7 +75,7 @@ fn open_db() -> Result<Db, String> {
 
 /// The state of one environment's latest run, with liveness checked and the
 /// latest resource sample per node. `name: None` infers the environment the way
-/// `veld status` always did (a sole live one, else a sole one at all).
+/// `veld orchestrator status` always did (a sole live one, else a sole one at all).
 pub fn status(
     project_root: &Path,
     name: Option<String>,
@@ -136,7 +188,7 @@ impl SourceFilter {
     ///
     /// NOTE: this is a hand-maintained mapping onto `veld_core::db::LogStream`
     /// — when a new stream variant is added there, list it here (under `All`
-    /// at minimum) or `veld logs` will never show it.
+    /// at minimum) or `veld orchestrator logs` will never show it.
     fn streams(&self) -> Vec<&'static str> {
         match self {
             // "all" intentionally includes the setup/debug streams too — they
@@ -236,7 +288,7 @@ pub fn logs(q: LogsQuery) -> Result<LogsPage, String> {
             Ok(None) if following => return Ok(gone_page(q.after_id.unwrap_or(0))),
             Ok(None) => {
                 return Err(format!(
-                    "No run matches id prefix '{prefix}' (see `veld runs`)."
+                    "No run matches id prefix '{prefix}' (see `veld orchestrator runs list`)."
                 ));
             }
             Err(e) => return Err(format!("{e}")),
@@ -440,6 +492,41 @@ fn gone_page(after_id: i64) -> LogsPage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_runs_keeps_only_running() {
+        use std::collections::HashMap;
+        use veld_core::state::{RegistryEntry, RegistryRunInfo};
+
+        let run = |name: &str, status| RegistryRunInfo {
+            run_id: uuid::Uuid::new_v4(),
+            name: name.to_owned(),
+            status,
+            urls: HashMap::new(),
+            hostnames: Vec::new(),
+        };
+        let mut registry = GlobalRegistry::default();
+        registry.projects.insert(
+            "/p".to_owned(),
+            RegistryEntry {
+                project_root: "/p".into(),
+                project_name: "p".to_owned(),
+                runs: [
+                    ("dev".to_owned(), run("dev", RunStatus::Running)),
+                    ("old".to_owned(), run("old", RunStatus::Stopped)),
+                    ("bad".to_owned(), run("bad", RunStatus::Crashed)),
+                    ("new".to_owned(), run("new", RunStatus::Starting)),
+                    ("end".to_owned(), run("end", RunStatus::Stopping)),
+                ]
+                .into(),
+            },
+        );
+        let got = running_in(&registry);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].name, "dev");
+        assert_eq!(got[0].project_name, "p");
+        assert_eq!(got[0].status, "running");
+    }
 
     fn names(streams: Vec<&'static str>) -> Vec<String> {
         streams.into_iter().map(|s| s.to_owned()).collect()

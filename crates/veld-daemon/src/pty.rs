@@ -70,7 +70,7 @@
 //! A session's PTY master, its shell and its scrollback belong to a **holder
 //! process** — one per session, `veld-daemon --pty-holder` — which the daemon
 //! talks to over a unix socket. That is what makes a shell survive `veld
-//! update`: the master descriptor is not the daemon's to lose. See
+//! self update`: the master descriptor is not the daemon's to lose. See
 //! [`holder`] for why it is per-session and what must not regress.
 //!
 //! What this module keeps is everything a *client* can observe: the tickets, the
@@ -182,7 +182,7 @@ fn session_cap() -> usize {
 ///
 /// **Not "how long since the socket dropped".** That was the rule until this
 /// clock learned to ask `ide::kept_among`, and it was wrong in the way that
-/// cost the most: a socket goes away when the laptop sleeps, when `veld update`
+/// cost the most: a socket goes away when the laptop sleeps, when `veld self update`
 /// restarts the daemon, and whenever the client's three reconnect attempts are
 /// spent — none of which is the user walking away, and all of which left a live
 /// build being hung up half an hour later under a pane still on screen. A
@@ -748,6 +748,18 @@ impl Session {
     }
 }
 
+/// The ids of the sessions this daemon holds whose shell is still running — the
+/// ones the overview may list an agent for. See `agent_overview::snapshot`.
+pub(crate) async fn live_sessions() -> std::collections::HashSet<String> {
+    SESSIONS
+        .lock()
+        .await
+        .iter()
+        .filter(|(_, s)| s.exited().is_none())
+        .map(|(id, _)| id.clone())
+        .collect()
+}
+
 static SESSIONS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<Session>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
@@ -877,6 +889,10 @@ async fn end_session(id: &str, reason: &str) -> bool {
     }
     forget_naming(id);
     let session = SESSIONS.lock().await.remove(id);
+    // After the removal, not before: `agent_state` records under the registry's lock
+    // and only for a registered session, so once the entry is gone nothing can
+    // re-add the row this clears.
+    super::agent_overview::forget(id);
     let Some(session) = session else {
         // Not in the registry is not the same as not running: [`release_session`]
         // gives a live shell up while its holder keeps serving it. Without this,
@@ -1124,7 +1140,7 @@ pub(super) async fn start_detach_clock(ids: &[String]) {
 ///
 /// Half the question, and the half that says nothing about the user — see
 /// [`reap_detached`], which asks `ide` the other half before ending anything. A
-/// socket drops when the laptop sleeps, when `veld update` restarts the daemon
+/// socket drops when the laptop sleeps, when `veld self update` restarts the daemon
 /// and when the client's few reconnect attempts are spent; none of those is a
 /// window closing, and treating them as one hung up live builds under panes that
 /// were still on screen.
@@ -1145,7 +1161,7 @@ fn is_reapable(detached_since: Option<Instant>, now: Instant, grace: Duration) -
 /// were this process's descriptors and died with it, so the choice was between a
 /// deliberate SIGHUP and the kernel's hangup half a second later with orphaned
 /// grandchildren. Now the masters belong to holder processes, so a daemon
-/// shutdown is invisible to the shells — and `veld update` stops being something
+/// shutdown is invisible to the shells — and `veld self update` stops being something
 /// to schedule around, which is the entire point of the holder split.
 ///
 /// What still ends a shell: an explicit `DELETE /api/pty/sessions/{id}` (the
@@ -1170,8 +1186,8 @@ pub async fn shutdown_sessions() {
 /// Where this instance's holder sockets live.
 ///
 /// The name belongs to `veld_core::instance::pty_dir`, because it has three
-/// readers: this module binds and scans the directory, `veld doctor` reports it,
-/// and `veld uninstall` sweeps it.
+/// readers: this module binds and scans the directory, `veld self doctor` reports it,
+/// and `veld self uninstall` sweeps it.
 #[cfg(not(test))]
 fn pty_dir() -> PathBuf {
     veld_core::instance::pty_dir()
@@ -1207,7 +1223,7 @@ fn socket_for(session_id: &str) -> PathBuf {
 // The predicate that decides whether a path has the shape `socket_for` produces
 // — the gate on anything destructive in `adopt_existing_sessions` — lives in
 // `veld_core::instance`, together with the `holder_sockets_in` scan built on it,
-// because `veld doctor` and `veld uninstall` walk the same directory and have to
+// because `veld self doctor` and `veld self uninstall` walk the same directory and have to
 // apply the same rule. Doctor did not, and connected to anything ending in
 // `.sock`.
 
@@ -2122,7 +2138,7 @@ const SHIM_PATH_PREFIX: &str = concat!(
 ///
 /// Deliberately small — a pane has no run, no node and no ports, so most of the
 /// `${veld.*}` family would resolve to nothing here. The names must be exactly
-/// `veld_core::ide::PANE_BUILTINS`, which is what `veld lint` accepts: a name
+/// `veld_core::ide::PANE_BUILTINS`, which is what `veld orchestrator lint` accepts: a name
 /// this populates but lint rejects is unreachable, and a name lint accepts but
 /// this omits produces a pane that passes lint and then dies at spawn with
 /// "command could not be resolved". `pane_context_populates_every_lintable_name`
@@ -2179,7 +2195,7 @@ pub(crate) fn worktree_builtins(
     builtins.insert("root".to_owned(), worktree_path.display().to_string());
 
     builtins.insert("branch".to_owned(), veld_core::url::slugify(branch));
-    // Unslugified, and `veld lint` refuses it in `shell` for exactly that reason
+    // Unslugified, and `veld orchestrator lint` refuses it in `shell` for exactly that reason
     // (`ide::SHELL_REFUSED_BUILTINS`) — this function has no notion of `argv`
     // versus `shell`, so that refusal has to live at lint time, not here.
     //
@@ -3037,7 +3053,7 @@ async fn open_url(
     // Refused rather than answered with `system`: a caller sending a non-web URL has
     // a bug, and reporting "opened in the system browser" would hide it. The one
     // place a non-web argument is *expected* — a shim invoked as `open report.pdf` —
-    // never gets this far, because `veld open-url` execs the real tool without asking.
+    // never gets this far, because `veld ide open-url` execs the real tool without asking.
     let Some(web) = veld_core::ide::parse_web_url(&body.url) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -3313,7 +3329,7 @@ fn relative_within(root: &str, path: &str) -> Option<String> {
 #[serde(deny_unknown_fields)]
 struct AgentStateRequest {
     /// Which agent reported. A name, not a schema: the vendor's payload is parsed on
-    /// the CLI side (`veld agent-state`) so that a second tool is a new mapping
+    /// the CLI side (`veld agent state`) so that a second tool is a new mapping
     /// function and a hook installer, with nothing to change here.
     tool: String,
     /// One of `veld_core::agent::State`'s spellings, minus `unknown` — the CLI does not
@@ -3373,7 +3389,7 @@ enum Naming {
 
 /// The naming nudge's state, per terminal session.
 ///
-/// Claude only: its hooks (the wrapper's `veld agent-state`, the mod's `/naming`) are
+/// Claude only: its hooks (the wrapper's `veld agent state`, the mod's `/naming`) are
 /// the ones that can add to a prompt and refuse a stop. Codex and Pi are told the rule
 /// in their context and nothing holds them to it.
 ///
@@ -3476,17 +3492,22 @@ fn naming_verdict(session: &str, turn: NamingTurn) -> Option<NamingVerdict> {
 /// Report that a coding agent in this terminal is working, waiting on the user, or
 /// done.
 ///
-/// The daemon is a **relay**, not a store. It resolves the session to a worktree —
-/// which is the one thing only it can do, since a hook knows a terminal and the rail
-/// is keyed on worktrees — and fans the event out to every connected client. Nothing is
-/// persisted and nothing is queued for a client that is not there: an inbox event is
-/// only meaningful to a window that can render it, and one that arrives half an hour
-/// late is worse than one that never arrives.
+/// The daemon resolves the session to a worktree — which is the one thing only it can
+/// do, since a hook knows a terminal and the rail is keyed on worktrees — and fans the
+/// event out to every connected client. Nothing is queued for a client that is not
+/// there: an inbox event is only meaningful to a window that can render it, and one
+/// that arrives half an hour late is worse than one that never arrives. It also keeps
+/// the session's *latest* state in memory ([`super::agent_overview`]) for the bare
+/// `veld` overview — current state, not events, and only for sessions this daemon
+/// holds, since a released one has no end here to clear its row at.
 ///
 /// CSRF-gated, like `open_url` and for the same reason: without the gate any page in a
 /// browser could push a "needs your attention" badge into a Veld window on the
 /// developer's machine. The generated hooks send the header (they go through the
-/// `veld` CLI, which sets it).
+/// `veld` CLI, which sets it). Host-checked as well, since the state now outlives the
+/// broadcast: a page that DNS-rebinds onto the daemon's port is same-origin and can
+/// send the header, and would otherwise plant "needs you" rows in the overview. The
+/// hooks call `127.0.0.1`, which the check accepts.
 async fn agent_state(
     headers: HeaderMap,
     Path(id): Path<String>,
@@ -3494,6 +3515,8 @@ async fn agent_state(
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
@@ -3526,6 +3549,17 @@ async fn agent_state(
     let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
     let state = reported_state(state, naming);
     let held = body.held && state == veld_core::agent::State::Blocked;
+    // Only a session this daemon holds: a released one has no end here to clear the
+    // entry at, so recording it would leave a row nothing ever removes. Under the
+    // registry's lock and re-checked there, because the session can end between the
+    // lookup above and here; `end_session` and `release_session` clear the row after
+    // removing the entry, so a record either lands before that clear or not at all.
+    if registered.is_some() {
+        let sessions = SESSIONS.lock().await;
+        if sessions.contains_key(&id) {
+            super::agent_overview::record(&id, worktree_id, tool, state, held);
+        }
+    }
     super::ide::broadcast_agent_state(worktree_id, &id, tool, state, held);
     // 202: the event has been handed to the clients that are connected, which is not
     // the same as a badge appearing. The body is only ever the naming nudge, for the
@@ -3651,7 +3685,7 @@ async fn paste_csrf_layer(
 ///
 /// `~/.veld` is the user's own directory — the one that already holds sockets,
 /// holder directories and `spawn-logs` — so nobody else can create the path
-/// first, and `veld uninstall` removing it is correct for a scratch file too.
+/// first, and `veld self uninstall` removing it is correct for a scratch file too.
 /// The "OS reaps it" argument it was rejected for was never load-bearing:
 /// [`prune_pastes`] is what actually reaps these, on the write path.
 ///
@@ -4078,7 +4112,7 @@ static HELPER_WEB_PORTS: std::sync::RwLock<Option<(u16, u16)>> = std::sync::RwLo
 
 /// Keep [`HELPER_WEB_PORTS`] current. Spawned once by the daemon at startup.
 ///
-/// **Polls rather than reading once, because of the order `veld setup` does
+/// **Polls rather than reading once, because of the order `veld self setup` does
 /// things in.** It reinstalls (and so restarts) the daemon in step 4, installs the
 /// helper in step 5, and writes the new mode to `setup.json` after that
 /// (`veld/src/commands/setup/privileged.rs`) — so a fresh daemon's first look at
@@ -4094,7 +4128,7 @@ static HELPER_WEB_PORTS: std::sync::RwLock<Option<(u16, u16)>> = std::sync::RwLo
 pub async fn track_helper_ports() {
     // Faster while nothing is known (a cold boot races the helper's own start),
     // then slow: this is a status call on a unix socket, not free, and the answer
-    // changes only when someone re-runs `veld setup`.
+    // changes only when someone re-runs `veld self setup`.
     const UNKNOWN: Duration = Duration::from_secs(5);
     const KNOWN: Duration = Duration::from_secs(60);
     loop {
@@ -4120,9 +4154,9 @@ pub async fn track_helper_ports() {
 /// The HTTPS and HTTP ports the dashboard is served on.
 ///
 /// The helper's answer when there is one, because the setup mode and the helper
-/// **can disagree** — a helper started by hand, a `veld setup privileged` that
+/// **can disagree** — a helper started by hand, a `veld self setup privileged` that
 /// died after writing the mode file, or a stray user helper on the high pair while
-/// the privileged LaunchDaemon is down, which `veld doctor` has a check for. The
+/// the privileged LaunchDaemon is down, which `veld self doctor` has a check for. The
 /// mode is the fallback for the window before the first status lands, and for a
 /// daemon running with no helper at all.
 pub(crate) fn dashboard_ports() -> (u16, u16) {
@@ -4142,7 +4176,7 @@ pub(crate) fn dashboard_ports() -> (u16, u16) {
 /// a process that merely happens to be running.
 fn ports_for_mode(mode: Option<&str>) -> (u16, u16) {
     match mode {
-        // `veld setup unprivileged`, and the auto-bootstrap that writes
+        // `veld self setup unprivileged`, and the auto-bootstrap that writes
         // `{"mode":"auto"}` — both run Caddy on the high pair.
         Some("unprivileged") | Some("auto") => (
             veld_core::instance::UNPRIVILEGED_HTTPS_PORT,
@@ -4167,7 +4201,7 @@ fn ports_for_mode(mode: Option<&str>) -> (u16, u16) {
 /// is weaker in itself — the name resolves on loopback, so nothing is on the path —
 /// but because an origin is only as trustworthy as the port it names: a port in the
 /// unprivileged range that Caddy is not currently bound to (before the helper
-/// starts, during a `veld update`, after a crash) can be bound by any process on
+/// starts, during a `veld self update`, after a crash) can be bound by any process on
 /// the machine, which then serves a page holding an allowlisted origin and can
 /// reverse-proxy `/api` to make [`mint_ticket`]'s header check same-origin.
 ///
@@ -4180,8 +4214,8 @@ fn ports_for_mode(mode: Option<&str>) -> (u16, u16) {
 /// lowered.
 ///
 /// This costs the no-sudo install a plaintext dashboard origin on 18080. Caddy does
-/// serve the dashboard there, and nothing advertises it (`veld ui`, the share join
-/// base, `veld doctor` and the setup tip all print `https://…:18443`), so nobody
+/// serve the dashboard there, and nothing advertises it (`veld ide dashboard`, the share join
+/// base, `veld self doctor` and the setup tip all print `https://…:18443`), so nobody
 /// arrives by typing a hostname — which was the whole reason the plaintext surface
 /// mattered. A page that *does* arrive there is now told rather than left to
 /// wonder: no control socket means the UI's channel banner
@@ -5313,6 +5347,11 @@ async fn release_session(session: &Arc<Session>) {
             .is_some_and(|s| Arc::ptr_eq(s, session))
         {
             sessions.remove(&session.id);
+            // No longer held here, so no longer ours to vouch for: the overview
+            // must not keep listing an agent this daemon can neither hear nor
+            // outlive. Inside the lock, after the removal, for the race
+            // `agent_state` describes.
+            super::agent_overview::forget(&session.id);
         }
     }
     // `send_replace` for the reason `exit` documents: with no socket attached
@@ -6475,7 +6514,7 @@ mod tests {
         }
     }
 
-    /// `veld lint` and the spawn path must agree on the pane variable scope,
+    /// `veld orchestrator lint` and the spawn path must agree on the pane variable scope,
     /// exactly.
     ///
     /// Two hand-maintained lists: `ide::PANE_BUILTINS` (what lint accepts) and
@@ -6536,7 +6575,7 @@ mod tests {
 
     /// The third of the same pair, for a pane's `sessions` lister.
     ///
-    /// `PANE_SESSIONS_BUILTINS` is what `veld lint` accepts and
+    /// `PANE_SESSIONS_BUILTINS` is what `veld orchestrator lint` accepts and
     /// `pane_sessions::list` is what resolves them. It is `PANE_BUILTINS` minus
     /// `pane.token` — the lister runs to decide *which* token there will be — so
     /// it is neither of the two scopes above and needs its own gate. The failure
@@ -6572,7 +6611,7 @@ mod tests {
     /// The same gate for `ide.extensions`, whose scope is one name-family narrower.
     ///
     /// `worktree_builtins` is what *resolves* and `EXTENSION_BUILTINS` is what
-    /// `veld lint` *accepts*, and they are a second hand-maintained pair. Drift
+    /// `veld orchestrator lint` *accepts*, and they are a second hand-maintained pair. Drift
     /// either way is silent and confusing in opposite directions: a name in
     /// `worktree_builtins` but not the allowlist is a lint error for a variable
     /// that would have resolved fine, and the reverse is a badge that lints clean
@@ -6605,7 +6644,7 @@ mod tests {
         );
     }
 
-    /// `veld lint` accepts `${veld.branch_raw}` in `argv` because git refuses a
+    /// `veld orchestrator lint` accepts `${veld.branch_raw}` in `argv` because git refuses a
     /// leading `-` only in the `git branch` porcelain, not in the ref grammar —
     /// `git switch -- -foo` really does produce a checked-out branch named
     /// `-foo`, and it would read as a flag to whatever `argv` command uses it.
@@ -6914,7 +6953,7 @@ mod tests {
     ///
     /// Listing the unprivileged pair's HTTP port was the first version of this fix
     /// and it opens a window: Caddy is not bound to 18080 before the helper starts,
-    /// during a `veld update`, or after a crash, and `veld.localhost` resolves to
+    /// during a `veld self update`, or after a crash, and `veld.localhost` resolves to
     /// loopback — so any process could bind it, serve a page holding an allowlisted
     /// origin, and reverse-proxy `/api` to make `mint_ticket`'s header check
     /// same-origin. 443/80 cannot be taken that way without root — see
@@ -7331,7 +7370,7 @@ mod tests {
         // Checked before the session is looked up and before the database is
         // touched, so these need neither. A caller sending one of these has a bug,
         // and answering "opened in the system browser" would hide it — the one place
-        // a non-web argument is expected is `veld open-url` standing in for `open`,
+        // a non-web argument is expected is `veld ide open-url` standing in for `open`,
         // which execs the real tool without asking the daemon at all.
         for body in [
             r#"{"url":"file:///etc/passwd"}"#,
@@ -8441,10 +8480,10 @@ mod tests {
         ///
         /// The daemon's half of `holder::tests::
         /// a_probe_connection_does_not_take_a_terminal_from_its_daemon`, and the
-        /// level the bug was actually experienced at: `veld doctor` counts live
+        /// level the bug was actually experienced at: `veld self doctor` counts live
         /// holders by connecting to each socket in the directory and closing
         /// again. While any accepted connection displaced the attached daemon, one
-        /// `veld doctor` disconnected every terminal on the machine — the daemon
+        /// `veld self doctor` disconnected every terminal on the machine — the daemon
         /// read EOF from the holder, published exit code 1 for shells that were
         /// still running, and the reaper hung those shells up 30 minutes later.
         /// The shape here is exactly doctor's: connect, drop, count.

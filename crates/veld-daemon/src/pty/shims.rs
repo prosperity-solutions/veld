@@ -61,7 +61,7 @@
 //!
 //! Nothing of the user's is edited, wrapped, or read twice. Everything else — fish,
 //! nushell, and a bash that failed the probe — keeps `$BROWSER` and the documented
-//! `$VELD_SHIM_DIR` one-liner, and `veld doctor` says so rather than leaving it
+//! `$VELD_SHIM_DIR` one-liner, and `veld self doctor` says so rather than leaving it
 //! silent.
 //!
 //! # Rewritten every daemon start, never trusted from disk
@@ -167,7 +167,7 @@ impl SessionOptions {
 /// a detail. It is documented as turning that behaviour off, so with it off veld must
 /// not be in the path for it at all: no `$BROWSER`, and no `open`/`xdg-open` on
 /// `PATH`. The first version gated only the `ZDOTDIR` block, which left the off
-/// switch still routing every browser launch through `veld open-url` to the daemon —
+/// switch still routing every browser launch through `veld ide open-url` to the daemon —
 /// a round trip, a stderr line per open, and a login URL (one-time tokens included)
 /// leaving the process — while the settings UI greyed the *other* switch out and so
 /// could not turn off the thing that was still running.
@@ -182,7 +182,7 @@ impl SessionOptions {
 /// which is what keeps the three switches independent without three files.
 ///
 /// Only `VELD_PTY_SESSION` survives everything being off, and it is not part of any
-/// of the behaviours: `veld open-url` run deliberately, by a person or an agent,
+/// of the behaviours: `veld ide open-url` run deliberately, by a person or an agent,
 /// still needs to know which terminal it is in.
 ///
 /// Empty except for `VELD_PTY_SESSION` when the shim directory could not be
@@ -354,7 +354,7 @@ fn session_env_in(
         env.insert("ENV".to_owned(), bash_handoff_file.display().to_string());
     }
     if browser {
-        // Saved before it is replaced, so the fall-through in `veld open-url` can give
+        // Saved before it is replaced, so the fall-through in `veld ide open-url` can give
         // a child the browser the user actually configured, rather than handing it the
         // shim again — which is a loop, not a fallback.
         //
@@ -751,7 +751,7 @@ fn prepare() -> std::io::Result<PathBuf> {
 /// new `VELD_INSTALL_DIR`, an uninstall, an update interrupted between the delete and
 /// the copy. Left in place, `$BROWSER` points at a script whose only act is to exec a
 /// file that is gone, and it stays that way forever: [`prepare_in`] is the only thing
-/// that rewrites them and it is never reached in this state, so `veld doctor` would
+/// that rewrites them and it is never reached in this state, so `veld self doctor` would
 /// keep reporting the dangling path and keep advising a restart that cannot help.
 /// Removing them is the state the feature already handles — no `veld-open`, so
 /// [`session_env`] injects nothing and a shell's `open` and `$BROWSER` are the
@@ -973,7 +973,7 @@ fn set_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 ///   generation time. An upgrade or an uninstall can remove it while a shell is
 ///   open, and `open` must keep working when that happens.
 /// - The fallback `exec`s the real tool with `"$@"` — the **original** argv,
-///   unexamined. Deciding what is and is not a URL is `veld open-url`'s job, in
+///   unexamined. Deciding what is and is not a URL is `veld ide open-url`'s job, in
 ///   Rust, where it is tested; a shell script that tried would be a second
 ///   implementation of it.
 fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
@@ -982,16 +982,16 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
     out.push_str(GENERATED_HEADER);
     out.push('\n');
     out.push_str(
-        "# Routes a single http(s) URL to a Veld browser pane. See `veld open-url --help`.\n",
+        "# Routes a single http(s) URL to a Veld browser pane. See `veld ide open-url --help`.\n",
     );
     // **Capability is probed, never inferred from an exit status**, and both halves of
     // that matter:
     //
-    // - `-x` alone is not enough. A `veld` that predates `open-url` (a rollback, or the
-    //   window mid-`veld update`, which installs with a plain `cp` in place so the file
+    // - `-x` alone is not enough. A `veld` that predates `ide open-url` (a rollback, or the
+    //   window mid-`veld self update`, which installs with a plain `cp` in place so the file
     //   is briefly a truncated executable) is executable and cannot serve the request.
     // - The status cannot tell us which happened. Inferring "did not understand" from
-    //   clap's usage status 2 was wrong in both directions: `veld open-url` **`exec`s**
+    //   clap's usage status 2 was wrong in both directions: `veld ide open-url` **`exec`s**
     //   the real opener on every fall-through, so the *opener's* status becomes this
     //   command's status — and `xdg-open` documents 2 as "a file did not exist", which
     //   would make the shim run the real opener a second time. A double invocation is
@@ -1004,8 +1004,8 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
     // and costs one extra spawn on a path a human just triggered. `exec` is restored,
     // so nothing downstream can run twice.
     out.push_str(&format!(
-        "if [ -x {cli} ] && {cli} open-url --help >/dev/null 2>&1; then\n  \
-         exec {cli} open-url --tool {flag} -- \"$@\"\nfi\n",
+        "if [ -x {cli} ] && {cli} ide open-url --help >/dev/null 2>&1; then\n  \
+         exec {cli} ide open-url --tool {flag} -- \"$@\"\nfi\n",
         cli = quote(cli),
         flag = tool.flag(),
     ));
@@ -1094,7 +1094,7 @@ fn script(tool: Tool, cli: &Path, real: Option<&Path>) -> String {
 ///    installed daemon and a dev one, since `pty_dir()` is keyed on the daemon port — each
 ///    skip their own and `exec` the other's, forever. Reproduced. A hand-copied or
 ///    symlinked wrapper is the same bug by another route. So there is also an exported
-///    **counter** (`VELD_AGENT_SHIM_DEPTH`), the shape `veld open-url` already uses for the
+///    **counter** (`VELD_AGENT_SHIM_DEPTH`), the shape `veld ide open-url` already uses for the
 ///    same reason: a counter rather than a flag, so a legitimate nested launch (an agent
 ///    invoking the agent through its own shell tool) still works while a loop stops at two.
 /// 5. **Fail open everywhere else** — with the depth counter above as the second and last
@@ -1126,7 +1126,7 @@ fn agent_script(
         format!("\"\" | -* | {extra_first_words}")
     };
     // The one place `SettingsFile` and `ConfigOverride` actually differ: whether
-    // `agent-settings`'s stdout names something that has to exist on disk before it is
+    // `agent settings`'s stdout names something that has to exist on disk before it is
     // safe to hand to the real binary, versus a value that must merely be *shaped*
     // right. See `veld_core::agent::Injection`.
     let (file_check, value_guard) = match injection {
@@ -1180,7 +1180,7 @@ if [ -n "$veld_prompt_file" ]; then
   # the agent starts bare, which is the right answer. A file that is gone, or a CLI
   # that fails, is the same nothing.
   if [ -n "$veld_prompt" ]; then
-    veld_prompt=$({cli} agent-prompt --take "$veld_prompt_file" 2>/dev/null) || veld_prompt=
+    veld_prompt=$({cli} agent prompt --take "$veld_prompt_file" 2>/dev/null) || veld_prompt=
   fi
   # LAST, after `--`: a prompt that begins with `-` is not a flag, and one after a
   # multi-value flag such as `--add-dir <dirs...>` is not another directory.
@@ -1248,7 +1248,7 @@ unset veld_prompt veld_prompt_file
 {header}
 # Wraps `{name}` so Veld's window learns when it is waiting on you, and so the agent
 # knows it is in a Veld terminal. Injects nothing unless VELD_AGENT_HOOKS or
-# VELD_AGENT_CONTEXT is set. See `veld agent-settings --help`.
+# VELD_AGENT_CONTEXT is set. See `veld agent settings --help`.
 
 # This script's own PHYSICAL directory. Two sources, no external commands: the baked
 # path (this file is rewritten every daemon start) and `$0`, whose prefix is stripped by
@@ -1277,7 +1277,7 @@ fi
 # shim directories on one PATH (an installed daemon and a dev one — `pty_dir()` is keyed on
 # the daemon port) each skip their own and resolve the other's, and exec each other
 # forever. Reproduced. A hand-copied or symlinked wrapper is the same bug by another route.
-# `veld open-url` learned this the expensive way — see VELD_OPEN_URL_DEPTH, measured at
+# `veld ide open-url` learned this the expensive way — see VELD_OPEN_URL_DEPTH, measured at
 # ~3,800 execs in five seconds — and its conclusion applies verbatim: a guard whose failure
 # mode is a fork bomb has to count.
 #
@@ -1379,12 +1379,12 @@ if [ -n "$veld_inject" ]; then
   #
   # Backgrounded and fully redirected, so it adds nothing to the launch: the child
   # outlives the `exec` below, and its stdio must not be the agent's terminal.
-  {cli} agent-state --tool {flag} --launched >/dev/null 2>&1 &
+  {cli} agent state --tool {flag} --launched >/dev/null 2>&1 &
   # The CLI computes the value and prints it: a file's path (Claude) or a literal
   # `-c` value (Codex). Generating either with correct escaping in POSIX sh is not
   # something to hand-roll, and the daemon must not be in this path at all — an agent
   # launch cannot depend on an HTTP round trip.
-  veld_settings=$({cli} agent-settings --tool {flag} 2>/dev/null) || veld_settings=
+  veld_settings=$({cli} agent settings --tool {flag} 2>/dev/null) || veld_settings=
 {value_guard}  if [ -n "$veld_settings" ]{file_check}; then
     exec "$veld_real" {inject_flag} "$veld_settings" "$@"
   fi
@@ -1450,7 +1450,7 @@ fn sh_word(s: &str) -> String {
 ///
 /// The resolution lives in [`veld_core::paths::cli_for_exe`] — a sibling `veld`
 /// first, then the install prefix's `bin/` when this daemon is the installed one —
-/// because `veld doctor` reports on the outcome and the two must not have separate
+/// because `veld self doctor` reports on the outcome and the two must not have separate
 /// ideas about where a CLI is. "Sibling only" was that separate idea: it is
 /// satisfiable in a build tree and in no install at all, since the release splits
 /// the CLI into `<prefix>/bin` and the daemon into `<prefix>/lib/veld`. Every
@@ -1477,7 +1477,7 @@ mod tests {
         // is open must not break `open`.
         assert!(body.contains("[ -x '/usr/local/bin/veld' ]"), "{body}");
         // Capability is **probed**, not inferred from an exit status: a `veld` that
-        // cannot serve `open-url` must fall through, and a status-based rule got that
+        // cannot serve `ide open-url` must fall through, and a status-based rule got that
         // wrong in both directions (see `script`).
         assert!(
             body.contains("open-url --help >/dev/null 2>&1"),
@@ -1491,7 +1491,7 @@ mod tests {
         // And with the probe in place the call is an `exec` again, so nothing
         // downstream can be invoked twice.
         assert!(
-            body.contains("exec '/usr/local/bin/veld' open-url --tool open -- \"$@\""),
+            body.contains("exec '/usr/local/bin/veld' ide open-url --tool open -- \"$@\""),
             "{body}"
         );
         // The original argv reaches the real tool unexamined.
@@ -1660,7 +1660,7 @@ mod tests {
         // Everything off gates the WHOLE environment. Off means veld is not in the
         // shell at all — no `$BROWSER` round trip, nothing in the startup — which is
         // what the documentation promises. Only the session id survives, and that
-        // is for `veld open-url` invoked deliberately.
+        // is for `veld ide open-url` invoked deliberately.
         let off = session_env(
             "s",
             "/bin/zsh",
@@ -2084,7 +2084,7 @@ mod tests {
         let real_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&real_dir).unwrap();
 
-        // A stand-in `veld` whose `agent-settings` prints the path of a file it wrote,
+        // A stand-in `veld` whose `agent settings` prints the path of a file it wrote,
         // exactly as the real subcommand does.
         let settings = tmp.path().join("ephemeral.json");
         std::fs::write(&settings, "{}").unwrap();
@@ -2092,7 +2092,7 @@ mod tests {
         std::fs::write(
             &fake_cli,
             format!(
-                "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf '%s\\n' {}\n",
+                "#!/bin/sh\n[ \"$1 $2\" = \"agent settings\" ] || exit 2\nprintf '%s\\n' {}\n",
                 quote(&settings)
             ),
         )
@@ -2199,7 +2199,7 @@ mod tests {
     /// The launch prompt, run for real: which launches take it, where it goes in the
     /// argv, and that the variable never reaches the agent — taken or not.
     ///
-    /// The stand-in `veld` claims the file the way the real `agent-prompt --take` does
+    /// The stand-in `veld` claims the file the way the real `agent prompt --take` does
     /// (print it, remove it, fail if it is gone), so "taken" is observable as the file
     /// disappearing and "left for the window" as it staying put. Its tools are named by
     /// absolute path: the wrapper runs with a cleared environment, PATH included.
@@ -2217,9 +2217,9 @@ mod tests {
             &fake_cli,
             format!(
                 "#!/bin/sh\n\
-                 case \"$1\" in\n\
-                 agent-settings) printf '%s\\n' {} ;;\n\
-                 agent-prompt) [ \"$2\" = --take ] && [ -f \"$3\" ] || exit 1; /bin/cat \"$3\"; /bin/rm \"$3\" ;;\n\
+                 case \"$1 $2\" in\n\
+                 \"agent settings\") printf '%s\\n' {} ;;\n\
+                 \"agent prompt\") [ \"$3\" = --take ] && [ -f \"$4\" ] || exit 1; /bin/cat \"$4\"; /bin/rm \"$4\" ;;\n\
                  *) exit 2 ;;\n\
                  esac\n",
                 quote(&settings)
@@ -2340,12 +2340,12 @@ mod tests {
         let real_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&real_dir).unwrap();
 
-        // A stand-in `veld` whose `agent-settings --tool codex` prints a literal value,
+        // A stand-in `veld` whose `agent settings --tool codex` prints a literal value,
         // exactly as the real subcommand does — no file behind it.
         let fake_cli = tmp.path().join("veld");
         std::fs::write(
             &fake_cli,
-            "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf 'notify=[\"/opt/veld/bin/veld\",\"agent-state\",\"--tool\",\"codex\",\"--session\",\"pane-1\"]\\n'\n",
+            "#!/bin/sh\n[ \"$1 $2\" = \"agent settings\" ] || exit 2\nprintf 'notify=[\"/opt/veld/bin/veld\",\"agent\",\"state\",\"--tool\",\"codex\",\"--session\",\"pane-1\"]\\n'\n",
         )
         .unwrap();
         set_mode(&fake_cli, 0o755).unwrap();
@@ -2376,7 +2376,7 @@ mod tests {
         // `[ -f ... ]` check, unlike `claude`'s `--settings`: there is no file here.
         assert_eq!(
             run(&[]).trim(),
-            r#"REAL -c notify=["/opt/veld/bin/veld","agent-state","--tool","codex","--session","pane-1"]"#
+            r#"REAL -c notify=["/opt/veld/bin/veld","agent","state","--tool","codex","--session","pane-1"]"#
         );
         // The user's own `-c`/`--config` wins outright, in every spelling.
         for args in [
@@ -2408,7 +2408,7 @@ mod tests {
             vec!["fork", "--last"],
         ] {
             let expected = format!(
-                r#"REAL -c notify=["/opt/veld/bin/veld","agent-state","--tool","codex","--session","pane-1"] {}"#,
+                r#"REAL -c notify=["/opt/veld/bin/veld","agent","state","--tool","codex","--session","pane-1"] {}"#,
                 args.join(" ")
             );
             assert_eq!(run(&args).trim(), expected.trim(), "{args:?}");
@@ -2435,7 +2435,7 @@ mod tests {
         std::fs::write(
             &fake_cli,
             format!(
-                "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf '%s\\n' {}\n",
+                "#!/bin/sh\n[ \"$1 $2\" = \"agent settings\" ] || exit 2\nprintf '%s\\n' {}\n",
                 quote(&settings)
             ),
         )
@@ -2496,7 +2496,7 @@ mod tests {
         }
     }
 
-    /// A malformed value from `agent-settings` — not just an empty one — must not
+    /// A malformed value from `agent settings` — not just an empty one — must not
     /// reach the real binary. Codex parses a broken `-c` value as a literal string
     /// rather than rejecting it, so `[ -n ]` alone would hand it a `notify` set to
     /// garbage instead of failing open the way a missing `--settings` file does.
@@ -2507,12 +2507,12 @@ mod tests {
         let real_dir = tmp.path().join("bin");
         std::fs::create_dir_all(&real_dir).unwrap();
 
-        // A `veld` whose `agent-settings` prints something non-empty but NOT shaped
+        // A `veld` whose `agent settings` prints something non-empty but NOT shaped
         // like `notify=...` — the failure this guard exists for.
         let fake_cli = tmp.path().join("veld");
         std::fs::write(
             &fake_cli,
-            "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 2\nprintf 'not-notify-garbage\\n'\n",
+            "#!/bin/sh\n[ \"$1 $2\" = \"agent settings\" ] || exit 2\nprintf 'not-notify-garbage\\n'\n",
         )
         .unwrap();
         set_mode(&fake_cli, 0o755).unwrap();
@@ -2555,7 +2555,7 @@ mod tests {
         std::fs::create_dir_all(&real_dir).unwrap();
         std::fs::create_dir_all(&home).unwrap();
 
-        // A `veld` whose `agent-settings` prints a settings file's path — enough for
+        // A `veld` whose `agent settings` prints a settings file's path — enough for
         // Claude's hooks half; Codex's value guard drops it, which no case below
         // turns hooks on for.
         let settings = tmp.path().join("ephemeral.json");
@@ -2564,7 +2564,7 @@ mod tests {
         std::fs::write(
             &fake_cli,
             format!(
-                "#!/bin/sh\n[ \"$1\" = agent-settings ] || exit 0\nprintf '%s\\n' {}\n",
+                "#!/bin/sh\n[ \"$1 $2\" = \"agent settings\" ] || exit 0\nprintf '%s\\n' {}\n",
                 quote(&settings)
             ),
         )
@@ -2828,7 +2828,7 @@ exit 0
     ///
     /// An agent invoking the agent through its own shell tool is depth 1 and must be
     /// allowed; a flag instead of a counter would have refused it, which is why
-    /// `veld open-url` uses a counter too.
+    /// `veld ide open-url` uses a counter too.
     #[test]
     fn a_nested_launch_is_allowed_but_a_third_level_is_not() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2867,7 +2867,7 @@ exit 0
         let out = run(Some("2"));
         assert_eq!(out.status.code(), Some(127));
         // A garbled value reads as zero rather than as "infinitely deep", so it can never
-        // refuse a legitimate launch — the same rule `veld open-url`'s guard follows.
+        // refuse a legitimate launch — the same rule `veld ide open-url`'s guard follows.
         assert!(
             String::from_utf8_lossy(&run(Some("banana")).stdout).contains("REAL"),
             "an unparseable depth must not block a launch"
@@ -3559,7 +3559,7 @@ exit
 
     #[test]
     fn the_session_id_is_always_exported() {
-        // Even when no shim directory could be prepared: `veld open-url` run by
+        // Even when no shim directory could be prepared: `veld ide open-url` run by
         // hand still needs to know which terminal it is in.
         let env = session_env(
             "abc-123",

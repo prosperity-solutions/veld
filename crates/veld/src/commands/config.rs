@@ -103,7 +103,7 @@ fn machine_var<'a>(
     }
 }
 
-/// `veld config vars [--json]`
+/// `veld orchestrator vars list [--json]`
 ///
 /// Every machine-overridable var, its effective value, and **which scope that
 /// value came from**. The scope column is not decoration: a value arriving
@@ -210,12 +210,14 @@ pub async fn list_vars(json: bool) -> i32 {
         .iter()
         .any(|(_, m, o)| o.is_none() && m.default.is_none())
     {
-        eprintln!("`unset` vars have no default — `veld start` will ask, or refuse if it cannot.");
+        eprintln!(
+            "`unset` vars have no default — `veld orchestrator start` will ask, or refuse if it cannot."
+        );
     }
     0
 }
 
-/// `veld config set <name> <value|--env|--file|--shell> [--worktree]`
+/// `veld orchestrator vars set <name> <value|--env|--file|--shell> [--worktree]`
 pub async fn set_var(
     name: &str,
     value: Option<&str>,
@@ -255,7 +257,7 @@ pub async fn set_var(
         (None, None, None, None) => {
             output::print_error(
                 &format!(
-                    "no value given. Pass one literally (`veld config set {name} <value>`) or \
+                    "no value given. Pass one literally (`veld orchestrator vars set {name} <value>`) or \
                      as a pointer (`--env NAME`, `--file PATH`, `--shell 'command'`)"
                 ),
                 json,
@@ -342,7 +344,7 @@ pub async fn set_var(
     0
 }
 
-/// `veld config unset <name> [--worktree]`
+/// `veld orchestrator vars unset <name> [--worktree]`
 pub async fn unset_var(name: &str, worktree: bool, json: bool) -> i32 {
     let Some(ctx) = var_context(json) else {
         return 1;
@@ -380,7 +382,7 @@ pub async fn unset_var(name: &str, worktree: bool, json: bool) -> i32 {
     }
     if removed {
         output::print_success(&format!("cleared {name} ({scope} scope)"));
-        output::print_info("Run `veld config vars` to see what it falls back to.");
+        output::print_info("Run `veld orchestrator vars list` to see what it falls back to.");
     } else {
         output::print_info(&format!(
             "{name} had no {scope}-scoped answer on this machine; nothing to clear."
@@ -389,7 +391,7 @@ pub async fn unset_var(name: &str, worktree: bool, json: bool) -> i32 {
     0
 }
 
-/// `veld config [--path] [--why <pointer>] [--json]`
+/// `veld orchestrator config [--path] [--why <pointer>] [--json]`
 ///
 /// Print the resolved veld.json contents. With `--path`, print only the file
 /// path. With `--why`, print one effective value and where it came from.
@@ -450,7 +452,7 @@ pub async fn run(path_only: bool, files: bool, why: Option<String>, json: bool) 
     }
 }
 
-/// `veld config --why nodes.api.variants.dev.env.DATABASE_URL`
+/// `veld orchestrator config --why nodes.api.variants.dev.env.DATABASE_URL`
 ///
 /// Prints the effective value and its single definition site. With one node per
 /// file plus the node→variant cascade there are at most three layers, so this
@@ -458,7 +460,7 @@ pub async fn run(path_only: bool, files: bool, why: Option<String>, json: bool) 
 /// and the whole point of "deduplicate values, never structure" is that there is
 /// exactly one place to look.
 ///
-/// A secret is **never** resolved here: `veld config` prints a redacted
+/// A secret is **never** resolved here: `veld orchestrator config` prints a redacted
 /// placeholder and there is deliberately no flag that prints a resolved secret.
 fn explain(config: &VeldConfig, pointer: &str, json: bool) -> i32 {
     let parts: Vec<&str> = pointer.split('.').collect();
@@ -567,7 +569,7 @@ fn explain(config: &VeldConfig, pointer: &str, json: bool) -> i32 {
     0
 }
 
-/// `veld config --files`
+/// `veld orchestrator config --files`
 ///
 /// Lists each include glob, the files it matched, and the nodes each defines.
 ///

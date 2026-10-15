@@ -629,7 +629,7 @@ fn resolve_servable(root: &Path, path: &str) -> Option<(PathBuf, &'static str)> 
 ///   is what `dev_trusted_origins` reads.
 ///
 /// A test daemon sets `VELD_DB_PATH`, `VELD_PTY_DIR` and a random port, and none of
-/// these. `VELD_PTY_DIR` is deliberately *not* the signal: `veld doctor` tells real
+/// these. `VELD_PTY_DIR` is deliberately *not* the signal: `veld self doctor` tells real
 /// users to set it when their socket path is too long, and gating on it would switch
 /// the feature off for them silently.
 fn instance_is_addressable() -> bool {

@@ -206,7 +206,7 @@ After this release:
 - helpers still on the old release accept it via slot 0 (the original key), install
   it, and relaunch onto it — nothing is asked of any user;
 - helpers on this release accept anything signed by either key;
-- `veld doctor` on a machine that has taken it says which key verified — `signed by
+- `veld self doctor` on a machine that has taken it says which key verified — `signed by
   org key 2 of 2`, the row number in `ORG_KEYS`.
 
 Nothing is retired yet, and nothing is safe yet. The leaked key still works. That
@@ -586,20 +586,20 @@ happens:
   actually hits; everything else below is something that keeps working.
 - **updates keep working.** The incoming candidate's `.sig` comes from the
   tarball, complete, and is verified before anything is written.
-- **`veld doctor` says so precisely**, naming the truncation rather than reporting
+- **`veld self doctor` says so precisely**, naming the truncation rather than reporting
   tampering, and naming the repair below. No password.
-- **the repair is re-running the installer**, not `veld update`:
+- **the repair is re-running the installer**, not `veld self update`:
 
   ```sh
   curl -fsSL https://veld.oss.life.li/get | bash
   ```
 
-  **`veld update` does not work here, and that is not an oversight in this
-  document — it was this document's first answer and it was wrong.** `veld update`
+  **`veld self update` does not work here, and that is not an oversight in this
+  document — it was this document's first answer and it was wrong.** `veld self update`
   resolves a target, finds nothing newer, and takes its "already on the latest
   version" branch without running the installer. A machine in this state is *by
   construction* on the latest release, because installing it is how it got there —
-  so `veld update` is a no-op, and so is `--target-version` at the current
+  so `veld self update` is a no-op, and so is `--target-version` at the current
   version. Re-running the installer *does* re-drive the helper handoff at the
   current version, and the store's floor accepts an equal version, so the full
   slot list is written and the row goes green. No password either way.
@@ -696,7 +696,7 @@ slot 0.
   between the two edits, where both dates are honest. Neither catches an *invented*
   `added_after`. Full account: [The two-release rule, and its
   guard](#the-two-release-rule-and-its-guard).
-- **`veld doctor` judges by the CLI's key list, not the helper's, and after a
+- **`veld self doctor` judges by the CLI's key list, not the helper's, and after a
   rotation those can disagree.** They ship together so they normally match, but an
   update whose helper half was refused — or an `install.sh` run with `VELD_VERSION`
   pinned older, which reinstalls the CLI unconditionally while the store's version
@@ -711,7 +711,7 @@ slot 0.
     so in the truncation state it prints a **green** "Helper binary signature OK"
     while the running post-retirement helper genuinely is refusing `restart` and
     `shutdown`. A false green, with no flag day involved. If you are diagnosing a
-    rotation, check `veld version` against the helper's version in `veld doctor`'s
+    rotation, check `veld self version` against the helper's version in `veld self doctor`'s
     Installation block before trusting this row.
 - **`veld-sign` writes nothing unless every key parses.** A half-written `.sig`
   would verify for one generation and no other, which no reader can detect, so it

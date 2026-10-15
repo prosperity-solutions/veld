@@ -34,7 +34,7 @@ pub enum ConfigError {
          `{{ \"argv\": … }}`; and a node output referenced as `${{veld.KEY}}` becomes \
          `${{output.KEY}}`.\n  \
          docs/migrating-to-v3.md states every rule — hand it to your coding agent, or \
-         apply them yourself. Then run `veld lint` to check the result."
+         apply them yourself. Then run `veld orchestrator lint` to check the result."
     )]
     UnsupportedSchemaVersion(String),
 
@@ -67,7 +67,7 @@ pub enum ConfigError {
 
 /// How serious a [`Finding`] is.
 ///
-/// `Error` blocks `veld start`; `Warning` and `Notice` are reported by `veld lint`
+/// `Error` blocks `veld orchestrator start`; `Warning` and `Notice` are reported by `veld orchestrator lint`
 /// and never block anything. Nothing here is reachable from [`parse_config`] — see
 /// the module note on the parse/validate split.
 ///
@@ -107,7 +107,7 @@ pub struct Finding {
     pub severity: Severity,
     pub location: String,
     pub message: String,
-    /// Which rule produced this, for `veld lint --json` consumers.
+    /// Which rule produced this, for `veld orchestrator lint --json` consumers.
     pub rule: String,
 }
 
@@ -182,7 +182,7 @@ impl Finding {
     /// config system answers. It refuses — but as a **finding**, not a load
     /// failure: F0.1 forbids a new stop-fatal error, and someone who copies a node
     /// file while an environment is running still has to be able to tear it down.
-    /// The last definition wins for the purposes of a `veld stop` that has to
+    /// The last definition wins for the purposes of a `veld orchestrator stop` that has to
     /// proceed anyway.
     pub(crate) fn duplicate_definition(kind: &str, name: &str, first: &str, second: &str) -> Self {
         Self {
@@ -200,8 +200,8 @@ impl Finding {
     /// An included file that could not be parsed.
     ///
     /// Reported rather than fatal, for the same F0.1 reason. "Never a silently
-    /// absent node" still holds: the node is absent, but loudly — `veld start` and
-    /// `veld lint` refuse and name the file.
+    /// absent node" still holds: the node is absent, but loudly — `veld orchestrator start` and
+    /// `veld orchestrator lint` refuse and name the file.
     pub(crate) fn unparseable_include(location: &str, detail: &str) -> Self {
         Self {
             severity: Severity::Error,
@@ -321,7 +321,7 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<IndexMap<String, PresetDef>>,
 
-    /// The preset `veld start` runs when given nothing to start.
+    /// The preset `veld orchestrator start` runs when given nothing to start.
     ///
     /// Answers "just start it" — the most common thing a human types and by far
     /// the most common thing a coding agent is asked to do — without a guess.
@@ -364,7 +364,7 @@ pub struct VeldConfig {
     /// would be a template system.
     ///
     /// A var may not reference another var: one hop, always, so provenance is a
-    /// single lookup (`veld config --why`).
+    /// single lookup (`veld orchestrator config --why`).
     ///
     /// A var may additionally declare itself *machine-overridable*
     /// ([`VarDecl::Machine`]), which keeps the declaration in the committed file
@@ -392,7 +392,7 @@ pub struct VeldConfig {
 
     /// **Reserved.** Repo-declared lifecycle hooks, keyed by event
     /// (`worktree.created`, `project.created`, `run.stopped`). Parsed into an
-    /// opaque value, stored, and **not executed by this version** — `veld lint`
+    /// opaque value, stored, and **not executed by this version** — `veld orchestrator lint`
     /// says so.
     ///
     /// Reserved now so the desktop app's extension work does not later distort the
@@ -434,13 +434,13 @@ pub struct VeldConfig {
     /// Some defects are only visible in the raw text — a duplicate key, which
     /// `serde_json` silently resolves last-wins, is the motivating case. They
     /// still have to be errors (F1), but making them *load* errors would put a
-    /// new failure on the path `veld stop` / `status` / `logs` and the daemon
+    /// new failure on the path `veld orchestrator stop` / `status` / `logs` and the daemon
     /// monitor use, and F0.1 forbids exactly that: `on_stop` is read from the
     /// on-disk config at stop time, so a config that will not load means
     /// teardown never runs and containers leak with no way to clean up.
     ///
     /// So the loader records them here and [`validate`] reports them.
-    /// `veld start` and `veld lint` refuse; everything else keeps working on the
+    /// `veld orchestrator start` and `veld orchestrator lint` refuse; everything else keeps working on the
     /// last-wins interpretation, which is what it did before this existed.
     #[serde(skip)]
     pub deferred_findings: Vec<Finding>,
@@ -594,7 +594,7 @@ impl<'de> Deserialize<'de> for ConfigValue {
 /// [`SecretSource`].** A [`ConfigValue`] is also what an `env` map holds at all
 /// three layers and what a [`FileDelivery`] carries, so making the machine form a
 /// value *source* would make `"env": { "DB": { "machine": … } }` parse — an
-/// overridable value inline in an env map, with no name for `veld config set` to
+/// overridable value inline in an env map, with no name for `veld orchestrator vars set` to
 /// address. Narrowing `vars` to this enum keeps the machine form addressable by
 /// construction: the only place it can appear is the one place a name exists.
 ///
@@ -607,7 +607,7 @@ pub enum VarDecl {
     /// The original form: a literal or a single value source.
     Value(ConfigValue),
     /// Machine-overridable: the config carries the default, the machine carries
-    /// the answer (`veld config set`).
+    /// the answer (`veld orchestrator vars set`).
     Machine(MachineVar),
 }
 
@@ -623,13 +623,13 @@ pub enum VarDecl {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct MachineVar {
     /// The checked-in fallback, used when this machine has no override. `None`
-    /// means the machine *must* answer — `veld start` prompts when it can, and
-    /// refuses with the exact `veld config set` command when it cannot.
+    /// means the machine *must* answer — `veld orchestrator start` prompts when it can, and
+    /// refuses with the exact `veld orchestrator vars set` command when it cannot.
     pub default: Option<ConfigValue>,
     /// The legal answers. Enforced when setting *and* when resolving, because
     /// the config can change under an override that was valid when it was set.
     pub choices: Option<Vec<String>>,
-    /// What the value means, shown by `veld config vars`.
+    /// What the value means, shown by `veld orchestrator vars list`.
     pub description: Option<String>,
     /// The question asked when there is no default and no override. Falls back
     /// to `description`, then to a generic line naming the var.
@@ -643,10 +643,10 @@ pub struct MachineVar {
     /// reserved keys, and the reason is F0.1: `parse_config` runs on *every*
     /// subcommand including `stop`, and teardown reads the on-disk config at stop
     /// time. Rejecting an unknown key here would make a config written for a
-    /// newer veld unloadable by an older one, so `veld stop` would fail and the
+    /// newer veld unloadable by an older one, so `veld orchestrator stop` would fail and the
     /// run's containers would leak with no way to clean them up. A typo is still
     /// loud: `machine-var-unknown-key` is a `Severity::Error` *finding*, which
-    /// blocks `veld start` and `veld lint` while leaving teardown alone.
+    /// blocks `veld orchestrator start` and `veld orchestrator lint` while leaving teardown alone.
     ///
     /// Names only, so an unknown key does not survive a re-serialize. veld does
     /// not propagate what it cannot interpret.
@@ -819,7 +819,7 @@ impl<'de> Deserialize<'de> for VarDecl {
             // Sensitivity fails closed: a `default` that is itself declared
             // secret makes the whole var secret even if the sibling flag is
             // missing, because the alternative is a value the author *called* a
-            // secret being printed by `veld config vars`. `validate` warns about
+            // secret being printed by `veld orchestrator vars list`. `validate` warns about
             // the mismatch so the declaration gets fixed.
             secret: secret || default.as_ref().is_some_and(|d| d.secret),
             default,
@@ -1086,7 +1086,7 @@ impl Serialize for PortEntry {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         // Round-trip the shorthand as shorthand: an entry that states nothing
         // beyond its port must not grow an object wrapper just by passing
-        // through `veld runs diff` or a graph snapshot.
+        // through `veld orchestrator runs diff` or a graph snapshot.
         if self.protocol.is_none() && self.host.is_none() && self.share.is_none() {
             return self.spec.serialize(s);
         }
@@ -1566,7 +1566,7 @@ pub struct SharingConfig {
     /// Relay policy. Relays must be opted into explicitly — including public —
     /// so nothing is routed over public relays by accident. Absent means "unset":
     /// the daemon then falls back to the `VELD_SHARE_RELAY` env override, and if
-    /// that is also unset, `veld share` is refused. When set, config wins over
+    /// that is also unset, `veld network share` is refused. When set, config wins over
     /// the env var.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relays: Option<RelayPolicy>,
@@ -1603,7 +1603,7 @@ pub struct SharingConfig {
     /// environment somebody hands round for an afternoon versus a database port —
     /// so the repo that describes the environment is the right place to bound it,
     /// and a checkout gets the team's answer without anybody configuring a
-    /// machine. `veld share --ttl` still overrides both, for one share.
+    /// machine. `veld network share --ttl` still overrides both, for one share.
     ///
     /// Absent means "unset" rather than a number, which is what keeps the
     /// precedence honest: a project that says nothing must fall through to the
@@ -2076,7 +2076,7 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_template: Option<String>,
 
-    /// When true, this node is hidden from `veld nodes` output.
+    /// When true, this node is hidden from `veld orchestrator nodes` output.
     /// Hidden nodes still participate in the dependency graph normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
@@ -2105,7 +2105,7 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 
-    /// User-invokable actions for this node, exposed on the CLI (`veld action
+    /// User-invokable actions for this node, exposed on the CLI (`veld orchestrator action
     /// <name>`) and as buttons in the management dashboard. Each action runs a
     /// shell command with the node's live outputs available as variables and
     /// environment variables.
@@ -2182,14 +2182,14 @@ pub struct NodeConfig {
 /// `${param.KEY}`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionConfig {
-    /// Stable identifier used to invoke the action: `veld action <name>`.
+    /// Stable identifier used to invoke the action: `veld orchestrator action <name>`.
     pub name: String,
 
     /// Human-readable label for the dashboard button. Defaults to `name`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 
-    /// Optional one-line description shown in `veld actions` and as a tooltip.
+    /// Optional one-line description shown in `veld orchestrator actions` and as a tooltip.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
@@ -2318,7 +2318,7 @@ pub struct VariantConfig {
     pub url_template: Option<String>,
 
     /// Teardown command to run when the environment is stopped.
-    /// Executed in reverse dependency order during `veld stop`.
+    /// Executed in reverse dependency order during `veld orchestrator stop`.
     ///
     /// **Replaces** the node-level hook; `null` erases it. `null` has to be
     /// distinguishable from absent here: with a plain `Option` an author writing
@@ -2351,7 +2351,7 @@ pub struct VariantConfig {
     pub cwd: Option<String>,
 
     /// Sharing opt-in for this variant. Absent (or an empty `expose` list) means
-    /// this service can never be shared — `veld share` refuses it. This is the
+    /// this service can never be shared — `veld network share` refuses it. This is the
     /// explicit, per-service consent that makes sharing auditable.
     ///
     /// **Replaces** the node-level policy wholesale rather than merging: sharing
@@ -3081,10 +3081,10 @@ fn default_interval() -> u64 {
 
 /// The names a project root may use, in the order they are reported.
 ///
-/// Both, because a veld config **is** JSONC at every schema version and editors
+/// Both, because a veld.json **is** JSONC at every schema version and editors
 /// decide that from the extension: `veld.json` full of `//` comments is a wall of
 /// red squiggles until someone finds the `files.associations` setting, which is
-/// a poor way to learn that comments were always allowed. `veld init` still
+/// a poor way to learn that comments were always allowed. `veld orchestrator init` still
 /// writes `veld.json` — one default, two accepted spellings.
 ///
 /// Only the **root** name is fixed. Included files have always been matched by
@@ -3098,7 +3098,7 @@ pub const ROOT_CONFIG_NAMES: &[&str] = &["veld.json", "veld.jsonc"];
 /// the desktop worktree views, the management API. Those bypass
 /// [`discover_config`] because they are not walking upward, and each one that
 /// hardcodes a filename is a project named `veld.jsonc` that the daemon cannot
-/// see: no liveness probes, no actions, `veld share` refusing with "could not
+/// see: no liveness probes, no actions, `veld network share` refusing with "could not
 /// load veld.json".
 pub fn root_config_in(dir: &Path) -> Option<PathBuf> {
     ROOT_CONFIG_NAMES
@@ -3139,7 +3139,7 @@ pub fn discover_config(start: &Path) -> Result<PathBuf, ConfigError> {
 /// veld can still interpret. Never add a semantic check here: `on_stop` is read
 /// from the on-disk config at stop time, so a config that fails to load means
 /// teardown commands never run and containers leak with no way to clean up.
-/// Semantic checks belong in [`validate`], which only `veld start`, `veld lint`,
+/// Semantic checks belong in [`validate`], which only `veld orchestrator start`, `veld orchestrator lint`,
 /// and the share flow call.
 pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     parse_config_with_files(path).map(|loaded| loaded.config)
@@ -3149,8 +3149,8 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
 /// which glob matched each, which nodes each defines, and the hash over all of
 /// them.
 ///
-/// Callers that only need the effective config use [`parse_config`]. `veld nodes`,
-/// `veld config --files`, and the run snapshot need the provenance — under
+/// Callers that only need the effective config use [`parse_config`]. `veld orchestrator nodes`,
+/// `veld orchestrator config --files`, and the run snapshot need the provenance — under
 /// `include` globs, "unknown node" has four different causes (never defined,
 /// defined but not matched by a glob, file renamed out of a glob, file present but
 /// unparseable) and a bare name cannot tell them apart.
@@ -3161,9 +3161,9 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
     // the reason every other semantic check is: `on_stop` is read from the
     // on-disk config at stop time, so a config that fails to load means teardown
     // never runs and containers leak with no way to clean them up. Refusing here
-    // would make `veld stop` impossible in exactly the situation the docs now
+    // would make `veld orchestrator stop` impossible in exactly the situation the docs now
     // invite — copy `veld.json` to `veld.jsonc`, edit, forget to delete the
-    // original. `veld start` and `veld lint` still refuse; `veld stop` still works.
+    // original. `veld orchestrator start` and `veld orchestrator lint` still refuse; `veld orchestrator stop` still works.
     if let Some(dir) = path.parent() {
         // Deduplicated by target, because `ln -s veld.jsonc veld.json` is the
         // obvious way to get JSONC editor mode without breaking a script or a CI
@@ -3188,7 +3188,7 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
                 "ambiguous-root-config",
                 // A file name, not `dir.display()`: every other `location` is a
                 // pointer into the document, and an absolute path would put the
-                // developer's home directory into `veld lint --json` and make a
+                // developer's home directory into `veld orchestrator lint --json` and make a
                 // golden-file CI diff machine-dependent.
                 ROOT_CONFIG_NAMES[0].to_owned(),
                 format!(
@@ -3238,7 +3238,7 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
 /// that `hooks` and `ide` are opaque, so it edited the blobs veld promises not to
 /// interpret. Detection is structural and exact and stays here; the rewrite is a
 /// judgment (`argv` or `shell`?) best left to whoever — or whatever — is reading
-/// the config, with `veld lint` as the check afterwards.
+/// the config, with `veld orchestrator lint` as the check afterwards.
 pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["3"];
 
 /// Every recognised top-level config key, for the unknown-key diagnostic.
@@ -3271,7 +3271,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
 ///
 /// This is a **structural** rule, not a semantic one — it is about which keys a
 /// config may use at all, in the same class as a wrong field type — so it belongs
-/// in the loader. That does mean such a document fails `veld stop` too; the
+/// in the loader. That does mean such a document fails `veld orchestrator stop` too; the
 /// mitigation is that it has never run, because it cannot start either. (A config
 /// that ran under an older veld declared `schemaVersion` 1 or 2, and now fails
 /// earlier, at the version check, which explains the upgrade in full.)
@@ -3341,13 +3341,13 @@ pub(crate) fn reject_v3_legacy_commands(
 }
 
 /// **Validate** an already-parsed config: every semantic rule, reported as
-/// [`Finding`]s rather than a single error so `veld lint` can show all of them
+/// [`Finding`]s rather than a single error so `veld orchestrator lint` can show all of them
 /// at once.
 ///
 /// Deliberately separate from [`parse_config`] and returning a *different* type
 /// than [`ConfigError`], so no diagnostic added here can ever reach a
 /// subcommand that must keep working against a broken config. Callers:
-/// `veld start` (refuses on any [`Severity::Error`]), `veld lint` (prints
+/// `veld orchestrator start` (refuses on any [`Severity::Error`]), `veld orchestrator lint` (prints
 /// everything), and the share flow (which emits proxy headers over the wire).
 #[must_use = "validate reports problems; ignoring the findings defeats the point"]
 pub fn validate(config: &VeldConfig) -> Vec<Finding> {
@@ -3367,7 +3367,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_share_ttls(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
-    // is a `HashMap`, so a partial sort would leave `veld lint --json` output
+    // is a `HashMap`, so a partial sort would leave `veld orchestrator lint --json` output
     // order varying run to run and any golden-file CI diff flapping.
     findings.sort_by(|a, b| {
         (a.severity, &a.location, &a.rule, &a.message).cmp(&(
@@ -3415,7 +3415,7 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
             ));
         }
         // A *well-formed* grant to a remote origin produced no output at all, so
-        // `veld lint` called a config that hands a third-party server standing
+        // `veld orchestrator lint` called a config that hands a third-party server standing
         // camera access "valid". The whole mitigation for config-declared grants
         // is that they are reviewable, and the person who clones a repo reads
         // neither its `veld.json` nor veld's docs — this is the one surface that
@@ -3471,10 +3471,10 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// selection names a real node and variant.
 ///
 /// None of this was checked. `expand_preset` catches an unknown reference and a
-/// cycle, but only when `veld start` runs it, and the node/variant existence check
+/// cycle, but only when `veld orchestrator start` runs it, and the node/variant existence check
 /// happened later still, during graph construction. So a config with `["@nope"]`,
 /// with `a → b → a`, or naming a node that does not exist reported *"is valid"* —
-/// which is the one thing `veld lint` exists not to do. F0.1's promise is that
+/// which is the one thing `veld orchestrator lint` exists not to do. F0.1's promise is that
 /// every semantic problem is reported at once, before anything starts; a preset is
 /// exactly the kind of thing edited by hand and used weeks later.
 ///
@@ -3492,15 +3492,15 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
                 "preset-unresolvable",
                 format!("presets.{name}"),
                 format!(
-                    "{e}. `veld start --preset {name}` would fail here, so it is \
+                    "{e}. `veld orchestrator start --preset {name}` would fail here, so it is \
                      reported now rather than at start"
                 ),
             )),
             Ok(selections) => {
                 // A preset that expands to nothing starts nothing — and reports
-                // success doing it, which is how `veld start` with such a preset as
+                // success doing it, which is how `veld orchestrator start` with such a preset as
                 // the `default_preset` hands a script (or a coding agent) an exit 0
-                // and a zero-node run. A warning, not an error: `veld init` writes
+                // and a zero-node run. A warning, not an error: `veld orchestrator init` writes
                 // an empty preset as a placeholder to fill in, and refusing to load
                 // a freshly scaffolded config would be worse than saying this.
                 if selections.is_empty() {
@@ -3523,7 +3523,7 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
                             format!(
                                 "selects `{}:{}`, but no node named `{}` is defined. \
                                  With `include` globs a node can also be missing \
-                                 because no glob matched its file — `veld config \
+                                 because no glob matched its file — `veld orchestrator config \
                                  --files` prints the glob → file → node chain",
                                 sel.node, sel.variant, sel.node
                             ),
@@ -3644,7 +3644,7 @@ fn node_context_strings(
 /// Two rules, both of which used to surface only at start:
 ///
 /// - `X` is not a node at all. Always broken, whatever is started.
-/// - `X` is a real node that a given preset does not bring up. `veld start
+/// - `X` is a real node that a given preset does not bring up. `veld orchestrator start
 ///   --preset a` works, `--preset b` dies with `unresolved variable reference:
 ///   ${nodes.b.url}`. A preset's plan is fully static — `expand_preset` plus the
 ///   `depends_on` closure — so this is exactly the combination a reader cannot
@@ -3690,7 +3690,7 @@ fn check_node_refs(config: &VeldConfig, out: &mut Vec<Finding>) {
                 format!(
                     "`${{nodes.{reference}}}` refers to node \"{target}\", which is not \
                      defined. With `include` globs a node can also be missing because no \
-                     glob matched its file — `veld config --files` prints the glob → file → \
+                     glob matched its file — `veld orchestrator config --files` prints the glob → file → \
                      node chain. Defined nodes: {}",
                     known.join(", ")
                 ),
@@ -3769,7 +3769,7 @@ fn check_node_refs(config: &VeldConfig, out: &mut Vec<Finding>) {
                 if names.len() == 1 { "" } else { "s" },
                 names.join(", "),
                 if names.len() == 1 {
-                    format!("`veld start --preset {}`", names[0])
+                    format!("`veld orchestrator start --preset {}`", names[0])
                 } else {
                     "them".to_owned()
                 },
@@ -3875,7 +3875,7 @@ fn check_preset_keys(config: &VeldConfig, out: &mut Vec<Finding>) {
             format!(
                 "{} presets, none with a \"label\" or \"when_to_use\". At this size the \
                  list is hard to pick from — for a person who did not write it, and for a \
-                 coding agent reading `veld presets --json` to decide what to start. The \
+                 coding agent reading `veld orchestrator presets --json` to decide what to start. The \
                  object form adds both: `\"{}\": {{ \"label\": …, \"when_to_use\": …, \
                  \"selections\": [...] }}`",
                 presets.len(),
@@ -4007,7 +4007,7 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
                 }
                 // Checked here as well as at resolution: a default that is not a
                 // legal choice fails every machine that has not overridden it,
-                // and `veld lint` should say so before a start does.
+                // and `veld orchestrator lint` should say so before a start does.
                 if let Some(literal) = machine.default.as_ref().and_then(ConfigValue::as_literal)
                     && !choices.iter().any(|c| c == literal)
                 {
@@ -4042,8 +4042,8 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
 
         // A key this binary does not understand. An **error finding**, not a load
         // failure: a typo (`defualt`) silently costs the var its default, so it
-        // must block `veld start`, while a config written for a newer veld must
-        // still be loadable by this one or `veld stop` cannot tear its run down.
+        // must block `veld orchestrator start`, while a config written for a newer veld must
+        // still be loadable by this one or `veld orchestrator stop` cannot tear its run down.
         for key in &machine.unknown_keys {
             out.push(Finding::error(
                 "machine-var-unknown-key",
@@ -4051,7 +4051,7 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
                 format!(
                     "has an unknown key \"{key}\". Expected `machine.default`, \
                      `machine.choices`, `machine.description`, `machine.prompt`, or a sibling \
-                     `secret`. If this config was written for a newer veld, run `veld update`; \
+                     `secret`. If this config was written for a newer veld, run `veld self update`; \
                      otherwise it is a typo and the key is being ignored"
                 ),
             ));
@@ -4625,7 +4625,7 @@ pub fn vars_for_setup(config: &VeldConfig) -> BTreeSet<String> {
 ///
 /// This is what makes a var's value source **lazy**, matching what a node-level
 /// `env` source already did. A var is the natural home for a credential used by
-/// several nodes; resolving it on every `veld start` meant `veld start docs`
+/// several nodes; resolving it on every `veld orchestrator start` meant `veld orchestrator start docs`
 /// reached for the credential store, so the cost and the failure modes of a
 /// secret stopped being local to the nodes that need it. Duplicating the source
 /// into each variant to avoid that is exactly what `vars` exists to prevent.
@@ -4639,7 +4639,7 @@ pub fn vars_for_plan(
 /// [`vars_for_plan`] minus `setup`, for the teardown path.
 ///
 /// A `setup` step does not run at stop, so a var only it names must not be
-/// resolved there — otherwise `veld stop` runs the credential helper behind a var
+/// resolved there — otherwise `veld orchestrator stop` runs the credential helper behind a var
 /// that this teardown will never look at, which is the cost this laziness exists
 /// to remove.
 pub fn vars_for_teardown(
@@ -4976,7 +4976,7 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
             // HTTP/1.1 over the tunnel, and a browser cannot speak a raw
             // protocol through it regardless — so this is not a gap to close
             // later, it is a property of what "web" means. Caught here so the
-            // author learns at `veld lint` rather than at `veld share --web`.
+            // author learns at `veld orchestrator lint` rather than at `veld network share --web`.
             for (name, port) in &r.ports.ports {
                 let Some(share) = &port.share else { continue };
                 if port.protocol == PortProtocol::Tcp && share.allows(ExposeMode::Web) {
@@ -5060,14 +5060,14 @@ pub const BUILTIN_VARS: &[&str] = &[
 /// per-node is meaningless in it.
 ///
 /// This used to be documented and otherwise unmodelled, so `${veld.url}` written
-/// in a `command` node's `env` passed `veld lint` and then failed the run with
+/// in a `command` node's `env` passed `veld orchestrator lint` and then failed the run with
 /// `unknown built-in variable: veld.url` — a message that reads like the name is
 /// wrong when the name is fine and the *place* is wrong. The variants exist to
 /// let [`check_builtin_names`] say the second thing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuiltinScopeKind {
     /// A project-level `setup` / `teardown` step. Run-scoped names only, and not
-    /// even `run_id`: a teardown step also runs from `veld stop` against a run
+    /// even `run_id`: a teardown step also runs from `veld orchestrator stop` against a run
     /// whose row is already gone, where there is no id to report.
     ProjectStep,
     /// A `vars` value. Run-scoped names, including `run_id` — vars are resolved
@@ -5139,7 +5139,7 @@ impl BuiltinScopeKind {
                     .to_owned()
             }
             BuiltinScopeKind::ProjectStep if name == "run_id" => {
-                "a project step also runs from `veld stop` after the run row is gone, so \
+                "a project step also runs from `veld orchestrator stop` after the run row is gone, so \
                  there is no run id. Use `${veld.run}`, which is the name you started with"
                     .to_owned()
             }
@@ -5398,8 +5398,8 @@ impl BuiltinSite {
 /// `${veld.exit_code}` in an `on_stop` hook — which veld's own docs used to
 /// recommend — produced `VariableError::UnknownBuiltin` at *teardown* time, where
 /// `run_on_stop_hook` could only log a warning and skip the hook: the container
-/// never got removed and `veld stop` still reported success. Catching the name
-/// here turns a silent teardown skip into a refusal at `veld start`, before
+/// never got removed and `veld orchestrator stop` still reported success. Catching the name
+/// here turns a silent teardown skip into a refusal at `veld orchestrator start`, before
 /// anything is running that would need tearing down.
 ///
 /// The scope half ([`BuiltinScopeKind`]) does the same for a name that is real
@@ -5447,7 +5447,7 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             // taken from one element. Without this, a value inherited by variants
             // that fail for *different* reasons (a `command` node, a server node
             // with no `ports` map) produced a different message on each run, which
-            // makes `veld lint --json` flap and any golden-file diff useless.
+            // makes `veld orchestrator lint --json` flap and any golden-file diff useless.
             missing.sort_by(|a, b| a.label.cmp(&b.label));
             let Some(first) = missing.first() else {
                 continue;
@@ -5779,7 +5779,7 @@ fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// failure — but a silent clamp on **this** field is worth a warning that the
 /// other clamped numbers do not need. It decides how long a share link keeps
 /// working, `--web` publishes that link to the open internet, and the settings
-/// path already tells its caller (`veld settings set --json` reports
+/// path already tells its caller (`veld self settings set --json` reports
 /// `clamped: true`). Without this, a project author writing `480` when they meant
 /// `4800` — or the reverse — has no surface anywhere that says the value they
 /// committed is not the value in force.
@@ -6141,7 +6141,7 @@ mod tests {
 
     #[test]
     fn validate_warns_when_a_share_ttl_will_be_clamped() {
-        // The clamp is silent at share time, so `veld lint` is the only surface
+        // The clamp is silent at share time, so `veld orchestrator lint` is the only surface
         // that can tell a project author the number they committed is not the
         // number in force.
         let base = r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#;
@@ -6160,7 +6160,7 @@ mod tests {
             .collect();
         assert_eq!(ttl.len(), 2, "{findings:?}");
         // A warning, not an error: the config still loads and the share still
-        // works, so this must not fail `veld lint`'s exit code.
+        // works, so this must not fail `veld orchestrator lint`'s exit code.
         assert!(ttl.iter().all(|f| f.severity == Severity::Warning));
         // Each finding names its own field and the value that will actually apply.
         let peer = ttl
@@ -6268,7 +6268,7 @@ mod tests {
     // -- F0.1: the parse / validate split -------------------------------------
 
     /// A semantically-broken config must still *parse*. This is the property
-    /// `veld stop` / `status` / `logs` depend on: they read the on-disk config
+    /// `veld orchestrator stop` / `status` / `logs` depend on: they read the on-disk config
     /// (for `on_stop` hooks and node metadata) and would otherwise be stranded
     /// by an unrelated typo, leaking containers with no way to clean them up.
     #[test]
@@ -6373,9 +6373,9 @@ mod tests {
     /// `${veld.exit_code}` in an `on_stop` hook is the case that made this
     /// necessary: veld's own docs used to recommend it, and after the closure it
     /// resolved to nothing — `run_on_stop_hook` could only log and skip the hook,
-    /// so the container never got removed while `veld stop` reported success.
+    /// so the container never got removed while `veld orchestrator stop` reported success.
     /// Catching the *name* here turns a silent teardown skip into a refusal at
-    /// `veld start`, before anything exists that would need tearing down.
+    /// `veld orchestrator start`, before anything exists that would need tearing down.
     #[test]
     fn unknown_builtin_var_is_error_and_names_the_replacement() {
         let config: VeldConfig = serde_json::from_str(
@@ -6494,7 +6494,7 @@ mod tests {
     }
 
     /// A machine var with no default has no value at all until the machine
-    /// answers — the state `veld start` must refuse to guess past.
+    /// answers — the state `veld orchestrator start` must refuse to guess past.
     #[test]
     fn a_machine_var_without_a_default_has_no_value() {
         let d = vd(r#"{ "machine": { "prompt": "Token?" }, "secret": true }"#);
@@ -6522,7 +6522,7 @@ mod tests {
 
     /// Sensitivity fails closed. A `default` the author called secret makes the
     /// whole var secret even when the sibling flag was forgotten, because the
-    /// alternative is `veld config vars` printing it.
+    /// alternative is `veld orchestrator vars list` printing it.
     #[test]
     fn a_secret_default_makes_the_whole_var_secret() {
         let d = vd(r#"{ "machine": { "default": { "env": "PG", "secret": true } } }"#);
@@ -6538,7 +6538,7 @@ mod tests {
     /// exactly the spelling `machine-var-secret-placement` tells authors to
     /// prefer. Anything rendering a value must therefore consult the
     /// *declaration*, never the value's own flag alone: three review angles
-    /// independently found `veld config vars`, `--json` and the daemon's GET all
+    /// independently found `veld orchestrator vars list`, `--json` and the daemon's GET all
     /// printing such a default in the clear.
     #[test]
     fn a_declared_secret_does_not_mark_its_own_default() {
@@ -6584,7 +6584,7 @@ mod tests {
         );
     }
 
-    /// …and the finding is an **error**, so a typo still blocks `veld start`
+    /// …and the finding is an **error**, so a typo still blocks `veld orchestrator start`
     /// rather than silently costing the var its default.
     #[test]
     fn a_misspelled_machine_key_is_an_error_finding() {
@@ -6621,7 +6621,7 @@ mod tests {
     }
 
     /// A machine var round-trips, so a config veld re-serializes (the share
-    /// manifest, `veld config --files`) does not lose the declaration.
+    /// manifest, `veld orchestrator config --files`) does not lose the declaration.
     #[test]
     fn a_machine_var_round_trips_through_serde() {
         let src = r#"{ "machine": { "default": "docker", "choices": ["docker", "podman"] }, "secret": true }"#;
@@ -6672,7 +6672,7 @@ mod tests {
             }
 
             // …it must be semantically valid, since a documented example that
-            // `veld start` would refuse is not an example…
+            // `veld orchestrator start` would refuse is not an example…
             let findings = validate(&cfg);
             // An example that declares `include` is a *root* file: its nodes live in
             // files this test cannot load, because the globs point into a project
@@ -6684,7 +6684,7 @@ mod tests {
             // has to hold.
             // `include` is consumed by merging, so it is not on the merged
             // `VeldConfig` — read it off the raw document instead.
-            // Comments stripped first: an example is a veld config, so it is
+            // Comments stripped first: an example is a veld.json, so it is
             // JSONC. Reading it here as strict JSON made this half of the drift
             // gate reject a file the loader above had just accepted.
             let source = std::fs::read_to_string(&path).expect("readable");
@@ -6749,7 +6749,7 @@ mod tests {
             // catch — someone adds a field to `MachineVar`, the compiler forces
             // the struct literal and `Deserialize`, and the `Serialize` arm is
             // forgotten — drops that field's value on every re-serialize (share
-            // manifests, `veld config --files`) while leaving the map's length
+            // manifests, `veld orchestrator config --files`) while leaving the map's length
             // untouched. `VarDecl` derives `PartialEq`, so this costs nothing.
             assert_eq!(round.vars, cfg.vars, "{label}: vars must round-trip");
         }
@@ -6781,7 +6781,7 @@ mod tests {
         assert_eq!(cfg.hooks.as_ref().unwrap().as_object().unwrap().len(), 2);
         assert!(cfg.ide.as_ref().unwrap().get("my-ext").is_some());
 
-        // Round-trips, so `veld config` cannot silently drop them.
+        // Round-trips, so `veld orchestrator config` cannot silently drop them.
         let round: VeldConfig =
             serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(round.hooks, cfg.hooks);
@@ -6855,7 +6855,8 @@ mod tests {
             r#"{ "schemaVersion": "3", "name": "t", "ui": { "quicklinks": [] }, "nodes": {} }"#,
         )
         .unwrap();
-        let cfg = parse_config(&path).expect("a renamed key must not strand `veld stop`");
+        let cfg =
+            parse_config(&path).expect("a renamed key must not strand `veld orchestrator stop`");
         let findings = validate(&cfg);
         let hit = findings
             .iter()
@@ -6892,14 +6893,14 @@ mod tests {
             .collect();
         assert_eq!(warned.len(), 1, "only the remote *allow*: {findings:?}");
         assert!(warned[0].location.contains("staging.example.com"));
-        // A warning, never an error — it must not block `veld start`.
+        // A warning, never an error — it must not block `veld orchestrator start`.
         assert!(error_summary(&findings).is_none());
     }
 
     /// A defect inside the interpreted part is a *warning*, never a load failure.
     ///
     /// Same reasoning as F0.1 everywhere else: a typo in a desktop-only
-    /// convenience field must not be able to take `veld stop` down with it.
+    /// convenience field must not be able to take `veld orchestrator stop` down with it.
     #[test]
     fn a_malformed_ui_entry_warns_and_grants_nothing() {
         let cfg: VeldConfig = serde_json::from_str(
@@ -6927,7 +6928,7 @@ mod tests {
     /// Reserving two keys must not open the door to every other typo — but the
     /// diagnostic is a **finding**, not a load failure.
     ///
-    /// `deny_unknown_fields` would put the failure on the loader that `veld stop`
+    /// `deny_unknown_fields` would put the failure on the loader that `veld orchestrator stop`
     /// uses, and would be a regression for v1/v2 documents which previously
     /// ignored an unknown key silently. See `crate::include::Document`.
     #[test]
@@ -6940,7 +6941,7 @@ mod tests {
         )
         .unwrap();
 
-        let config = parse_config(&path).expect("a typo must not strand `veld stop`");
+        let config = parse_config(&path).expect("a typo must not strand `veld orchestrator stop`");
         let findings = validate(&config);
         let hit = findings
             .iter()
@@ -6950,7 +6951,7 @@ mod tests {
         assert!(hit.message.contains("\"hoks\""), "{hit:?}");
         // Names `hooks` among the valid keys, so the typo is obvious.
         assert!(hit.message.contains("hooks"), "{hit:?}");
-        // …and it blocks `veld start`.
+        // …and it blocks `veld orchestrator start`.
         assert!(error_summary(&findings).is_some());
     }
 
@@ -7321,7 +7322,7 @@ mod tests {
     /// from the on-disk config at stop time — so refusing to load would make
     /// teardown impossible and leak the containers those hooks exist to remove,
     /// in exactly the situation the docs now invite (copy, edit, forget to delete
-    /// the original). `veld start` and `veld lint` still refuse; `veld stop`
+    /// the original). `veld orchestrator start` and `veld orchestrator lint` still refuse; `veld orchestrator stop`
     /// still works.
     #[test]
     fn both_root_spellings_is_a_finding_not_a_load_failure() {
@@ -7346,7 +7347,7 @@ mod tests {
         assert!(hit.message.contains("veld.json"), "{}", hit.message);
         assert!(error_summary(&findings).is_some());
         // A document pointer, not an absolute path: every other `location` is one,
-        // and a home directory in `veld lint --json` makes a golden-file CI diff
+        // and a home directory in `veld orchestrator lint --json` makes a golden-file CI diff
         // machine-dependent.
         assert_eq!(hit.location, "veld.json");
     }
@@ -7730,7 +7731,7 @@ mod tests {
 
         // The teardown path excludes `setup`, which does not run at stop — so a
         // credential helper behind a var only a setup step names is not woken up
-        // by `veld stop`. `teardown` itself stays in, because it does run.
+        // by `veld orchestrator stop`. `teardown` itself stays in, because it does run.
         let stop = vars_for_teardown(&cfg, &sel);
         assert!(!stop.contains("setup_only"), "{stop:?}");
         assert!(stop.contains("teardown_only"), "{stop:?}");
@@ -7812,7 +7813,7 @@ mod tests {
     /// the name through `root_config_in` rather than hardcoding one.
     ///
     /// Each site that hardcodes `veld.json` is a `veld.jsonc` project the daemon
-    /// cannot see: no liveness probes, no actions in the dashboard, `veld share`
+    /// cannot see: no liveness probes, no actions in the dashboard, `veld network share`
     /// refusing outright. Nothing in the type system catches that, so it is
     /// pinned here and by a grep in the sibling assertion.
     #[test]
@@ -7836,10 +7837,10 @@ mod tests {
         assert_eq!(root_config_in(&inner), None);
     }
 
-    /// Every way a preset can be broken is reported by `veld lint`.
+    /// Every way a preset can be broken is reported by `veld orchestrator lint`.
     ///
     /// All four of these used to report *"is valid"*: `expand_preset` catches an
-    /// unknown reference and a cycle, but only when `veld start` runs it, and the
+    /// unknown reference and a cycle, but only when `veld orchestrator start` runs it, and the
     /// node/variant existence check happened later still, during graph
     /// construction. A preset is edited by hand and used weeks later — exactly the
     /// thing that must fail at lint time rather than at 9am on a Monday.
@@ -8052,7 +8053,7 @@ mod tests {
             "false positive on a non-credential value: {hits:?}"
         );
         // Warning, not error: the value may be a deliberate local-only credential,
-        // and this must not block `veld start`.
+        // and this must not block `veld orchestrator start`.
         assert!(
             f.iter()
                 .filter(|x| x.rule == "credential-shaped-proxy-header")
@@ -8340,7 +8341,7 @@ mod tests {
             assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
             assert!(msg.contains("${output.KEY}"), "{msg}");
             assert!(msg.contains("docs/migrating-to-v3.md"), "{msg}");
-            assert!(msg.contains("veld lint"), "{msg}");
+            assert!(msg.contains("veld orchestrator lint"), "{msg}");
             // Pointing at a converter veld no longer ships is a dead end.
             assert!(!msg.contains("--migrate"), "{msg}");
         }
@@ -8477,7 +8478,7 @@ mod tests {
     /// already a parse error from `serde_derive`; that is pre-existing and
     /// unchanged.)
     ///
-    /// It must not fail the load, because the loader runs on `veld stop`, which
+    /// It must not fail the load, because the loader runs on `veld orchestrator stop`, which
     /// reads `on_stop` from the on-disk config: failing here would mean teardown
     /// never runs and containers leak. The document is still perfectly
     /// interpretable — last-wins is deterministic — so `stop` proceeds on that

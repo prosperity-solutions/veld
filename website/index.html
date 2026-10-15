@@ -389,18 +389,18 @@
       <h1>Like if Kubernetes and localhost had a <span class="accent">magic, agentic baby</span> — with a gorgeous UI.</h1>
       <p class="tagline">Real HTTPS URLs for every service you run — one command, no YAML, no cloud bill. Then you and your coding agent build on it, together.</p>
 
-      <pre data-copy="veld start frontend:local
-veld start --preset fullstack
-veld share --web"><code><span class="cmt"># declare it once, then start a service:</span>
-veld start frontend:local
+      <pre data-copy="veld orchestrator start frontend:local
+veld orchestrator start --preset fullstack
+veld network share --web"><code><span class="cmt"># declare it once, then start a service:</span>
+veld orchestrator start frontend:local
 <span class="out">=> https://frontend.my-feature.myproject.localhost</span>
 <span class="out">=> https://backend.my-feature.myproject.localhost</span>
 
 <span class="cmt"># …or spin up a whole preset — by name, or the number veld shows you:</span>
-veld start <span class="kw">--preset</span> fullstack
+veld orchestrator start <span class="kw">--preset</span> fullstack
 
 <span class="cmt"># hand it to a colleague on the web — no Veld on their end:</span>
-veld share <span class="kw">--web</span>
+veld network share <span class="kw">--web</span>
 <span class="out">=> https://frontend-a1b2c3.share.yourteam.dev  (password: cheerful-otter-42)</span></code></pre>
       <p class="vibe" style="margin-bottom:22px;">The run name is inferred from your git branch — no <code>--name</code> needed (pass one to override).</p>
 
@@ -421,16 +421,16 @@ veld share <span class="kw">--web</span>
       <div class="grid">
         <div class="cell"><h3>No port numbers</h3><p>Real names like <code>frontend.my-feature.localhost</code> instead of <code>localhost:3847</code>.</p></div>
         <div class="cell"><h3>Starts things in the right order</h3><p>Works out what depends on what, starts it all (in parallel where it can), and shuts down cleanly in reverse.</p></div>
-        <div class="cell"><h3>Run your e2e tests on it</h3><p>Point <code>veld start --oneshot</code> at a test command: it spins up every service the tests need, runs them, prints the results, then tears it all down — and the test's exit code becomes veld's. One line in CI.</p></div>
+        <div class="cell"><h3>Run your e2e tests on it</h3><p>Point <code>veld orchestrator start --oneshot</code> at a test command: it spins up every service the tests need, runs them, prints the results, then tears it all down — and the test's exit code becomes veld's. One line in CI.</p></div>
         <div class="cell"><h3>Real HTTPS, no warnings</h3><p>Every URL is <code>https://</code> with a trusted certificate. Set up once — no browser warnings.</p></div>
         <div class="cell"><h3>Waits until things are ready</h3><p>You don't get a URL until the service actually responds — and veld keeps watching after it's up. Not everything in a dev environment is a web server, either: a file watcher, a background compiler, a desktop shell can all sit in the same graph, supervised and torn down with the rest, with no port and no URL.</p></div>
-        <div class="cell"><h3>Restarts what crashes — and remembers why</h3><p>If a service falls over, veld brings the environment back on its own. Every run leaves a record: when it ran, how it ended, and its logs — so <code>veld runs</code> answers "why did last night's run die?" days later.</p></div>
+        <div class="cell"><h3>Restarts what crashes — and remembers why</h3><p>If a service falls over, veld brings the environment back on its own. Every run leaves a record: when it ran, how it ended, and its logs — so <code>veld orchestrator runs list</code> answers "why did last night's run die?" days later.</p></div>
         <div class="cell"><h3>One config, many setups</h3><p>Run a service locally, in Docker, or against a remote — and start your go-to combinations with one short name. Give each a number that never moves when someone adds another, and a line saying who it&rsquo;s for, so &ldquo;which one do I run?&rdquo; has an answer for the designer <em>and</em> the coding agent.</p></div>
         <div class="cell"><h3>A config a monorepo can live with</h3><p>Comments where you need them &mdash; call the file <code>veld.jsonc</code> and your editor stops arguing. Split it across per-directory files so each team owns theirs. Say a value once and reference it everywhere. It deduplicates <em>values</em>, never structure — so opening a service&rsquo;s file still tells you what it runs, and grepping for an env var still finds the line that sets it.</p></div>
         <div class="cell"><h3>Your command, not the shell&rsquo;s opinion</h3><p>Write it as a list and veld runs it directly. A password with a space in it stays <em>one</em> argument &mdash; not two arguments and an incident. Want a pipe? Ask for a shell.</p></div>
         <div class="cell"><h3>Secrets it never keeps</h3><p>veld holds a pointer, not your password: an env var, a file, or a command that prints one. Mark it secret and it refuses to put it on a command line, where <code>ps</code> would read it out to the whole machine.</p></div>
-        <div class="cell"><h3>The bits that differ per laptop</h3><p>Some values in a checked-in config aren&rsquo;t project facts, they&rsquo;re machine facts &mdash; which container runtime you have, how much memory this machine can spare, where a tool lives. Declare a default, and each person answers once with <code>veld config set</code>. Kept per machine and shared across all your worktrees, so you answer it once, not once per checkout.</p></div>
-        <div class="cell"><h3>Wrong config, caught early</h3><p><code>veld lint</code> lists every problem at once and fails CI. Typo&rsquo;d variable, one that is real but means nothing where you wrote it, a preset pointing at a node that moved, a service reading a URL that only exists under <em>some</em> presets, secret about to leak. Better now than 9am Monday.</p></div>
+        <div class="cell"><h3>The bits that differ per laptop</h3><p>Some values in a checked-in config aren&rsquo;t project facts, they&rsquo;re machine facts &mdash; which container runtime you have, how much memory this machine can spare, where a tool lives. Declare a default, and each person answers once with <code>veld orchestrator vars set</code>. Kept per machine and shared across all your worktrees, so you answer it once, not once per checkout.</p></div>
+        <div class="cell"><h3>Wrong config, caught early</h3><p><code>veld orchestrator lint</code> lists every problem at once and fails CI. Typo&rsquo;d variable, one that is real but means nothing where you wrote it, a preset pointing at a node that moved, a service reading a URL that only exists under <em>some</em> presets, secret about to leak. Better now than 9am Monday.</p></div>
         <div class="cell"><h3>Many runs, side by side</h3><p>Give every branch or git worktree its own environment — they run in parallel without clashing. Re-running by name just resumes.</p></div>
         <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
         <div class="cell"><h3>A dashboard in your browser</h3><p>See health, per-service memory &amp; CPU, tail logs, search, browse past runs, and stop/restart — all at <code>veld.localhost</code>.</p></div>
@@ -438,9 +438,9 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>What your build actually costs</h3><p>Measuring starts when the run does, not when it finishes. Your build steps and installs are graphed while they run, and a dev server&rsquo;s startup ramp is recorded &mdash; so &ldquo;why does this need 12&nbsp;GB&rdquo; is a question you can answer.</p></div>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
         <div class="cell"><h3>Tell your team what changed</h3><p>You move the test command; everyone else finds out when it breaks for them. Write a short note into the project&rsquo;s config alongside the change &mdash; a headline and one sentence &mdash; and each teammate is told once, the next time they open the IDE. Capped at five notes and 44 characters of headline, so it stays worth reading.</p></div>
-        <div class="cell"><h3>The laptop stays awake</h3><p>Long builds and overnight agents die when the machine suspends. One button in the top bar holds it awake &mdash; for 30 minutes, a few hours, or until you say otherwise &mdash; and lets go the moment Veld does, so nothing is left pinned on. Shut the lid and walk away: on Linux, and on a Mac set up with <code>veld setup privileged</code>, that works on battery too. Sharing does it for you without being asked, capped, and asked separately for mains and battery &mdash; but it will never hold the lid shut on battery unless you say so yourself.</p></div>
+        <div class="cell"><h3>The laptop stays awake</h3><p>Long builds and overnight agents die when the machine suspends. One button in the top bar holds it awake &mdash; for 30 minutes, a few hours, or until you say otherwise &mdash; and lets go the moment Veld does, so nothing is left pinned on. Shut the lid and walk away: on Linux, and on a Mac set up with <code>veld self setup privileged</code>, that works on battery too. Sharing does it for you without being asked, capped, and asked separately for mains and battery &mdash; but it will never hold the lid shut on battery unless you say so yourself.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
-        <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
+        <div class="cell"><h3>Or share with anyone</h3><p><code>veld network share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
         <div class="cell"><h3>Read what your agent wrote, in place</h3><p>Ask for a slide deck or an analysis written as HTML and you used to leave for Chrome to look at it. Run <code>open&nbsp;deck.html</code> in a Veld terminal, or pick it off a newest-first list showing what changed and how long ago, and it opens in a pane beside the shell that made it &mdash; then reloads itself each time that file changes &mdash; including one you reached by a link out of it, so a set of decks that link to each other behaves like one document. Served over HTTP from an origin of its own, so module scripts and <code>fetch</code> work where a <code>file://</code> URL would render the page blank.</p></div>
         <div class="cell"><h3>Your agent hands you the file</h3><p>A plan, a CSV, the function it wants you to look at: the agent runs <code>veld&nbsp;ide&nbsp;open&nbsp;plan.md&nbsp;--notify</code> and it opens beside its terminal &mdash; markdown rendered, tables sortable, code highlighted with this branch&rsquo;s changes in the gutter &mdash; and the worktree is marked until you&rsquo;ve looked. Agents started in a Veld terminal are told they can. Select a few lines and copy them as <code>plan.md:12-18</code> with the excerpt, ready to paste back. Read-only on purpose: your editor is still where you edit.</p></div>
         <div class="cell cell-next">
@@ -465,46 +465,55 @@ veld share <span class="kw">--web</span>
   <section id="cli" class="anchor">
     <div class="wrap">
       <h2>The commands<span class="dot">.</span></h2>
-      <p class="section-sub">What you'll actually type. Every one speaks <code>--json</code>.</p>
+      <p class="section-sub">What you'll actually type: <code>veld &lt;part&gt; &lt;verb&gt;</code>. Bare <code>veld</code> shows what is up and who needs you, <code>veld --help-all</code> lists every command, and an old name such as <code>veld start</code> tells you where it went.<!-- pre-#423: names a retired command on purpose --> <code>orc</code> works for <code>orchestrator</code>. Every one speaks <code>--json</code>.</p>
 
       <div class="cli-group">
-        <h3>Environments</h3>
-        <div class="cli-row"><code>veld start NODE:VARIANT --name N</code><span>Start an environment</span></div>
-        <div class="cli-row"><code>veld start --preset NAME|KEY</code><span>Start a preset — a saved selection of nodes (e.g. <code>fullstack</code>). Or just <code>veld start</code> and pick from the list</span></div>
-        <div class="cli-row"><code>veld start NODE --oneshot</code><span>Run a command node as a one-off — start its deps, run it to completion, tear down, exit with its code (e.g. e2e tests)</span></div>
-        <div class="cli-row"><code>veld stop [--name N] [--all]</code><span>Stop a running environment</span></div>
-        <div class="cli-row"><code>veld restart [--name N]</code><span>Restart an environment</span></div>
-        <div class="cli-row"><code>veld status [--name N]</code><span>Show run status</span></div>
-        <div class="cli-row"><code>veld stats [--processes] [--history] [--cpu]</code><span>Detailed CPU &amp; memory — split by memory type and by subprocess, with history</span></div>
-        <div class="cli-row"><code>veld urls [--name N]</code><span>Show URLs for a run</span></div>
-        <div class="cli-row"><code>veld logs [-f] [-s TERM] [--run ID]</code><span>View logs (follow, search, source filter — including past runs)</span></div>
-        <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and the run history</span></div>
-        <div class="cli-row"><code>veld lint</code><span>Check the config for problems — every one at once, exits non-zero in CI</span></div>
-        <div class="cli-row"><code>veld config --files / --why P</code><span>Which file defines which node, and where an effective value came from</span></div>
-        <div class="cli-row"><code>veld config vars / set / unset</code><span>Values that differ per machine — answered once, shared across your worktrees</span></div>
-        <div class="cli-row"><code>veld settings [get / set / describe]</code><span>Veld&rsquo;s own preferences from the terminal — <code>describe</code> gives an agent the type, default and allowed values</span></div>
-        <div class="cli-row"><code>veld action NAME</code><span>Run a node-defined action (e.g. open the DB in a GUI)</span></div>
+        <h3>Orchestrator</h3>
+        <div class="cli-row"><code>veld orchestrator start NODE:VARIANT --name N</code><span>Start an environment</span></div>
+        <div class="cli-row"><code>veld orchestrator start --preset NAME|KEY</code><span>Start a preset — a saved selection of nodes (e.g. <code>fullstack</code>). Or just <code>veld orchestrator start</code> and pick from the list</span></div>
+        <div class="cli-row"><code>veld orchestrator start NODE --oneshot</code><span>Run a command node as a one-off — start its deps, run it to completion, tear down, exit with its code (e.g. e2e tests)</span></div>
+        <div class="cli-row"><code>veld orchestrator stop [--name N] [--all]</code><span>Stop a running environment</span></div>
+        <div class="cli-row"><code>veld orchestrator restart [--name N]</code><span>Restart an environment</span></div>
+        <div class="cli-row"><code>veld orchestrator status [--name N]</code><span>Show run status</span></div>
+        <div class="cli-row"><code>veld orchestrator stats [--processes] [--history] [--cpu]</code><span>Detailed CPU &amp; memory — split by memory type and by subprocess, with history</span></div>
+        <div class="cli-row"><code>veld orchestrator urls [--name N]</code><span>Show URLs for a run</span></div>
+        <div class="cli-row"><code>veld orchestrator logs [-f] [-s TERM] [--run ID]</code><span>View logs (follow, search, source filter — including past runs)</span></div>
+        <div class="cli-row"><code>veld orchestrator graph / nodes / presets / runs list</code><span>Inspect the config and the run history</span></div>
+        <div class="cli-row"><code>veld orchestrator lint</code><span>Check the config for problems — every one at once, exits non-zero in CI</span></div>
+        <div class="cli-row"><code>veld orchestrator config --files / --why P</code><span>Which file defines which node, and where an effective value came from</span></div>
+        <div class="cli-row"><code>veld orchestrator vars list / set / unset</code><span>Values that differ per machine — answered once, shared across your worktrees</span></div>
+        <div class="cli-row"><code>veld orchestrator action NAME</code><span>Run a node-defined action (e.g. open the DB in a GUI)</span></div>
+        <div class="cli-row"><code>veld orchestrator init</code><span>Create a new veld.json (veld reads veld.jsonc too)</span></div>
       </div>
 
       <div class="cli-group">
-        <h3>Sharing</h3>
-        <div class="cli-row"><code>veld share [RUN] [--web]</code><span>Share a run over an encrypted P2P tunnel (or the open web)</span></div>
-        <div class="cli-row"><code>veld join TICKET</code><span>Join a shared env; the same URLs materialize locally</span></div>
-        <div class="cli-row"><code>veld shares</code><span>List shares, joins, and pending requests with transport info</span></div>
-        <div class="cli-row"><code>veld approve / deny REQ</code><span>Gate who connects to your share</span></div>
-        <div class="cli-row"><code>veld unshare / leave</code><span>Stop hosting, or disconnect from a joined share</span></div>
-      </div>
-
-      <div class="cli-group">
-        <h3>Setup &amp; misc</h3>
-        <div class="cli-row"><code>veld setup [privileged]</code><span>One-time system setup (clean URLs need privileged; unprivileged is no-sudo)</span></div>
-        <div class="cli-row"><code>veld init</code><span>Create a new veld.json (veld reads veld.jsonc too)</span></div>
-        <div class="cli-row"><code>veld ui</code><span>Open the management dashboard</span></div>
-        <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
+        <h3>IDE</h3>
+        <div class="cli-row"><code>veld ide dashboard</code><span>Open the management dashboard</span></div>
         <div class="cli-row"><code>veld ide open PATH|URL --notify|--quiet</code><span>Show a file or a page in the Veld window, beside the terminal that asked (agent-facing)</span></div>
         <div class="cli-row"><code>veld ide worktree new --branch B --name T --prompt-file F</code><span>Hand a task to the human: a new worktree whose agent starts on that prompt when they open it (agent-facing)</span></div>
-        <div class="cli-row"><code>veld doctor / gc</code><span>Check extension status; clean up stale state</span></div>
-        <div class="cli-row"><code>veld backup [now / restore]</code><span>Copies of veld's own state database, and putting one back — and it says when copies have stopped being written</span></div>
+      </div>
+
+      <div class="cli-group">
+        <h3>Agent</h3>
+        <div class="cli-row"><code>veld agent skills [TOPIC]</code><span>The agent documentation this binary carries — one topic at a time</span></div>
+        <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
+      </div>
+
+      <div class="cli-group">
+        <h3>Network</h3>
+        <div class="cli-row"><code>veld network share [RUN] [--web]</code><span>Share a run over an encrypted P2P tunnel (or the open web)</span></div>
+        <div class="cli-row"><code>veld network join TICKET</code><span>Join a shared env; the same URLs materialize locally</span></div>
+        <div class="cli-row"><code>veld network list</code><span>List shares, joins, and pending requests with transport info</span></div>
+        <div class="cli-row"><code>veld network approve / deny REQ</code><span>Gate who connects to your share</span></div>
+        <div class="cli-row"><code>veld network unshare / leave</code><span>Stop hosting, or disconnect from a joined share</span></div>
+      </div>
+
+      <div class="cli-group">
+        <h3>Self</h3>
+        <div class="cli-row"><code>veld self settings list / get / set / unset / describe</code><span>Veld&rsquo;s own preferences from the terminal — <code>describe</code> gives an agent the type, default and allowed values</span></div>
+        <div class="cli-row"><code>veld self setup [privileged]</code><span>One-time system setup (clean URLs need privileged; unprivileged is no-sudo)</span></div>
+        <div class="cli-row"><code>veld self doctor / gc</code><span>Check extension status; clean up stale state</span></div>
+        <div class="cli-row"><code>veld self backup list / now / restore</code><span>Copies of veld's own state database, and putting one back — and it says when copies have stopped being written</span></div>
       </div>
     </div>
   </section>
@@ -515,8 +524,8 @@ veld share <span class="kw">--web</span>
       <h2>Install<span class="dot">.</span></h2>
       <p class="section-sub">One line. No sudo. Detects your OS and architecture.</p>
       <pre data-copy="curl -fsSL https://veld.oss.life.li/get | bash"><code>curl -fsSL https://veld.oss.life.li/get | bash</code></pre>
-      <p class="lead" style="font-size:14px;">This installs <code>veld</code> to <code>~/.local/bin</code>. Commands auto-bootstrap on first use with HTTPS on port 18443. For clean URLs with no port suffix, run the one-time <code>veld setup privileged</code> — sudo once, never again. Prefer no sudo at all? <code>veld setup unprivileged</code> supports the full feature set on <code>.localhost</code> domains.</p>
-      <p class="lead" style="font-size:14px;"><strong>Upgrading from an older veld?</strong> Your <code>veld.json</code> needs <code>"schemaVersion": "3"</code> &mdash; earlier versions no longer load. It is a handful of lines, and the error you get names every change: <a href="https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md">the migration guide</a> is written so you can hand it to your coding agent, then run <code>veld lint</code> to check the result.</p>
+      <p class="lead" style="font-size:14px;">This installs <code>veld</code> to <code>~/.local/bin</code>. Commands auto-bootstrap on first use with HTTPS on port 18443. For clean URLs with no port suffix, run the one-time <code>veld self setup privileged</code> — sudo once, never again. Prefer no sudo at all? <code>veld self setup unprivileged</code> supports the full feature set on <code>.localhost</code> domains.</p>
+      <p class="lead" style="font-size:14px;"><strong>Upgrading from an older veld?</strong> Your <code>veld.json</code> needs <code>"schemaVersion": "3"</code> &mdash; earlier versions no longer load. It is a handful of lines, and the error you get names every change: <a href="https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md">the migration guide</a> is written so you can hand it to your coding agent, then run <code>veld orchestrator lint</code> to check the result.</p>
     </div>
   </section>
 
@@ -550,14 +559,14 @@ veld share <span class="kw">--web</span>
 
       <h3 style="margin-top:36px; font-size:17px;">Docs that can't go stale</h3>
       <p class="lead" style="font-size:14px; margin-bottom:6px;">The skill is a pointer, a few kilobytes. The documentation ships inside the binary, so your agent reads the docs for the veld you actually have — and reads only the page it needs, when it needs it, instead of loading a manual and your whole config into its context first.</p>
-      <pre data-copy="veld skills
-veld skills basics
-veld skills config"><code><span class="cmt"># the index — fourteen topics, one line each:</span>
-veld skills
+      <pre data-copy="veld agent skills
+veld agent skills basics
+veld agent skills config"><code><span class="cmt"># the index — fourteen topics, one line each:</span>
+veld agent skills
 
 <span class="cmt"># then just the page the task needs:</span>
-veld skills basics
-veld skills config</code></pre>
+veld agent skills basics
+veld agent skills config</code></pre>
       <p class="note">Nothing to re-install when veld updates: the skill never changes, because it only says where to look.</p>
 
       <h3 style="margin-top:36px; font-size:17px;">Start work by describing it</h3>
@@ -591,7 +600,7 @@ veld skills config</code></pre>
         <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, feedback, tokens — in one WAL-mode database. Versioned, migrates forward. Backed up on an interval, integrity-checked on a timer, and restorable in one click when it isn't.</p></div>
       </div>
 
-      <div class="diagram" role="img" aria-label="Architecture. Local: the veld CLI drives the daemon and helper; the helper configures Caddy, which terminates HTTPS and reverse-proxies your services on clean URLs; SQLite holds all state. Sharing over iroh: veld share connects your daemon straight to a colleague's Veld — no gateway involved (an optional self-hosted relay may sit in between). Only veld share --web routes through a veld-gateway to reach anyone in a browser.">
+      <div class="diagram" role="img" aria-label="Architecture. Local: the veld CLI drives the daemon and helper; the helper configures Caddy, which terminates HTTPS and reverse-proxies your services on clean URLs; SQLite holds all state. Sharing over iroh: veld network share connects your daemon straight to a colleague's Veld — no gateway involved (an optional self-hosted relay may sit in between). Only veld network share --web routes through a veld-gateway to reach anyone in a browser.">
         <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg">
           <defs>
             <marker id="arw" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
@@ -677,16 +686,16 @@ veld skills config</code></pre>
           <path class="dg-line dg-dash" d="M170 420 L214 420" marker-end="url(#arw)"/>
 
           <!-- peer path: elbow up to a colleague's Veld, no gateway -->
-          <text class="dg-cap" x="512" y="330" text-anchor="middle">veld share</text>
+          <text class="dg-cap" x="512" y="330" text-anchor="middle">veld network share</text>
           <path class="dg-line" d="M380 410 L470 410 L470 344 L554 344" marker-end="url(#arw)"/>
 
           <!-- web path: elbow down through the gateway to anyone -->
-          <text class="dg-cap" x="300" y="476" text-anchor="end">veld share --web</text>
+          <text class="dg-cap" x="300" y="476" text-anchor="end">veld network share --web</text>
           <path class="dg-line" d="M305 448 L305 500 L406 500" marker-end="url(#arw)"/>
           <path class="dg-line" d="M560 500 L594 500" marker-end="url(#arw)"/>
         </svg>
       </div>
-      <p class="lead" style="margin-top:18px; font-size:14px;"><code>veld share</code> connects your daemon <strong>straight to a colleague's Veld</strong> over an encrypted iroh tunnel — no gateway in the path (an optional self-hosted <strong>relay</strong> can keep traffic on infrastructure you control). The <strong>veld-gateway</strong> only comes in for <code>veld share --web</code>, which publishes a service on the open web for anyone with a browser, no Veld required.</p>
+      <p class="lead" style="margin-top:18px; font-size:14px;"><code>veld network share</code> connects your daemon <strong>straight to a colleague's Veld</strong> over an encrypted iroh tunnel — no gateway in the path (an optional self-hosted <strong>relay</strong> can keep traffic on infrastructure you control). The <strong>veld-gateway</strong> only comes in for <code>veld network share --web</code>, which publishes a service on the open web for anyone with a browser, no Veld required.</p>
     </div>
   </section>
 

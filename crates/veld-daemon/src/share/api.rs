@@ -95,7 +95,7 @@ async fn start(
     )?;
     // `display_nodes`, not the bare node name: the manifest holds one entry per
     // **port**, so a node sharing two of them appeared twice under one name — and
-    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // "Sharing 2 node(s)" is the only scope statement `veld network share` prints when it
     // mints a link, where an app port and an admin console must not read alike.
     let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
@@ -212,13 +212,13 @@ async fn start_web_share(
 
     // `display_nodes`, not the bare node name: the manifest holds one entry per
     // **port**, so a node sharing two of them appeared twice under one name — and
-    // "Sharing 2 node(s)" is the only scope statement `veld share` prints when it
+    // "Sharing 2 node(s)" is the only scope statement `veld network share` prints when it
     // mints a link, where an app port and an admin console must not read alike.
     let node_names: Vec<String> = manifest.display_nodes();
     let expires_at = manifest.expires_at;
     let run_id = manifest.run_id;
 
-    // Re-running `veld share --web` for the same run replaces the previous web
+    // Re-running `veld network share --web` for the same run replaces the previous web
     // share rather than stacking a second one. Snapshot the prior web shares
     // now but DON'T tear them down yet: the new share has a fresh capability
     // (hence fresh slugs), so both can coexist momentarily — and if the new
@@ -601,7 +601,7 @@ fn config_ttl_minutes(sharing: Option<&SharingConfig>, mode: ExposeMode) -> Opti
 /// that actually limits this is the 5–480 clamp, which applies to the project's
 /// number as much as the machine's; a repo that can land a `veld.json` can already
 /// run arbitrary commands through one, so the clamp — not the precedence — is
-/// where the exposure question is answered. `veld lint` warns when it bites
+/// where the exposure question is answered. `veld orchestrator lint` warns when it bites
 /// (`share-ttl-range`).
 fn effective_ttl_secs(
     flag_secs: Option<i64>,
@@ -656,7 +656,7 @@ fn build_manifest(
     // manifest builder below reads. Sharing one would mint a tunnel, or a public
     // gateway URL, pointing at ports that are gone and that another process can
     // reuse. Gate here rather than filtering the resolution, so the error can
-    // say *why* a run the user can see in `veld status` was refused.
+    // say *why* a run the user can see in `veld orchestrator status` was refused.
     //
     // `Running`, not `is_live()`: that also admits `Starting`, and node URLs are
     // written per node as each one comes up — so a share taken mid-startup
@@ -878,7 +878,7 @@ fn build_manifest(
     if !other_only.is_empty() {
         warnings.push(match mode {
             ExposeMode::Peer => format!(
-                "not shared here (opted into `web` only — use `veld share --web`): {}",
+                "not shared here (opted into `web` only — use `veld network share --web`): {}",
                 other_only.join(", ")
             ),
             ExposeMode::Web => format!(
@@ -911,7 +911,7 @@ fn build_manifest(
     ))?;
 
     // Loud warning when a relay secret is about to ride inside the join link, so
-    // `veld share` / the dashboard surface it (the link is auto-copied) rather
+    // `veld network share` / the dashboard surface it (the link is auto-copied) rather
     // than silently shipping the secret.
     if let Some(w) = embed_warning(embed_relay_tokens, &relay) {
         warnings.push(w);
@@ -1020,7 +1020,7 @@ fn share_exclusion_message(
     if !other_only.is_empty() {
         parts.push(match mode {
             ExposeMode::Peer => format!(
-                "These opt into `web` only — use `veld share --web`, or add `peer` to share \
+                "These opt into `web` only — use `veld network share --web`, or add `peer` to share \
                  Veld-to-Veld: {}.",
                 other_only.join(", ")
             ),
@@ -1068,7 +1068,7 @@ fn mode_name(mode: ExposeMode) -> &'static str {
 ///
 /// The tempting alternative — treat the project as a hint and fall back to a
 /// machine-wide match when it doesn't hold the name — was tried and reverted. It
-/// meant `cd repoA && veld share main`, where A has no `main`, silently shared
+/// meant `cd repoA && veld network share main`, where A has no `main`, silently shared
 /// *B's* `main`; with `--web` that publishes URLs while the output names neither
 /// project nor run. The apparent capability it preserved (sharing any project's
 /// run from any directory) was never a designed feature: it was an artifact of
@@ -1078,7 +1078,7 @@ fn mode_name(mode: ExposeMode) -> &'static str {
 ///
 /// So: naming a project that doesn't run the name is an error that says where it
 /// *does* run. `cd` is the remedy, and it's in the message. Callers with no
-/// project at all (a `veld share` outside any project) pass `None` and get
+/// project at all (a `veld network share` outside any project) pass `None` and get
 /// machine-wide matching, where **more than one match is a hard error** rather
 /// than a guess.
 ///
@@ -1131,12 +1131,12 @@ fn resolve_share_project(
         [only] => Ok(only.to_path_buf()),
         [] => Err((StatusCode::NOT_FOUND, format!("run '{run_name}' not found"))),
         // Name the candidates and a remedy that exists: there is no
-        // `--project-root` flag on `veld share`, so `cd` is the answer.
+        // `--project-root` flag on `veld network share`, so `cd` is the answer.
         _ => Err((
             StatusCode::CONFLICT,
             format!(
                 "run '{run_name}' exists in more than one project ({}) — run \
-                 `veld share` from the directory of the one you mean",
+                 `veld network share` from the directory of the one you mean",
                 roots()
             ),
         )),
@@ -1152,7 +1152,7 @@ fn resolve_share_project(
 ///
 /// Scoped to `project` when the caller supplied one, so "the only run" means
 /// the only run *of this project*. Unscoped it stays machine-wide, which is
-/// what a `veld share` invoked outside any project can offer.
+/// what a `veld network share` invoked outside any project can offer.
 fn sole_run(registry: &GlobalRegistry, project: Option<&str>) -> Result<String, ApiError> {
     let requested = project.map(std::path::Path::new);
     let scoped = || {
@@ -1177,7 +1177,7 @@ fn sole_run(registry: &GlobalRegistry, project: Option<&str>) -> Result<String, 
             // user can copy one straight into the command.
             // Deduplicated, and qualified by project when unscoped: across two
             // projects both running `main`, a bare list reads "dev, main, main"
-            // and the remedy it suggests (`veld share main`) then 409s.
+            // and the remedy it suggests (`veld network share main`) then 409s.
             let mut candidates: Vec<String> = scoped()
                 .flat_map(|e| {
                     e.runs.keys().map(move |name| match project {
@@ -1193,7 +1193,7 @@ fn sole_run(registry: &GlobalRegistry, project: Option<&str>) -> Result<String, 
             Err((
                 StatusCode::BAD_REQUEST,
                 format!(
-                    "several environments here ({}) — name one: `veld share <run>`",
+                    "several environments here ({}) — name one: `veld network share <run>`",
                     candidates.join(", ")
                 ),
             ))
@@ -1316,7 +1316,7 @@ mod tests {
 
         // A scope that does NOT hold the name is an error, even when the name is
         // unambiguous elsewhere. Falling through was tried and reverted: it made
-        // `cd repoA && veld share main` publish repoB's run, and it left this
+        // `cd repoA && veld network share main` publish repoB's run, and it left this
         // path laxer than `sole_run`, which never crosses the boundary.
         let mut solo = colliding_registry();
         solo.projects.remove("/repos/beta");
@@ -1369,11 +1369,11 @@ mod tests {
             msg.contains("/repos/alpha") && msg.contains("/repos/beta"),
             "{msg}"
         );
-        // The remedy named must exist: `veld share` has no project flag.
+        // The remedy named must exist: `veld network share` has no project flag.
         assert!(!msg.contains("--project"), "{msg}");
 
         // Unambiguous names still resolve without a project — an older CLI, or
-        // `veld share` run from outside a project, keeps working.
+        // `veld network share` run from outside a project, keeps working.
         let (code, _) = resolve_share_project(&reg, None, "nope").unwrap_err();
         assert_eq!(code, StatusCode::NOT_FOUND);
         let mut solo = colliding_registry();
@@ -1643,7 +1643,7 @@ mod tests {
 
     #[test]
     fn exclusion_message_other_audience_is_called_out_distinctly() {
-        // Peer share, web-only nodes → point at `veld share --web`.
+        // Peer share, web-only nodes → point at `veld network share --web`.
         let msg = share_exclusion_message(
             "r",
             true,
@@ -1652,7 +1652,7 @@ mod tests {
             &mut vec![],
             ExposeMode::Peer,
         );
-        assert!(msg.contains("veld share --web"), "{msg}");
+        assert!(msg.contains("veld network share --web"), "{msg}");
         assert!(msg.contains("api:local"), "{msg}");
 
         // Web share, peer-only nodes → point at adding `web` to expose.

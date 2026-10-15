@@ -187,7 +187,7 @@ impl CertGate {
         // certificate faults a new process cannot touch: an unwritable storage
         // tree, a CA whose key is gone, an intermediate clamped to nothing. Past
         // this many restarts with no healthy probe in between, veld says so and
-        // leaves Caddy alone; the state is still red in `veld doctor` and the
+        // leaves Caddy alone; the state is still red in `veld self doctor` and the
         // reason is in Caddy's own log.
         if self.restarts_without_recovery >= CERT_RESTART_ATTEMPTS {
             return CertVerdict::GaveUp;
@@ -323,7 +323,7 @@ impl CaddyManager {
             // See: golang/go#71128, caddyserver/caddy#7309
             .env("GODEBUG", "http2xconnect=1")
             // Put Caddy in its own process group (pgid = its own pid) so a signal
-            // delivered to the helper's launchd job — e.g. `veld update`'s
+            // delivered to the helper's launchd job — e.g. `veld self update`'s
             // `launchctl kill TERM system/dev.veld.helper`, or a bootout — cannot
             // reach Caddy through the shared group. The helper only ever controls
             // Caddy deliberately (admin-API `/stop` or an explicit kill-by-pid),
@@ -1398,7 +1398,7 @@ fn build_base_config(
                         "routes": [
                             // First, and on every hostname: the one route Caddy
                             // answers entirely by itself. Anything checking
-                            // "is Caddy serving?" — `veld doctor`, the TLS
+                            // "is Caddy serving?" — `veld self doctor`, the TLS
                             // health probe — gets an answer that does not
                             // depend on the daemon being up, which it would if
                             // the management route below (host-matched and

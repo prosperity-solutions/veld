@@ -168,7 +168,7 @@ pub enum HelperCommand {
     /// Exit so the service manager relaunches the helper onto a freshly
     /// installed binary, leaving Caddy running. Unlike [`Self::Shutdown`] this
     /// keeps every live URL served across the swap — it is how an unprivileged
-    /// `veld update` restarts the *root* helper without sudo.
+    /// `veld self update` restarts the *root* helper without sudo.
     ///
     /// Helpers older than 16.14 answer `unknown command: restart`; callers must
     /// treat that as "fall back to the binary watcher", not as a failure.
@@ -525,9 +525,9 @@ impl HelperClient {
     ///
     /// **The authoritative answer, and the reason it is worth one round trip.**
     /// Everything else infers the pair from `~/.veld/setup.json`, and the two can
-    /// disagree: a helper started by hand, a `veld setup privileged` that died
+    /// disagree: a helper started by hand, a `veld self setup privileged` that died
     /// after writing the mode, or a stray user helper on the high pair while the
-    /// privileged LaunchDaemon is down (`veld doctor` reports exactly that state).
+    /// privileged LaunchDaemon is down (`veld self doctor` reports exactly that state).
     /// The daemon's `Origin` allowlist has to know which pair is really in front —
     /// an origin it does not recognise is a WebSocket upgrade it refuses, and a
     /// browser cannot show the user why.

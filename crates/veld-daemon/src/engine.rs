@@ -1,7 +1,7 @@
 //! The engine's home in the daemon: spawning workers, streaming what they say,
 //! noticing when one dies, and the `/api/engine/*` routes every face talks to.
 //!
-//! **One engine per machine, many faces.** `veld start` in a terminal, the IDE's
+//! **One engine per machine, many faces.** `veld orchestrator start` in a terminal, the IDE's
 //! start button, the monitor's crash recovery and the trash flow's teardown all
 //! come through [`spawn_action`]. None of them execs a `veld` binary any more:
 //! the daemon spawns `veld-daemon --engine-worker` (see `engine_worker.rs`) and
@@ -11,7 +11,7 @@
 //! spawned; a face that wants the outcome reads the action's event log, which
 //! the worker writes directly. That is what lets a worker outlive this daemon
 //! (an update restarts it), and what removed the circular wait the old
-//! `spawn_veld` had to dodge (a `veld stop` the daemon waited on, calling back
+//! `spawn_veld` had to dodge (a `veld orchestrator stop` the daemon waited on, calling back
 //! into the daemon).
 
 use std::path::{Path, PathBuf};
@@ -61,7 +61,7 @@ pub(crate) fn project_root_of(path: &Path) -> Result<PathBuf, ApiError> {
 /// Start a worker for `request`. Returns the action id as soon as the worker is
 /// spawned; the outcome arrives in the action's event log.
 ///
-/// Refuses with `503` while `veld update` holds the update lock — the answer a
+/// Refuses with `503` while `veld self update` holds the update lock — the answer a
 /// UI already shows as "try again shortly", and the honest one. A worker already
 /// running keeps running across the update.
 pub(crate) async fn spawn_action(
@@ -75,7 +75,7 @@ pub(crate) async fn spawn_action(
         );
         return Err(err(
             StatusCode::SERVICE_UNAVAILABLE,
-            "a veld update is in progress — try again when it finishes",
+            "a Veld update is in progress — try again when it finishes",
         ));
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -277,7 +277,7 @@ pub(crate) async fn start_unattended(
             StatusCode::UNPROCESSABLE_ENTITY,
             format!(
                 "this project needs values on this machine first: {} — set them with \
-                 `veld config set`",
+                 `veld orchestrator vars set`",
                 names.join(", ")
             ),
         ));
@@ -366,7 +366,7 @@ async fn sweep_lost_with(grace_secs: i64) {
             &row.id,
             STATUS_LOST,
             &ActionOutcome::Failed {
-                message: "The engine worker stopped before it finished. Check `veld status` \
+                message: "The engine worker stopped before it finished. Check `veld orchestrator status` \
                           and run the command again."
                     .to_owned(),
                 kind: FailureKind::WorkerLost,
@@ -774,6 +774,7 @@ mod tests {
             ("GET", "/api/engine/actions/x/events"),
             ("GET", "/api/engine/status?project_root=/"),
             ("GET", "/api/engine/logs?project_root=/"),
+            ("GET", "/api/engine/overview"),
         ] {
             let req = axum::http::Request::builder()
                 .method(method)
@@ -891,7 +892,7 @@ mod tests {
     }
 
     /// The daemon runs the engine in workers of its own binary; it never execs
-    /// the `veld` CLI. That exec is what made a `veld stop` the daemon waited on
+    /// the `veld` CLI. That exec is what made a `veld orchestrator stop` the daemon waited on
     /// call back into the daemon — the circular wait this design removed.
     #[test]
     fn the_daemon_never_execs_the_veld_cli() {

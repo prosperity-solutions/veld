@@ -400,7 +400,7 @@ export function DatabaseHealthDialog(props: {
             Nothing here needs restoring — the database itself is intact. The
             newest usable backup was taken {describeAge(candidate.takenAt)}; use{" "}
             <Text span ff="monospace" size="sm">
-              veld backup restore
+              veld self backup restore
             </Text>{" "}
             if you deliberately want to go back to it.
           </Text>
@@ -408,7 +408,7 @@ export function DatabaseHealthDialog(props: {
           <Text size="sm" c="dimmed">
             There is no backup that can be restored — none of the copies on disk
             passed their integrity check. Copy the database aside before doing
-            anything else, then see <Text span ff="monospace" size="sm">veld backup</Text>.
+            anything else, then see <Text span ff="monospace" size="sm">veld self backup list</Text>.
           </Text>
         ) : (
           // **"No copy passed the check" is false when there is no copy.** Every
@@ -420,7 +420,7 @@ export function DatabaseHealthDialog(props: {
             There are no backups to restore from — none has been written yet. Copy
             the database aside before doing anything else, then see{" "}
             <Text span ff="monospace" size="sm">
-              veld backup
+              veld self backup list
             </Text>{" "}
             for why the schedule is not producing any.
           </Text>
@@ -3282,7 +3282,7 @@ export function ClaudeModOfferDialog(props: {
           <Text size="sm" c="dimmed">
             Veld could not check your Claude Code
             {check?.reason ? ` (${check.reason})` : checkError ? ` (${checkError})` : ""}. You
-            can still switch; <code>veld doctor</code> says whether it took.
+            can still switch; <code>veld self doctor</code> says whether it took.
           </Text>
         )}
         <Text size="xs" c="dimmed">

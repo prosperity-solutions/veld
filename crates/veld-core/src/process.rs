@@ -149,7 +149,7 @@ const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// never finishes. Ctrl+C during a `command` node drops this future without
 /// reaching the grace period above, and that is exactly when it matters: the
 /// step's process is still running, so the pipes are still open, and `veld
-/// start` would hang instead of tearing the run down.
+/// orchestrator start` would hang instead of tearing the run down.
 struct DrainTasks(Vec<tokio::task::JoinHandle<()>>);
 
 impl Drop for DrainTasks {
@@ -462,7 +462,7 @@ pub fn tokio_command(spec: &CommandSpec) -> Result<Command, ProcessError> {
 }
 
 /// The `std::process::Command` twin of [`tokio_command`], for the sync spawn
-/// sites (detached servers, `veld action`).
+/// sites (detached servers, `veld orchestrator action`).
 pub fn std_command(spec: &CommandSpec) -> Result<std::process::Command, ProcessError> {
     match spec {
         CommandSpec::Argv(argv) => {
@@ -650,7 +650,7 @@ pub fn spawn_detached(
     // rebuilding the pipeline with manual file descriptors: the process topology,
     // tracked PID, process-group leadership, and the `stats.rs` parent-tree walk
     // must stay byte-identical to the shell-string case. Real fds would change
-    // what `is_alive` tracks (breaking `cleanup_dead_runs`, `veld status`, the
+    // what `is_alive` tracks (breaking `cleanup_dead_runs`, `veld orchestrator status`, the
     // monitor, and GC for servers that double-fork) and would change the
     // `node_stats` sampled *set*, producing an unexplained step change in the UI
     // graph. See the RC1 characterization tests below.
@@ -835,7 +835,7 @@ async fn emit_step_line<W: tokio::io::AsyncWrite + Unpin>(
 /// Both pipes are captured, never inherited: everything the step prints is
 /// handed to `sink` as it arrives, in batches (see [`LineSink`]). Inheriting
 /// stderr wrote a `docker build` straight over the progress bars and left
-/// nothing behind for `veld logs`.
+/// nothing behind for `veld orchestrator logs`.
 ///
 /// `VELD_OUTPUT ` control lines are peeled off **both** streams and never
 /// sinked — they can carry secrets, which is the whole reason the file channel
@@ -1130,7 +1130,7 @@ impl tokio::io::AsyncWrite for LineCallbackWriter {
 /// agent) sees the output as it happens — this is what makes a `--oneshot`
 /// terminal node (e.g. an end-to-end test runner) print its results inline.
 /// When `log_target` is `Some`, each line is also timestamped into the
-/// database `server` stream so `veld logs --node <n>` works after the run.
+/// database `server` stream so `veld orchestrator logs --node <n>` works after the run.
 ///
 /// `VELD_OUTPUT key=value` control lines on stdout are still parsed (for
 /// declared outputs) but are never echoed or logged — they are machinery, not
@@ -1539,7 +1539,7 @@ mod characterization_tests {
 
     /// The tracked PID is the pipeline's process-group leader, and killing the
     /// group reaps both the node process and the log writer. `kill_process`
-    /// signals `-pid`, so this property is what makes `veld stop` complete
+    /// signals `-pid`, so this property is what makes `veld orchestrator stop` complete
     /// rather than leaving an orphaned log writer holding the pipe.
     #[tokio::test]
     async fn tracked_pid_is_group_leader() {
@@ -1916,7 +1916,7 @@ mod command_capture_tests {
     /// The regression this whole path exists for: a `command` step's output —
     /// on *both* pipes — reaches the sink. stderr used to be inherited straight
     /// onto the terminal and stdout was read only for control lines, so a
-    /// `docker build` left nothing behind for `veld logs`.
+    /// `docker build` left nothing behind for `veld orchestrator logs`.
     #[tokio::test]
     async fn captures_stdout_and_stderr() {
         let (sink, lines) = recording_sink();
@@ -2070,7 +2070,7 @@ mod command_capture_tests {
     /// a clone of the progress channel's sender. A reader that outlives its
     /// `run_command` keeps that sender alive, and the CLI's progress task ends
     /// only when the last sender drops: Ctrl+C during a `command` node would
-    /// hang `veld start` instead of tearing the run down, with the step's
+    /// hang `veld orchestrator start` instead of tearing the run down, with the step's
     /// process still running and its pipes still open.
     #[tokio::test]
     async fn cancelling_the_call_releases_what_the_sink_holds() {

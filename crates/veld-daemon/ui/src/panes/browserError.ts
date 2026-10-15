@@ -5,7 +5,7 @@
  * without a DOM (the UI's runner is `environment: "node"`). The mapping is the
  * part worth pinning: which icon appears is cosmetic, but telling "nothing is
  * listening" apart from "that hostname does not resolve" is the difference
- * between starting the run and running `veld doctor`.
+ * between starting the run and running `veld self doctor`.
  *
  * Keyed off Chromium's net error rather than its message: the message is prose
  * that changes between versions, the codes are stable.
@@ -65,7 +65,7 @@ export function describeBrowserError(err: BrowserError): BrowserErrorCopy {
     return {
       kind: "cert",
       title: "The certificate has expired",
-      hint: "Veld restarts Caddy to renew it, usually within a couple of minutes — reload then. If it persists, `veld doctor` reports the certificate and names Caddy's log.",
+      hint: "Veld restarts Caddy to renew it, usually within a couple of minutes — reload then. If it persists, `veld self doctor` reports the certificate and names Caddy's log.",
     };
   }
   if (
@@ -75,7 +75,7 @@ export function describeBrowserError(err: BrowserError): BrowserErrorCopy {
     return {
       kind: "cert",
       title: "The certificate isn't trusted",
-      hint: "Veld serves runs with Caddy's local CA. Run `veld doctor` to check it is in the system trust store.",
+      hint: "Veld serves runs with Caddy's local CA. Run `veld self doctor` to check it is in the system trust store.",
     };
   }
   switch (err.code) {
@@ -98,7 +98,7 @@ export function describeBrowserError(err: BrowserError): BrowserErrorCopy {
       return {
         kind: "dns",
         title: "That hostname doesn't resolve",
-        hint: "Veld's DNS or the privileged helper may not be set up. `veld doctor` reports on both.",
+        hint: "Veld's DNS or the privileged helper may not be set up. `veld self doctor` reports on both.",
       };
     case NET.CONNECTION_TIMED_OUT:
     case NET.TIMED_OUT:

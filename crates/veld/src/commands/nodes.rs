@@ -1,6 +1,6 @@
 use crate::output;
 
-/// `veld nodes [--json]`
+/// `veld orchestrator nodes [--json]`
 pub async fn run(json: bool) -> i32 {
     let Some((config_path, _)) = super::parse_config(json) else {
         return 1;

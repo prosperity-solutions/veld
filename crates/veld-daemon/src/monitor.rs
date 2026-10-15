@@ -26,7 +26,7 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// interval and the heartbeat) and entries for dead instances have to be pruned
 /// (the map lives as long as the daemon). Doing that against a joined string
 /// means a prefix match, and `--name` is free-form — it is passed through
-/// verbatim, never slugified — so `veld start --name dev` alongside
+/// verbatim, never slugified — so `veld orchestrator start --name dev` alongside
 /// `--name dev:eu` in one project had the `dev` scan delete `dev:eu`'s **live**
 /// entries on every 5-second scan. That node's `interval_ms` would then never be
 /// honoured and every probe would answer `Heartbeat`, i.e. ~17,000 internal rows
@@ -46,7 +46,7 @@ type LastCheckMap = HashMap<LastCheckKey, ProbeBookkeeping>;
 /// A transition is what carries information, and those lines already exist
 /// separately (failed / cannot run / self-healed). This heartbeat exists only so
 /// a long-healthy run does not look *silent* to somebody watching
-/// `veld logs --source internal`: ~21 rows per node per day instead of ~11,200.
+/// `veld orchestrator logs --source internal`: ~21 rows per node per day instead of ~11,200.
 const PASS_HEARTBEAT: Duration = Duration::from_secs(3600);
 
 /// What a *passing* liveness probe should write to the `internal` stream.
@@ -326,9 +326,9 @@ async fn run_liveness_checks(
     // `last_checks` is created once for the daemon's lifetime and was never
     // pruned, which was harmless while the key was bounded by the node count. It
     // now carries the run id — so a fresh run re-arms its probe interval and its
-    // heartbeat — and a run id is a new UUID per `veld start`, so without this the
+    // heartbeat — and a run id is a new UUID per `veld orchestrator start`, so without this the
     // map grows by one entry per node per restart, forever, on a daemon that
-    // survives `veld update`.
+    // survives `veld self update`.
     //
     // Exact field comparison, never a prefix: see [`LastCheckMap`] for what a
     // prefix match did to a run whose name contained a `:`.
@@ -372,7 +372,7 @@ async fn run_liveness_checks(
         //
         // **Keyed on the run instance, not just the run name.** This map is
         // per-daemon and never pruned, so a name-only key carries a *previous*
-        // run's `last_pass_logged` into a fresh `veld start` of the same name —
+        // run's `last_pass_logged` into a fresh `veld orchestrator start` of the same name —
         // and the new run's `internal` stream then says nothing about that node
         // for up to `PASS_HEARTBEAT`, which is not what README
         // promises a reader ("a quiet stream means healthy"). `run.run_id` changes per instance, so a restart re-arms
@@ -492,7 +492,7 @@ async fn run_liveness_checks(
             // the node unhealthy is honest — the check is not answering — but
             // letting it reach `failure_threshold` would restart the whole
             // environment over a config shape a restart cannot change, and the
-            // restart's `veld start` now refuses on the same shape, so the
+            // restart's `veld orchestrator start` now refuses on the same shape, so the
             // environment would stay down until `max_recoveries` ran out.
             Err(LivenessFailure::Unrunnable(detail)) => {
                 if node_state.status != NodeStatus::Unhealthy
@@ -548,7 +548,7 @@ async fn run_liveness_checks(
 
                 // **Never spend a recovery attempt during an update.** Recovery
                 // is an engine restart, which the engine refuses (`503`) while
-                // `veld update` holds the lock — and the attempt is counted and
+                // `veld self update` holds the lock — and the attempt is counted and
                 // persisted *before* that call, with nothing rolling it back. An
                 // update deliberately leaves environments running while it
                 // restarts the daemon and helper underneath them, so probes
@@ -684,8 +684,8 @@ async fn run_liveness_checks(
 /// a node that has no port, a `type` veld does not implement — and no number of
 /// restarts changes a config shape. Counting those toward `failure_threshold`
 /// takes the whole environment down and keeps it down: the restart re-enters
-/// `veld start`, which now refuses on the very lint error the probe shape
-/// produces. `veld update` deliberately does not stop live environments, so this
+/// `veld orchestrator start`, which now refuses on the very lint error the probe shape
+/// produces. `veld self update` deliberately does not stop live environments, so this
 /// is reachable on a config that was accepted when the run began.
 enum LivenessFailure {
     /// The probe ran and did not pass. Counts toward recovery.
@@ -913,7 +913,7 @@ fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
 
 /// Restart a run through the engine and wait for it to finish.
 ///
-/// **Precondition, enforced only at the call site: no `veld update` may be
+/// **Precondition, enforced only at the call site: no `veld self update` may be
 /// holding the update lock.** The engine refuses new actions during an update
 /// (`503`) — while the caller has already incremented and *persisted*
 /// `recovery_count`. A second call site that forgets the check therefore burns a
@@ -946,7 +946,7 @@ async fn run_veld_restart(project_root: &Path, run_name: &str, internal_log: Opt
     };
     let ended = crate::feedback_server::engine::await_action(&id, Duration::from_secs(300)).await;
     // What the restart said — teardown warnings, released shares, the failure —
-    // into the run's own log, as the `veld restart` output used to be. Progress
+    // into the run's own log, as the `veld orchestrator restart` output used to be. Progress
     // stays in the action's event log.
     if let Some(log) = internal_log {
         let said: Vec<String> = {
@@ -1096,10 +1096,10 @@ mod tests {
     /// A probe that cannot run and a probe that ran and failed are different
     /// answers, and only one of them is worth restarting an environment over.
     ///
-    /// Getting this wrong is not theoretical: `veld update` does not stop live
+    /// Getting this wrong is not theoretical: `veld self update` does not stop live
     /// environments, so a run whose config predates `probe-needs-port` keeps
     /// going with a probe that now reports failure — and the recovery it would
-    /// trigger re-enters `veld start`, which refuses on that same config. The
+    /// trigger re-enters `veld orchestrator start`, which refuses on that same config. The
     /// environment would stay down until `max_recoveries` ran out.
     #[tokio::test]
     async fn a_probe_that_cannot_run_is_not_a_probe_that_failed() {

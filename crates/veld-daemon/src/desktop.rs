@@ -1674,7 +1674,7 @@ fn parse_prunable_paths(porcelain: &str) -> Vec<String> {
 }
 
 /// Canonicalize discovered worktree paths before storing them. Git porcelain
-/// already emits physical (symlink-resolved) paths, and `veld start` derives
+/// already emits physical (symlink-resolved) paths, and `veld orchestrator start` derives
 /// the project root from `getcwd` (also physical) — canonicalizing here keeps
 /// the UI's join key (`worktrees.path` == `projects.root`, string equality)
 /// stable even when git reports a path through a symlink. Falls back to the
@@ -2878,11 +2878,11 @@ const PRESETS_EXPANDED_PER_LISTING: usize = 64;
 ///   `RunInfo.started_from.selections`. An **empty** vector is a legitimate `ok`: a
 ///   preset whose `selections` are `[]` really does expand to nothing.
 /// - `failed` — the preset exists and does not expand: a `@ref` to something gone,
-///   a since-removed node, a cycle. `veld status` says "cannot be expanded — see
-///   `veld lint`" for this, and lint does report it.
+///   a since-removed node, a cycle. `veld orchestrator status` says "cannot be expanded — see
+///   `veld orchestrator lint`" for this, and lint does report it.
 /// - `skipped` — nothing is wrong with the preset; this *listing* ran out of its
 ///   shared expansion budget. Distinct from `failed` precisely because the label
-///   `failed` earns ("see `veld lint`") would send the reader to a check that
+///   `failed` earns ("see `veld orchestrator lint`") would send the reader to a check that
 ///   passes. A client that cannot compare must say so rather than guess, exactly as
 ///   it does when the whole config is unreadable.
 ///
@@ -2901,7 +2901,7 @@ enum Expansion {
 ///
 /// A lean view rather than `veld_core::ide::IdeSection` itself: the section also
 /// carries the parse problems and the still-uninterpreted key names, and those
-/// belong to `veld lint`, not to a repo listing.
+/// belong to `veld orchestrator lint`, not to a repo listing.
 #[derive(Serialize, Default)]
 struct IdeView {
     quicklinks: Vec<veld_core::ide::Quicklink>,
@@ -3242,9 +3242,9 @@ fn worktree_view_with(
                 // Sharing was the first shape and it could not tell its two failure
                 // modes apart: a preset refused because an earlier one had eaten the
                 // budget looked exactly like a broken preset, so the UI sent the
-                // reader to `veld lint` for a config lint reports nothing about. A
+                // reader to `veld orchestrator lint` for a config lint reports nothing about. A
                 // per-preset budget also keeps this endpoint's verdict identical to
-                // `veld lint`'s and `veld status`'s, which is the property that
+                // `veld orchestrator lint`'s and `veld orchestrator status`'s, which is the property that
                 // stopped two surfaces contradicting each other in the first place.
                 //
                 // The endpoint stays bounded because the count is: 64 presets × the
@@ -3256,7 +3256,7 @@ fn worktree_view_with(
                     };
                 }
                 // Expand AND resolve, in that order — the same two steps
-                // `veld start --preset` takes. `expand_preset` alone leaves a
+                // `veld orchestrator start --preset` takes. `expand_preset` alone leaves a
                 // bare `node` without its default variant, so its tokens
                 // would differ from a run's recorded ones for every selection
                 // written without an explicit variant.
@@ -3755,7 +3755,7 @@ struct RestoreDbResponse {
     restarts_automatically: bool,
     /// What to run when it will *not* come back on its own.
     ///
-    /// The CLI has said this since `veld backup restore` existed (its
+    /// The CLI has said this since `veld self backup restore` existed (its
     /// `restart_hint`), and the IDE said only "start the daemon again" — leaving
     /// somebody who had just replaced their database in a GUI strictly worse off
     /// than the same person in a terminal. `None` when the restart is automatic.
@@ -3769,13 +3769,13 @@ struct RestoreDbResponse {
 /// database access in this process is short-lived (`Db::open()` per request, per
 /// scheduler pass), but "short" is not "none": a stats tick holding a handle
 /// across the rename would keep writing into the displaced file, and those
-/// writes would be silently lost. `veld backup restore` refuses to run at all
+/// writes would be silently lost. `veld self backup restore` refuses to run at all
 /// while a daemon is up for exactly this reason. Rather than invent a quiescing
 /// protocol for every task, this raises `SIGTERM` on itself once the file is in
 /// place: the ordinary graceful shutdown runs — which deliberately leaves
 /// terminal shells alive, because their PTYs belong to holder processes — and
 /// launchd (`KeepAlive`) or systemd (`Restart=always`) starts the daemon again
-/// within seconds, on the restored file. `veld update` already depends on this
+/// within seconds, on the restored file. `veld self update` already depends on this
 /// same property.
 /// **Two gates, and the CSRF header is not one of them.**
 ///
@@ -3797,7 +3797,7 @@ struct RestoreDbResponse {
 /// 2. **A human must confirm in a native dialog** the page cannot draw or
 ///    dismiss — the same `osascript`/`zenity` mechanism [`pick_directory`] uses.
 ///    No GUI to ask on (a headless box, a TCC refusal) means refusal, pointing at
-///    `veld backup restore`, which has its own daemon-down and TTY consent gates.
+///    `veld self backup restore`, which has its own daemon-down and TTY consent gates.
 ///    The extra click is real friction on a rare, destructive action, and it is
 ///    the only thing on this surface that distinguishes a person from a script.
 async fn db_health_restore() -> Result<Json<RestoreDbResponse>, ApiError> {
@@ -3838,7 +3838,7 @@ async fn db_health_restore() -> Result<Json<RestoreDbResponse>, ApiError> {
             return Err(err(
                 StatusCode::CONFLICT,
                 "a restore has to be confirmed on this machine and no dialog could be \
-                 shown — run `veld backup restore` instead",
+                 shown — run `veld self backup restore` instead",
             ));
         }
     }
@@ -4004,7 +4004,7 @@ async fn confirm_destructive(message: &str) -> Confirmed {
         // kdialog both exit 1 for a refusal *and* for a display they cannot open, and
         // `run_picker` maps exit 1 to `Cancelled` — correct for a picker the user
         // opened, wrong here, where the difference decides whether we tell them to
-        // run `veld backup restore` instead. With no display there is nobody to ask.
+        // run `veld self backup restore` instead. With no display there is nobody to ask.
         #[cfg(not(target_os = "macos"))]
         if std::env::var_os("DISPLAY").is_none() && std::env::var_os("WAYLAND_DISPLAY").is_none() {
             return Confirmed::CannotAsk("no display to show a confirmation on".to_string());
@@ -5562,7 +5562,7 @@ fn check_handoff_agent(panes: &[PaneView], agent: Option<&str>) -> Result<(), Ap
             StatusCode::BAD_REQUEST,
             "no_agent",
             "this project declares no agent pane to start the prompt in — add one to \
-             ide.panes (see `veld skills ide-panes`), or leave the prompt out",
+             ide.panes (see `veld agent skills ide-panes`), or leave the prompt out",
         ));
     }
     match agent {
@@ -6261,7 +6261,7 @@ struct StartBody {
     /// Explicit `node:variant` selections — the alternative to a preset for
     /// configs without presets (or custom picks). Mutually exclusive with
     /// `preset`; the UI always sends one of the two. With neither, a non-TTY
-    /// `veld start` starts the project's `default_preset` if one is declared, and
+    /// `veld orchestrator start` starts the project's `default_preset` if one is declared, and
     /// otherwise fails "No selections provided" — so an empty body is a spawn,
     /// not reliably a no-op.
     #[serde(default)]
@@ -6271,7 +6271,7 @@ struct StartBody {
     run_name: Option<String>,
 }
 
-/// Start a veld run in a worktree by spawning `veld start` with the worktree
+/// Start a veld run in a worktree by spawning `veld orchestrator start` with the worktree
 /// as cwd (the CLI resolves the root config from there) — the same fire-and-forget
 /// pattern as the management stop/restart endpoints. Returns 202; the UI
 /// observes progress via `/api/environments`.
@@ -6296,7 +6296,7 @@ async fn start_worktree_run(
     validate_run_name(&run_name).map_err(|c| err(c, "invalid run name"))?;
     // Refuse a start whose environment is already live, rather than taking it over.
     //
-    // `veld start` replaces a live same-named run on purpose — that is the CLI's
+    // `veld orchestrator start` replaces a live same-named run on purpose — that is the CLI's
     // documented behaviour and stays. Through this endpoint it is never what anyone
     // asked for, because the caller is a UI that computed the name from a run list
     // it polled up to `POLL_MS` ago. Two ways that goes wrong, both real: ▶ on an

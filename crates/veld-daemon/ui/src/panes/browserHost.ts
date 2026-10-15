@@ -1894,7 +1894,7 @@ export function onBrowserClosed(fn: (payload: { viewId: string }) => void): () =
 // veld's to answer.
 //
 // **Every call below is optional-chained through the method, not just through
-// `desktop`.** The two halves of Veld Desktop update independently — `veld update`
+// `desktop`.** The two halves of Veld Desktop update independently — `veld self update`
 // bumps the daemon (and with it this bundle), while the app updates on its own
 // cadence, which `desktop/ARCHITECTURE.md` names as *the* compatibility surface
 // and deliberately reports rather than blocks on. So a newer bundle routinely runs

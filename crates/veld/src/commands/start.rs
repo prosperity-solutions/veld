@@ -1,4 +1,4 @@
-//! `veld start` — a face of the engine.
+//! `veld orchestrator start` — a face of the engine.
 //!
 //! Everything that decides something (which nodes, which run, which answers are
 //! missing, what to spawn) is the engine's, in the daemon. What is left here is
@@ -21,7 +21,7 @@ use veld_engine::progress::ProgressEvent;
 use crate::engine_client::EngineClient;
 use crate::output::{self, is_tty};
 
-/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--oneshot] [--debug]`
+/// `veld orchestrator start [node:variant...] [--preset <n>] [--name <n>] [-a] [--oneshot] [--debug]`
 // One parameter per CLI flag, as with `share::run` and `logs::run`. Bundling
 // them into a struct would put the flag list in two places and drift.
 #[allow(clippy::too_many_arguments)]
@@ -47,7 +47,7 @@ pub async fn run(
         Err(code) => return code,
     };
 
-    // Preflight, with the picker in the loop: a bare `veld start` at a terminal
+    // Preflight, with the picker in the loop: a bare `veld orchestrator start` at a terminal
     // is answered by a human choosing, then asked again with their choice.
     let mut plan_selections = selections;
     let mut plan_preset = preset;
@@ -239,7 +239,9 @@ async fn print_failed_node_tail(
     eprintln!();
     eprintln!(
         "  {}",
-        output::dim(&format!("Full log: veld logs --name {run} --node {node}"))
+        output::dim(&format!(
+            "Full log: veld orchestrator logs --name {run} --node {node}"
+        ))
     );
 }
 
@@ -248,7 +250,7 @@ async fn attach_logs(client: &Arc<EngineClient>, project_root: &std::path::Path,
     println!();
     output::print_info("Streaming logs (Ctrl+C to stop)...");
     println!();
-    // `veld logs -f` for this run, from now: it returns on Ctrl-C (or when the
+    // `veld orchestrator logs -f` for this run, from now: it returns on Ctrl-C (or when the
     // run ends on its own), and then the run is stopped.
     let _ = project_root;
     super::logs::run(super::logs::LogsOptions {
@@ -295,7 +297,7 @@ enum Picked {
     Selections(Vec<String>),
 }
 
-/// The human half of a bare `veld start`. Reads this checkout's veld.json for
+/// The human half of a bare `veld orchestrator start`. Reads this checkout's veld.json for
 /// the picker's `interpret_pick`, which is a parse of what was typed, not a
 /// decision: the choice goes back to the engine's preflight.
 fn pick(choice: &Choice) -> Option<Picked> {
@@ -322,12 +324,12 @@ pub(super) fn caller_env(names: &[String]) -> BTreeMap<String, String> {
 /// How [`drive`] shows an action's progress.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Drive {
-    /// `veld start`: spinners at a terminal, NDJSON on stdout otherwise.
+    /// `veld orchestrator start`: spinners at a terminal, NDJSON on stdout otherwise.
     Progress,
     /// `--oneshot`: as `Progress` but on stderr — stdout is the node's output —
     /// with the engine's notices as plain lines, as the CLI always printed them.
     Oneshot,
-    /// `veld stop`/`restart`: only the engine's notices and warnings, as plain
+    /// `veld orchestrator stop`/`restart`: only the engine's notices and warnings, as plain
     /// lines on stderr. These never streamed progress, and a script reading their
     /// stdout must not start seeing JSON.
     Quiet,
@@ -454,7 +456,7 @@ pub(super) async fn drive(
         Ok(Ok(Some(outcome))) => Ok(outcome),
         Ok(Ok(None)) => {
             output::print_error(
-                "The engine ended the action without saying how. Check `veld status`.",
+                "The engine ended the action without saying how. Check `veld orchestrator status`.",
                 false,
             );
             Err(1)
@@ -566,7 +568,7 @@ pub(super) async fn gather_answers(
                 if !saved.saved.is_empty() {
                     eprintln!(
                         "Saved {} value(s) to {} — shared by every worktree of this project. \
-                         Change with `veld config set`, clear with `veld config unset`.",
+                         Change with `veld orchestrator vars set`, clear with `veld orchestrator vars unset`.",
                         saved.saved.len(),
                         saved.project_id
                     );
@@ -582,9 +584,9 @@ pub(super) async fn gather_answers(
     Some(answers)
 }
 
-/// A per-run answer lives only in this action. `veld stop` is another one, so a
+/// A per-run answer lives only in this action. `veld orchestrator stop` is another one, so a
 /// teardown that needs it will skip its `${vars.*}` steps. Say so now, while
-/// `veld config set` is still an option.
+/// `veld orchestrator vars set` is still an option.
 pub(super) async fn warn_stranded(
     client: &EngineClient,
     project_root: &std::path::Path,
@@ -625,8 +627,8 @@ pub(super) async fn warn_stranded(
     let them = if stranded.len() == 1 { "it" } else { "them" };
     eprintln!(
         "Warning: {} answered for this run only, but this project's teardown needs {them}. \
-         `veld stop` is a separate action and cannot see a per-run answer, so its \
-         `${{vars.*}}` steps will be skipped. Use `veld config set` for {them} if teardown has \
+         `veld orchestrator stop` is a separate action and cannot see a per-run answer, so its \
+         `${{vars.*}}` steps will be skipped. Use `veld orchestrator vars set` for {them} if teardown has \
          to work.",
         stranded.join(", "),
     );
@@ -1076,23 +1078,26 @@ fn report_unanswered_vars(missing: &[veld_core::values::UnansweredVar], offer_va
     }
     detail.push_str("\nTo fix this, either:\n");
     // A declared secret must never be told to put its value on a command line.
-    // `veld config set X <value>` and `--var X=…` both land in the process table
+    // `veld orchestrator vars set X <value>` and `--var X=…` both land in the process table
     // (world-readable) and in shell history — the exact leak `secret: true`
     // exists to prevent, and which `secret-in-command` makes a lint error
     // elsewhere. Point those at a source instead.
     let (secret, plain): (Vec<_>, Vec<_>) = missing.iter().partition(|v| v.secret);
     for var in &plain {
-        detail.push_str(&format!("  - veld config set {} <value>\n", var.name));
+        detail.push_str(&format!(
+            "  - veld orchestrator vars set {} <value>\n",
+            var.name
+        ));
     }
     for var in &secret {
         detail.push_str(&format!(
-            "  - veld config set {name} --env NAME   (or --file PATH, or --shell 'op read …')\n    \
+            "  - veld orchestrator vars set {name} --env NAME   (or --file PATH, or --shell 'op read …')\n    \
              `{name}` is declared secret, so veld stores where to read it, not the value — \
              a value on the command line is readable by every process on this machine\n",
             name = var.name
         ));
     }
-    // Only when the subcommand actually has the flag: `veld restart` does not,
+    // Only when the subcommand actually has the flag: `veld orchestrator restart` does not,
     // and a refusal whose whole job is naming the exact command must not name
     // one that does not exist.
     if offer_var_flag && !plain.is_empty() {

@@ -40,7 +40,7 @@
 //!   `sqlite_master` minus a denylist, so a table a future migration adds is copied
 //!   without anyone remembering to say so. The failure direction is *inclusion* — a
 //!   new high-volume table would make artifacts big, which is visible in
-//!   `veld backup list`'s size column — never silent omission.
+//!   `veld self backup list`'s size column — never silent omission.
 //!
 //! # Verification is semantic, not structural
 //!
@@ -102,7 +102,7 @@ pub const META_KEY: &str = "backup.meta";
 ///
 /// State, not a preference — which is why it is here and not a `backup.lastAt`
 /// entry in the settings catalog. The catalog is a projection of things a user
-/// *sets*, and a read-only pseudo-setting would be a key `veld settings set`
+/// *sets*, and a read-only pseudo-setting would be a key `veld self settings set`
 /// accepts and then cannot honour.
 pub const LAST_RUN_KEY: &str = "backup.lastRun";
 
@@ -154,7 +154,7 @@ pub enum BackupError {
     #[error(
         "the database at {path} is schema v{found} but this binary's is v{head} — it was \
          migrated by a newer veld, so backing it up here would silently drop whatever that \
-         version added. Run `veld update` first"
+         version added. Run `veld self update` first"
     )]
     SourceSchema {
         path: PathBuf,
@@ -164,7 +164,7 @@ pub enum BackupError {
 
     #[error(
         "{path} was written by a newer veld (schema v{found}; this binary supports up to \
-         v{supported}) — run `veld update` first"
+         v{supported}) — run `veld self update` first"
     )]
     NewerSchema {
         path: PathBuf,
@@ -346,7 +346,7 @@ pub fn list(dir: &Path) -> Vec<Artifact> {
             // it closed: a FIFO named like an artifact — the name pattern is
             // documented and guessable — then reached `header_schema_version`, whose
             // `File::open` on a pipe with no writer **blocks forever**, wedging
-            // `veld backup`, the daemon's retention tick and the restore pick alike.
+            // `veld self backup list`, the daemon's retention tick and the restore pick alike.
             //
             // Deleting stays safe either way: `remove_file` removes a link, never its
             // target.
@@ -430,11 +430,11 @@ pub struct Retention {
 /// absence of a fresh copy is itself worth reporting.
 ///
 /// **There are deliberately two staleness rules in this codebase, and this is
-/// the impatient one.** `veld doctor` judges a backup directory it has no memory
+/// the impatient one.** `veld self doctor` judges a backup directory it has no memory
 /// of, on demand, so it is generous (four intervals, floored at twelve hours):
 /// a laptop that slept through a few slots is healthy, and a check that cries
 /// wolf is a check people learn to skip. This rule is for the surfaces that are
-/// *watching* — the daemon's health probe and `veld backup` — where twelve hours
+/// *watching* — the daemon's health probe and `veld self backup list` — where twelve hours
 /// is not caution, it is how an incident stays invisible overnight. Two
 /// intervals rather than one so a single missed slot is still not an alarm.
 ///
@@ -527,20 +527,20 @@ pub fn create(
     // Sweep abandoned temp files before adding another. They are deliberately named
     // so `parse_name` cannot match them — which keeps retention from ever deleting a
     // backup in progress, and left nothing at all to clean them up: three interrupted
-    // runs put 208 MB of orphans in a directory `veld backup` reported as 138 MB.
+    // runs put 208 MB of orphans in a directory `veld self backup list` reported as 138 MB.
     // Retention is the only thing bounding this folder, so it has to reach these too.
     sweep_abandoned_temp_files(dir, now);
 
     // The name is decided **before** anything is written, because deciding it
     // afterwards means `rename` — which replaces silently on Unix — is what
     // discovers a collision, and by then the artifact it replaced is gone. Two
-    // backups inside one second is not hypothetical: `veld backup now` run twice,
+    // backups inside one second is not hypothetical: `veld self backup now` run twice,
     // or a manual one landing in the same second as the scheduled one, both do it.
     //
     // And the name is **claimed**, not merely probed. `exists()` followed by a
     // rename is a check-then-act across two processes, and the two producers this
     // guards against are two processes: the daemon's tick claims an interval in the
-    // database, `veld backup now` claims nothing. `create_exclusive` makes the
+    // database, `veld self backup now` claims nothing. `create_exclusive` makes the
     // claim atomic, and the rename below then replaces veld's own placeholder.
     //
     // An artifact is always at head, because its schema comes from running the
@@ -1068,7 +1068,7 @@ pub fn prune(dir: &Path, retention: Retention, now: chrono::DateTime<chrono::Utc
 ///
 /// Returns the artifact's schema version. Separated out so "would this restore
 /// work?" is answerable without performing one — which is what lets
-/// `veld backup list` label each candidate and what lets a restore with no path
+/// `veld self backup list` label each candidate and what lets a restore with no path
 /// named pick the newest artifact that is actually **usable** rather than the newest
 /// file. On the day this matters the newest file may be the one that recorded the
 /// damage.
@@ -1080,7 +1080,7 @@ pub fn inspect(artifact: &Path) -> Result<i64, BackupError> {
 ///
 /// What `restore` uses, and the difference is not pedantry. `quick_check` is right
 /// for the sweep — it runs over every artifact in the folder on every
-/// `veld backup` and every `veld doctor` — but it deliberately skips the
+/// `veld self backup list` and every `veld self doctor` — but it deliberately skips the
 /// index-versus-table comparison, so a copy whose index no longer agrees with its
 /// rows passes it. That file being installed as the user's entire state is the one
 /// outcome worth paying a full scan to avoid, and "it was verified when it was
@@ -1128,7 +1128,7 @@ fn inspect_with(artifact: &Path, check: &str) -> Result<i64, BackupError> {
     );
     // Which check is the caller's decision — see [`inspect`] and [`inspect_deep`].
     // The sweep gets `quick_check` because it runs over every artifact in the folder
-    // on every `veld backup` and every `veld doctor`, and a full check on a synced
+    // on every `veld self backup list` and every `veld self doctor`, and a full check on a synced
     // folder also force-materialises every evicted file; `restore` gets the full one
     // because it is about to install the result as the user's whole state.
     let integrity: String = conn.query_row(&format!("PRAGMA {check}"), [], |r| r.get(0))?;
@@ -1150,7 +1150,7 @@ fn inspect_with(artifact: &Path, check: &str) -> Result<i64, BackupError> {
             supported,
         });
     }
-    // **Being a readable SQLite file is not being a veld backup**, and everything
+    // **being a readable SQLite file is not being a veld backup**, and everything
     // above only established the former. Without this, any database — another
     // application's, or one built by hand — passes every check and `restore` then
     // installs it as the user's entire state. That state decides what the daemon
@@ -1198,7 +1198,7 @@ pub fn newest_usable(dir: &Path, now: chrono::DateTime<chrono::Utc>) -> Option<A
 ///
 /// The same rule as [`newest_usable`] but gated on [`inspect_deep`], and the two
 /// exist separately because the checks are not the same strength: splitting them
-/// meant a no-path `veld backup restore` could pick a candidate on the cheap check
+/// meant a no-path `veld self backup restore` could pick a candidate on the cheap check
 /// and then be refused by the strict one, with no fall-through to the next — a
 /// restore that fails *after* choosing, on the day it is the only thing that
 /// matters. Choosing with the same check that gates the act is what makes that
@@ -1253,7 +1253,7 @@ pub fn restore(artifact: &Path, target: &Path) -> Result<RestoreReport, BackupEr
     // with `integrity_check` still saying `ok`, grafting the pages of the database
     // being replaced onto the one replacing it. "Main file gone, `-wal` still
     // there" is not a corner case here: it is the disaster this feature exists for,
-    // and it is where `veld doctor` sends people. Doing this only on the
+    // and it is where `veld self doctor` sends people. Doing this only on the
     // `target.exists()` branch shipped in the first draft of this function and was
     // caught by review with a live repro.
     //
@@ -1395,7 +1395,7 @@ mod tests {
     ///
     /// `rename` replaces silently on Unix, so the second one used to overwrite the
     /// first — losing a generation from the retention set with nothing reported.
-    /// Reachable by running `veld backup now` twice, or by a manual backup landing
+    /// Reachable by running `veld self backup now` twice, or by a manual backup landing
     /// in the same second as the scheduled one.
     #[test]
     fn two_backups_in_one_second_are_two_files() {
@@ -1623,7 +1623,7 @@ mod tests {
     /// A stale WAL is cleared even when there is **no database to move aside**.
     ///
     /// The disaster this feature serves is "the database is gone or unopenable",
-    /// and `veld doctor` sends people straight here — so "main file missing, `-wal`
+    /// and `veld self doctor` sends people straight here — so "main file missing, `-wal`
     /// still present" is the *normal* input, not a corner. Handling the sidecars
     /// only on the `target.exists()` branch shipped in the first draft: SQLite then
     /// replays the old WAL into the restored file on the next open, silently, with
@@ -1879,7 +1879,7 @@ mod tests {
     ///
     /// `inspect` (the folder sweep) and `inspect_deep` (the restore gate) are not
     /// the same strength, so choosing with the first and acting on the second means
-    /// a no-path `veld backup restore` can fail *after* choosing, with no
+    /// a no-path `veld self backup restore` can fail *after* choosing, with no
     /// fall-through — on the day it is the only thing that matters. Pinned by
     /// making the two picks disagree: an artifact only `inspect_deep` refuses must
     /// be skipped by `newest_restorable` while `newest_usable` still offers it.
@@ -1922,7 +1922,7 @@ mod tests {
             assert_ne!(full, "ok", "and fail the deep one");
         }
 
-        // The shallow sweep still offers it — that is what `veld backup` lists —
+        // The shallow sweep still offers it — that is what `veld self backup list` lists —
         // while the pick a restore acts on skips it for the older, sound one.
         assert_eq!(
             newest_usable(dir.path(), now).map(|a| a.path),
@@ -1983,7 +1983,7 @@ mod tests {
     /// another disk from listing, restore and retention. Narrowing the exclusion to
     /// directories then let a **FIFO** through, and `File::open` on a pipe with no
     /// writer blocks forever — so a single named pipe in the backup folder wedged
-    /// `veld backup`, the daemon's retention tick and the restore pick.
+    /// `veld self backup list`, the daemon's retention tick and the restore pick.
     #[cfg(unix)]
     #[test]
     fn only_regular_files_are_artifacts_and_a_symlinked_one_counts() {
@@ -2089,7 +2089,7 @@ mod tests {
     /// They are deliberately named so `parse_name` cannot match them — which is
     /// what keeps retention from deleting a backup in progress, and left nothing at
     /// all to clean them up. Three interrupted runs put 208 MB of orphans in a
-    /// folder `veld backup` reported as 138 MB.
+    /// folder `veld self backup list` reported as 138 MB.
     #[test]
     fn abandoned_temp_files_are_swept_and_fresh_ones_are_not() {
         let dir = tempfile::TempDir::new().unwrap();

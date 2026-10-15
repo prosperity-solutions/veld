@@ -1261,7 +1261,7 @@ mod tests {
 
     #[test]
     fn an_absent_origin_stays_absent_through_a_save() {
-        // What `veld restart` carries forward for a run recorded before provenance
+        // What `veld orchestrator restart` carries forward for a run recorded before provenance
         // existed. Synthesising one from that run's node rows — the dependency
         // closure — would write a claim the user never made, permanently, and print
         // it as `Started from: selections <everything>`. `None` is the honest record
@@ -1291,7 +1291,7 @@ mod tests {
     fn a_pre_origin_snapshot_still_loads() {
         // Rows written before provenance existed hold a snapshot with no
         // `started_from` key. Reading one must yield `None`, not an error — a
-        // `veld runs` listing that fails on last week's run is worse than a
+        // `veld orchestrator runs list` listing that fails on last week's run is worse than a
         // missing line.
         let json = r#"{"config_hash":"abc","nodes":{}}"#;
         let snap: crate::state::GraphSnapshot = serde_json::from_str(json).unwrap();

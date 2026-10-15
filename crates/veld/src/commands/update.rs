@@ -11,7 +11,7 @@ use crate::output;
 
 /// How long `--console` waits for the window it opened to prove it exists.
 ///
-/// Proof is the terminal's `veld update` taking the update lock — the one thing
+/// Proof is the terminal's `veld self update` taking the update lock — the one thing
 /// only a process that actually started can do. `open` and every Linux terminal
 /// emulator are fire-and-forget: a zero exit status means a launcher ran, not
 /// that a window appeared, so without this handshake the app would hand the
@@ -23,7 +23,7 @@ const CONSOLE_HANDSHAKE: Duration = Duration::from_secs(20);
 ///
 /// `EX_TEMPFAIL`. "Try again shortly" is exactly what this is, and it has to be
 /// distinguishable from the failures that mean something is actually wrong —
-/// a coding agent driving `veld update` should retry this one and not the others.
+/// a coding agent driving `veld self update` should retry this one and not the others.
 const EX_TEMPFAIL: i32 = 75;
 
 /// What this run intends to do about Veld Desktop, decided *before* anything is
@@ -73,13 +73,13 @@ struct Outcome {
     error: Option<String>,
 }
 
-/// `veld update` -- update Veld to the latest version.
+/// `veld self update` -- update Veld to the latest version.
 ///
 /// `wait_pid`, `relaunch` and `app_path` are the app handing its own update over.
 /// It cannot update itself in place — an Electron app reads from its own bundle
 /// while it runs — so it spawns this detached, quits, and lets the CLI move
-/// *both* halves and reopen it. That is why this is `veld update` and not
-/// `veld desktop update`: one release, one command, both halves, one restart.
+/// *both* halves and reopen it. That is why this is `veld self update` and not
+/// `veld self desktop update`: one release, one command, both halves, one restart.
 pub async fn run(
     wait_pid: Option<u32>,
     relaunch: bool,
@@ -105,19 +105,19 @@ pub async fn run(
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
 
-    // **`sudo veld update` is refused, and the reason is not tidiness.** Under
+    // **`sudo veld self update` is refused, and the reason is not tidiness.** Under
     // sudo, `dirs::home_dir()` is *root's* (this repo already relies on that at
     // `setup.rs`'s `resolve_real_user_macos`), so the lock would be taken in
-    // `/var/root/.veld` while every other reader — a plain `veld update`, the
-    // command gate, `veld doctor`, the daemon monitor, Veld Desktop — looks in
+    // `/var/root/.veld` while every other reader — a plain `veld self update`, the
+    // command gate, `veld self doctor`, the daemon monitor, Veld Desktop — looks in
     // the user's `~/.veld`. Single-flight against a lock nobody else can see is
-    // no single-flight at all, and it is silent. The rest of `veld update`
+    // no single-flight at all, and it is silent. The rest of `veld self update`
     // already assumes it runs unprivileged and escalates only for the helper
     // restart, and `install.sh` does its own escalation for a `/usr/local`
     // install, so nothing legitimate needs this — a root-run install would also
     // leave root-owned binaries in the user's `~/.local`.
     if std::env::var("SUDO_USER").is_ok_and(|user| !user.is_empty()) {
-        let msg = "`veld update` must not run under sudo — run it as yourself.";
+        let msg = "`veld self update` must not run under sudo — run it as yourself.";
         output::print_error(msg, false);
         println!(
             "  {}",
@@ -299,7 +299,7 @@ async fn run_locked(
     let outcome = perform(&plan, target_version.as_deref(), guard.as_mut(), verbose).await;
 
     // Written before the app is reopened, and that ordering is load-bearing for
-    // the same reason it is in `veld desktop update`: the app reads this during
+    // the same reason it is in `veld self desktop update`: the app reads this during
     // startup, so it has to be on disk before the launch it belongs to.
     if handoff {
         veld_core::setup::write_desktop_update_report(
@@ -357,7 +357,7 @@ enum DesktopGate {
 ///
 /// The load-bearing asymmetry is in the unanswered row, and it is the difference
 /// between two users veld cannot tell apart from a preference file: someone who
-/// **has** the app is running the IDE and is entitled to have `veld update` keep
+/// **has** the app is running the IDE and is entitled to have `veld self update` keep
 /// it in step, answer or no answer. Someone who does **not** have it has been
 /// managing without it, so an update that cannot ask must not decide for them by
 /// downloading it.
@@ -442,7 +442,7 @@ async fn plan_desktop(
             // fetching and updating the app; it does not license deleting a bundle
             // the user may have put there by hand since — a `.dmg` drag is a more
             // recent signal than an old "no", and silently deleting an app is not
-            // a thing `veld update` may do. Named rather than silent, so the state
+            // a thing `veld self update` may do. Named rather than silent, so the state
             // is discoverable from the run that acts on it.
             if let Some(path) = path_of(&status) {
                 output::print_info(&format!(
@@ -452,7 +452,7 @@ async fn plan_desktop(
                 println!(
                     "  {}",
                     output::dim(
-                        "'veld desktop install' keeps it updated again; 'veld desktop uninstall' \
+                        "'veld self desktop install' keeps it updated again; 'veld self desktop uninstall' \
                          removes it."
                     )
                 );
@@ -462,7 +462,7 @@ async fn plan_desktop(
                 // Silence would read as success.
                 plan.skipped = Some(
                     "you opted out of Veld Desktop, so the app was not updated — run \
-                     `veld desktop install` to opt back in"
+                     `veld self desktop install` to opt back in"
                         .to_string(),
                 );
             }
@@ -473,14 +473,14 @@ async fn plan_desktop(
             // a CI box and an agent-driven update a GUI app nobody wanted.
             output::print_info(
                 "Veld Desktop is not installed and this run cannot ask — skipping the app. \
-                 Run `veld desktop install` to add it.",
+                 Run `veld self desktop install` to add it.",
             );
             return plan;
         }
         DesktopGate::Ask => match super::desktop::ask_desktop_choice(path_of(&status).as_deref()) {
             Some(DesktopChoice::Wanted) => {}
             Some(DesktopChoice::Unwanted) => {
-                // The one place `veld update` removes the app, and it is
+                // The one place `veld self update` removes the app, and it is
                 // authorised by the answer that was *just* given rather than by a
                 // stored one — which is the difference between reconciling the
                 // machine and deleting somebody's app behind their back.
@@ -498,7 +498,7 @@ async fn plan_desktop(
                                 "  {}",
                                 output::dim(
                                     "veld will not install it again either way — run \
-                                     'veld desktop uninstall' once it has quit."
+                                     'veld self desktop uninstall' once it has quit."
                                 )
                             );
                         }
@@ -547,7 +547,7 @@ async fn plan_desktop(
         // this reports the app half as skipped and moves on.
         output::print_info(
             "Veld Desktop is running and this is a non-interactive run, so the app was left \
-             alone. Quit it and re-run `veld update`, or use the app's own 'Check for Updates…'.",
+             alone. Quit it and re-run `veld self update`, or use the app's own 'Check for Updates…'.",
         );
         return plan;
     }
@@ -555,7 +555,7 @@ async fn plan_desktop(
     if !ask_to_close_desktop() {
         output::print_info(
             "Leaving Veld Desktop alone. The CLI is still updated; the app catches up on the \
-             next `veld update` or from its own 'Check for Updates…'.",
+             next `veld self update` or from its own 'Check for Updates…'.",
         );
         return plan;
     }
@@ -632,7 +632,7 @@ fn refuse_busy(
     println!(
         "  {}",
         output::dim(&format!(
-            "Watch it with `veld update --status`. If you know it is dead, `veld update --force` \
+            "Watch it with `veld self update --status`. If you know it is dead, `veld self update --force` \
              takes over; otherwise it is reclaimed automatically after {} minutes without \
              progress.",
             veld_core::update_lock::PHASE_TIMEOUT.as_secs() / 60
@@ -690,7 +690,7 @@ fn status_json(
     }
 }
 
-/// `veld update --status` — what, if anything, is updating.
+/// `veld self update --status` — what, if anything, is updating.
 pub fn status(json: bool) -> i32 {
     let now = chrono::Utc::now();
     let peeked = veld_core::update_lock::peek();
@@ -712,7 +712,7 @@ pub fn status(json: bool) -> i32 {
             }
         }
         // Reported rather than hidden: a user who just watched an update die wants
-        // to know the leftovers are harmless, and the next `veld update` clearing
+        // to know the leftovers are harmless, and the next `veld self update` clearing
         // them is a promise worth making out loud.
         Some((state, Some(reason))) => {
             output::print_success("No update is running.");
@@ -742,7 +742,7 @@ pub fn status(json: bool) -> i32 {
 /// **Two paths branch on it**, so a stale inherited value is not cosmetic:
 /// `refuse_busy` uses it to stay silent (no report, no relaunch) when a window
 /// that lost the race is the one reporting, and `hand_over_to_console`'s
-/// handshake only accepts a holder whose `Origin` is `Console`. A `veld update`
+/// handshake only accepts a holder whose `Origin` is `Console`. A `veld self update`
 /// that wrongly believed itself a console child would therefore refuse a busy
 /// lock without telling the app anything.
 ///
@@ -758,7 +758,7 @@ fn console_child() -> bool {
 }
 
 enum ConsoleHandoff {
-    /// A window opened and its `veld update` took the lock.
+    /// A window opened and its `veld self update` took the lock.
     TookOver(String),
     /// No window; the caller should do the update itself.
     Failed(String),
@@ -800,7 +800,7 @@ fn console_args(
     if force {
         args.push("--force".into());
     }
-    // Without this, `veld update --console --verbose` opens a window that runs
+    // Without this, `veld self update --console --verbose` opens a window that runs
     // quietly — the one place the raw installer stream is hardest to get at any
     // other way, since the window is the whole point of the handoff.
     if verbose {
@@ -851,7 +851,7 @@ async fn hand_over_to_console(
     //
     // **Three conditions, not one.** "A lock exists" is not evidence: this
     // process deliberately never acquires, so *any* holder would satisfy a bare
-    // `pid != me` — including an unrelated `veld update` a user started in
+    // `pid != me` — including an unrelated `veld self update` a user started in
     // another terminal a second ago. Accepting that would have the app quit,
     // announce "the update is running in your terminal", and exit 0 with no
     // window anywhere and nobody owing the app a relaunch. So the holder must
@@ -893,7 +893,7 @@ fn attended() -> bool {
 /// pane reattaches (`crates/veld-daemon/src/pty/holder.rs`). So a command still
 /// running keeps running, and comes back with its output intact.
 ///
-/// Defaults to yes on a bare Enter. The user typed `veld update`; closing an app
+/// Defaults to yes on a bare Enter. The user typed `veld self update`; closing an app
 /// for a moment is within what that asked for, and the destructive-sounding half
 /// of the question is the part that is not actually destructive.
 fn ask_to_close_desktop() -> bool {
@@ -927,7 +927,7 @@ fn ask_to_close_desktop() -> bool {
 /// it is the gate in front of closing someone's running application.
 ///
 /// A bare Enter is yes — the question was asked with `[Y/n]` and the user typed
-/// `veld update`. **EOF is not**: `None` is nobody answering, which happens when
+/// `veld self update`. **EOF is not**: `None` is nobody answering, which happens when
 /// stdin is a closed pipe rather than the terminal `attended()` believed it to
 /// be, and an answer nobody gave cannot be consent. Anything unrecognised is also
 /// no, for the same reason — this branch closes an app, so it takes agreement
@@ -943,7 +943,7 @@ fn consent(line: Option<&str>) -> bool {
 ///
 /// It is the app saying "I quit for this, put me back", so it means nothing
 /// without the pid that says *which* app quit. Honouring it alone would make
-/// `veld update --relaunch` **launch** a GUI app that was never running — and,
+/// `veld self update --relaunch` **launch** a GUI app that was never running — and,
 /// worse, launch it after the user answered "n" to the close prompt.
 fn honour_relaunch(relaunch: bool, wait_pid: Option<u32>) -> bool {
     relaunch && wait_pid.is_some()
@@ -1010,7 +1010,7 @@ async fn perform(
             // running across its own restart (URLs stay up) and the daemon GC
             // self-heals, so nothing needs tearing down. Environments keep
             // serving and pick up the new orchestrator on their next
-            // `veld start`/`veld restart`.
+            // `veld orchestrator start`/`veld orchestrator restart`.
             let running = find_running_environments();
             if !running.is_empty() {
                 output::print_info(&format!(
@@ -1054,7 +1054,7 @@ async fn perform(
             // and a sudo restart of a nonexistent job fails. So a job that is
             // entirely GONE is
             // the one case the update genuinely can't self-apply — it needs
-            // `veld setup privileged` to re-register the LaunchDaemon. Check for
+            // `veld self setup privileged` to re-register the LaunchDaemon. Check for
             // that BEFORE installing so it's reported as the pre-existing
             // problem it is, instead of a 45-second wait ending in a misleading
             // "did not pick up the new binary". In unprivileged mode the
@@ -1065,7 +1065,7 @@ async fn perform(
                 output::print_error(
                     "The veld-helper service is not registered with the service manager. The \
                      update will install new binaries, but the helper cannot restart itself — \
-                     run `veld setup privileged` afterwards.",
+                     run `veld self setup privileged` afterwards.",
                     false,
                 );
             }
@@ -1105,7 +1105,7 @@ async fn perform(
                     } else {
                         output::print_info(&format!(
                             "Binaries updated to {new_version}, but a service above did not come \
-                             back on it. Run `veld doctor`."
+                             back on it. Run `veld self doctor`."
                         ));
                     }
                     print_install_summary(plan);
@@ -1130,7 +1130,7 @@ async fn perform(
                         println!(
                             "  {}",
                             output::dim(
-                                "Re-run with `veld update --verbose` to see the installer's \
+                                "Re-run with `veld self update --verbose` to see the installer's \
                                  own output."
                             )
                         );
@@ -1145,16 +1145,16 @@ async fn perform(
         }
         Ok(None) => {
             output::print_success(&format!("Already on the latest version ({current})."));
-            // Also on the no-op branch, and not only for symmetry. `veld update`
+            // Also on the no-op branch, and not only for symmetry. `veld self update`
             // runs the *old* binary, so the release that carries this cleanup is
             // never the release that runs it — without this arm the Spoon would
             // survive until the user's *next* actual version bump. Here, any
-            // `veld update` after this one is installed clears it. Idempotent
+            // `veld self update` after this one is installed clears it. Idempotent
             // and silent on a machine that never had the Spoon.
             super::remove_legacy_hammerspoon().await;
             // The app can lag the CLI even when the CLI is current: the installer
             // skips an app that is running, and someone may have installed the app
-            // after the last update. Without this, `veld update` would report
+            // after the last update. Without this, `veld self update` would report
             // success while leaving a stale app in /Applications and never mention
             // it — the CLI half moves, the app half silently does not.
             phase!(Phase::UpdatingApp);
@@ -1335,7 +1335,7 @@ fn print_install_summary(plan: &DesktopPlan) {
 /// The app and the CLI are two halves of one release, so an update moves both —
 /// the same reason the install script installs the app by default. This is the
 /// *only* thing that moves the app half: `perform_update` runs the script with
-/// `VELD_DESKTOP=0`, so both arms of `veld update` come through here and the app
+/// `VELD_DESKTOP=0`, so both arms of `veld self update` come through here and the app
 /// is downloaded once, not twice. It also covers the case its own name is about —
 /// an installer that skipped a *running* app.
 ///
@@ -1401,7 +1401,7 @@ async fn run_desktop_step(
         .and_then(
             |()| match veld_core::setup::desktop_app_status_in(app_dir) {
                 Some((_, v)) if v.as_deref() == Some(version) => Ok(()),
-                // Same reason `veld desktop install` checks: the published install
+                // Same reason `veld self desktop install` checks: the published install
                 // script may predate the desktop section entirely and exit 0.
                 _ => Err(anyhow::anyhow!(
                     "the install script ran but did not update the app"
@@ -1422,7 +1422,7 @@ async fn run_desktop_step(
             // never the running-app skip that advice was written for.
             //
             // The script's own last complaint is lifted out of the log, the same
-            // way `veld desktop update` does it (`desktop.rs`). Without this the
+            // way `veld self desktop update` does it (`desktop.rs`). Without this the
             // full route reports "install script exited with code 1" where the
             // route it replaces said "checksum verification failed" — the
             // information is on disk either way, because the app hands this
@@ -1432,7 +1432,7 @@ async fn run_desktop_step(
             // Not when the script never ran, though: the download precedes the log
             // truncation, so on that path the "last complaint" is a leftover from an
             // earlier run and would attach a stale, wrong reason to a message that is
-            // already complete. Same guard as `veld desktop update`.
+            // already complete. Same guard as `veld self desktop update`.
             let detail = if veld_core::setup::is_install_script_unavailable(&e) {
                 None
             } else {
@@ -1446,7 +1446,9 @@ async fn run_desktop_step(
             };
             let reason = format!("Could not install Veld Desktop: {e}");
             output::print_error(
-                &format!("{reason}. The veld CLI was updated; run `veld update` again to retry."),
+                &format!(
+                    "{reason}. The veld CLI was updated; run `veld self update` again to retry."
+                ),
                 false,
             );
             Some(reason)
@@ -1476,7 +1478,7 @@ fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
 /// Remove stale daemon/helper copies next to the CLI binary.
 ///
 /// If a dev previously ran `just dev-install` or manually copied binaries into
-/// `~/.local/bin/`, those copies persist after `veld update` and can shadow the
+/// `~/.local/bin/`, those copies persist after `veld self update` and can shadow the
 /// real binaries in `~/.local/lib/veld/`. This cleans them up.
 fn cleanup_stale_binaries() {
     let cli_dir = match std::env::current_exe()
@@ -1557,13 +1559,13 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
     }
 
     // Auto mode has no persistent service: stop the ephemeral helper so the
-    // next `veld start` re-bootstraps it with the new binary.
+    // next `veld orchestrator start` re-bootstraps it with the new binary.
     if !matches!(mode.as_deref(), Some("privileged") | Some("unprivileged")) {
         let user_socket = veld_core::helper::user_socket_path();
         let client = veld_core::helper::HelperClient::new(&user_socket);
         if client.shutdown().await.is_ok() {
             Steps::detail(&output::dim(
-                "veld-helper stopped — it restarts on the next `veld start`",
+                "veld-helper stopped — it restarts on the next `veld orchestrator start`",
             ));
         }
         return true;
@@ -1578,7 +1580,7 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
         // for its version to flip would only produce a second, misleading error.
         output::print_error(
             "Skipping helper restart check — the helper service was not registered before the \
-             update. Run `veld setup privileged` to start it on the new version.",
+             update. Run `veld self setup privileged` to start it on the new version.",
             false,
         );
     } else {
@@ -1632,7 +1634,7 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
             Steps::service_ok("veld-helper", target_version);
         } else {
             all_healthy = false;
-            // One remedy, not two: under this error, "re-run `veld setup`" would
+            // One remedy, not two: under this error, "re-run `veld self setup`" would
             // be advice that points the service at the same unverified file.
             match unverified {
                 Some((bin, cause)) => output::print_error(
@@ -1647,7 +1649,7 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
                 ),
                 None => output::print_error(
                     "veld-helper did not pick up the new binary automatically. \
-                     Run `veld doctor`; if it stays down, re-run `veld setup`.",
+                     Run `veld self doctor`; if it stays down, re-run `veld self setup`.",
                     false,
                 ),
             }
@@ -1656,8 +1658,8 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
 
     // The daemon is a user-level service (LaunchAgent / systemd --user) that the
     // installer restarts. Verify it came back on the new binary too — otherwise
-    // `veld update` returns while the daemon is mid-restart, and an immediate
-    // `veld doctor` shows "Daemon: not running / Feedback server not responding"
+    // `veld self update` returns while the daemon is mid-restart, and an immediate
+    // `veld self doctor` shows "Daemon: not running / Feedback server not responding"
     // even though it self-heals moments later.
     Steps::detail(&output::dim("waiting for veld-daemon..."));
     if wait_for_daemon_version(target_version, std::time::Duration::from_secs(45)).await {
@@ -1666,7 +1668,7 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) ->
         all_healthy = false;
         output::print_error(
             "veld-daemon did not pick up the new binary automatically. \
-             Run `veld doctor`; if it stays down, re-run `veld setup`.",
+             Run `veld self doctor`; if it stays down, re-run `veld self setup`.",
             false,
         );
     }
@@ -1771,7 +1773,7 @@ async fn request_helper_restart(socket: &std::path::Path, target_version: &str) 
 /// Last resort, offered only after both no-sudo paths have had their chance and
 /// the helper still has not come back.
 ///
-/// Deliberately not offered up front. `veld update` used to reach for sudo
+/// Deliberately not offered up front. `veld self update` used to reach for sudo
 /// first, which meant it spent a password prompt on every single update to buy a
 /// determinism the socket now provides for free — and it fired before the
 /// no-sudo mechanism was ever given a chance, so the prompt was almost always
@@ -1814,8 +1816,8 @@ async fn offer_sudo_helper_restart(socket: &std::path::Path, target_version: &st
         output::print_error(
             &format!(
                 "The installed veld-helper at {} does not run, so restarting the service would \
-                 leave it down rather than update it. Re-run `veld update`; if it persists, \
-                 re-run `veld setup privileged`.",
+                 leave it down rather than update it. Re-run `veld self update`; if it persists, \
+                 re-run `veld self setup privileged`.",
                 bad.display()
             ),
             false,
@@ -1862,7 +1864,7 @@ async fn offer_sudo_helper_restart(socket: &std::path::Path, target_version: &st
 /// The path comes from the **service manager**, not from `paths::lib_dir()`.
 /// `lib_dir()` prefers `~/.local/lib/veld` whenever that directory merely exists,
 /// while a privileged install writes `/usr/local/lib/veld` and the plist pins
-/// whichever absolute path `veld setup` chose — so on a machine carrying both,
+/// whichever absolute path `veld self setup` chose — so on a machine carrying both,
 /// guessing would accuse a binary this update never touched *and*, worse, clear a
 /// broken one: the sudo restart would then relaunch the root service onto exactly
 /// the file the no-sudo paths had just refused, which is the crash loop this
@@ -1950,7 +1952,7 @@ mod tests {
         }
 
         // Never asked, and there is somebody to ask: ask. This is where every
-        // existing user lands on their first interactive `veld update` — with the
+        // existing user lands on their first interactive `veld self update` — with the
         // app installed, having never chosen it.
         assert_eq!(desktop_gate(None, true, true), DesktopGate::Ask);
         assert_eq!(desktop_gate(None, false, true), DesktopGate::Ask);
@@ -2168,7 +2170,7 @@ mod handoff_tests {
 
     #[test]
     fn the_window_is_never_told_to_open_a_window() {
-        // The one arm that must never appear. With it, the window's `veld update`
+        // The one arm that must never appear. With it, the window's `veld self update`
         // opens another window, which opens another — and each one waits 20s for
         // the next to take a lock it will never get.
         let args = console_args(
@@ -2220,7 +2222,7 @@ mod handoff_tests {
 
     #[test]
     fn a_terminal_run_hands_over_nothing_it_was_not_given() {
-        // `veld update --console` typed by hand: no app quit for it, so no pid to
+        // `veld self update --console` typed by hand: no app quit for it, so no pid to
         // wait for and nothing owed a relaunch. `honour_relaunch` already refuses
         // `--relaunch` without a pid upstream of this, and passing one anyway
         // would have the window *launch* an app the user never had running.

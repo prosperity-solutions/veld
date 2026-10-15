@@ -5,7 +5,7 @@
 release and then flips `draft=false`, has no retry on a 5xx, and one asset
 upload came back as GitHub's 500 HTML page.  The action threw, the flip never
 ran, and the release sat invisible as a draft while `releases/latest` still
-pointed at the previous version — `veld update`, install.sh and Desktop
+pointed at the previous version — `veld self update`, install.sh and Desktop
 auto-update all read `latest`, so for every user the release did not exist.
 
 The replacement lives inline in the workflow, and every rule it follows bends
@@ -384,7 +384,7 @@ def scenario_draft_first(script: str) -> None:
           r.published and any("draft=false" in e for e in r.edits), f"{r.edits}")
     # `legacy`, never `true`. `true` re-points `releases/latest` at whatever it
     # is called on, so publishing an old stranded draft after a newer release
-    # shipped would downgrade every `curl | bash` install and `veld update`
+    # shipped would downgrade every `curl | bash` install and `veld self update`
     # (install.sh resolves `/releases/latest`). `legacy` lets GitHub pick by
     # version and date, which is correct for both a normal release and a
     # late top-up.

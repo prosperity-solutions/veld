@@ -24,7 +24,7 @@
 //!    probe.
 //! 2. **`Db::open()` succeeding proves nothing.** It succeeded throughout the
 //!    incident. Any health story built on "can we open it" reports OK while the
-//!    file rots, which is precisely what `veld doctor` did.
+//!    file rots, which is precisely what `veld self doctor` did.
 //! 3. **The record of a fault must not live in the thing that is faulty.** The
 //!    backup scheduler already demonstrated the failure mode: its "cannot open
 //!    the database" arm wrote nothing, so the `backup.lastRun` kv row kept its
@@ -34,7 +34,7 @@
 //!    the database, never a row inside it.
 //!
 //! **Backup health is attempt-based, not age-based, and that is deliberate.**
-//! `veld doctor` judges backups by the age of the newest artifact against a
+//! `veld self doctor` judges backups by the age of the newest artifact against a
 //! threshold with a 12-hour floor, which is the right rule for a cold CLI check
 //! that has no memory. It is the wrong rule here: 12 hours is *how the incident
 //! stayed invisible overnight*. The daemon knows the outcome of the last attempt
@@ -95,7 +95,7 @@ const RENOTIFY_AFTER_HOURS: i64 = 12;
 
 /// Everything the IDE needs to say what is wrong and what to do about it.
 ///
-/// Deliberately not shared with `veld doctor`: that lives in `crates/veld`, which
+/// Deliberately not shared with `veld self doctor`: that lives in `crates/veld`, which
 /// cannot see a `veld-daemon` type, and it answers the same questions from the
 /// database and the backups directory directly — a cold check with no daemon to
 /// ask is the case it exists for.
@@ -365,7 +365,7 @@ pub fn corruption_recorded() -> bool {
 /// `06:50:04.058` and this probe recorded the fault at `06:50:04.075`, 17 ms
 /// later. A gate on the absence of a verdict would have let exactly the pass it
 /// exists to stop straight through, and on a daemon that is restarting (auto
-/// recovery, `veld update`) it would let *every* pass through.
+/// recovery, `veld self update`) it would let *every* pass through.
 ///
 /// So housekeeping waits for a positive answer. The cost is at most one skipped
 /// pass — retention has a 168-hour horizon and does not care about 600 seconds —
@@ -550,7 +550,7 @@ fn check_overdue_backup() {
     }
     let Some(dir) = backup_dir() else { return };
     let newest = backup::list(&dir).into_iter().next();
-    // The shared rule, so `veld backup` and this probe agree on the word
+    // The shared rule, so `veld self backup list` and this probe agree on the word
     // "overdue". See `backup::overdue_after` for why it is not doctor's rule.
     let overdue_after = backup::overdue_after(interval);
     let now = Utc::now();
@@ -826,7 +826,7 @@ fn forget_notified(id: &str) {
 /// schedule, measured in minutes.
 fn artifacts_cached() -> (Option<backup::Artifact>, Option<backup::Artifact>) {
     /// Deliberately shorter than the probe interval (the deadman that reads these
-    /// artifacts ticks every [`PROBE_INTERVAL_SECS`]), so a `veld backup now` taken
+    /// artifacts ticks every [`PROBE_INTERVAL_SECS`]), so a `veld self backup now` taken
     /// by hand shows up quickly, and far longer than the UI's 5-second poll.
     const ARTIFACT_CACHE_SECS: u64 = 30;
     static CACHE: OnceLock<Mutex<Option<(std::time::Instant, ArtifactPair)>>> = OnceLock::new();
@@ -850,7 +850,7 @@ fn artifacts_cached() -> (Option<backup::Artifact>, Option<backup::Artifact>) {
     let newest = dir
         .as_ref()
         .and_then(|d| backup::list(d).into_iter().next());
-    // The candidate is deep-checked, exactly like `veld backup restore` picks
+    // The candidate is deep-checked, exactly like `veld self backup restore` picks
     // one: offering a button that `backup::restore` will refuse is worse than
     // saying there is nothing to offer.
     let candidate = dir
@@ -881,7 +881,7 @@ type ArtifactPair = (Option<backup::Artifact>, Option<backup::Artifact>);
 /// version tested `consecutive_failures` before `fresh_on_disk`, so the
 /// "a fresh copy counts, whoever wrote it" fallback was unreachable in every
 /// state that had recorded a failure, i.e. in exactly the states where it is the
-/// point: `check_overdue_backup` sets a failure, `veld backup now` then writes a
+/// point: `check_overdue_backup` sets a failure, `veld self backup now` then writes a
 /// good copy, and the undismissable banner went on saying "Veld has stopped
 /// backing up" until the daemon's own next successful pass — up to two intervals,
 /// which at the maximum interval is two days.
@@ -917,7 +917,7 @@ fn backup_state_word(state: &BackupState, enabled: bool, fresh_on_disk: bool) ->
 ///
 /// `None` for a dev instance, and that is a correction rather than a gap. The
 /// obvious answer, which the CLI's own `restart_hint` gives and which this
-/// function used to copy, is `veld start` — and a maintainer reading it out of
+/// function used to copy, is `veld orchestrator start` — and a maintainer reading it out of
 /// this dialog said plainly that they did not understand it. They were right not
 /// to: on a dev instance the daemon is a *node of a veld run*, so "start the
 /// daemon" is not a thing anybody does, and worse, the presets that start it
@@ -966,7 +966,7 @@ pub fn restart_hint() -> Option<String> {
 /// descendant of a unit, including a shell inside `gnome-terminal-server.service`
 /// — so the unit is identified from the process's own cgroup instead.
 ///
-/// `veld backup restore`'s `restart_hint` keeps inferring from the database path,
+/// `veld self backup restore`'s `restart_hint` keeps inferring from the database path,
 /// and that stays correct: it prints a suggestion, where this asserts what is
 /// about to happen.
 pub fn service_manager_will_restart() -> bool {
@@ -998,10 +998,10 @@ pub fn view_blocking() -> HealthView {
 
     // **A fresh copy on disk counts, whoever wrote it.** This process's own
     // `last_ok` is empty for up to a whole interval after every restart, and
-    // `veld backup now` writes an artifact this daemon never hears about — so
+    // `veld self backup now` writes an artifact this daemon never hears about — so
     // keying "ok" on our own memory alone reported `unknown` with a
     // minutes-old backup sitting right there, and put the IDE at odds with what
-    // `veld backup` was showing on the same machine.
+    // `veld self backup list` was showing on the same machine.
     // **`taken_at <= now` is half the test, and the half that was missing.** A
     // future-dated artifact — an NTP step, or a NAS folder written by a machine
     // whose clock runs ahead — makes `now - taken_at` negative, which satisfies
@@ -1257,7 +1257,7 @@ mod tests {
     /// **The branch order, which was the bug.** A fresh copy on disk means the
     /// user is protected, so it has to outrank a failure this process is still
     /// remembering — otherwise `check_overdue_backup` records a failure, a
-    /// `veld backup now` fixes the actual problem, and the undismissable banner
+    /// `veld self backup now` fixes the actual problem, and the undismissable banner
     /// goes on saying "Veld has stopped backing up" until the daemon's own next
     /// successful pass (up to two intervals — two days at the maximum interval).
     #[test]

@@ -17,7 +17,7 @@ use veld_engine::api::{
 const BOOT_WAIT: Duration = Duration::from_secs(15);
 
 /// How long a dropped event stream is retried before giving up — long enough
-/// to ride out the daemon restart a `veld update` does mid-start.
+/// to ride out the daemon restart a `veld self update` does mid-start.
 const RESUME_WINDOW: Duration = Duration::from_secs(90);
 
 pub struct EngineClient {
@@ -78,7 +78,7 @@ impl EngineClient {
                         let port = veld_core::instance::daemon_port();
                         return Err(ClientError::Unreachable(format!(
                             "veld's daemon did not come up on port {port}. Its log: \
-                             ~/.veld/daemon-{port}.log (or `veld doctor` for an installed one)."
+                             ~/.veld/daemon-{port}.log (or `veld self doctor` for an installed one)."
                         )));
                     }
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -118,7 +118,7 @@ impl EngineClient {
         Err(ClientError::Other(format!(
             "The veld daemon on port {} uses the database {}, but this veld uses {}. It would \
              start and stop runs this one cannot see, so it refuses.\n  A source build has its \
-             own instance: `veld start --preset dev-headless`, then use the `veld-dev-<worktree>` \
+             own instance: `veld orchestrator start --preset dev-headless`, then use the `veld-dev-<worktree>` \
              wrapper it prints.",
             veld_core::instance::daemon_port(),
             theirs.display(),
@@ -143,7 +143,7 @@ impl EngineClient {
     }
 
     /// A `404` from `/api/engine/*` means the daemon predates the engine API —
-    /// the window after `veld update` replaced this binary but before the daemon
+    /// the window after `veld self update` replaced this binary but before the daemon
     /// restarted onto the new one. Say that, not "404 Not Found".
     fn explain(&self, e: ClientError) -> ClientError {
         match e {
@@ -157,7 +157,7 @@ impl EngineClient {
                 message: format!(
                     "The running veld daemon ({}) is older than this veld ({}) and does not have \
                      the engine yet. It restarts onto the new version on its own after an \
-                     update; if it does not, run `veld doctor`.",
+                     update; if it does not, run `veld self doctor`.",
                     self.daemon_version,
                     env!("CARGO_PKG_VERSION")
                 ),
@@ -230,7 +230,7 @@ impl EngineClient {
     /// Follow an action's events until it finishes, calling `on_event` for each.
     ///
     /// A dropped connection is not the end: the daemon may be restarting under a
-    /// `veld update` while the worker carries on, so the stream is reopened from
+    /// `veld self update` while the worker carries on, so the stream is reopened from
     /// the last `seq` seen for up to [`RESUME_WINDOW`].
     pub async fn follow(
         &self,
@@ -354,7 +354,7 @@ async fn decode<T: DeserializeOwned>(resp: reqwest::Response) -> Result<T, Clien
 /// Start this instance's daemon. The service manager's job when there is one
 /// (it owns restarts); otherwise the daemon binary, detached into its own session
 /// so closing this terminal does not take it down — the case on CI and in any
-/// shell where `veld setup` never ran.
+/// shell where `veld self setup` never ran.
 async fn start_daemon() -> Result<(), ClientError> {
     let installed = !veld_core::instance::daemon_port_is_explicit();
     if installed && kick_service_manager().await {
@@ -399,7 +399,7 @@ async fn start_daemon() -> Result<(), ClientError> {
             bin.display()
         ))
     })?;
-    // No service manager knows this daemon, so `veld update` and `veld uninstall`
+    // No service manager knows this daemon, so `veld self update` and `veld self uninstall`
     // find it by this file.
     let _ = std::fs::write(
         veld_core::instance::bootstrapped_daemon_pidfile(),

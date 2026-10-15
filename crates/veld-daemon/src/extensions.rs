@@ -5,7 +5,7 @@
 //!
 //! - **`status`** evaluates a worktree's badge commands. It is the first thing veld
 //!   runs from a repo's config with *no* user action — everything else needs
-//!   `veld start` or a click — so execution is bounded and observable rather than
+//!   `veld orchestrator start` or a click — so execution is bounded and observable rather than
 //!   gated by a consent prompt. See [`docs/extensions-vision.md`] for why a prompt
 //!   was rejected (it must re-prompt on every `git pull` that touches `veld.json`,
 //!   which manufactures the click-through reflex that makes prompts worthless).
@@ -617,7 +617,7 @@ fn resolve_actions(items: &[Value], section: &IdeSection) -> Vec<StatusActionVie
         // offers its actions from the top bar, with nothing selected, so one that
         // declares `accepts` would run with an empty `$1`. Skipped silently because
         // this list comes from a *command's stdout* at runtime — there is no config
-        // location to report a problem against, and `veld lint` already refuses the
+        // location to report a problem against, and `veld orchestrator lint` already refuses the
         // two places a config can name one.
         if !matches!(&ext.body, ExtensionBody::Action(a) if a.accepts.is_none()) {
             continue;

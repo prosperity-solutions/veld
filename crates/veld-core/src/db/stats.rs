@@ -1,8 +1,8 @@
 //! Per-node process resource stats, stored in the central database.
 //!
 //! Written by the daemon's stats sampler once per sample interval and read by
-//! the management UI (`/api/stats`, `/api/stats/history`), `veld status` and
-//! `veld stats`. Two tables, both cascade-deleting with their run:
+//! the management UI (`/api/stats`, `/api/stats/history`), `veld orchestrator status` and
+//! `veld orchestrator stats`. Two tables, both cascade-deleting with their run:
 //!
 //! - `node_stats` — one row per node per sample: the tree aggregate (see the v2
 //!   migration for the table, v7 for the memory-breakdown columns).

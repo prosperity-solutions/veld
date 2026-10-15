@@ -12,7 +12,7 @@ const load = (code: number | null, text = "failed"): BrowserError => ({
 describe("describeBrowserError", () => {
   it("separates a dead dev server from a hostname that doesn't resolve", () => {
     // The whole point of classifying: one means "start the run", the other means
-    // "veld doctor". A single generic screen makes the user guess.
+    // "veld self doctor". A single generic screen makes the user guess.
     expect(describeBrowserError(load(-102)).kind).toBe("unreachable");
     expect(describeBrowserError(load(-101)).kind).toBe("unreachable");
     expect(describeBrowserError(load(-324)).kind).toBe("unreachable");

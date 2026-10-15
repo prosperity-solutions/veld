@@ -260,7 +260,7 @@ export function RunsMode(props: { modeSwitch: ReactNode;
               {/* Raw TCP endpoints the join reproduced. Text, never a link:
                   nothing routes them, and the port is this machine's local
                   listener — which makes this the only place the address is
-                  discoverable outside `veld shares`. */}
+                  discoverable outside `veld network list`. */}
               {j.addresses.map((a) => (
                 <span key={a} className="node-address" title={`Raw TCP — ${a}`}>
                   {a} <span className="node-proto">tcp</span>
@@ -293,7 +293,7 @@ export function RunsMode(props: { modeSwitch: ReactNode;
             <Text size="sm" c="dimmed">
               {joinCount > 0
                 ? `You've joined ${joinCount} shared environment(s) — see the panel above.`
-                : "Start one with `veld start` in any project with a veld.json."}
+                : "Start one with `veld orchestrator start` in any project with a veld.json."}
             </Text>
           </div>
         )}

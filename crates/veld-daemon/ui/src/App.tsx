@@ -495,7 +495,7 @@ function flashAttention(): void {
 }
 
 /** How long an optimistic pending marker survives without an observed run
- *  signature change. Several polls' worth, so a slow `veld start` isn't cut
+ *  signature change. Several polls' worth, so a slow `veld orchestrator start` isn't cut
  *  off. */
 const PENDING_TTL_MS = 60_000;
 
@@ -503,7 +503,7 @@ const PENDING_TTL_MS = 60_000;
  * How long the control socket may be down before the page says so.
  *
  * Long enough to cover a reconnect (the channel's own backoff starts at 300ms)
- * and a daemon restart, so `veld update` does not flash a warning at everyone;
+ * and a daemon restart, so `veld self update` does not flash a warning at everyone;
  * short enough that a page whose upgrade is being *refused* — a scheme the
  * daemon's origin allowlist does not know, a proxy that drops upgrades — says
  * something while the person is still looking at it. That case is why this
@@ -1149,7 +1149,7 @@ function AppInner(props: {
   const splitFileDiff = filesSplitDiff(settings ?? {});
 
   // Which zone the logs views spell a line's timestamp in. Read here and threaded for
-  // the same reason as the two above, and it is the same key `veld logs` reads — so the
+  // the same reason as the two above, and it is the same key `veld orchestrator logs` reads — so the
   // two agree on the *policy*.
   //
   // They do not necessarily agree on the zone, and it would be wrong to claim they do:
@@ -1708,7 +1708,7 @@ function AppInner(props: {
     // **A detached window connects, and claims nothing.** It used to return here
     // instead, and that quietly excluded the one thing this socket now does for
     // every client: `channel.keep` is what stops the daemon collecting a shell
-    // whose socket dropped (a slept laptop, a `veld update`) while its window is
+    // whose socket dropped (a slept laptop, a `veld self update`) while its window is
     // still open. A detached window's tabs are named by no other client's layout
     // — they left the origin's in the same step the window was seeded — so
     // staying silent here meant the fix reached every window *except* the one
@@ -1790,7 +1790,7 @@ function AppInner(props: {
       onReady: (sameEpoch) => {
         noteChannelUp();
         // The daemon is answering again, which is the evidence a terminal whose
-        // retry budget is spent has been waiting for. `veld update` restarts the
+        // retry budget is spent has been waiting for. `veld self update` restarts the
         // daemon while pages stay open and takes longer than the eleven seconds
         // that budget covers, so without this the panes come back as dead
         // rectangles over live shells and every one of them needs a click.
@@ -2326,7 +2326,7 @@ function AppInner(props: {
    * entry point (top bar, context menu, palette — the rail row once had one too) — they disagreed
    * before: some checked "is anything in flight", others "is there anything
    * to start", so one surface offered an enabled button whose click was a
-   * silent no-op while another allowed a double-spawned `veld start`.
+   * silent no-op while another allowed a double-spawned `veld orchestrator start`.
    * Declared after `canRunWorktreeNow` on purpose: it closes over it, and
    * TypeScript does not flag use-before-declaration through a closure.
    */
@@ -2461,7 +2461,7 @@ function AppInner(props: {
     // the action against the run it was about.
     const target = name ?? startNameFor(w);
     void (async () => {
-      // Ask before starting, not after failing. A daemon-spawned `veld start`
+      // Ask before starting, not after failing. A daemon-spawned `veld orchestrator start`
       // has no terminal, so its own pre-flight can only refuse — this is the
       // channel that refusal assumes exists.
       //
@@ -2485,7 +2485,7 @@ function AppInner(props: {
         }
       } catch {
         // Advisory only. If the check itself fails — an older daemon, a config
-        // that no longer parses — start anyway and let `veld start` report the
+        // that no longer parses — start anyway and let `veld orchestrator start` report the
         // real problem. Refusing to start because a *check* broke would be a
         // worse failure than the one it was looking for.
       }
@@ -2995,7 +2995,7 @@ function AppInner(props: {
     // has no space for inline controls and right-click is its only affordance.
     // `pendingFor` gates every entry: `running` lags a fired action by up to
     // one poll, so without it the menu keeps offering "Start run" while a
-    // start is already in flight and `veld start` gets spawned twice.
+    // start is already in flight and `veld orchestrator start` gets spawned twice.
     const busy = pendingFor(w) !== null;
     const runItems = canRunWorktreeNow(w)
       ? [
@@ -8202,7 +8202,7 @@ function AppInner(props: {
                       ? "Database restored — Veld is restarting"
                       : // Name the command when there is a safe one to name; on a
                         // dev instance there is not (see `dbhealth::restart_hint`
-                        // — the obvious `veld start` can recreate the database and
+                        // — the obvious `veld orchestrator start` can recreate the database and
                         // undo the restore), so point at the dialog instead of
                         // inventing an instruction.
                         result.restartHint
@@ -9238,7 +9238,7 @@ function TopBar(props: {
                   : "Repository directory not found on disk — showing last known state. Veld's own database is reported separately."
               }
             >
-              {repoAvailable ? "no veld config" : "repository unavailable"}
+              {repoAvailable ? "no veld.json" : "repository unavailable"}
             </span>
           )}
         </>

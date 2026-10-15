@@ -56,7 +56,7 @@ pub fn connection_info(conn: &Connection, label: &str) -> ShareConnectionInfo {
 /// Neutralize a peer-chosen label for display: control characters (ANSI
 /// escapes, newlines, tabs) and Unicode bidi/isolate overrides (U+202E and
 /// friends — the secondary terminal/reader-spoofing vector) are dropped, and
-/// the length is capped. `veld shares` prints labels to the host's terminal,
+/// the length is capped. `veld network list` prints labels to the host's terminal,
 /// where `\x1b[…` would otherwise let an approved joiner rewrite the screen;
 /// daemons also sanitize at ingestion (accept loop) so log lines and the
 /// pending-approval list carry clean labels too.

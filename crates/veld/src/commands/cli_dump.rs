@@ -6,16 +6,16 @@
 //!
 //! * **Descriptions leaked into the flag set.** clap wraps a long description
 //!   onto its own indented line, so every hyphenated word in one became a flag:
-//!   `veld logs` gained `--pin` (from the sentence describing `veld presets`),
-//!   and `veld settings set` gained `-apple-system` out of a CSS font stack. A
+//!   `veld orchestrator logs` gained `--pin` (from the sentence describing `veld orchestrator presets`),
+//!   and `veld self settings set` gained `-apple-system` out of a CSS font stack. A
 //!   phantom flag does not fail the gate — it *widens* it, so a documented
-//!   `veld logs --pin` would have passed.
+//!   `veld orchestrator logs --pin` would have passed.
 //! * **A `hide = true` flag is real and absent from help**, which forced a
 //!   hand-maintained allowlist for the ones the maintainer docs legitimately
 //!   describe. Introspection reports them, so the allowlist is gone.
 //! * **Help says nothing usable about *positionals*.** Without that, the gate
-//!   could not tell `veld logs dev-daemon` (there is no positional; clap refuses
-//!   it) from `veld start e2e` (there is one) — and `veld logs dev-daemon
+//!   could not tell `veld orchestrator logs dev-daemon` (there is no positional; clap refuses
+//!   it) from `veld orchestrator start e2e` (there is one) — and `veld orchestrator logs dev-daemon
 //!   --follow` is a defect this repo actually shipped, in `CONTRIBUTING.md`.
 //!
 //! Everything above is a property clap already knows. Asking it is exact, is one
@@ -39,10 +39,10 @@ pub fn run() -> i32 {
 /// `inherited` carries the `global = true` flags of every ancestor.
 ///
 /// clap declares a global argument once, on the parent, and accepts it on every
-/// descendant — `veld backup --dir D now` and `veld backup now --dir D` are the
+/// descendant — `veld self backup --dir D now` and `veld self backup now --dir D` are the
 /// same command, and `--debug` is legal everywhere. Reporting a global only
 /// where it was written would make this dump describe a *narrower* CLI than the
-/// real one, and a gate reading it would reject `veld backup now --dir D`, which
+/// real one, and a gate reading it would reject `veld self backup now --dir D`, which
 /// the README documents and clap accepts. Flattening it into every descendant is
 /// what makes each node's `flags` the answer to "may this be written here".
 fn describe(cmd: &clap::Command, inherited: &[String]) -> serde_json::Value {
@@ -75,9 +75,8 @@ fn describe(cmd: &clap::Command, inherited: &[String]) -> serde_json::Value {
     // Every name a subcommand answers to, not only its canonical one. An alias
     // absent here reads to the gate as an unknown word: at a node with no
     // positional that is a false failure on a correct doc line, and at one with
-    // a positional it silently swallows the rest of the line. No alias exists in
-    // `main.rs` today — this is so that adding the first one needs no second
-    // change here.
+    // a positional it silently swallows the rest of the line. `orc` (for
+    // `orchestrator`) is the first, and docs write it as often as the full name.
     let mut subcommands = serde_json::Map::new();
     for s in cmd.get_subcommands() {
         // `help` is clap's own generated subcommand and is not something a doc
@@ -114,25 +113,31 @@ mod tests {
     fn the_dump_reports_what_the_gate_needs() {
         let v = describe(&crate::Cli::command(), &[]);
         let subs = &v["subcommands"];
+        let orc = &subs["orchestrator"]["subcommands"];
 
         // A positional exists on `start` (node selections) and not on `logs`.
-        assert_eq!(subs["start"]["takes_positional"], true);
-        assert_eq!(subs["logs"]["takes_positional"], false);
+        assert_eq!(orc["start"]["takes_positional"], true);
+        assert_eq!(orc["logs"]["takes_positional"], false);
+
+        // A part's alias is a key of its own, carrying the same tree: docs write
+        // `veld orc start` as often as `veld orchestrator start`.
+        assert_eq!(subs["orc"], subs["orchestrator"]);
+        assert_eq!(subs["orchestrator"]["subcommand_required"], true);
 
         // `veld feedback` alone is refused by clap; the gate has to know that.
         assert_eq!(subs["feedback"]["subcommand_required"], true);
-        assert_eq!(subs["start"]["subcommand_required"], false);
+        assert_eq!(orc["start"]["subcommand_required"], false);
 
         // Flags are per-node, and a hidden one is reported — which is the whole
         // reason the gate no longer carries an allowlist of them.
-        let start_flags = subs["start"]["flags"].as_array().expect("array");
+        let start_flags = orc["start"]["flags"].as_array().expect("array");
         assert!(start_flags.iter().any(|f| f == "--preset"));
         assert!(start_flags.iter().any(|f| f == "-a"));
         assert!(
             !start_flags.iter().any(|f| f == "--pin"),
             "no leakage across nodes"
         );
-        let update_flags = subs["desktop"]["subcommands"]["update"]["flags"]
+        let update_flags = subs["self"]["subcommands"]["desktop"]["subcommands"]["update"]["flags"]
             .as_array()
             .expect("array");
         assert!(
@@ -158,9 +163,9 @@ mod tests {
         );
 
         // A global declared on a parent must appear on every descendant, or a
-        // reader concludes `veld backup now --dir D` is illegal when clap accepts
+        // reader concludes `veld self backup now --dir D` is illegal when clap accepts
         // it (and the README documents it).
-        let backup_now = subs["backup"]["subcommands"]["now"]["flags"]
+        let backup_now = subs["self"]["subcommands"]["backup"]["subcommands"]["now"]["flags"]
             .as_array()
             .expect("array");
         assert!(
@@ -168,7 +173,7 @@ mod tests {
             "an ancestor's global must be inherited: {backup_now:?}"
         );
         assert!(
-            subs["start"]["flags"]
+            orc["start"]["flags"]
                 .as_array()
                 .expect("array")
                 .iter()

@@ -5,7 +5,7 @@ use crate::output;
 use veld_core::helper::HelperClient;
 use veld_core::instance::{UNPRIVILEGED_HTTP_PORT, UNPRIVILEGED_HTTPS_PORT};
 
-/// `veld setup unprivileged` -- run the unprivileged (no-sudo) setup sequence.
+/// `veld self setup unprivileged` -- run the unprivileged (no-sudo) setup sequence.
 ///
 /// Installs everything in user space: Caddy in `~/.local/lib/veld/`,
 /// helper as a user-level LaunchAgent/systemd unit on ports 18443/18080.
@@ -43,7 +43,7 @@ pub async fn run() -> i32 {
             print_step_fail(&format!("{e:#}"));
             // Non-fatal — daemon is optional for core functionality
             eprintln!(
-                "  Feedback overlay may not work. You can retry with: veld setup unprivileged"
+                "  Feedback overlay may not work. You can retry with: veld self setup unprivileged"
             );
         }
     }
@@ -70,15 +70,15 @@ pub async fn run() -> i32 {
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
             eprintln!("  HTTPS will work but browsers may show certificate warnings.");
-            eprintln!("  You can retry later with: veld setup unprivileged");
+            eprintln!("  You can retry later with: veld self setup unprivileged");
         }
     }
 
     println!();
-    output::print_success("Setup complete! Run `veld start` to get going.");
+    output::print_success("Setup complete! Run `veld orchestrator start` to get going.");
     println!();
     let tip = format!(
-        "Run `veld setup privileged` for clean URLs without :{UNPRIVILEGED_HTTPS_PORT} (one-time sudo)"
+        "Run `veld self setup privileged` for clean URLs without :{UNPRIVILEGED_HTTPS_PORT} (one-time sudo)"
     );
     eprintln!("  {} {tip}", output::bold("Tip:"));
 
@@ -148,7 +148,7 @@ async fn install_unprivileged_helper() -> Result<String, anyhow::Error> {
     let via = if service_ok {
         "service registered and running"
     } else {
-        "started directly (service registration FAILED — helper will not survive reboots; re-run `veld setup unprivileged`)"
+        "started directly (service registration FAILED — helper will not survive reboots; re-run `veld self setup unprivileged`)"
     };
     Ok(format!("veld-helper {via}, Caddy started"))
 }

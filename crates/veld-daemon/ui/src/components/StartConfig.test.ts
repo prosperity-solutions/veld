@@ -112,7 +112,7 @@ describe("pruneStartSelection", () => {
       }),
     ).toEqual({ kind: "nodes", selections: ["api:dev"] });
     // Nothing valid left → null, so the caller falls back to the default
-    // rather than sending an empty list `veld start` would reject.
+    // rather than sending an empty list `veld orchestrator start` would reject.
     expect(
       pruneStartSelection(w, { kind: "nodes", selections: ["removed:dev"] }),
     ).toBeNull();
@@ -308,7 +308,7 @@ describe("startSelectionLabel", () => {
 
 describe("startBody", () => {
   it("sends exactly one of preset / selections", () => {
-    // `veld start` treats the two as mutually exclusive. Sending neither is not a
+    // `veld orchestrator start` treats the two as mutually exclusive. Sending neither is not a
     // safe no-op either: it falls back to the project's `default_preset` when one
     // is declared, and only fails "No selections provided" when there isn't one.
     expect(startBody({ kind: "preset", name: "full" })).toEqual({

@@ -20,7 +20,7 @@ const GC_INTERVAL_SECS: u64 = 600; // 10 minutes
 const RUN_HISTORY_KEEP: usize = 10;
 
 /// Grace period before the stale-`stopping` reaper touches a `stopping` run.
-/// Dead PIDs under `stopping` is the NORMAL state of a healthy `veld stop`
+/// Dead PIDs under `stopping` is the NORMAL state of a healthy `veld orchestrator stop`
 /// (PIDs are killed first, then on_stop hooks and teardown steps run for
 /// seconds to minutes) — indistinguishable in DB state from a SIGKILLed
 /// ender, so only age separates them. Generous on purpose. Conscious accept:
@@ -74,7 +74,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
                     summary.trash_purged
                 );
                 // Stop any shares whose run just died so they don't outlive the
-                // environment they expose (crash path — CLI `veld stop` already
+                // environment they expose (crash path — CLI `veld orchestrator stop` already
                 // unshares directly).
                 for run_id in summary.orphaned_runs {
                     share_manager.unshare_run(run_id).await;
@@ -373,7 +373,7 @@ pub(crate) async fn run_gc_pass(
     // is: `dbhealth` is daemon-process-local, so this stops *this process's*
     // page-moving traffic and nothing else's.
     //
-    // The other pruning-and-vacuuming path is `veld gc`, which is emphatically
+    // The other pruning-and-vacuuming path is `veld self gc`, which is emphatically
     // **not** just a hand-run command — `maybe_auto_gc` detaches it from any CLI
     // invocation every 30 minutes — so it carries its own gate, asking SQLite
     // directly because it has no `dbhealth` state to read. See
@@ -514,9 +514,9 @@ async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperC
         // node whose `url` checkpoint never landed still had its route added
         // (`add_route` runs before the post-spawn save), and this is the only
         // key that can reach such an entry. Covers a route stored by an older
-        // helper still running after a `veld update` (see `legacy_run_route_id`).
+        // helper still running after a `veld self update` (see `legacy_run_route_id`).
         let legacy = veld_core::url::legacy_run_route_id(run_name, &ns.node_name, &ns.variant);
-        // Counted like any other removal: in the `veld update` window this exists
+        // Counted like any other removal: in the `veld self update` window this exists
         // for, it IS the removal, and reporting "0 routes removed" while deleting
         // them would misread as "nothing to do".
         if helper.remove_route(&legacy).await.is_ok() {

@@ -41,9 +41,9 @@ pub fn lib_dir() -> PathBuf {
 /// `<lib dir>/veld-daemon.log` there would have bricked the daemon on exactly the
 /// machines that were working before. `~/.veld` is the user's, is where every other
 /// piece of per-user veld state already lives (sockets, holder directories,
-/// `spawn-logs`), and is removed wholesale by `veld uninstall`.
+/// `spawn-logs`), and is removed wholesale by `veld self uninstall`.
 ///
-/// `home` is passed rather than read because `veld setup` can be running under
+/// `home` is passed rather than read because `veld self setup` can be running under
 /// `sudo`, where `dirs::home_dir()` is root's and a log written there would be
 /// unwritable by the job that needs it.
 pub fn daemon_log_path_in(home: &Path) -> PathBuf {
@@ -128,7 +128,7 @@ pub fn cli_candidates(exe_dir: &Path) -> Vec<PathBuf> {
 /// The `veld` CLI belonging to a binary in `exe_dir`, or `None` if there is none.
 ///
 /// Callers are the daemon — which bakes the answer into the terminal shims, passing
-/// its own `current_exe()` directory — and `veld doctor`, which reports on them and
+/// its own `current_exe()` directory — and `veld self doctor`, which reports on them and
 /// passes the directory of the daemon its plist actually names. One rule, so the two
 /// cannot disagree about *what* a CLI is; they still have to be given the same
 /// directory to agree about *which* one, and that is doctor's job, not this
@@ -162,7 +162,7 @@ pub fn caddy_data_dir() -> PathBuf {
 /// survives a reboot. `/var/db` and `/var/lib` are `root:wheel`.
 ///
 /// Lives here rather than in `veld-helper` because **two** crates need it: the
-/// helper writes it, and `veld uninstall` (in this crate) sweeps it. A second
+/// helper writes it, and `veld self uninstall` (in this crate) sweeps it. A second
 /// literal in the uninstall path is the drift this repo already names for the
 /// lease constants — change one, and the other silently stops matching, leaving a
 /// stranded claim on a machine with no veld left to honour it.
@@ -192,14 +192,14 @@ pub fn sleep_marker_dir() -> PathBuf {
 /// as themselves, and "we create it root-owned" fixes nothing about a directory
 /// that is already there. `/var/db` (`root:wheel`) and `/var/lib` (`root:root`)
 /// have a root-owned parent on every machine, so pre-creation there requires
-/// root — which makes it not an attack. It also keeps `veld doctor`'s shipped
+/// root — which makes it not an attack. It also keeps `veld self doctor`'s shipped
 /// "No stale system install" row honest: that row fails when
 /// `/usr/local/lib/veld` exists and is not the active lib dir, so putting the
 /// helper there would have made it fail for every migrated user.
 ///
 /// **Why a sibling of [`sleep_marker_dir`] rather than a subdirectory of it.**
 /// Same reasoning about the parent, and the same two paths — but that directory
-/// is `0700`, and this one must be world-*readable*: `veld doctor` runs as the
+/// is `0700`, and this one must be world-*readable*: `veld self doctor` runs as the
 /// user and reads this binary and its `.sig` to report the signature row. Two
 /// directories with one job each, rather than one directory whose mode has to
 /// serve both.
@@ -228,8 +228,8 @@ pub fn privileged_helper_bin() -> PathBuf {
 /// consequence was the opposite of what the callers wanted: `veld
 /// _helper-install` returned 0 in silence for a machine whose root daemon has no
 /// binary to exec, so the one loud message it exists to print ("the privileged
-/// veld-helper is not answering … run `sudo veld setup privileged`") was
-/// unreachable, and `veld doctor` reported the same machine green.
+/// veld-helper is not answering … run `sudo veld self setup privileged`") was
+/// unreachable, and `veld self doctor` reported the same machine green.
 ///
 /// The `/private` arm is macOS's `/var` symlink: `launchctl print` echoes back
 /// whatever string the plist holds, and this crate always writes the `/var`
@@ -264,7 +264,7 @@ pub fn dnsmasq_conf_dir() -> PathBuf {
 }
 
 /// Filename of the log Caddy writes for itself. Shared so the helper that
-/// configures it and `veld doctor` that reports it cannot drift apart.
+/// configures it and `veld self doctor` that reports it cannot drift apart.
 pub const CADDY_LOG_FILENAME: &str = "caddy.log";
 
 /// Where Caddy writes its own log.
@@ -283,7 +283,7 @@ pub const CADDY_LOG_FILENAME: &str = "caddy.log";
 /// which couples the log's fate to the thing it is a log about.
 ///
 /// **But it is not reliably root-owned.** Nothing chowns it: an
-/// unprivileged-first install creates it as the user, and `veld setup privileged`
+/// unprivileged-first install creates it as the user, and `veld self setup privileged`
 /// afterwards does not change that. So the actual defence against the symlink is
 /// the helper opening this path with `O_NOFOLLOW` and setting permissions through
 /// the descriptor (`prepare_caddy_log`), not the directory's ownership. The
@@ -302,7 +302,7 @@ mod tests {
     /// That fail-open is what an implementation which canonicalised got wrong:
     /// `canonicalize` errors on a path that is not there, so a machine whose root
     /// daemon had no binary to exec read as "not migrated" — and `veld
-    /// _helper-install` returned 0 in silence while `veld doctor` went green, the
+    /// _helper-install` returned 0 in silence while `veld self doctor` went green, the
     /// two places that exist to say so loudly.
     ///
     /// **This test used to assert `!bin.exists()` as a precondition**, which made

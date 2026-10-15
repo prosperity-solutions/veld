@@ -762,7 +762,7 @@ enum ClientMsg {
     ///
     /// **The detach grace is about the client being gone, not the socket.** A
     /// terminal's socket drops for reasons that have nothing to do with the user
-    /// walking away: the laptop slept, `veld update` restarted the daemon, a
+    /// walking away: the laptop slept, `veld self update` restarted the daemon, a
     /// proxy timed out. `pty`'s reaper cannot tell those from a closed window,
     /// so before this frame existed a transient drop plus a spent reconnect
     /// budget hung up a live build thirty minutes later with the pane still on
@@ -775,7 +775,7 @@ enum ClientMsg {
     /// the daemon's copy dies with the socket, which is exactly what makes this a
     /// lease rather than a promise. See [`kept_among`].
     ///
-    /// **A page from an older build never sends it**, and `veld update` replaces
+    /// **A page from an older build never sends it**, and `veld self update` replaces
     /// the daemon while pages stay open. So for windows open across an update the
     /// grace still measures the socket until they are reloaded — the desktop app
     /// relaunches and heals itself, a browser tab does not. Nothing breaks: an
@@ -1070,7 +1070,7 @@ static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 /// A client that reconnects and sees a different epoch knows the daemon
 /// restarted underneath it — its claims are gone and its layout may have been
 /// written by someone else — so it re-reads rather than trusting what it holds.
-/// `veld update` replaces the binary while pages stay open, so this is a normal
+/// `veld self update` replaces the binary while pages stay open, so this is a normal
 /// event, not a fault.
 static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().to_string());
 
@@ -1079,7 +1079,7 @@ static EPOCH: LazyLock<String> = LazyLock::new(|| uuid::Uuid::new_v4().simple().
 /// The answer to "is any Veld window or tab still showing this terminal", which
 /// is the question `pty`'s detach reaper needs and could not ask: a session is
 /// *detached* the moment its socket goes away, and a socket goes away for
-/// reasons — a sleeping laptop, `veld update`, a spent reconnect budget — that
+/// reasons — a sleeping laptop, `veld self update`, a spent reconnect budget — that
 /// have nothing to do with the window being closed. Reaping on the socket alone
 /// hung up live builds under a pane the user was looking at.
 ///

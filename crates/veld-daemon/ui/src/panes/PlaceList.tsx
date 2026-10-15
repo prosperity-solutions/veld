@@ -386,7 +386,7 @@ export function FilesModal(props: {
           // would appear, in the one state where they never will.
           <p className="faint place-nomatch">
             Veld cannot serve local files right now — its <code>files.*</code> route is
-            not registered. Check <code>veld doctor</code>; the helper may not be
+            not registered. Check <code>veld self doctor</code>; the helper may not be
             running. <code>open&nbsp;&lt;file&gt;</code> falls through to your system
             opener until it is.
           </p>

@@ -1,4 +1,4 @@
-//! `veld restart` — a face of the engine.
+//! `veld orchestrator restart` — a face of the engine.
 
 use std::sync::Arc;
 
@@ -9,7 +9,7 @@ use veld_engine::api::{
 
 use crate::output;
 
-/// `veld restart [--name <n>] [--debug]`
+/// `veld orchestrator restart [--name <n>] [--debug]`
 pub async fn run(name: Option<String>, debug: bool) -> i32 {
     let Some(project_root) = super::project_root() else {
         return 1;
@@ -48,7 +48,7 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     for note in &ready.notices {
         output::print_info(note);
     }
-    // `veld restart` has no `--var`, so the refusal must not offer one.
+    // `veld orchestrator restart` has no `--var`, so the refusal must not offer one.
     let Some(answers) =
         super::start::gather_answers(&client, &project_root, &ready.unanswered, false).await
     else {

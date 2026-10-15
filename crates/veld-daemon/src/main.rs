@@ -473,7 +473,7 @@ async fn run(args: Args) -> Result<()> {
 
     // Same reasoning, for the directory-scoped sibling: prime every already-
     // registered project's entry so the FIRST top-bar start/stop/restart/
-    // action click after this boot (including every `veld update`, which
+    // action click after this boot (including every `veld self update`, which
     // restarts the daemon) doesn't pay a synchronous login-shell resolution
     // on a UI `fetch` with no timeout. A project registered after this runs
     // still pays that cost once on its own first use — the same one-time
@@ -555,7 +555,7 @@ async fn run(args: Args) -> Result<()> {
 
     // Terminal shells are deliberately **left running**. Their PTYs belong to
     // holder processes rather than to this one, so a shutdown is invisible to them
-    // and the next daemon adopts them — which is what makes `veld update` safe to
+    // and the next daemon adopts them — which is what makes `veld self update` safe to
     // run with terminals open. This call only records how many were left; what
     // still ends a shell is an explicit `DELETE`, the detach reaper, or the
     // holder's own orphan grace. Ordered before the aborts because it needs the

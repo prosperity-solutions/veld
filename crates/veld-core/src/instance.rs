@@ -16,7 +16,7 @@
 //! instances collide in shared Caddy exactly when they mint the same
 //! hostname — which two checkouts of one repo do whenever their run names
 //! match (last-write-wins, and stopping one removes the route the other still
-//! needs). `veld start` refuses that case *within* one instance by checking
+//! needs). `veld orchestrator start` refuses that case *within* one instance by checking
 //! the registry, but instances have separate databases and cannot see each
 //! other's runs, so nothing detects it across them. Keep dev-instance run
 //! names distinct from the installed instance's.
@@ -36,11 +36,11 @@ pub const DEFAULT_DAEMON_PORT: u16 = 19899;
 /// does not know is a hostname whose every WebSocket upgrade it refuses.
 pub const MANAGEMENT_HOST: &str = "veld.localhost";
 
-/// Ports Caddy serves on without root: `veld setup unprivileged`, and the
+/// Ports Caddy serves on without root: `veld self setup unprivileged`, and the
 /// auto-bootstrap.
 ///
 /// **The one definition point**, because three places have to agree and two of
-/// them cannot see each other: `veld setup unprivileged` and the auto-bootstrap
+/// them cannot see each other: `veld self setup unprivileged` and the auto-bootstrap
 /// tell the helper which ports to listen on, and the daemon's `Origin` allowlist
 /// (`veld-daemon/src/pty.rs`, `management_ports`) decides which origins that
 /// makes real. They were four independent string literals; changing the setup's
@@ -177,7 +177,7 @@ pub fn daemon_socket() -> PathBuf {
 ///
 /// The socket the installed daemon is on whatever this process was pointed at —
 /// which is the question to ask when the thing being acted on is the installed
-/// *database*, since the two overrides are independent. `veld backup restore` is
+/// *database*, since the two overrides are independent. `veld self backup restore` is
 /// the caller: a CLI told to use a different socket must still notice the installed
 /// daemon holding the file it is about to replace.
 pub fn default_daemon_socket() -> PathBuf {
@@ -193,7 +193,7 @@ pub fn default_daemon_socket() -> PathBuf {
 /// Exists so a caller can ask whether the daemon it can reach is the one that owns
 /// the database it is about to act on. Those are separate overrides —
 /// `VELD_DB_PATH` and `VELD_DAEMON_SOCK` — and when only one of them is set the
-/// socket and the database belong to different instances. `veld backup restore`
+/// socket and the database belong to different instances. `veld self backup restore`
 /// needs exactly that: refusing because *a* daemon is running, when that daemon
 /// holds a different database entirely, blocks a restore for no reason.
 pub fn daemon_socket_is_default() -> bool {
@@ -204,7 +204,7 @@ pub fn daemon_socket_is_default() -> bool {
 /// [`shim_dir`] subdirectory of executables a terminal's environment points at.
 ///
 /// One owner for the name, because three crates need it: the daemon binds and
-/// scans it, `veld doctor` reports it, and `veld uninstall` sweeps it.
+/// scans it, `veld self doctor` reports it, and `veld self uninstall` sweeps it.
 ///
 /// Keyed by daemon **port**, not just by the socket directory: a dev instance must
 /// never adopt the installed instance's terminal sessions, whose `worktree_id`s
@@ -232,7 +232,7 @@ pub fn pty_dir() -> PathBuf {
 }
 
 /// The pid of a daemon the CLI started by hand (no launchd/systemd job), so
-/// `veld update` and `veld uninstall` can stop it. Per instance.
+/// `veld self update` and `veld self uninstall` can stop it. Per instance.
 pub fn bootstrapped_daemon_pidfile() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -335,7 +335,7 @@ pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
 }
 
 /// The prefix every [`pty_dir`] shares, for code that must find the holder
-/// directories of **every** instance rather than only this one — `veld uninstall`,
+/// directories of **every** instance rather than only this one — `veld self uninstall`,
 /// which has to stop them all.
 pub const PTY_DIR_PREFIX: &str = "pty-";
 
@@ -343,10 +343,10 @@ pub const PTY_DIR_PREFIX: &str = "pty-";
 ///
 /// **The chokepoint, and the reason it exists rather than each caller writing
 /// its own `read_dir`:** three of them already do — the daemon's adoption sweep,
-/// `veld uninstall`'s hangup sweep and `veld doctor`'s count — and every one of
+/// `veld self uninstall`'s hangup sweep and `veld self doctor`'s count — and every one of
 /// them then *acts* on what it found, destructively. The fourth such scan is the
 /// one somebody writes next, and the natural version of it filters on `.sock`,
-/// which is how `veld doctor` came to connect to every socket in a directory
+/// which is how `veld self doctor` came to connect to every socket in a directory
 /// `VELD_PTY_DIR` can point anywhere. Reach for this instead of `read_dir`.
 ///
 /// A missing directory is an empty list: it appears with the first terminal and
@@ -626,7 +626,7 @@ mod tests {
 
             std::env::set_var("VELD_DAEMON_PORT", "19898");
             assert_eq!(daemon_port(), 19898);
-            // `veld agent-state` writes its request by hand to `127.0.0.1:<daemon_port>`
+            // `veld agent state` writes its request by hand to `127.0.0.1:<daemon_port>`
             // on this assumption: plain http, loopback, this port.
             assert_eq!(daemon_base(), "http://127.0.0.1:19898");
             assert_eq!(daemon_upstream(), "localhost:19898");
@@ -683,8 +683,8 @@ mod tests {
             // --- holder_sockets_in ---------------------------------------
             // The chokepoint every holder-directory scan goes through, because
             // each of them then *acts* on what it found: the daemon deletes a
-            // socket nobody answers, `veld uninstall` writes a HANGUP to it, and
-            // `veld doctor` connects to it. Pointed at `~/.veld` — which
+            // socket nobody answers, `veld self uninstall` writes a HANGUP to it, and
+            // `veld self doctor` connects to it. Pointed at `~/.veld` — which
             // `VELD_PTY_DIR` can be — a `.sock`-extension filter hands all three
             // the daemon's own control socket.
             let dir = tempfile::tempdir().unwrap();

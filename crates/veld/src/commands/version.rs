@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Command;
 
 /// How long to wait for the running helper to answer before falling back to the
-/// binaries on disk. Short: this sits in front of `veld start` and `veld status`,
+/// binaries on disk. Short: this sits in front of `veld orchestrator start` and `veld orchestrator status`,
 /// and a helper that is up answers its status request in milliseconds.
 const RUNNING_HELPER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
@@ -35,10 +35,10 @@ pub async fn print_version() {
 /// install whose service had been pointed back at `~/.local/lib/veld`, the
 /// store-first candidate list read a stale v16.74.0 out of the root-owned
 /// directory while v16.80.1 was the helper actually serving requests — and
-/// `veld start` refused to run over a mismatch that did not exist, naming no
+/// `veld orchestrator start` refused to run over a mismatch that did not exist, naming no
 /// source and offering no way around it.
 ///
-/// The socket is chosen by setup mode, as `veld update` does, rather than by
+/// The socket is chosen by setup mode, as `veld self update` does, rather than by
 /// `connect()`'s fallthrough, which could latch onto a stale user-level helper
 /// while the privileged one is down.
 async fn running_helper_version() -> Option<String> {
@@ -106,7 +106,7 @@ fn binary_candidates(binary_name: &str) -> Vec<String> {
     let mut paths = Vec::new();
     // **Privileged installs only.** A machine that was once privileged and is
     // now unprivileged still has the root-owned store on disk, and an
-    // unconditional candidate would have `veld version` report that stale root
+    // unconditional candidate would have `veld self version` report that stale root
     // helper as this install's — which nothing updates any more, so
     // `check_version_mismatch` would print a permanent, false skew warning after
     // every update.
@@ -195,8 +195,8 @@ pub async fn check_version_mismatch() -> Result<(), String> {
     // restart onto a file whose signature did not verify), and the only mode
     // whose helper restarts itself onto a new file, so a gap there has a cause
     // this check can name. Auto mode's helper is ephemeral: nothing restarts it
-    // after an install, and only `veld update` stops it — which does nothing on
-    // a CLI that is already current — so gating on it would block `veld start`
+    // after an install, and only `veld self update` stops it — which does nothing on
+    // a CLI that is already current — so gating on it would block `veld orchestrator start`
     // (the very command that re-bootstraps it) behind advice that cannot work.
     // Unprivileged mode's LaunchAgent is restarted by the installer, and when
     // that fails there is nothing here to tell the user that fixes it. Both keep
@@ -230,12 +230,12 @@ pub async fn check_version_mismatch() -> Result<(), String> {
         return Ok(());
     }
     // A running helper that is behind is usually one that refused to restart
-    // onto its file, and `veld update` cannot fix that: on a CLI that is already
-    // current it does nothing at all, so "run `veld update`" would loop. Name the
-    // real remedy when that is the cause, and `veld doctor` when it might be.
+    // onto its file, and `veld self update` cannot fix that: on a CLI that is already
+    // current it does nothing at all, so "run `veld self update`" would loop. Name the
+    // real remedy when that is the cause, and `veld self doctor` when it might be.
     // `running_helper_behind` implies privileged mode: no other mode asks.
     let remedy = if !running_helper_behind {
-        "Run `veld update` to fix this.".to_string()
+        "Run `veld self update` to fix this.".to_string()
     } else if let Some((bin, cause)) = veld_core::setup::unverified_service_binary().await {
         format!(
             "The helper cannot restart onto {}: it is not signed with the org's key ({cause}). \
@@ -245,7 +245,7 @@ pub async fn check_version_mismatch() -> Result<(), String> {
         )
     } else if let Some(store_version) = service_runs_an_older_store_copy(cli_version).await {
         // The service already runs the newest helper it has: restarting it
-        // changes nothing, and `veld update` does nothing on a current CLI. The
+        // changes nothing, and `veld self update` does nothing on a current CLI. The
         // installer is what puts this release's helper into the store.
         format!(
             "The helper service runs the verified v{store_version} copy in {}, which is older than \
@@ -255,8 +255,8 @@ pub async fn check_version_mismatch() -> Result<(), String> {
         )
     } else {
         "If you just updated, the helper restarts onto the new version within about 15 seconds \
-         — retry then. Otherwise run `veld update`; if it says you are already on the latest \
-         version, run `veld doctor` to see why the helper has not restarted."
+         — retry then. Otherwise run `veld self update`; if it says you are already on the latest \
+         version, run `veld self doctor` to see why the helper has not restarted."
             .to_string()
     };
     Err(format!(
@@ -269,7 +269,7 @@ pub async fn check_version_mismatch() -> Result<(), String> {
 /// that copy is older than `cli_version`; `None` when it does not, or when that
 /// cannot be told.
 ///
-/// Reached by `sudo veld setup privileged` on a machine whose lib-dir helper does
+/// Reached by `sudo veld self setup privileged` on a machine whose lib-dir helper does
 /// not verify: the service is pointed back at the store's verified copy, which
 /// may be several releases old, and no restart will ever move it past that.
 async fn service_runs_an_older_store_copy(cli_version: &str) -> Option<String> {

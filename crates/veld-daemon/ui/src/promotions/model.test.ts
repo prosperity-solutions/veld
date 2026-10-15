@@ -417,7 +417,7 @@ describe("a project's own news", () => {
     // style advice, and the failure they guard against is silent in the worst
     // direction: widen the schema alone and an author's editor accepts a headline
     // the daemon then drops, so the change the card announced never reaches the
-    // team. `veld lint` says why, to whoever runs it.
+    // team. `veld orchestrator lint` says why, to whoever runs it.
     expect(fields.eyebrow.maxLength).toBe(MAX_EYEBROW);
     expect(fields.headline.maxLength).toBe(MAX_HEADLINE);
     expect(fields.body.maxLength).toBe(MAX_BODY);

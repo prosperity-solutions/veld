@@ -3,11 +3,11 @@
 //!
 //! Lives here, not in `veld-helper`, for the reason [`crate::signing`] does —
 //! two crates must agree. The helper *decides* the gate at startup; `veld
-//! doctor` *reports* it from the helper's `status` response, and the wire values
+//! self doctor` *reports* it from the helper's `status` response, and the wire values
 //! it matches on are [`GateSource::as_str`]. One definition, parsed back with
 //! [`GateSource::from_wire`], so the CLI renders by matching this enum rather
 //! than a second list of strings to drift from — and every one of those matches
-//! (`as_str` here, `gate_source_label` and `ungated_reason` in `veld doctor`) is
+//! (`as_str` here, `gate_source_label` and `ungated_reason` in `veld self doctor`) is
 //! deliberately wildcard-free, so a new variant fails to build until each side
 //! has said what to do with it. The field *names* are constants below for the
 //! same reason; the values alone were not the whole contract.
@@ -19,7 +19,7 @@ use std::path::Path;
 ///
 /// A constant, not a literal at each end, because the *names* are as much of the
 /// contract as the values: rename one side and both crates still compile while
-/// the `veld doctor` row silently reports a current helper as too old to check.
+/// the `veld self doctor` row silently reports a current helper as too old to check.
 pub const ALLOW_UID_FIELD: &str = "allow_uid";
 
 /// The `status` response field carrying [`GateSource::as_str`].
@@ -27,7 +27,7 @@ pub const ALLOW_UID_SOURCE_FIELD: &str = "allow_uid_source";
 
 /// What the helper writes back before dropping a connection the gate refused.
 ///
-/// Shared because `veld doctor` matches on it to tell "the gate refused *you*"
+/// Shared because `veld self doctor` matches on it to tell "the gate refused *you*"
 /// apart from "the helper is down" — which is the difference between naming the
 /// one failure mode this gate can introduce and saying nothing at all. The peer
 /// is untrusted, so this is for diagnosis only; nothing may depend on receiving
@@ -37,13 +37,13 @@ pub const REJECTED_PEER_ERROR: &str = "permission denied: untrusted peer uid";
 /// Where the privileged helper's peer-uid gate got the uid it admits — or why
 /// it has none.
 ///
-/// Reported over `status` (and rendered by `veld doctor`) because a privileged
+/// Reported over `status` (and rendered by `veld self doctor`) because a privileged
 /// helper that is *not* gated is invisible from the outside: it serves every
 /// command exactly as a gated one does, to anybody. See [`Gate::resolve`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GateSource {
     /// `--allow-uid` from the service definition, written by
-    /// `veld setup privileged`.
+    /// `veld self setup privileged`.
     Flag,
     /// Derived from the owner of the directory the helper binary lives in,
     /// because the service definition carries no `--allow-uid`.
@@ -57,7 +57,7 @@ pub enum GateSource {
     /// restriction; there is nothing for a peer gate to add.
     ///
     /// Benign where it belongs — on the user helper — but an **anomaly** coming
-    /// back over the *system* socket, which is the only place `veld doctor`
+    /// back over the *system* socket, which is the only place `veld self doctor`
     /// reads it: a helper answering there while believing itself unprivileged
     /// was given a `--socket-path` that does not match what setup writes.
     Unprivileged,
@@ -79,7 +79,7 @@ impl GateSource {
     /// list instead of two.
     ///
     /// The one thing here a compiler cannot check: adding a variant and
-    /// forgetting this array. `as_str` and both of `veld doctor`'s rendering
+    /// forgetting this array. `as_str` and both of `veld self doctor`'s rendering
     /// functions are wildcard-free and *will* fail to build, so the omission
     /// cannot escape a `cargo build` — but if it somehow did, the effect is the
     /// designed degrade path (an unrecognised source reads as unknown), never a
@@ -120,12 +120,12 @@ impl Gate {
     /// filesystem.
     ///
     /// **Why derive at all.** `--allow-uid` is a launchd/systemd *argument*, and
-    /// only `veld setup privileged` writes the service definition — `install.sh`
-    /// and `veld update` swap the binary and leave the plist alone. So every
+    /// only `veld self setup privileged` writes the service definition — `install.sh`
+    /// and `veld self update` swap the binary and leave the plist alone. So every
     /// privileged install that predates the flag would stay ungated until its
     /// owner ran a `sudo` command, which is not a migration story (#337). The
     /// helper can work the uid out for itself instead, and does so the moment
-    /// `veld update` bounces it, with no service-definition change at all.
+    /// `veld self update` bounces it, with no service-definition change at all.
     ///
     /// **Why the install directory's owner.** On the default privileged install
     /// the helper lives in `$HOME/.local/lib/veld`, created by `install.sh` as
@@ -148,8 +148,8 @@ impl Gate {
     /// and it presents as a helper that is simply broken. So that class of
     /// install stays **ungated**, which is an acknowledged exception to #338's
     /// "no user runs anything" rule: nothing on disk says who its installing
-    /// user is, so there is nothing to derive, and the remedy is the `veld setup
-    /// privileged` that `veld doctor` names.
+    /// user is, so there is nothing to derive, and the remedy is the `veld self setup
+    /// privileged` that `veld self doctor` names.
     ///
     /// **An explicit `--allow-uid 0` is honoured, not refused.** The rule above
     /// is about a uid this code *guessed*; a 0 in the service definition is one
@@ -161,7 +161,7 @@ impl Gate {
     ///
     /// **Why once, at startup, rather than per connection.** The gate is a
     /// property of the install, and the install changes by replacing this
-    /// binary — which restarts the process (`veld update` bounces the helper,
+    /// binary — which restarts the process (`veld self update` bounces the helper,
     /// and `watch_own_binary` exits onto a swapped one), so the derivation
     /// re-runs exactly when its inputs can have changed.
     ///
@@ -170,7 +170,7 @@ impl Gate {
     /// next restart. And an `--allow-uid` in the service definition is never
     /// re-derived at all, so an account renumbered under it — Migration
     /// Assistant, MDM re-creating the user, a restored backup — keeps a gate
-    /// pointing at a uid that no longer exists. In both cases `veld doctor`
+    /// pointing at a uid that no longer exists. In both cases `veld self doctor`
     /// compares the reported uid against the invoking user's and, if the peer is
     /// refused outright, says the gate refused *you* rather than "helper down".
     ///
@@ -179,7 +179,7 @@ impl Gate {
     /// the alternative is a root daemon that refuses to serve, and under
     /// launchd's `KeepAlive` that is a throttled restart loop with Caddy down
     /// and every URL dropped. Ungated is also exactly the pre-existing state, so
-    /// it is a non-regression rather than a new hole, and `veld doctor` reports
+    /// it is a non-regression rather than a new hole, and `veld self doctor` reports
     /// it as a failing row with a remedy — loud, not silent.
     pub fn resolve(flag: Option<u32>, privileged: bool, exe: Option<&Path>) -> Self {
         Self::from_owner(flag, privileged, exe.and_then(lib_dir_owner))
@@ -317,14 +317,14 @@ mod tests {
     }
 
     /// The wire values are the contract between the helper that writes them and
-    /// the `veld doctor` row that reads them, and nothing else pins them: a
+    /// the `veld self doctor` row that reads them, and nothing else pins them: a
     /// renamed variant would still compile on both sides and quietly stop
     /// matching. Round-tripping every variant is what catches that.
     #[test]
     fn every_gate_source_round_trips_through_the_wire() {
         // Driven off `ALL`, so a variant missing from it fails here rather than
         // in a caller — and the literal pairs still pin the exact bytes, which
-        // is what `veld doctor` actually matches on.
+        // is what `veld self doctor` actually matches on.
         for (source, wire) in [
             (GateSource::Flag, "flag"),
             (GateSource::LibDirOwner, "lib-dir-owner"),

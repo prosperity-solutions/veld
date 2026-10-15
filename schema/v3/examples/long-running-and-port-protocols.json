@@ -12,7 +12,7 @@
   // automatic keep-awake with it — `keepAwake.sharing*Minutes` is a ceiling over
   // this, not a second countdown. Set here, a project's answer overrides each
   // machine's `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` setting, and
-  // `veld share --ttl` overrides both for one share.
+  // `veld network share --ttl` overrides both for one share.
   "sharing": {
     "relays": "public",
     "peer_ttl_minutes": 480,

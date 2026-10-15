@@ -2,7 +2,7 @@ use veld_core::config;
 
 use crate::output;
 
-/// `veld urls [--name <n>] [--json]`
+/// `veld orchestrator urls [--name <n>] [--json]`
 pub async fn run(name: Option<String>, json: bool) -> i32 {
     let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;

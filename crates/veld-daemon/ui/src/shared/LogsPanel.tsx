@@ -138,7 +138,7 @@ export function LogsPanel(props: {
     for (const n of data?.nodes ?? []) {
       // `_veld:internal` is the run's liveness stream (probes, recoveries —
       // daemon noise, not any node's output), so a node pick hides it — same
-      // rule the daemon and `veld logs` follow. `_veld:setup`/`teardown` are
+      // rule the daemon and `veld orchestrator logs` follow. `_veld:setup`/`teardown` are
       // a node's real step output and stay under the old rule: kept even with
       // a node picked (filtering them out blanked the Setup view).
       const runLevel = n.node === "_veld";

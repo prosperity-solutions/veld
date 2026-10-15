@@ -2,10 +2,10 @@ use veld_core::config::{Finding, Severity};
 
 use crate::output;
 
-/// `veld lint [--json]`
+/// `veld orchestrator lint [--json]`
 ///
 /// Run every semantic config rule and report all of them at once. This is the
-/// CI-facing half of the parse/validate split: `veld start` refuses on the same
+/// CI-facing half of the parse/validate split: `veld orchestrator start` refuses on the same
 /// `error`-severity findings, but only `lint` also surfaces warnings, and
 /// neither set is reachable from the loader that `stop`/`status`/`logs` use.
 ///

@@ -47,13 +47,13 @@ impl RunStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EndReason {
-    /// Deliberate `veld stop` (CLI or UI).
+    /// Deliberate `veld orchestrator stop` (CLI or UI).
     Stopped,
     /// Startup aborted, or a `--oneshot` terminal node exited non-zero.
     Failed,
     /// A node process died without being asked to.
     Crashed,
-    /// A same-name `veld start` superseded this run.
+    /// A same-name `veld orchestrator start` superseded this run.
     Replaced,
     /// A `--oneshot` terminal node exited zero.
     Completed,
@@ -115,7 +115,7 @@ pub enum NodeStatus {
     /// the hook existed to remove — for a container node, its container — is
     /// stranded permanently, with no veld command able to collect it. Those
     /// paths write [`NodeStatus::Failed`] instead, which is also what
-    /// `veld status` already displays for a healthy node whose PID is gone.
+    /// `veld orchestrator status` already displays for a healthy node whose PID is gone.
     ///
     /// Nothing in the type system enforces this. `Db::mark_node_torn_down` is
     /// the intended writer, and two source-scanning tripwire tests (in the
@@ -234,10 +234,10 @@ impl NodeState {
     /// multi-port routing carries only as `url`/`port`.
     ///
     /// **Use this, not `endpoints`, anywhere the answer decides what a node can
-    /// do.** `veld update` deliberately does not stop running environments, so a
+    /// do.** `veld self update` deliberately does not stop running environments, so a
     /// run that was live across the upgrade has an empty `endpoints` map and a
     /// populated `url` for the rest of its life — and a consumer reading the map
-    /// alone sees a node with no ports at all. That cost `veld share` an entire
+    /// alone sees a node with no ports at all. That cost `veld network share` an entire
     /// run's worth of services, refused with "no shareable (URL-bearing) nodes"
     /// about nodes that all had URLs.
     ///
@@ -406,7 +406,7 @@ pub struct GraphSnapshot {
     /// machine override changes the effective configuration without changing one
     /// of them. Two runs of the same commit that behaved differently would
     /// otherwise be reported as identical, which is the single most confusing
-    /// thing this feature could do to `veld runs diff`.
+    /// thing this feature could do to `veld orchestrator runs diff`.
     ///
     /// **No value and no hash of one.** A fingerprint was the tempting middle
     /// ground and is worse than either end: the values people override are
@@ -503,12 +503,12 @@ impl StartOrigin {
 /// How a run's node command was expressed, preserved **structurally**.
 ///
 /// Not a joined string: `["psql", "a b"]` and `["psql", "a", "b"]` would be
-/// diff-identical once flattened, so `veld runs diff` could not tell one from the
+/// diff-identical once flattened, so `veld orchestrator runs diff` could not tell one from the
 /// other — and those are two different commands. Keeping the argv boundaries is
 /// the whole reason this is an enum.
 ///
 /// Reads are deliberately lenient: rows written before this existed hold a plain
-/// string, and a `veld runs` listing must never fail on one.
+/// string, and a `veld orchestrator runs list` listing must never fail on one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandSnapshot {
     /// An argument vector, spawned directly.
@@ -520,7 +520,7 @@ pub enum CommandSnapshot {
 }
 
 impl CommandSnapshot {
-    /// Rendering for `veld runs show` / `diff`. An `argv` keeps its list form so
+    /// Rendering for `veld orchestrator runs show` / `diff`. An `argv` keeps its list form so
     /// a boundary change is visible in the diff rather than smoothed away.
     pub fn display(&self) -> String {
         match self {
@@ -563,7 +563,7 @@ impl<'de> Deserialize<'de> for CommandSnapshot {
             // **There is no migration that rewrites these, and this arm is
             // therefore load-bearing forever — do not delete it.** A rewrite
             // migration was considered and skipped: the format change is confined
-            // to one JSON column read only by `veld runs show`/`diff`, so a lenient
+            // to one JSON column read only by `veld orchestrator runs show`/`diff`, so a lenient
             // read costs nothing, while a data-rewriting migration over every
             // historical row is risk with no payoff. A database restored from an
             // older backup also has to keep working.

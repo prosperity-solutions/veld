@@ -43,7 +43,7 @@ pub fn routes() -> Router {
 const CLAUDE_MOD_TTL: Duration = Duration::from_secs(60);
 
 /// Whether the Claude Code this daemon's terminals would run loads veld's mod —
-/// `veld doctor`'s question, asked for the IDE before it offers to switch.
+/// `veld self doctor`'s question, asked for the IDE before it offers to switch.
 ///
 /// `POST` and gated for [`post_shell_intercept`]'s reason: it spawns a process. Also
 /// single-flighted and cached for [`CLAUDE_MOD_TTL`], by the same reasoning.
@@ -98,7 +98,7 @@ async fn claude_mod_report() -> Value {
 /// where the status *is* the whole message (403 for a missing CSRF header). It
 /// stops being right for a rejected settings write: the validator already knows
 /// why — *"must not put %s in the host"* — and a 400 with an empty body throws
-/// that away at the last hop, leaving `veld settings set` and the dialog both
+/// that away at the last hop, leaving `veld self settings set` and the dialog both
 /// saying "invalid" about a value whose fault is knowable.
 ///
 /// Deliberately local to this module rather than a daemon-wide error type. Every
@@ -162,8 +162,8 @@ const DB_HEADER: &str = "X-Veld-Db";
 /// backstop resolves a **cargo-built** binary to `.veld-dev/veld-cargo.db` so a
 /// test can never migrate the real user database — but the daemon it would reach
 /// over HTTP is whatever is listening on the port, which for a bare `cargo run`
-/// is the *installed* daemon on the *real* database. So `veld settings set`
-/// would write one database and `veld settings get` would read another: the set
+/// is the *installed* daemon on the *real* database. So `veld self settings set`
+/// would write one database and `veld self settings get` would read another: the set
 /// reports success, the get reports the old value, and the user's real
 /// preferences change with nothing pointing at why. That happened once, during
 /// this feature's own smoke test, which is why the check exists rather than a
@@ -314,7 +314,7 @@ async fn shell_intercept_report() -> Result<Value, StatusCode> {
     opts.bash_handoff = opts.wants_handoff()
         && veld_core::shell::kind(&shell) == veld_core::shell::Kind::Bash
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
-    // The session id is synthetic: nothing in the probe reaches `veld open-url`,
+    // The session id is synthetic: nothing in the probe reaches `veld ide open-url`,
     // which is the only consumer, and minting a real one would register a terminal
     // that does not exist.
     let env = super::pty::shims::session_env("settings-probe", &shell, opts);
@@ -456,7 +456,7 @@ async fn delete_setting(
     // `Db::unset_settings` returns the rows it actually removed, and its own doc
     // says the point is that a caller can tell "reset" from "was already on the
     // default" without a prior read. Dropping it here is what made
-    // `veld settings unset <typo>` print a confident "cleared" and exit 0.
+    // `veld self settings unset <typo>` print a confident "cleared" and exit 0.
     let removed = db.unset_settings(&[key]).map_err(|e| {
         warn!("failed to unset setting: {e}");
         ApiError::internal()
@@ -515,7 +515,7 @@ fn after_settings_write(db: &veld_core::db::Db) -> Result<Value, ApiError> {
 ///
 /// Unauthenticated and uncached like `GET /api/settings`, and it carries no user
 /// data at all — every byte of it is a compile-time constant of this binary. It
-/// is served rather than bundled so that the `/ide` client and `veld settings`
+/// is served rather than bundled so that the `/ide` client and `veld self settings list`
 /// describe a setting identically without either one holding a copy.
 async fn get_catalog() -> Json<Value> {
     Json(serde_json::json!({

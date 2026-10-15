@@ -23,7 +23,7 @@
       // branch, or --name. A pinned host would grant to exactly one run.
       //
       // `:*` because an omitted port means the scheme's DEFAULT port, and only a
-      // privileged install serves on 443 — `veld setup unprivileged` (the no-sudo
+      // privileged install serves on 443 — `veld self setup unprivileged` (the no-sudo
       // default) uses 18443, where `https://*.veld.localhost` matches nothing at
       // all and the grant silently never applies.
       //
@@ -354,7 +354,7 @@
         // ones do. A picked session is delivered through ${veld.pane.token} in
         // `resume`, and this `resume` does not reference it — so every pick
         // would open `--last` regardless, which is the one outcome a picker
-        // must not have. `veld lint` refuses that combination rather than
+        // must not have. `veld orchestrator lint` refuses that combination rather than
         // rendering it. Point `resume` at `codex resume ${veld.pane.token}` and
         // a picker becomes possible here too.
         "id": "codex",
@@ -421,19 +421,19 @@
   //
   // Both carry a `default` that reproduces browser-sync's own behaviour, so a
   // fresh clone and CI are unaffected and nobody has to answer anything. Change
-  // yours with `veld config set`, never by editing this file — the declaration is
+  // yours with `veld orchestrator vars set`, never by editing this file — the declaration is
   // shared, the answer is not:
   //
-  //   veld config vars
-  //   veld config set website_log_level debug
-  //   veld config unset website_log_level
+  //   veld orchestrator vars list
+  //   veld orchestrator vars set website_log_level debug
+  //   veld orchestrator vars unset website_log_level
   //
   // The two also show the two shapes a machine var takes. `website_log_level` is
   // a **closed** set, so `choices` can enumerate it and veld refuses anything
   // else at set time. `website_reload_delay` is **open** — any number of
   // milliseconds — so today nothing validates it beyond being a string, which is
   // the gap tracked in #227.
-  // Public relays, opted into explicitly — required for `veld share`/`--web` to
+  // Public relays, opted into explicitly — required for `veld network share`/`--web` to
   // work at all. No self-hosted relay or gateway needed for this repo: the
   // website node below is the only thing exposed, and n0's public set is enough
   // to try peer/web sharing (e.g. mobile-testing the marketing site) locally.
@@ -455,7 +455,7 @@
       }
     }
   },
-  // `veld start` with no arguments offers these. Keys are pinned, because they
+  // `veld orchestrator start` with no arguments offers these. Keys are pinned, because they
   // are the numbers a contributor types.
   // Each dev preset names the `dev-db` variant it wants, so the database mode
   // is part of the thing you start rather than a flag to remember.
@@ -495,7 +495,7 @@
   "nodes": {
     "website": {
       "default_variant": "local",
-      // Peer and web sharing, opted in — lets `veld share --web` put the local
+      // Peer and web sharing, opted in — lets `veld network share --web` put the local
       // site on a real URL, which is the easy way to check it on a phone.
       "share": { "expose": ["peer", "web"] },
       "variants": {
@@ -518,12 +518,12 @@
     //
     // The justfile's `just dev` / `just dev-daemon` tier still exists and is
     // still a singleton. It is the BOOTSTRAP tier, deliberately: you need a way
-    // to run the daemon when what you broke is `veld start` itself.
+    // to run the daemon when what you broke is `veld orchestrator start` itself.
     //
     // Which instance owns this run? The **installed** veld. It starts and
     // monitors these nodes; the daemon one of them runs is a separate instance
     // with its own database. So a schema-ahead branch cannot touch your real
-    // state, and `veld status` still works while the dev daemon is wedged.
+    // state, and `veld orchestrator status` still works while the dev daemon is wedged.
     //
     // The paths every node here shares. `${veld.root}` rather than a relative
     // path because a `cwd` moves the goalposts, and `.veld-dev/` is gitignored.
@@ -592,7 +592,7 @@
         //
         // This makes `dev-daemon` NOT independently startable: it references a
         // node that does not depend on it (the edge runs the other way), and
-        // `build_env` is all-or-nothing, so `veld start dev-daemon` fails with
+        // `build_env` is all-or-nothing, so `veld orchestrator start dev-daemon` fails with
         // `unresolved variable reference: ${nodes.dev-ui.url}`. Every preset
         // pulls `dev-ui` in, so the supported paths are unaffected — but start
         // it by hand and you must name `dev-ui` too.

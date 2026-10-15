@@ -1,10 +1,10 @@
-//! `veld stats` — the detailed resource view.
+//! `veld orchestrator stats` — the detailed resource view.
 //!
-//! `veld status` answers "is it up", with one CPU and one memory number per
+//! `veld orchestrator status` answers "is it up", with one CPU and one memory number per
 //! node. This command answers "what is it *doing* with the machine": the memory
 //! breakdown by page class, the split across a node's subprocesses, and history
 //! over a window. It reads the samples the daemon's stats sampler already stores
-//! (same source as `veld status` and the management UI) rather than probing
+//! (same source as `veld orchestrator status` and the management UI) rather than probing
 //! processes itself, so it works the same whether or not the daemon is currently
 //! up — a dead daemon shows as stale samples, which is information rather than
 //! an error.
@@ -20,7 +20,7 @@ use crate::output;
 /// A sparkline wider than this stops fitting an 80-column terminal.
 const HISTORY_POINTS: u32 = 60;
 
-/// `veld stats` arguments, flattened into the CLI so the flag definitions live
+/// `veld orchestrator stats` arguments, flattened into the CLI so the flag definitions live
 /// next to the code that reads them.
 #[derive(Debug, clap::Args)]
 pub struct StatsArgs {
@@ -211,11 +211,11 @@ pub async fn run(args: StatsArgs) -> i32 {
     if rows.is_empty() {
         if args.node.is_some() {
             output::print_info(&format!(
-                "No samples for that node in run '{run_name}'. `veld stats` lists every sampled node when --node is omitted."
+                "No samples for that node in run '{run_name}'. `veld orchestrator stats` lists every sampled node when --node is omitted."
             ));
         } else {
             output::print_info(&format!(
-                "No resource samples for run '{run_name}' yet. The daemon samples every 5s while a run is up — check `veld doctor` if this persists."
+                "No resource samples for run '{run_name}' yet. The daemon samples every 5s while a run is up — check `veld self doctor` if this persists."
             ));
         }
         return 0;
@@ -252,7 +252,7 @@ pub async fn run(args: StatsArgs) -> i32 {
     }
     if rows.iter().any(|r| !r.fresh) {
         output::print_info(
-            "Values marked stale are older than the sampler's interval — the node exited or the daemon stopped sampling (`veld doctor`).",
+            "Values marked stale are older than the sampler's interval — the node exited or the daemon stopped sampling (`veld self doctor`).",
         );
     }
     0

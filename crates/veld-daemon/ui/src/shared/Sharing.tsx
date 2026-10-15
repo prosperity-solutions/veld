@@ -351,7 +351,7 @@ export function PeerShareStrip(props: {
         <Button
           size="compact-xs"
           variant="default"
-          onClick={() => copy(`veld join ${share.ticket}`, "join-cmd")}
+          onClick={() => copy(`veld network join ${share.ticket}`, "join-cmd")}
         >
           {flash === "join-cmd" ? "Copied" : "Copy command"}
         </Button>

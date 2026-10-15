@@ -2,7 +2,7 @@
 
 Authoring reference for the picker that lets a pane reopen a coding-agent session
 it never started. The field table is in
-`veld skills config`; this page is how to **decide whether to write one
+`veld agent skills config`; this page is how to **decide whether to write one
 and what to put in it**, plus adapters you can copy.
 
 Read [Before you write one](#before-you-write-one) first. The commonest mistake
@@ -46,7 +46,7 @@ has a picker of its own.
 }
 ```
 
-**Two requirements the parser enforces**, both of them `veld lint` problems that
+**Two requirements the parser enforces**, both of them `veld orchestrator lint` problems that
 drop the picker rather than rendering something that cannot work:
 
 1. The pane must declare `resume`. That is what a pick runs.
@@ -83,7 +83,7 @@ Write a `sessions` script when at least one of these holds:
   labelled from your own metadata.
 
 **Do not** add one to a pane whose `resume` is a `--last`-style guess. It cannot
-work, and `veld lint` will tell you so.
+work, and `veld orchestrator lint` will tell you so.
 
 ---
 
@@ -264,7 +264,7 @@ digits either way.
 **Do this one config change before anything else, or nothing you write can
 work.** `codex` mints its own ids, and the pane shape Veld's own docs give it —
 `resume: { argv: ["codex", "resume", "--last"] }` — ignores `${veld.pane.token}`,
-so every pick would open the most recent session regardless. `veld lint` refuses
+so every pick would open the most recent session regardless. `veld orchestrator lint` refuses
 that combination outright. Point `resume` at the token first:
 
 ```jsonc
@@ -335,7 +335,7 @@ A `sessions` command may use `${veld.root}`, `${veld.branch}`,
 
 **`${veld.pane.token}` is not available here**, and the reason is worth
 understanding: the lister runs to decide *which* token there will be. Referencing
-it is a `veld lint` problem rather than an empty string at runtime.
+it is a `veld orchestrator lint` problem rather than an empty string at runtime.
 
 `${veld.pane.id}` is the useful one — it lets one script serve several panes:
 
@@ -380,19 +380,19 @@ hatch for testing one before it does — and it is also the setting that hands a
 hostile branch the same capability, so flip it back when you are done.
 
 At most **8 panes per project** may declare a lister; they all run at once when
-the chooser opens. Past that, `veld lint` drops the extra pickers (never the
+the chooser opens. Past that, `veld orchestrator lint` drops the extra pickers (never the
 panes).
 
 ---
 
 ## Checking your work
 
-`veld lint` is the **only** check that a declaration took: everything under `ide`
+`veld orchestrator lint` is the **only** check that a declaration took: everything under `ide`
 is lenient by design, so a bad `sessions` block is a warning and a dropped picker,
 never a load error.
 
 ```sh
-veld lint                             # missing resume, a resume that ignores the token,
+veld orchestrator lint                             # missing resume, a resume that ignores the token,
                                       # unknown keys, a forbidden variable
 ./scripts/veld/claude-sessions.sh     # run it yourself, from a worktree root
 ./scripts/veld/claude-sessions.sh | cat -A | head    # are those real tabs?
@@ -409,4 +409,4 @@ code path:
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

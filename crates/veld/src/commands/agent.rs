@@ -1,10 +1,10 @@
-//! `veld agent-settings` and `veld agent-state` — the two halves of telling a Veld
+//! `veld agent settings` and `veld agent state` — the two halves of telling a Veld
 //! window that a coding agent is waiting on the user.
 //!
-//! Neither is meant to be typed. `agent-settings` is called by the generated `claude`
+//! Neither is meant to be typed. `agent settings` is called by the generated `claude`
 //! wrapper (`veld-daemon/src/pty/shims.rs`) just before it `exec`s the real binary;
-//! `agent-state` is what the hooks in the file that wrapper produces call. They are
-//! CLI subcommands rather than daemon endpoints for the same reason `veld open-url` is:
+//! `agent state` is what the hooks in the file that wrapper produces call. They are
+//! CLI subcommands rather than daemon endpoints for the same reason `veld ide open-url` is:
 //! a shell can reach a binary, and the binary is where the escaping, the timeouts and
 //! the fall-through belong — in Rust, where they are tested.
 //!
@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use veld_core::agent::{self, AgentTool, valid_session_id};
 
-/// `veld agent-settings [--tool claude|codex] [--session <id>]`
+/// `veld agent settings [--tool claude|codex] [--session <id>]`
 ///
 /// Prints this session's ephemeral hook configuration on stdout: a settings file's
 /// path for a tool [`agent::Injection::SettingsFile`] describes (Claude), or a
@@ -28,7 +28,7 @@ use veld_core::agent::{self, AgentTool, valid_session_id};
 /// describes (Codex) — see [`agent::AgentTool::injection`].
 ///
 /// Stdout is that value and nothing else — the caller is a shell doing
-/// `settings=$(veld agent-settings ...)`, so a stray diagnostic there becomes part
+/// `settings=$(veld agent settings ...)`, so a stray diagnostic there becomes part
 /// of a filename or a `-c` value (AGENTS.md: machine-readable output on stdout,
 /// chrome on stderr).
 pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
@@ -63,7 +63,7 @@ pub fn settings(tool: Option<String>, session: Option<String>) -> i32 {
 ///
 /// Hardcoded to Claude rather than generic over `AgentTool`, on purpose: it is the
 /// only `SettingsFile` tool today, and `settings()` above is what decides which of
-/// the two `agent-settings` shapes a tool gets. A generic version with a runtime
+/// the two `agent settings` shapes a tool gets. A generic version with a runtime
 /// assertion is a guard a release build compiles out; naming the tool in the
 /// function makes a mis-route a compile error for whoever adds a second
 /// `SettingsFile` tool, instead of a debug-only assertion nobody sees fire in the
@@ -141,7 +141,7 @@ fn write_pi_extension_file(cli: &Path, session: &str) -> i32 {
     0
 }
 
-/// `veld agent-state [--tool claude|codex|pi] [--session <id>] [--launched] [PAYLOAD]`
+/// `veld agent state [--tool claude|codex|pi] [--session <id>] [--launched] [PAYLOAD]`
 ///
 /// Reads a hook payload — on **stdin** for a tool that pipes it there (Claude), or
 /// from `PAYLOAD` for one that appends it as the final argument instead (Codex's
@@ -447,7 +447,7 @@ fn post_to(
     Some(Reply { status, body })
 }
 
-/// `veld agent-prompt --take <PATH>`: print a launch prompt and remove it, or fail.
+/// `veld agent prompt --take <PATH>`: print a launch prompt and remove it, or fail.
 ///
 /// The wrapper reads stdout through `$(…)` and passes it as the agent's startup
 /// argument, so nothing else may be printed — not even a reason on failure, which
@@ -497,7 +497,7 @@ fn parse_tool(tool: Option<&str>) -> Option<AgentTool> {
 /// `--session` first, then `$VELD_PTY_SESSION`, which a Veld terminal exports. The
 /// generated hooks always pass the flag — they cannot rely on Claude Code forwarding
 /// the shell's environment to a hook subprocess — so the variable is the path for
-/// `agent-settings`, called from the wrapper inside the shell itself.
+/// `agent settings`, called from the wrapper inside the shell itself.
 fn session_id(explicit: Option<String>) -> Option<String> {
     explicit
         .or_else(|| std::env::var("VELD_PTY_SESSION").ok())

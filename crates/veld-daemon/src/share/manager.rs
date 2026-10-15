@@ -101,7 +101,7 @@ struct WebRegistration {
     public_urls: Vec<GatewayPublicUrl>,
     /// Viewer access policy sent with the registration; heartbeats re-send it
     /// so a restarted gateway re-learns the password with the lease (§6.1).
-    /// Also the source for re-displaying the password in `veld shares`.
+    /// Also the source for re-displaying the password in `veld network list`.
     access: Option<veld_core::share::GatewayAccessPolicy>,
     /// The heartbeat loop; aborted on unshare. It also self-terminates when
     /// the share disappears from the map (belt and braces).
@@ -356,7 +356,7 @@ impl ShareManager {
 
                     let node_id = conn.remote_id();
                     // Sanitize the peer's self-label at ingestion: everything
-                    // downstream — approval prompts, log lines (`veld logs`
+                    // downstream — approval prompts, log lines (`veld orchestrator logs`
                     // ends up on a terminal), the live-connection map, the
                     // dashboard — then carries a string that can't smuggle
                     // ANSI escapes or bidi overrides.
@@ -396,8 +396,8 @@ impl ShareManager {
 
     /// Periodically remove shares past their TTL, closing them fail-closed.
     ///
-    /// TTL is the only trigger here. `veld stop`, `veld restart` and a
-    /// `veld start` that replaces a live run release that run's shares
+    /// TTL is the only trigger here. `veld orchestrator stop`, `veld orchestrator restart` and a
+    /// `veld orchestrator start` that replaces a live run release that run's shares
     /// explicitly, and the GC pass unshares runs it finds dead — so a share
     /// reaches this reaper only if its run left the live slot by some other
     /// route (e.g. a crash the monitor finalized before GC saw it). Both
@@ -775,7 +775,7 @@ impl ShareManager {
         let mut warnings = Vec::new();
 
         // Display labels for the whole manifest, so a joined share names its
-        // services exactly as the hosting side does in `veld shares`.
+        // services exactly as the hosting side does in `veld network list`.
         let display = manifest.display_nodes();
 
         for (idx, node) in manifest.nodes.iter().enumerate() {
@@ -1281,7 +1281,7 @@ impl ShareManager {
     }
 
     /// The ids of every live **web** share minted from `run_id`. Snapshotted
-    /// so a repeat `veld share --web` can register its replacement first and
+    /// so a repeat `veld network share --web` can register its replacement first and
     /// only then tear these down — a failed re-share must not destroy the
     /// share it was replacing.
     pub async fn web_share_ids_for_run(&self, run_id: Uuid) -> Vec<String> {
@@ -1472,7 +1472,7 @@ mod tests {
     // A web share's ticket embeds the capability that IS the public-URL bearer
     // secret — `list()` must never surface it (no ticket, no join_url), and it
     // must surface the public URLs instead. Guards against a refactor of
-    // `list()` re-leaking the web capability to any local `veld shares` caller.
+    // `list()` re-leaking the web capability to any local `veld network list` caller.
     #[tokio::test]
     async fn list_never_surfaces_a_web_share_ticket() {
         let mgr = std::sync::Arc::new(ShareManager::new(SecretKey::generate()));

@@ -128,7 +128,7 @@ fn an_app_install_runs_the_script_in_app_only_mode() {
 #[test]
 fn a_default_app_install_asks_for_no_handoff_mechanics() {
     let dir = tempfile::tempdir().unwrap();
-    // `veld desktop install` from a terminal: nothing to wait for, nothing to
+    // `veld self desktop install` from a terminal: nothing to wait for, nothing to
     // reopen, and no bundle the caller has named.
     let plain = veld_core::setup::DesktopInstall::default();
     let (env, ok) = record(dir.path(), &[], || {
@@ -144,7 +144,7 @@ fn a_default_app_install_asks_for_no_handoff_mechanics() {
 #[test]
 fn a_cli_update_never_installs_the_app_as_a_side_effect() {
     let dir = tempfile::tempdir().unwrap();
-    // `veld update`'s two halves are separate calls: this one moves the
+    // `veld self update`'s two halves are separate calls: this one moves the
     // binaries, `run_desktop_step` moves the app. If this said anything
     // but 0, the app would be downloaded twice per update — and the script's
     // install-by-default would be deciding it, not the CLI.
@@ -161,7 +161,7 @@ fn an_ambient_handoff_variable_cannot_reach_the_script() {
     let dir = tempfile::tempdir().unwrap();
     // These three are pure mechanics — which pid to wait for, whether to reopen
     // the app, whether to skip the CLI half. A shell that exported one would
-    // otherwise change what `veld update` does to this machine.
+    // otherwise change what `veld self update` does to this machine.
     let ambient = [
         ("VELD_DESKTOP_ONLY", "1"),
         ("VELD_DESKTOP_WAIT_PID", "1"),
@@ -297,7 +297,7 @@ fn repo_root() -> PathBuf {
 /// The capability string is a **two-language contract with no compiler between
 /// the halves**, so this is the compiler.
 ///
-/// `veld desktop status --json` emits it from `crates/veld/src/commands/desktop.rs`
+/// `veld self desktop status --json` emits it from `crates/veld/src/commands/desktop.rs`
 /// and Veld Desktop tests for it in `desktop/src/updatePolicy.js`. Rename or
 /// mistype either side and nothing fails: the app silently drops to the app-only
 /// route, `cargo test` and `npm test` both stay green, and the entire feature
@@ -507,7 +507,7 @@ fn the_handoff_log_path_means_the_same_thing_in_both_languages() {
 /// banner are the caller's to print — not the script's.
 ///
 /// Pinned because the failure is silent and cosmetic-looking: without it a single
-/// `veld update` printed three "installed successfully!" banners, a first-install
+/// `veld self update` printed three "installed successfully!" banners, a first-install
 /// footer halfway through an update, and two raw curl meters. It also decides
 /// something that is *not* cosmetic — an embedded run leaves the privileged
 /// helper restart to the CLI (see `install.sh`), so a regression here would have

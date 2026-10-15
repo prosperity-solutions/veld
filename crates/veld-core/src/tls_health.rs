@@ -2,7 +2,7 @@
 //!
 //! Caddy issues and renews the certificate for every hostname veld serves, and
 //! veld has always taken that on trust. The helper's watchdog asks Caddy's admin
-//! API whether it is alive; `veld doctor` asks the keychain whether the *CA* is
+//! API whether it is alive; `veld self doctor` asks the keychain whether the *CA* is
 //! trusted. Neither question notices the one failure a user actually hits — a
 //! leaf certificate that expired and was never renewed, which Chrome refuses
 //! with `ERR_CERT_DATE_INVALID` while every check veld had stayed green.

@@ -312,8 +312,8 @@ channel every teammate can push a modal through to every other teammate, and the
 honest technical mitigations are the ones that also improve authoring: the copy
 limits (24 / 44 / 160) stop a wall of prose, and `MAX_NEWS_ITEMS = 5` stops a
 stack. Retiring is deleting, here as everywhere. Items over the cap, and any
-malformed entry, are dropped with a `veld lint` warning — never a load error,
-because a config that will not load takes `veld stop` and `veld logs` with it.
+malformed entry, are dropped with a `veld orchestrator lint` warning — never a load error,
+because a config that will not load takes `veld orchestrator stop` and `veld orchestrator logs` with it.
 
 Over the cap it is the entries with the **oldest `since`** that go, named in the
 warning. Two wrong versions preceded that, and both are worth knowing because both
@@ -332,7 +332,7 @@ look right:
 breaks a tie, ascending, matching the history view's own within-a-day order. The
 schema's `maxItems: 5` bounds one **file**, so a project splitting news across
 included files can validate green in an editor and still lose its oldest card at
-load — `veld lint` is what says so.
+load — `veld orchestrator lint` is what says so.
 
 **A `since` in the future is refused.** It is the one typo that re-creates the
 never-expiring card: the date is the only thing that retires an item, so a day that
@@ -491,7 +491,7 @@ by date would have to know that promotions have dates.
 
 **Nothing may key any of this on database freshness.** The tempting version — "a
 database with no rows is a new user" — is wrong here in a way that bites daily:
-`veld start --preset dev` mints `.veld-dev/<run>/veld.db` several times a day,
+`veld orchestrator start --preset dev` mints `.veld-dev/<run>/veld.db` several times a day,
 and either the CLI or the daemon may be the process that creates one. Note the
 asymmetry that makes the repo evidence above safe where freshness is not: a repo
 row is proof the user *was* here, while an empty table proves nothing at all — so

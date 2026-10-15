@@ -14,7 +14,7 @@
 //! disjoint by node kind: no process is counted twice, and no node key is
 //! written by both. Persisting a `command` step's PID to make it visible here
 //! would break that *and* make a finished build look like a dead node to
-//! `veld stop` and the orphan reaper.
+//! `veld orchestrator stop` and the orphan reaper.
 
 use std::time::Duration;
 

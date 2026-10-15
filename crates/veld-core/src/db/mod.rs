@@ -81,7 +81,7 @@ pub enum DbError {
 
     #[error(
         "the veld database (schema v{found}) was created by a newer veld version \
-         (this binary supports up to v{supported}) — run `veld update` to upgrade"
+         (this binary supports up to v{supported}) — run `veld self update` to upgrade"
     )]
     NewerSchema { found: i64, supported: i64 },
 
@@ -628,7 +628,7 @@ impl Db {
         // That is a deliberate exception and a much weaker one — it is a log
         // line, not process state any other code reads, and it has to sit at
         // `open_at` because that is the only layer holding the path whose bytes
-        // are the evidence (`veld doctor` and the backup verifier open by
+        // are the evidence (`veld self doctor` and the backup verifier open by
         // explicit path and want the forensics too). Its once-per-process flag is
         // shared with the test binary, so a damaged-fixture test can consume it;
         // that costs a log line and nothing else.
@@ -863,7 +863,7 @@ impl Db {
     /// creates and migrates: on a machine whose `veld.db` was deleted, an empty one
     /// is minted within seconds by whichever daemon task opens it next, and backing
     /// *that* up produces an artifact that passes every check, wins the restore
-    /// pick, and turns the `veld doctor` row green — the exact second failure of the
+    /// pick, and turns the `veld self doctor` row green — the exact second failure of the
     /// incident the backup feature was built for.
     ///
     /// **Asked of every table rather than of a chosen few**, which is the part that
@@ -942,7 +942,7 @@ impl Db {
         // and `query_row` takes the first and discards the rest — which threw
         // away the trailing `database disk image is malformed` and any second
         // damaged page, in the one string the dialog labels "What SQLite said"
-        // and `veld doctor` prints.
+        // and `veld self doctor` prints.
         let rows: Result<Vec<String>, _> = (|| {
             let mut stmt = conn.prepare("PRAGMA quick_check")?;
             let found = stmt
@@ -1505,7 +1505,7 @@ fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX idx_runs_env ON runs(environment_id, created_at);
 
         -- The one-live-run invariant, enforced by the engine: a second
-        -- concurrent `veld start` fails atomically instead of racing a
+        -- concurrent `veld orchestrator start` fails atomically instead of racing a
         -- check-then-act in application code.
         CREATE UNIQUE INDEX idx_runs_one_live ON runs(environment_id)
             WHERE status IN ('starting','running','stopping');
@@ -1839,7 +1839,7 @@ fn migrate_v11_pane_sessions(conn: &Connection) -> rusqlite::Result<()> {
 /// rather than a second table. Reads take both and let `worktree` win.
 ///
 /// **`value` is a serialized `ConfigValue`, not a string.** An override may be a
-/// pointer — `veld config set token --shell 'op read op://…'` — which is what
+/// pointer — `veld orchestrator vars set token --shell 'op read op://…'` — which is what
 /// lets a `secret: true` var be overridable without veld taking custody of the
 /// secret. A plain scalar round-trips as a bare JSON string, so the common case
 /// stays readable in `sqlite3`.
@@ -1878,7 +1878,7 @@ fn migrate_v12_var_overrides(conn: &Connection) -> rusqlite::Result<()> {
 /// [`crate::state::NodeState::endpoints_or_legacy`]**, which folds `url`/`port`
 /// back in as the single primary entry such a row always had. Reading the raw
 /// map is correct only where the answer is "what did this run record", never
-/// "what does this node have". `veld update` does not stop running environments,
+/// "what does this node have". `veld self update` does not stop running environments,
 /// so rows like these outlive the upgrade by days.
 fn migrate_v14_node_endpoints(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -2571,7 +2571,7 @@ mod tests {
     }
 
     /// `Db::open()` succeeding is not evidence of a healthy database — the
-    /// property that made `veld doctor` print "Database OK" throughout a
+    /// property that made `veld self doctor` print "Database OK" throughout a
     /// 17-hour incident. `integrity()` is what actually asks.
     #[test]
     fn integrity_sees_damage_that_opening_the_database_does_not() {
@@ -2650,11 +2650,11 @@ mod tests {
     /// The sibling of the test below, at the level the mistake actually happened.
     /// `default_path()` already keeps a cargo-built binary's *reads* off the real
     /// database; it says nothing about a **write sent over HTTP**, and
-    /// `veld settings set` sends one. During #306's own smoke test a cargo-built
+    /// `veld self settings set` sends one. During #306's own smoke test a cargo-built
     /// `veld` wrote the developer's real settings through the installed daemon
     /// while reading `.veld-dev/veld-cargo.db`, so the set reported success and
     /// the matching get reported the old value. `Db::uses_installed_database` is
-    /// the predicate `veld settings` consults before it will talk to a daemon at
+    /// the predicate `veld self settings list` consults before it will talk to a daemon at
     /// all, and this asserts it is false for exactly the binary that must not.
     #[test]
     fn a_cargo_built_binary_never_claims_the_installed_database() {
@@ -2862,13 +2862,13 @@ mod tests {
 
     /// v14 against a real v13 database holding a node row from before per-port
     /// endpoints — the row every machine that upgrades with an environment
-    /// running will have, since `veld update` deliberately does not stop them.
+    /// running will have, since `veld self update` deliberately does not stop them.
     ///
     /// Two properties, and the second is the one that matters: the ALTER leaves
     /// the row alone (no backfill, `endpoints = '{}'`), **and** the node still
     /// reads back as a node with one endpoint, because `endpoints_or_legacy`
     /// folds `url`/`port` in. Reading the raw map instead is what made `veld
-    /// share` refuse a whole run as having nothing to share.
+    /// network share` refuse a whole run as having nothing to share.
     #[test]
     fn v13_v14_upgrade_leaves_a_legacy_node_shareable() {
         let dir = tempfile::TempDir::new().unwrap();

@@ -4,7 +4,7 @@
 //! - Masked as `[REDACTED]` in all terminal output, debug logs, and run logs
 //! - Stored encrypted at rest in the central veld database using a
 //!   machine-local key
-//! - Never visible in `veld graph` output
+//! - Never visible in `veld orchestrator graph` output
 //!
 //! V1 uses XOR-based obfuscation with a SHA-256 key derived from the machine's
 //! hardware UUID. This protects against casual inspection of stored state.

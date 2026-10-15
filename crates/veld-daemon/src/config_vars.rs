@@ -1,7 +1,7 @@
 //! Machine-overridable vars over HTTP, for the management UI and Desktop.
 //!
 //! The CLI can ask a human at a terminal; a run started from the UI cannot —
-//! there is no TTY, and the safe branch of `veld start` refuses rather than
+//! there is no TTY, and the safe branch of `veld orchestrator start` refuses rather than
 //! guessing. That refusal is correct and it is also a dead end in a GUI, which
 //! is what these endpoints exist to fix: the human is right there, so the UI
 //! asks them and writes the answer through here.
@@ -10,14 +10,14 @@
 //!
 //! - **A value declared `secret` never travels to a client.** Reads return a
 //!   description (`<secret, from environment variable PGPASS>`), exactly as
-//!   `veld config vars` prints it. There is no "reveal" endpoint; the value's
+//!   `veld orchestrator vars list` prints it. There is no "reveal" endpoint; the value's
 //!   only egress remains a child process's environment.
 //! - **Writes are CSRF-gated and refuse an undeclared var.** Storing an answer
 //!   for a var no config declares would put a row in the database that every run
 //!   silently ignores.
 //! - **The project is identified the same way the CLI identifies it**
 //!   ([`veld_core::project_id`]), so an answer given in the UI is the same answer
-//!   `veld start` reads in a terminal, in any worktree.
+//!   `veld orchestrator start` reads in a terminal, in any worktree.
 
 use axum::{
     Json, Router,
@@ -146,7 +146,7 @@ async fn resolve_project(project: &str) -> Result<Resolved, ApiError> {
     // — and `project_id_for` never fails, it falls back. Without this the daemon
     // would key answers by the config directory while the CLI keys them by the
     // repo's main checkout: the UI would report a successful write that
-    // `veld start` never reads. Same rule AGENTS.md sets for `desktop.rs`'s git
+    // `veld orchestrator start` never reads. Same rule AGENTS.md sets for `desktop.rs`'s git
     // plumbing, but the failure here is silent rather than a visible error.
     let project_id = project_id_for_with_path(
         &project_root,
@@ -319,7 +319,7 @@ async fn put_var(headers: HeaderMap, Json(body): Json<PutVarBody>) -> ApiResult 
 #[derive(Deserialize)]
 struct PreflightBody {
     project: String,
-    /// A preset name, as `veld start --preset` takes.
+    /// A preset name, as `veld orchestrator start --preset` takes.
     #[serde(default)]
     preset: Option<String>,
     /// Explicit `node:variant` selections. Ignored when `preset` is set.
@@ -331,7 +331,7 @@ struct PreflightBody {
 /// not answered.
 ///
 /// Scoped to the plan, not to the whole config, and expanded through
-/// `build_execution_plan` — the same call `veld start` makes. Two consequences,
+/// `build_execution_plan` — the same call `veld orchestrator start` makes. Two consequences,
 /// both required: a var only a transitive dependency uses is reported (the case
 /// that would otherwise fail after three nodes are already up), and a var no
 /// selected node touches is *not* (so starting the docs site does not demand the

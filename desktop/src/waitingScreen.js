@@ -20,7 +20,7 @@
 //  - **No binary.** Nothing is coming. Say so at once, with the commands — this
 //    is the first-impression case the original screen was written for, and
 //    making it wait would be a regression. It keeps the old screen's `veld
-//    doctor` line too, and that is not decoration: the probe only knows the
+//    self doctor` line too, and that is not decoration: the probe only knows the
 //    three directories `install.sh` prefers, and `install.sh` will happily
 //    install elsewhere — `VELD_INSTALL_DIR`, or an existing veld found anywhere
 //    and updated in place. Somebody in that position reads "no binary" wrongly,
@@ -29,8 +29,8 @@
 //    just restarted. Say that, name no commands, and wait.
 //  - **A binary, and it has been a minute.** Now it is a fault worth debugging,
 //    and the advice is different from the fresh-machine advice: the daemon agent
-//    may never have been installed (`veld setup unprivileged`), or it is
-//    installed and unhealthy (`veld doctor`). Neither of those is "install
+//    may never have been installed (`veld self setup unprivileged`), or it is
+//    installed and unhealthy (`veld self doctor`). Neither of those is "install
 //    veld", which is the line that made the old screen wrong.
 
 const { cliCandidatePaths } = require("./updatePolicy");
@@ -39,7 +39,7 @@ const { cliCandidatePaths } = require("./updatePolicy");
  * How long a machine that *has* veld is given before the screen starts
  * diagnosing.
  *
- * Sized for the case it exists for rather than for impatience: a `veld update`
+ * Sized for the case it exists for rather than for impatience: a `veld self update`
  * restarts the daemon and the helper and then relaunches the app, and the app
  * can win that race by a wide margin. A minute is comfortably longer than that
  * sequence takes and still short enough that somebody staring at a genuinely
@@ -61,7 +61,7 @@ const STALL_AFTER_MS = 60_000;
  * **This can say `null` about a machine that has veld.** `install.sh` honours
  * `VELD_INSTALL_DIR` and updates an existing binary wherever it finds one, so a
  * veld outside these three directories is legitimate and invisible here. That is
- * why the `not-installed` page keeps a `veld doctor` line rather than only
+ * why the `not-installed` page keeps a `veld self doctor` line rather than only
  * offering the installer: the failure mode of guessing wrong has to be a
  * redundant instruction, never a dead end.
  *
@@ -120,7 +120,7 @@ function esc(s) {
 
 /** The commands, spelled out rather than linked — see the module header. */
 const INSTALL_COMMAND = "curl -fsSL https://veld.oss.life.li/get | bash";
-const SETUP_COMMAND = "veld setup unprivileged";
+const SETUP_COMMAND = "veld self setup unprivileged";
 
 /**
  * Self-contained and branded (dark tokens + wordmark dot styling from the design
@@ -147,6 +147,10 @@ function waitingHtml({ stage, cliPath = null, baseUrl = "" }) {
     // The fault page. Both commands are here because the two failures look
     // identical from the app's side: an install that never ran setup has no
     // daemon agent, and one that did has an agent that is not answering.
+    // The CLI found here can be older than this app (a .dmg install, an app-only
+    // update), and a pre-17 CLI answers `veld self …` with clap's bare
+    // "unrecognized subcommand" — no crumb — so the old spelling is named too
+    // (#423). Not on the other pages: those are a fresh install, which is new.
     const where = cliPath
       ? `<p>veld is installed at <code>${esc(cliPath)}</code>, but nothing is answering${
           baseUrl ? ` at <code>${esc(baseUrl)}</code>` : ""
@@ -158,7 +162,8 @@ function waitingHtml({ stage, cliPath = null, baseUrl = "" }) {
   <p>If you've never run setup, this is the step that installs the daemon agent:</p>
   <p><code class="cmd">${SETUP_COMMAND}</code></p>
   <p>Otherwise, this says what's wrong:</p>
-  <p><code class="cmd">veld doctor</code></p>
+  <p><code class="cmd">veld self doctor</code></p>
+  <p class="quiet">On a veld older than 17, leave out <code>self</code>: <code>veld setup unprivileged</code>, <code>veld doctor</code>.</p><!-- pre-#423: the old spelling, on purpose -->
   <p class="quiet">Still retrying automatically.</p>`;
   } else {
     body = `
@@ -166,7 +171,7 @@ function waitingHtml({ stage, cliPath = null, baseUrl = "" }) {
   <p>On a fresh machine, install veld and set it up — no sudo needed:</p>
   <p><code class="cmd">${INSTALL_COMMAND}</code></p>
   <p><code class="cmd">${SETUP_COMMAND}</code></p>
-  <p>Already have veld somewhere else? <code>veld doctor</code> says what's wrong.</p>
+  <p>Already have veld somewhere else? <code>veld self doctor</code> says what's wrong.</p>
   <p class="quiet">Retrying automatically.</p>`;
   }
 

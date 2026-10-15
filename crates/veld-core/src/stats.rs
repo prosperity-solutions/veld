@@ -45,11 +45,11 @@ use serde::{Deserialize, Serialize};
 /// database) cannot see the most expensive part of a run.
 ///
 /// **The seam passes the PID out; it does not persist it, and no implementation
-/// may.** [`crate::state::NodeState::pid`] is read by `veld stop`, the health
+/// may.** [`crate::state::NodeState::pid`] is read by `veld orchestrator stop`, the health
 /// monitor, the GC and the orphan reaper as a claim that the node has a process
 /// *now*; a finished build's PID stored there would make a run that is still
 /// coming up look like one that spawned and died, and would eventually have
-/// `veld stop` signal whatever recycled the number. A resource sample is the
+/// `veld orchestrator stop` signal whatever recycled the number. A resource sample is the
 /// opposite kind of fact — "at time T this tree looked like this" — and stays
 /// true after the process is gone.
 ///
@@ -270,7 +270,7 @@ impl MemoryBreakdown {
 /// Selecting the metric belongs to the reader, not the collector: the same
 /// stored sample answers "is this node leaking" (`PrivateDirty`), "what does it
 /// cost the machine" (`Footprint`), and "why does `top` say 4 GB"
-/// (`Virtual`). Parsed from `veld stats --memory <metric>` and the
+/// (`Virtual`). Parsed from `veld orchestrator stats --memory <metric>` and the
 /// `metric=` query parameter, so the spellings are user-facing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -439,7 +439,7 @@ pub struct ProcessStats {
     ///
     /// Double-counts pages shared between processes in the tree; prefer
     /// `memory.footprint`. It stays the top-level field (rather than moving
-    /// into [`MemoryBreakdown`]) because `veld status --json` and every shipped
+    /// into [`MemoryBreakdown`]) because `veld orchestrator status --json` and every shipped
     /// management-UI bundle read this name.
     pub memory_bytes: u64,
     /// Number of live processes in the tree (the node's process + descendants).
@@ -455,7 +455,7 @@ pub struct ProcessStats {
     #[serde(default)]
     pub memory: MemoryBreakdown,
     /// When the sample was taken. Serialized as epoch milliseconds so
-    /// `veld status --json` consumers get a plain number.
+    /// `veld orchestrator status --json` consumers get a plain number.
     #[serde(with = "chrono::serde::ts_milliseconds")]
     pub sampled_at: DateTime<Utc>,
 }

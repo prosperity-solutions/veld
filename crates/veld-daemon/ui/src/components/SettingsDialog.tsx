@@ -131,7 +131,7 @@ import { useCaffeinate } from "../shared/useCaffeinate";
 /**
  * A help string's `backticked` spans, as inline code.
  *
- * One help string serves every surface — `veld settings describe` wraps it into a
+ * One help string serves every surface — `veld self settings describe` wraps it into a
  * terminal, this puts it under a label — so it marks code up the one way both can
  * read. An odd number of backticks is not markup at all: rendering it as written
  * beats turning the rest of the sentence into a code span.
@@ -434,7 +434,7 @@ function Unsupported(props: { entry: CatalogEntry; shape: string }) {
   return (
     <Text size="xs" c="dimmed" ta="right" title={props.shape}>
       This version of the Veld IDE cannot show this setting — use{" "}
-      <Code>veld settings set {props.entry.key}</Code>
+      <Code>veld self settings set {props.entry.key}</Code>
     </Text>
   );
 }
@@ -1208,7 +1208,7 @@ const GROUP_ICONS: Record<string, ReactNode> = {
  */
 const SECTION_BLURBS: Record<string, string> = {
   "Database backups":
-    "Every repository, checkout, lane, layout and setting on this page lives in one file, and nothing else on this machine has a copy of it. These decide how often Veld takes one, how many it keeps, and where they go. Copies leave out logs and resource samples, so one is a few megabytes rather than the hundreds the live file can reach. `veld backup` lists them; `veld backup restore` puts one back.",
+    "Every repository, checkout, lane, layout and setting on this page lives in one file, and nothing else on this machine has a copy of it. These decide how often Veld takes one, how many it keeps, and where they go. Copies leave out logs and resource samples, so one is a few megabytes rather than the hundreds the live file can reach. `veld self backup list` lists them; `veld self backup restore` puts one back.",
   Notifying:
     "System notifications, and only while Veld is not the focused window — nothing interrupts you about a pane you could be looking at. The rail still marks everything either way.",
   "Focus mode":
@@ -1221,7 +1221,7 @@ const SECTION_BLURBS: Record<string, string> = {
   // "a positional reference is a lie on a terminal", and it is equally a lie
   // across a tab boundary.
   "Share links expire after":
-    "How long a link keeps working, counted from when you started sharing. This is usually what ends a share — and so what ends the automatic keep-awake with it, since the caps under Keep awake are a ceiling over this rather than a second countdown. A project can override these in its veld.json, and veld share --ttl overrides everything for one share.",
+    "How long a link keeps working, counted from when you started sharing. This is usually what ends a share — and so what ends the automatic keep-awake with it, since the caps under Keep awake are a ceiling over this rather than a second countdown. A project can override these in its veld.json, and veld network share --ttl overrides everything for one share.",
 };
 
 /** What this machine is, as far as this dialog needs to know. */
@@ -1236,7 +1236,7 @@ interface Machine {
  * **A runtime machine fact, not a setting dependency** — which is exactly why it is
  * here and not in the catalog's `requires`. A desktop does not have
  * `keepAwake.sharingOnBattery` switched *off*; it has nowhere for the question to
- * land. The daemon still stores and validates the key, so `veld settings set` works
+ * land. The daemon still stores and validates the key, so `veld self settings set` works
  * on a desktop: this hides a control, never a capability.
  *
  * Applied before headings are emitted, so a section whose only row is filtered out
@@ -1282,7 +1282,7 @@ const HARDWARE_GATES: Record<string, (m: Machine) => boolean> = {
  * and not the `backup.enabled` one: a ligature switch under Menlo is not a
  * disabled control, it is a question with nowhere to land — the same reading
  * {@link HARDWARE_GATES} takes for a battery setting on a desktop. The daemon
- * still stores and validates the key, so `veld settings set terminal.ligatures`
+ * still stores and validates the key, so `veld self settings set terminal.ligatures`
  * works whatever font is selected; this hides a control, never a capability.
  *
  * A hidden row can therefore sit over a stored `true`. That is deliberate and

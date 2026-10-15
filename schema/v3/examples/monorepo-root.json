@@ -13,7 +13,7 @@
     "ci": ["@core", "e2e:dev"],
     // The object form, for a preset picked by people who did not write this
     // config — and by coding agents, which read `when_to_use` from
-    // `veld presets --json`. The pinned `key` is what someone types at the
+    // `veld orchestrator presets --json`. The pinned `key` is what someone types at the
     // picker, and it does not move when presets are added around it.
     "designer-preview": {
       "key": 1,

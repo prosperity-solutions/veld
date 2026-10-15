@@ -53,21 +53,21 @@ attached to. Inside `command` you can reference:
 Run actions from the CLI:
 
 ```sh
-veld actions                   # list configured actions
-veld action psql               # run it against the only active run
-veld action psql --name dev    # target a specific run
-veld action psql --node database  # disambiguate when several nodes define it
-veld action psql --print       # print the resolved command instead of running it
-veld action psql --json        # resolved command as JSON (does not run)
+veld orchestrator actions                   # list configured actions
+veld orchestrator action psql               # run it against the only active run
+veld orchestrator action psql --name dev    # target a specific run
+veld orchestrator action psql --node database  # disambiguate when several nodes define it
+veld orchestrator action psql --print       # print the resolved command instead of running it
+veld orchestrator action psql --json        # resolved command as JSON (does not run)
 ```
 
 `requires_outputs` gates availability: the action only runs (and only appears as
 a dashboard button) when the node is running and exposes all listed outputs.
 
-The management dashboard (`veld ui`) shows a button for each available action on
+The management dashboard (`veld ide dashboard`) shows a button for each available action on
 the node's row. Clicking it runs the action server-side via the CLI, so any
 credentials never reach the browser.
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

@@ -2,7 +2,7 @@
 //!
 //! Replaces the old `.veld/logs/{run}/*.log` files. Writers (the CLI, the
 //! detached `veld-daemon --log-sink` pipeline wrapper, and the daemon) insert rows; readers
-//! (`veld logs`, the management UI) query by scope. Follow mode polls for
+//! (`veld orchestrator logs`, the management UI) query by scope. Follow mode polls for
 //! rows with `id` greater than the last one seen — `id` is a global,
 //! monotonically increasing insert order across all writer processes.
 
@@ -187,7 +187,7 @@ impl Db {
     /// single `read` but wrong for one assembled over a flush window: readers
     /// tiebreak on `id` so within-source ordering stays exact either way, but a
     /// shared stamp fuzzes cross-source interleaving by the whole window and
-    /// quietly makes `veld logs --since` answer from a coarser clock than it
+    /// quietly makes `veld orchestrator logs --since` answer from a coarser clock than it
     /// looks like it has.
     #[allow(clippy::too_many_arguments)]
     pub fn append_logs(

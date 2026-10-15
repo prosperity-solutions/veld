@@ -3,7 +3,7 @@
 //! The daemon spawns one of these per start/stop/restart/action, in its own
 //! process group, with the action on stdin. Same pattern as the PTY holder and
 //! for the same reason: launchd's and systemd's restarts take the daemon's group
-//! down, and a run half-started when `veld update` restarts the daemon must not
+//! down, and a run half-started when `veld self update` restarts the daemon must not
 //! be cut in half. The worker finishes the action whatever happens to the daemon
 //! and writes everything it has to say into the action's event log, where
 //! whichever daemon is up streams it to the face that asked.
@@ -13,7 +13,7 @@
 //!   declared env values, var answers). The one channel that is not persisted,
 //!   not in `ps`, and not in a log.
 //! - **cwd**: the project root. **`PATH`**: the user's login-shell `PATH` resolved
-//!   in that directory, exactly what the daemon used to give a `veld start` it execed.
+//!   in that directory, exactly what the daemon used to give a `veld orchestrator start` it execed.
 //!   Everything else is the daemon's own environment; nodes inherit it.
 //!
 //! stderr is the daemon's log (inherited), so tracing here is for operators;
@@ -51,7 +51,7 @@ pub fn status_for(outcome: &ActionOutcome) -> &'static str {
 /// The worker's [`EngineHost`]: share release goes to the daemon over HTTP.
 ///
 /// Over HTTP from a *separate process* is what makes this safe: the old
-/// in-daemon equivalent (a `veld stop` the daemon waited on, calling back into the
+/// in-daemon equivalent (a `veld orchestrator stop` the daemon waited on, calling back into the
 /// daemon) was a circular wait. Nothing in the daemon waits on a worker.
 struct WorkerHost {
     cancelled: Arc<std::sync::atomic::AtomicBool>,
@@ -219,7 +219,7 @@ pub async fn run() -> i32 {
     .await;
     if let ActionOutcome::Failed { message, .. } = &outcome {
         // Said where an operator and a user will look: the daemon log, and the
-        // run's own log (`veld logs --source veld`) — an IDE button or a crash
+        // run's own log (`veld orchestrator logs --source veld`) — an IDE button or a crash
         // teardown has no terminal to print it on.
         tracing::warn!(action = %action_id, kind = request_kind, "engine action failed: {message}");
         if let Some(run) = &request_run {

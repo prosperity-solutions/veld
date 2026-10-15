@@ -22,7 +22,7 @@ const daemonPort = process.env.VELD_DAEMON_PORT || "19898";
 //   just dev-ui               the BOOTSTRAP tier — one worktree at a time, so
 //                             5199 is fine and is what pty.rs's allowlist and
 //                             `just dev-desktop` both hardcode.
-//   veld start --preset dev   the dev stack as a veld run — veld allocates the
+//   veld orchestrator start --preset dev   the dev stack as a veld run — veld allocates the
 //                             port and hands it over as VELD_PORT, which is
 //                             what lets two worktrees serve /ide at once.
 //

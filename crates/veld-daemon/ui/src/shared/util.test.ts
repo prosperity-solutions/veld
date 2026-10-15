@@ -156,7 +156,7 @@ describe("timestamps", () => {
     // `new Date` holds milliseconds, so both rendered lines truncate `.123456` to
     // `.123` (truncate, not round — `.123999` is also `.123`) and two rows 200µs apart
     // would tooltip identically. The CLI keeps the precision,
-    // so the stored line is what makes this agree with `veld logs --utc` and what a
+    // so the stored line is what makes this agree with `veld orchestrator logs --utc` and what a
     // reader can paste into a bug report.
     const full = fmtTsFull("2026-07-27T10:00:00.123456Z", "utc");
     expect(full).toContain("stored: 2026-07-27T10:00:00.123456Z");

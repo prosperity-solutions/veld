@@ -28,7 +28,7 @@ export VELD_DAEMON_SOCK="$HOME/.veld/dev-$port.sock"
 # justfile. Under veld the port is allocated afresh on every start, so the
 # default would strand every previous start's holder processes in a directory
 # nothing ever looks at again, and no terminal would survive a restart. The
-# `pty-` prefix is load-bearing: `veld uninstall` finds every instance's holders
+# `pty-` prefix is load-bearing: `veld self uninstall` finds every instance's holders
 # by it.
 #
 # A DIGEST of `<root>|<run>`, and both halves earn their place.
@@ -51,7 +51,7 @@ export VELD_DAEMON_SOCK="$HOME/.veld/dev-$port.sock"
 run_digest="$(printf '%s|%s' "$root" "$run" | cksum | awk '{print $1}')"
 export VELD_PTY_DIR="$HOME/.veld/pty-dv-$run_digest"
 
-# The digest is not guessable from the run name, and `veld doctor` reports the
+# The digest is not guessable from the run name, and `veld self doctor` reports the
 # directory rather than the mapping — so say it once, here, where someone
 # chasing a stranded holder will find it in the node's log.
 echo "dev daemon: port $port, socket $VELD_DAEMON_SOCK" >&2

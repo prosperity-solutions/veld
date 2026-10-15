@@ -7,7 +7,7 @@
  * session had reported in switched a setting the session in front of the person
  * could not follow, and it then went on behaving the old way. Asked first, the pane
  * starts the way the answer says. Claude typed into a plain terminal is never asked
- * about: nothing sees it coming, and Settings and `veld doctor` cover it.
+ * about: nothing sees it coming, and Settings and `veld self doctor` cover it.
  *
  * Whether it was asked lives in the daemon's promotion store, under an id in the
  * namespace `promotions/model.ts` reserves for sources other than Veld's own cards,

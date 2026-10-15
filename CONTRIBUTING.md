@@ -57,7 +57,7 @@ instance is also what owns Caddy, DNS and the helper:
 
 ```sh
 curl -fsSL https://veld.oss.life.li/get | bash
-veld setup unprivileged     # no sudo; `veld setup` alone only prints status
+veld self setup unprivileged     # no sudo; `veld self setup` alone only prints status
 veld --version
 ```
 
@@ -66,7 +66,7 @@ Linux box where `/bin/sh` is dash it dies on its first line.
 
 Already have one? Make sure it is current — this repo's `veld.json` uses config
 features from the latest release, and an older binary fails to parse the **whole
-file** (see the note below). `veld update`.
+file** (see the note below). `veld self update`.
 
 ### The dev stack is a veld environment
 
@@ -75,13 +75,13 @@ The usual way to run veld while working on it is to let veld run it. The root
 Electron shell:
 
 ```sh
-veld start --preset dev            # daemon + /ide + Electron, empty database
-veld start --preset dev-keep       # …reusing the database this run already has
-veld start --preset dev-from-real  # …on a snapshot of the REAL database
-veld start --preset dev-headless   # empty database, no Electron
-veld status
-veld logs --node dev-daemon --follow
-veld stop
+veld orchestrator start --preset dev            # daemon + /ide + Electron, empty database
+veld orchestrator start --preset dev-keep       # …reusing the database this run already has
+veld orchestrator start --preset dev-from-real  # …on a snapshot of the REAL database
+veld orchestrator start --preset dev-headless   # empty database, no Electron
+veld orchestrator status
+veld orchestrator logs --node dev-daemon --follow
+veld orchestrator stop
 ```
 
 `dev` starts on an **empty** database, so it is reproducible and a migration
@@ -91,8 +91,8 @@ start has none of it. `dev-keep` is the same stack over whatever the run's
 database already holds; reach for it once you have things arranged.
 
 > **`unknown variant 'long_running'`?** Your installed veld predates the release
-> that added it, and the failure is the *whole file* — `veld start website:local`
-> stops working too, because a config is parsed as one unit. Run `veld update`.
+> that added it, and the failure is the *whole file* — `veld orchestrator start website:local`
+> stops working too, because a config is parsed as one unit. Run `veld self update`.
 > Until you do, `just dev start --preset dev` runs the same thing through this
 > branch's own binary, which is also the answer while you are working on a change
 > to the config language itself.
@@ -101,7 +101,7 @@ database already holds; reach for it once you have things arranged.
 own allocated ports, its own database under `.veld-dev/<run>/`, its own
 hostnames, and its own `~/.local/bin/veld-dev-<run>` — so two branches can each
 have a full stack up at the same time. The stack you start is monitored by the
-*installed* veld, so `veld status` keeps working even when the dev daemon is
+*installed* veld, so `veld orchestrator status` keeps working even when the dev daemon is
 wedged, and a schema-ahead branch can never touch your real database.
 
 The dev-stack nodes:
@@ -124,7 +124,7 @@ throw away the state you were debugging.
 You can close or Cmd+Q the desktop app and keep working; bring it back with:
 
 ```sh
-veld action open --node dev-electron
+veld orchestrator action open --node dev-electron
 ```
 
 That is not free behaviour — it needed the node to be a supervisor
@@ -145,7 +145,7 @@ permission; clicking the tray icon does the same job.
 Everything below this line is the older, **single-worktree** path: fixed ports,
 one dashboard hostname, one `veld-dev` wrapper. It has not gone anywhere,
 because you need a way to run the daemon when the thing you broke is
-`veld start` itself, and because a fresh clone has nothing to start a veld run
+`veld orchestrator start` itself, and because a fresh clone has nothing to start a veld run
 with. Use it for that; use the preset above the rest of the time.
 
 Veld has three tiers of binaries with different lifecycles:
@@ -162,7 +162,7 @@ Veld has three tiers of binaries with different lifecycles:
 **dedicated dev database** at `.veld-dev/veld.db` (gitignored) — never the
 installed veld's DB. Dev builds can carry newer schema migrations, and a
 schema-ahead binary migrates whatever DB it opens; on the real DB that would
-blind the installed daemon (`NewerSchema`) until `veld update`. Isolation
+blind the installed daemon (`NewerSchema`) until `veld self update`. Isolation
 makes that impossible by default:
 
 ```sh
@@ -228,14 +228,14 @@ just dev-install-helper    # builds, installs, sudo restarts Caddy
 ### Going back to the released version
 
 ```sh
-just dev-restore    # runs veld update
+just dev-restore    # runs veld self update
 ```
 
 ### All commands
 
 | Command | What it does | Sudo? |
 |---------|-------------|-------|
-| `veld start --preset dev` | The whole dev stack, per worktree (the usual way) | No |
+| `veld orchestrator start --preset dev` | The whole dev stack, per worktree (the usual way) | No |
 | `just dev <args>` | Run CLI from source (safe, no install) | No |
 | `just dev-link` | Create the bootstrap `veld-dev` wrapper for cross-project use | No |
 | `just dev-db-list` | Every per-run dev database, with its schema version | No |

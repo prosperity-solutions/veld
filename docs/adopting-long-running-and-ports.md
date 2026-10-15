@@ -26,10 +26,10 @@ If you are coming from `schemaVersion: "1"` or `"2"`, do
 ```
 Adopt veld's long-running/port features in my veld.json, following
 https://github.com/prosperity-solutions/veld/blob/main/docs/adopting-long-running-and-ports.md
-Change nothing that already works. Then run `veld lint` and fix everything it reports.
+Change nothing that already works. Then run `veld orchestrator lint` and fix everything it reports.
 ```
 
-`veld lint` is what makes this safe to delegate: it reads the result with the real
+`veld orchestrator lint` is what makes this safe to delegate: it reads the result with the real
 parser and reports every problem with a file, line, and rule name.
 
 ---
@@ -37,7 +37,7 @@ parser and reports every problem with a file, line, and rule name.
 ## `start_server` is now spelled `long_running`
 
 Both spellings load, forever, exactly as `bash` still loads as an alias for
-`command`. Nothing rewrites your file, and `veld lint` does not flag the old one —
+`command`. Nothing rewrites your file, and `veld orchestrator lint` does not flag the old one —
 a permanent alias sets no deadline, so there is no rule to write.
 
 ```jsonc
@@ -141,7 +141,7 @@ One thing to know if you adopt a secondary `http` port: it is served at
 `<node>-<port>.…` — `web-admin.dev.veld.localhost`, a sibling of the node's own
 hostname rather than a deeper label, so a wildcard cert or dnsmasq rule that
 already covers the node covers it too. If that collides with a node genuinely
-named `web-admin`, `veld start` refuses before spawning anything and names both
+named `web-admin`, `veld orchestrator start` refuses before spawning anything and names both
 owners; the way out is `host` on the port.
 
 ## The `settle` readiness probe
@@ -213,7 +213,7 @@ Two rules to know:
   "share" and getting nothing, with nothing to say so, is the failure mode this
   whole design exists to prevent.
 
-Sharing a `tcp` port to a **peer** works: `veld join` binds a local listener,
+Sharing a `tcp` port to a **peer** works: `veld network join` binds a local listener,
 splices it over the tunnel, and prints the address separately from the URLs. The
 address is `<the origin's hostname>:<the joiner's local port>` — the hostname
 resolves locally because the join mints it in DNS, and the port is the joiner's
@@ -221,13 +221,13 @@ own listener, never the origin's number.
 
 ---
 
-## Behaviour changes worth a `veld lint`
+## Behaviour changes worth a `veld orchestrator lint`
 
 These are the items that can affect a config you do not edit. The first two are
 the same fix: a check that could not run used to answer "healthy", and now
 answers "no".
 
-`veld lint` reports every one of them **except number 2**, which is silent by
+`veld orchestrator lint` reports every one of them **except number 2**, which is silent by
 construction — a variant that erases its last port has said something veld now
 takes literally, and there is no way to tell that apart from meaning it. Run
 lint first anyway; then read 2 and decide whether any of your variants meant
@@ -238,11 +238,11 @@ what they now say.
    the readiness and the liveness path, so a typo was the silent way to turn a
    probe off. So did a `port` or `http` probe on a node with no such port.
    Both are now errors: `unknown-probe-type` and `probe-needs-port` at lint time,
-   and a real failure at runtime. If `veld lint` reports one, that probe has
+   and a real failure at runtime. If `veld orchestrator lint` reports one, that probe has
    never checked anything — decide what it should have checked.
 
-   Run `veld lint` *before* restarting the daemon, not after. An environment
-   that is already running keeps running across `veld update`, and a *liveness*
+   Run `veld orchestrator lint` *before* restarting the daemon, not after. An environment
+   that is already running keeps running across `veld self update`, and a *liveness*
    probe of this shape flips from permanently healthy to permanently failing —
    with recovery restarts behind it — the next time the daemon reads it.
 
@@ -276,13 +276,13 @@ what they now say.
    `<node>-debug.…` in DNS as well as `<node>.…` — with no route in front of it,
    which is why it gains no URL. Two consequences on an unchanged config: the
    name enters the collision checks, so a run holding a node called `web-debug`
-   alongside a node `web` with a port `debug` is refused at `veld start` (naming
+   alongside a node `web` with a port `debug` is refused at `veld orchestrator start` (naming
    both owners, with per-port `host` as the way out); and on a custom apex domain
    it is a real DNS entry rather than something `*.localhost` resolves for free.
 
 One rule was **renamed**: `start-server-needs-readiness` is now
 `long-running-needs-readiness`, with identical behaviour. It matters only if you
-filter or suppress `veld lint --json` output by rule id.
+filter or suppress `veld orchestrator lint --json` output by rule id.
 
 `ambiguous-primary-port` also became *more permissive*: a node whose ports are
 **all** explicitly `tcp` legitimately has no primary, and no longer trips it.
