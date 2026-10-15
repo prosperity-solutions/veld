@@ -515,7 +515,7 @@ let dockBadge = null;
  *
  * The shell polls rather than waiting to be told because the setting is one
  * document shared by every client (`crates/veld-daemon/src/settings.rs`): it can
- * be changed from a plain browser tab, or from `veld settings set`, with no window
+ * be changed from a plain browser tab, or from `veld self settings set`, with no window
  * of this app open to forward it. The renderer's nudge
  * (`veld:app:settings-changed`) is what makes the *common* case immediate; this
  * is what makes it correct.
@@ -764,7 +764,7 @@ app.on("second-instance", () => focusPrimary());
 
 /**
  * Keep the daemon's version current for the skew notice. The reachability poll
- * in `loadAppWhenReady` stops as soon as the app loads, and `veld update` lands
+ * in `loadAppWhenReady` stops as soon as the app loads, and `veld self update` lands
  * long after that — so without this, a mismatch that appears (or is fixed) while
  * the app is open would never be seen. Loopback GET, so a minute is cheap.
  */
@@ -892,7 +892,7 @@ app.on("window-all-closed", () => {
 /**
  * A `SIGTERM` is a polite request to quit, so answer it politely.
  *
- * `veld update` closes the app before replacing its bundle. It asks over an Apple
+ * `veld self update` closes the app before replacing its bundle. It asks over an Apple
  * Event first — which is Automation-TCC-gated and can be denied — and falls back
  * to this signal. Node's default disposition would end the process on the spot:
  * `before-quit` never runs, so the window layout, the persisted window set and a

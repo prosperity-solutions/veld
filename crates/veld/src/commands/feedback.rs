@@ -270,7 +270,9 @@ fn resolve(
             let has_feedback = FeedbackStore::new(db.clone(), &project_root, &n).has_data();
             if !active && !has_feedback {
                 output::print_error(
-                    &format!("No such run '{n}'. Run `veld runs` to list active runs."),
+                    &format!(
+                        "No such run '{n}'. Run `veld orchestrator runs list` to list active runs."
+                    ),
                     json,
                 );
                 return None;

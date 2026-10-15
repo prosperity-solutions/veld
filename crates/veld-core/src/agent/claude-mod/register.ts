@@ -3,7 +3,7 @@
 // (That line is for the copy in Veld's folder. This file is the template, in
 // crates/veld-core/src/agent/claude-mod/, whose placeholders Veld fills. Nothing
 // in CI typechecks it; `claude plugin validate` on the written folder, which
-// `veld doctor` runs, is the check.)
+// `veld self doctor` runs, is the check.)
 //
 // Veld's Claude Code mod: tells Veld's window when this session is working, waiting
 // for you or finished, and tells the agent how to put a file in front of you. Loaded

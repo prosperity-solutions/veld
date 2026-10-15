@@ -79,8 +79,8 @@ The system will be built in layers. Each tier is a superset of the one below.
 ### Tier 0 — what exists today (the seed)
 
 - `veld.json`: probes, presets, `actions` (`name`/`label`/`argv`, runnable via
-  `veld action`), panes, `ide` blocks.
-- Per-project machine-overridable vars (`veld config vars`).
+  `veld orchestrator action`), panes, `ide` blocks.
+- Per-project machine-overridable vars (`veld orchestrator vars list`).
 - These are the proof that "config drives IDE behaviour" already works in a
   narrow, well-scoped form.
 
@@ -340,7 +340,7 @@ first paint. Deliberately not built now — see the [Decision log](#decision-log
 ### Security posture
 
 A status extension is the **first thing Veld runs from a repo's config without a
-user action**. Everything else needs a deliberate act: `veld start` for
+user action**. Everything else needs a deliberate act: `veld orchestrator start` for
 `setup`/nodes/probes, a click for a pane or a node action. That difference is
 real and it is the reason this section exists.
 
@@ -357,7 +357,7 @@ only whatever that project's badge commands already are on main — not the
 branch's own. Setting `extensions.source` to `worktree` restores the original
 placement, where **checking out a branch and selecting it runs that branch's own
 badge commands**; reviewing a fork pull request that way is an act of trust in
-its author, the same way `veld start` on that branch already is. Two residuals
+its author, the same way `veld orchestrator start` on that branch already is. Two residuals
 worth naming even under the `main` default: the command still *executes* with
 the viewed worktree as its working directory, so a main-declared badge shelling
 out to a repo-relative script still runs whatever that path resolves to in the
@@ -762,7 +762,7 @@ Rejected, with reasons:
 
 **Decision: add `${veld.branch_raw}` — the checkout branch name, unslugified —
 to the pane and extension variable scopes, permitted in `argv`, and a `veld
-lint` finding when used in `shell`.**
+orchestrator lint` finding when used in `shell`.**
 
 `${veld.branch}` is slugified (`feat/foo` → `feat-foo`), which is documented
 across every reference for this scope as a trap: the obvious
@@ -842,7 +842,7 @@ Rejected:
   message and doc table (`branch`, `pane.id`, … vs `branch`, `branch_raw`,
   `pane.id`, …). `branch_raw` lands immediately next to `branch` everywhere the
   trap is already documented, so the escape hatch appears beside the trap with
-  no cross-reference needed — including in the `veld lint` error message
+  no cross-reference needed — including in the `veld orchestrator lint` error message
   itself, which lists the allowed set. Adopted instead.
 - **Not adding it at all**, and documenting `git rev-parse --abbrev-ref HEAD`
   harder instead. That one line is arguably *more* correct — it reads live
@@ -1311,7 +1311,7 @@ had not come along.
   schema. `ide.panes` has never been capped and still is not — but the number of
   panes that may run a **child process when the chooser opens** now is, at
   `MAX_PANE_SESSION_LISTERS` = 8. Over the cap, `parse_panes` drops the *pickers*
-  past the eighth with a `veld lint` problem and leaves every pane working. Eight
+  past the eighth with a `veld orchestrator lint` problem and leaves every pane working. Eight
   because they all run at once, on a screen somebody is waiting for — which is
   why it is far below the badge cap of 24, where one command runs per timer tick.
 - **A refresh floor.** Every POST re-ran every lister unconditionally, so
@@ -1606,7 +1606,7 @@ Six calls, recorded because each has an obvious alternative:
 - **A CLI, not MCP.** Every agent in a Veld terminal can already run a command;
   an MCP server would need per-agent registration — an edit to the user's agent
   config, which the agent integration has never done — and a server process per
-  session, to deliver one verb. `veld skills ide` is the documentation, in the
+  session, to deliver one verb. `veld agent skills ide` is the documentation, in the
   binary, as for every other command.
 - **`--notify` or `--quiet` is required.** An agent opening a tab is either asking
   for attention or not, and only the agent knows which. A default would make one

@@ -156,7 +156,7 @@ export function fmtPercent(v: number): string {
  * A live process cannot occupy zero bytes of address space, so `virtual: 0` means
  * "not recorded" — a bucket built from rows written before the breakdown columns
  * existed. Rust reports that as absent; without the same gate here the chart drew
- * a real line down to zero for exactly the samples `veld stats` printed as `-`,
+ * a real line down to zero for exactly the samples `veld orchestrator stats` printed as `-`,
  * two readers of one artifact disagreeing about absent-vs-zero.
  */
 /** Whether a metric is a page class, i.e. one a platform may be unable to

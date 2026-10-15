@@ -72,7 +72,7 @@
         },
         "hidden": {
           "type": "boolean",
-          "description": "When true, this node is hidden from `veld nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
+          "description": "When true, this node is hidden from `veld orchestrator nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
           "default": false
         },
         "client_log_levels": {

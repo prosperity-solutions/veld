@@ -1,7 +1,7 @@
 //! Log writing helpers on top of the central database (see [`crate::db`]).
 //!
 //! Every log line is one `log_lines` row, timestamped at write time. The old
-//! `.veld/logs/{run}/*.log` files are gone; `veld logs` and the management UI
+//! `.veld/logs/{run}/*.log` files are gone; `veld orchestrator logs` and the management UI
 //! query the database instead.
 
 use std::path::{Path, PathBuf};
@@ -287,7 +287,7 @@ pub fn row_to_json(row: &crate::db::LogRow, run: &str) -> serde_json::Value {
 ///
 /// The input is what `db::ts_to_str` wrote: RFC 3339, UTC, microseconds, `Z`.
 ///
-/// [`LogTimeZone::Utc`] returns it untouched, so `veld logs --utc` is byte-for-byte
+/// [`LogTimeZone::Utc`] returns it untouched, so `veld orchestrator logs --utc` is byte-for-byte
 /// what veld printed before this function existed. [`LogTimeZone::Local`] re-renders
 /// it in the machine's zone **in the same RFC 3339 shape, offset included** — same
 /// field order, same precision, still parseable by anything that parsed the old

@@ -289,6 +289,7 @@ async function isVeldCli(candidate) {
  */
 async function cliHandlesDesktop(candidate) {
   try {
+    // Old spelling on purpose (#423): an older CLI does not know `self desktop`.
     const { stdout } = await execFileAsync(
       candidate,
       ["desktop", "status", "--json"],

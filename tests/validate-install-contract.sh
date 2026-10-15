@@ -78,7 +78,7 @@ done
 #
 # `say` is a no-op under VELD_EMBEDDED, `echo` is not, and swapping one for the
 # other is both the natural edit and completely invisible: the script still works,
-# the tests still pass, and `veld update` quietly goes back to printing three
+# the tests still pass, and `veld self update` quietly goes back to printing three
 # "installed successfully!" banners with a first-install footer in the middle of an
 # update. Only the lines whose duplication was the actual bug are pinned — this is
 # a regression guard, not a style rule, so a new warning is still free to use echo.
@@ -99,7 +99,7 @@ while IFS='|' read -r pattern what; do
   fi
 done <<'PINNED'
 installed successfully!|the success banner
-Run 'veld start' in any project|the first-install footer
+start' in any project to get going|the first-install footer
 veld binary:   |the install path summary
 Detected platform:|the platform line
 PINNED
@@ -190,7 +190,7 @@ fi
 # pipefail`, which exempts a command on the left of `||` but NOT one whose exit
 # status is read afterwards with `$?`. Written the plain way, a refused helper
 # install — or the exit 2 an older CLI returns for an unknown subcommand, which
-# is the *expected* path on `veld update --target-version <older>` — aborts the
+# is the *expected* path on `veld self update --target-version <older>` — aborts the
 # whole install before the services are restarted, silently, mid-update.
 if grep -A 2 -- "${HELPER_INSTALL_CMD} --binary" "$SCRIPT" | grep -q '||'; then
   ok "the ${HELPER_INSTALL_CMD} call is \`set -e\`-safe"
@@ -216,7 +216,7 @@ fi
 # The store's two paths are hardcoded in install.sh's switch-to-user-paths
 # cleanup, duplicating `paths::privileged_helper_dir()`. Change the Rust and this
 # script silently stops removing the directory it orphans — root-owned files with
-# nothing left able to delete them, which is the leftover `veld uninstall` cannot
+# nothing left able to delete them, which is the leftover `veld self uninstall` cannot
 # reach on that path (its escalation keys off `setup.json`, which the same branch
 # clears). Same class as section 1's env-var names, same fix: pin both sides.
 PATHS_RS="$REPO_ROOT/crates/veld-core/src/paths.rs"

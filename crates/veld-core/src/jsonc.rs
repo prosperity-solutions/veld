@@ -1,4 +1,4 @@
-//! JSONC support for veld config files: `//` line comments, `/* */` block
+//! JSONC support for veld.json files: `//` line comments, `/* */` block
 //! comments, and trailing commas.
 //!
 //! The approach is deliberately the boring one. [`strip`] rewrites comment and
@@ -8,12 +8,12 @@
 //! `serde_json::Error::line()` / `column()` still point at the real position in
 //! the file the user is editing. That is the whole reason not to reach for a CST
 //! or a span map: veld never *rewrites* an existing `veld.json`, so there is no
-//! comment-preserving writer to feed. (`veld init` writes one, but only when none
-//! exists.) veld did briefly ship a config rewriter — `veld config --migrate
-//! --write` — and it is instructive that it could not round-trip through `serde`
-//! without deleting every comment this module exists to allow, so it edited bytes
-//! instead, and editing bytes is precisely why it could not tell that `hooks` and
-//! `ide` are opaque. Anything proposing to rewrite a config should read that twice.
+//! comment-preserving writer to feed. (`veld orchestrator init` writes one, but only
+//! when none exists.) veld did briefly ship a config rewriter,
+//! `veld config --migrate --write` (pre-#423), and it is instructive that it could
+//! not round-trip through `serde` without deleting every comment this module
+//! exists to allow, so it edited bytes instead, and editing bytes is precisely why
+//! it could not tell that `hooks` and `ide` are opaque. Anything proposing to rewrite a config should read that twice.
 //!
 //! There is no `.jsonc` extension **requirement**: every config file accepts
 //! comments whatever it is called, and an included file has always been matched

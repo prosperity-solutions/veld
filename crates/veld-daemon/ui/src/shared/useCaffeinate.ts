@@ -48,7 +48,7 @@ let onFocus: (() => void) | null = null;
  *
  * **Any** unrequested `active → inactive`, not only a timed expiry. Gating on
  * `expires_at` excluded the "until I turn it off" session — the overnight one,
- * whose ending (a daemon restart from `veld update`, a crash, an inhibitor that
+ * whose ending (a daemon restart from `veld self update`, a crash, an inhibitor that
  * died) is both the least expected and the most expensive to miss. The timed
  * case, whose deadline the user already knows, was the only one being announced.
  *

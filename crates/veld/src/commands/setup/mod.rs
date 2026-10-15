@@ -4,7 +4,7 @@ mod unprivileged;
 
 pub use privileged::is_root_user;
 
-use crate::SetupCommand;
+use crate::parts::self_::SetupCommand;
 
 pub async fn run(command: Option<SetupCommand>) -> i32 {
     match command {

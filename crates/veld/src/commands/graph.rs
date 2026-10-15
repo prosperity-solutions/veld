@@ -2,7 +2,7 @@ use veld_core::graph;
 
 use crate::output;
 
-/// `veld graph [node:variant...]`
+/// `veld orchestrator graph [node:variant...]`
 pub async fn run(selections: Vec<String>) -> i32 {
     let Some((_config_path, config)) = super::parse_config(false) else {
         return 1;

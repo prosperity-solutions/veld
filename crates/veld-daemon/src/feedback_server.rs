@@ -29,6 +29,10 @@ pub(crate) mod engine;
 #[path = "engine_query.rs"]
 pub(crate) mod engine_query;
 
+/// The in-memory record of which coding agents are working or waiting.
+#[path = "agent_overview.rs"]
+pub(crate) mod agent_overview;
+
 #[path = "desktop.rs"]
 mod desktop;
 
@@ -114,7 +118,7 @@ pub(crate) mod caffeinate;
 ///
 /// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a
 /// session's PTY belongs to a holder process, so the shells survive a restart —
-/// which is what makes `veld update` safe to run with terminals open. See
+/// which is what makes `veld self update` safe to run with terminals open. See
 /// `pty::shutdown_sessions`.
 pub async fn shutdown_terminal_sessions() {
     pty::shutdown_sessions().await;
@@ -124,7 +128,7 @@ pub async fn shutdown_terminal_sessions() {
 /// the terminal and IDE-channel upgrades share.
 ///
 /// Re-exported for `main`, which spawns it beside the other background timers. It
-/// is a timer rather than a startup read because `veld setup` restarts this daemon
+/// is a timer rather than a startup read because `veld self setup` restarts this daemon
 /// *before* it installs the helper and *before* it writes the new mode — so a
 /// fresh daemon's first look finds neither, and an allowlist stuck on that answer
 /// refuses every upgrade the dashboard makes, which a browser cannot report. See
@@ -410,7 +414,7 @@ fn resolve_store(
     // claimed here, a harmless empty scope).
     //
     // The reach is LOCAL ONLY — an earlier version of this comment claimed a
-    // `veld share --web` page could read across projects, which is false: a
+    // `veld network share --web` page could read across projects, which is false: a
     // web-shared page is dialled straight at the node's app port
     // (`veld-share`'s host), bypassing Caddy, so it gets neither the
     // `/__veld__/*` subroute nor the injected overlay, and this server binds

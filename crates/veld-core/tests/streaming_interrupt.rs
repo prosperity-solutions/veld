@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// though the child runs in its own process group (`process_group(0)`) and so
 /// never receives the terminal's SIGINT itself. veld catches the signal, kills
 /// the child's group, and normalizes the code — this is what makes
-/// `veld start --oneshot` exit deterministically under Ctrl+C regardless of how
+/// `veld orchestrator start --oneshot` exit deterministically under Ctrl+C regardless of how
 /// the child handles signals.
 #[tokio::test]
 async fn streaming_interrupt_reports_130() {

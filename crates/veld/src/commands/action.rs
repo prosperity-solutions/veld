@@ -2,7 +2,7 @@ use veld_core::config::CommandSpec;
 
 use crate::output;
 
-/// `veld action <name> [--name <run>] [--node <node>] [--print] [--json]`
+/// `veld orchestrator action <name> [--name <run>] [--node <node>] [--print] [--json]`
 ///
 /// Run a node-defined action against a running environment. Actions are the
 /// generic mechanism behind things like "open the database in Postico": the
@@ -121,7 +121,7 @@ pub async fn run(
     }
 }
 
-/// `veld actions [--json]` — list the actions configured across all nodes.
+/// `veld orchestrator actions [--json]` — list the actions configured across all nodes.
 pub async fn list(json: bool) -> i32 {
     let Some((_config_path, cfg)) = super::parse_config(json) else {
         return 1;

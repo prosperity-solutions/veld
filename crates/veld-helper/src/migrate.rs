@@ -82,7 +82,7 @@ const REREGISTER_ATTEMPTS: u32 = 3;
 /// unit sets no `StandardOutput=`, so systemd journals it and no such file
 /// exists. Saying "the helper's log" without this would point every Linux user
 /// at a path that is not there — including from the migration warning below and
-/// from `veld doctor`'s row.
+/// from `veld self doctor`'s row.
 pub fn log_location_hint() -> String {
     if cfg!(target_os = "macos") {
         format!(
@@ -122,7 +122,7 @@ pub async fn reregister_service() -> anyhow::Result<()> {
         error = %format!("{error:#}"),
         "could not re-register the privileged helper after {REREGISTER_ATTEMPTS} attempts. Its \
          service definition already points at the root-owned directory, so a reboot will start \
-         it there; `sudo veld setup privileged` does the same without one"
+         it there; `sudo veld self setup privileged` does the same without one"
     );
     Err(error)
 }
@@ -332,7 +332,7 @@ async fn relocate(
     // Both skips carry the underlying error, which says which check failed. It
     // never says what the bytes are: this is the root helper, its log is
     // world-readable, and `Candidate` keeps the size and digest out of its errors
-    // for exactly that reason. `veld doctor`'s signature row, run as the user,
+    // for exactly that reason. `veld self doctor`'s signature row, run as the user,
     // is where a re-signed release is told apart from a local build.
     let candidate = veld_core::helper_store::Candidate::read(exe).map_err(|e| {
         Skip(format!(

@@ -12,7 +12,7 @@
 #   1  One or more tests failed
 
 set -uo pipefail
-# NOTE: This script should be run with sudo for full testing (veld setup
+# NOTE: This script should be run with sudo for full testing (veld self setup
 # requires privileged access). Without sudo, setup-dependent tests are skipped.
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ ORIG_DIR="$(pwd)"
 cleanup() {
     cd "$ORIG_DIR"
     info "cleaning up: stopping run '${RUN_NAME}' if still active"
-    "$VELD_BIN" stop --name "$RUN_NAME" 2>/dev/null || true
+    "$VELD_BIN" orchestrator stop --name "$RUN_NAME" 2>/dev/null || true
 }
 trap cleanup EXIT
 
@@ -145,14 +145,14 @@ info "verifying that environment commands fail gracefully without setup"
 
 # This test checks that veld produces a clear error when system setup has not
 # been performed. We intentionally expect a non-zero exit code here.
-if "$VELD_BIN" status --name "nonexistent-run-$$" 2>&1 | grep -qi "error\|not found\|no such\|not set up\|does not exist"; then
+if "$VELD_BIN" orchestrator status --name "nonexistent-run-$$" 2>&1 | grep -qi "error\|not found\|no such\|not set up\|does not exist"; then
     pass "pre-setup: commands produce a clear error for missing runs"
 else
     skip "pre-setup: could not verify error behaviour (command may have succeeded or produced unexpected output)"
 fi
 
 # PRD assertion 13: status --json should contain "setup_required" error key
-PRE_STATUS_JSON=$("$VELD_BIN" status --name "nonexistent-run-$$" --json 2>&1 || true)
+PRE_STATUS_JSON=$("$VELD_BIN" orchestrator status --name "nonexistent-run-$$" --json 2>&1 || true)
 if echo "$PRE_STATUS_JSON" | grep -q '"setup_required"'; then
     pass "pre-setup: status --json contains setup_required error key"
 else
@@ -174,26 +174,26 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 2: veld setup
+# Test 2: veld self setup
 # ---------------------------------------------------------------------------
 
 header "Setup"
 
-info "running 'veld setup privileged' (may require sudo -- will skip if not available)"
+info "running 'veld self setup privileged' (may require sudo -- will skip if not available)"
 
 if sudo -n true 2>/dev/null; then
     # Use timeout to prevent CI hangs (setup involves network downloads,
     # service registration, and CA trust which can block interactively).
-    assert_ok "veld setup privileged completes" run_with_timeout 120 "$VELD_BIN" setup privileged
+    assert_ok "veld self setup privileged completes" run_with_timeout 120 "$VELD_BIN" self setup privileged
 
     # PRD assertion 2: setup idempotency — running setup a second time should also succeed.
-    assert_ok "veld setup privileged idempotent (second run)" run_with_timeout 120 "$VELD_BIN" setup privileged
+    assert_ok "veld self setup privileged idempotent (second run)" run_with_timeout 120 "$VELD_BIN" self setup privileged
 else
-    skip "veld setup privileged (sudo not available without password)"
+    skip "veld self setup privileged (sudo not available without password)"
 fi
 
 # ---------------------------------------------------------------------------
-# Test 3: veld start
+# Test 3: veld orchestrator start
 # ---------------------------------------------------------------------------
 
 header "Start Environment"
@@ -202,20 +202,20 @@ cd "$PROJECT_DIR"
 info "project directory: $PROJECT_DIR"
 info "run name: $RUN_NAME"
 
-assert_ok "veld start frontend:local --name $RUN_NAME" \
-    run_with_timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+assert_ok "veld orchestrator start frontend:local --name $RUN_NAME" \
+    run_with_timeout 120 "$VELD_BIN" orchestrator start "frontend:local" --name "$RUN_NAME"
 
 # Give processes a moment to spin up.
 sleep 2
 
 # ---------------------------------------------------------------------------
-# Test 4: veld status
+# Test 4: veld orchestrator status
 # ---------------------------------------------------------------------------
 
 header "Status Check"
 
 STATUS_OUTPUT=""
-if STATUS_OUTPUT=$(capture_ok "veld status --json" "$VELD_BIN" status --name "$RUN_NAME" --json); then
+if STATUS_OUTPUT=$(capture_ok "veld orchestrator status --json" "$VELD_BIN" orchestrator status --name "$RUN_NAME" --json); then
     # Check that the output contains "healthy" or "running".
     if echo "$STATUS_OUTPUT" | grep -qiE '"(healthy|running)"'; then
         pass "status reports healthy/running"
@@ -226,14 +226,14 @@ if STATUS_OUTPUT=$(capture_ok "veld status --json" "$VELD_BIN" status --name "$R
 fi
 
 # ---------------------------------------------------------------------------
-# Test 5: veld urls
+# Test 5: veld orchestrator urls
 # ---------------------------------------------------------------------------
 
 header "URL Check"
 
 URLS_OUTPUT=""
 EXTRACTED_URLS=""
-if URLS_OUTPUT=$(capture_ok "veld urls --json" "$VELD_BIN" urls --name "$RUN_NAME" --json); then
+if URLS_OUTPUT=$(capture_ok "veld orchestrator urls --json" "$VELD_BIN" orchestrator urls --name "$RUN_NAME" --json); then
     if echo "$URLS_OUTPUT" | grep -q "localhost"; then
         pass "urls output contains localhost entries"
     else
@@ -309,22 +309,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 7: veld logs
+# Test 7: veld orchestrator logs
 # ---------------------------------------------------------------------------
 
 header "Logs"
 
-assert_ok "veld logs --node backend --lines 10" \
-    "$VELD_BIN" logs --name "$RUN_NAME" --node backend --lines 10
+assert_ok "veld orchestrator logs --node backend --lines 10" \
+    "$VELD_BIN" orchestrator logs --name "$RUN_NAME" --node backend --lines 10
 
 # ---------------------------------------------------------------------------
-# Test 8: veld stop
+# Test 8: veld orchestrator stop
 # ---------------------------------------------------------------------------
 
 header "Stop Environment"
 
-assert_ok "veld stop --name $RUN_NAME" \
-    "$VELD_BIN" stop --name "$RUN_NAME"
+assert_ok "veld orchestrator stop --name $RUN_NAME" \
+    "$VELD_BIN" orchestrator stop --name "$RUN_NAME"
 
 sleep 1
 
@@ -356,7 +356,7 @@ fi
 header "Process Cleanup Verification"
 
 # After stop, the PIDs should be gone. We check by looking at the status.
-if STOPPED_STATUS=$("$VELD_BIN" status --name "$RUN_NAME" --json 2>/dev/null); then
+if STOPPED_STATUS=$("$VELD_BIN" orchestrator status --name "$RUN_NAME" --json 2>/dev/null); then
     if echo "$STOPPED_STATUS" | grep -qiE '"(stopped|not.found|exited)"'; then
         pass "processes confirmed stopped"
     else
@@ -369,12 +369,12 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Test 10: veld gc
+# Test 10: veld self gc
 # ---------------------------------------------------------------------------
 
 header "Garbage Collection"
 
-assert_ok "veld gc exits 0" "$VELD_BIN" gc
+assert_ok "veld self gc exits 0" "$VELD_BIN" self gc
 
 # ---------------------------------------------------------------------------
 # Test 11: Re-start (idempotency)
@@ -384,12 +384,12 @@ header "Idempotency (Re-Start)"
 
 cd "$PROJECT_DIR"
 
-assert_ok "veld start (re-start) exits 0" \
-    run_with_timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+assert_ok "veld orchestrator start (re-start) exits 0" \
+    run_with_timeout 120 "$VELD_BIN" orchestrator start "frontend:local" --name "$RUN_NAME"
 
 sleep 2
 
-if RESTART_STATUS=$("$VELD_BIN" status --name "$RUN_NAME" --json 2>/dev/null); then
+if RESTART_STATUS=$("$VELD_BIN" orchestrator status --name "$RUN_NAME" --json 2>/dev/null); then
     if echo "$RESTART_STATUS" | grep -qiE '"(healthy|running)"'; then
         pass "re-started environment is healthy"
     else
@@ -400,10 +400,10 @@ else
 fi
 
 # Stop again for cleanup.
-"$VELD_BIN" stop --name "$RUN_NAME" >/dev/null 2>&1 || true
+"$VELD_BIN" orchestrator stop --name "$RUN_NAME" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
-# Test 12: veld start --oneshot (terminal node: e2e/CI pattern)
+# Test 12: veld orchestrator start --oneshot (terminal node: e2e/CI pattern)
 # ---------------------------------------------------------------------------
 
 header "One-off run (--oneshot)"
@@ -415,10 +415,10 @@ OS_ERR="$(mktemp)"
 
 # The `e2e` command node runs to completion after its deps are healthy, then
 # the whole environment is torn down; the node's exit code becomes veld's.
-if run_with_timeout 120 "$VELD_BIN" start e2e --oneshot --name "$OS_RUN" >"$OS_OUT" 2>"$OS_ERR"; then
-    pass "veld start e2e --oneshot exits 0"
+if run_with_timeout 120 "$VELD_BIN" orchestrator start e2e --oneshot --name "$OS_RUN" >"$OS_OUT" 2>"$OS_ERR"; then
+    pass "veld orchestrator start e2e --oneshot exits 0"
 else
-    fail "veld start e2e --oneshot (exit $?)"
+    fail "veld orchestrator start e2e --oneshot (exit $?)"
     info "stderr: $(cat "$OS_ERR")"
 fi
 
@@ -438,7 +438,7 @@ else
 fi
 
 # Teardown ran: the run is gone afterwards.
-if OS_STATUS=$("$VELD_BIN" status --name "$OS_RUN" --json 2>/dev/null); then
+if OS_STATUS=$("$VELD_BIN" orchestrator status --name "$OS_RUN" --json 2>/dev/null); then
     if echo "$OS_STATUS" | grep -qiE '"(stopped|not.found|exited)"'; then
         pass "oneshot: environment torn down after run"
     else
@@ -450,7 +450,7 @@ fi
 
 # A non-zero terminal exit becomes veld's own exit code.
 OSF_RUN="oneshotfail-$$"
-run_with_timeout 60 "$VELD_BIN" start failtest --oneshot --name "$OSF_RUN" >/dev/null 2>&1
+run_with_timeout 60 "$VELD_BIN" orchestrator start failtest --oneshot --name "$OSF_RUN" >/dev/null 2>&1
 OSF_RC=$?
 if [ "$OSF_RC" -eq 3 ]; then
     pass "oneshot: non-zero terminal exit code propagated (exit 3)"
@@ -459,8 +459,8 @@ else
 fi
 
 rm -f "$OS_OUT" "$OS_ERR"
-"$VELD_BIN" stop --name "$OS_RUN" >/dev/null 2>&1 || true
-"$VELD_BIN" stop --name "$OSF_RUN" >/dev/null 2>&1 || true
+"$VELD_BIN" orchestrator stop --name "$OS_RUN" >/dev/null 2>&1 || true
+"$VELD_BIN" orchestrator stop --name "$OSF_RUN" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
 # Summary

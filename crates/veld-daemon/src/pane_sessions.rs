@@ -89,7 +89,7 @@
 //!
 //! ## Variables
 //!
-//! [`veld_core::ide::PANE_SESSIONS_BUILTINS`] is what `veld lint` accepts and
+//! [`veld_core::ide::PANE_SESSIONS_BUILTINS`] is what `veld orchestrator lint` accepts and
 //! [`list`] is what resolves them, and they are a hand-maintained pair like the
 //! two scopes before them — `pty::tests::sessions_commands_resolve_exactly_the_names_lint_accepts`
 //! is the test that keeps them equal. `pane.id` and `pane.label` are added per

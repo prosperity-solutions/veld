@@ -105,7 +105,7 @@ pub fn hostname_of_url(url: &str) -> &str {
 /// Caddy matches on host, so two entries for one hostname have no defined
 /// winner; keying by hostname makes that state unrepresentable. Two hostnames
 /// that are genuinely equal (two clones of one repo, same run name) do collide
-/// here — deliberately, because they cannot both be served. `veld start`
+/// here — deliberately, because they cannot both be served. `veld orchestrator start`
 /// refuses that case up front instead of silently overwriting.
 ///
 /// The hash suffix is load-bearing: `slugify` truncates at 48 characters, so
@@ -149,8 +149,8 @@ pub fn run_route_id(hostname: &str) -> String {
 /// stored by an older helper.
 ///
 /// The helper canonicalises its whole store to [`run_route_id`] on startup, so
-/// this matters in one window: `veld update` installed new binaries but the *old*
-/// helper is still running (see `veld update`'s warning for the modes where it
+/// this matters in one window: `veld self update` installed new binaries but the *old*
+/// helper is still running (see `veld self update`'s warning for the modes where it
 /// cannot restart itself). Without this, stopping such a run would leave its
 /// legacy entry behind to shadow the hostname forever.
 ///
@@ -158,7 +158,7 @@ pub fn run_route_id(hostname: &str) -> String {
 /// helper only ever removes the legacy id, so every `veld-run-*` entry this build
 /// persisted becomes a store orphan it will replay but never clean up. Nothing
 /// prunes it automatically — delete `caddy-data/veld-routes.json` (the helper
-/// rebuilds it from the next `veld start`) if a downgrade leaves stale routes.
+/// rebuilds it from the next `veld orchestrator start`) if a downgrade leaves stale routes.
 ///
 /// Only ever call it on a **removal** path. Deleting a legacy id before adding
 /// ours would re-create #170's start collision, since the legacy id may belong

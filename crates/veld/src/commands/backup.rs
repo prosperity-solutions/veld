@@ -1,4 +1,4 @@
-//! `veld backup` — see the copies, take one, put one back.
+//! `veld self backup list` — see the copies, take one, put one back.
 //!
 //! **Everything here has to work on a machine whose database does not open**, which
 //! is the only day this command matters. So nothing in this file requires
@@ -6,7 +6,7 @@
 //! ([`backup::default_dir`]) when the settings cannot be read, and `restore` never
 //! opens the live database at all.
 //!
-//! Restore is deliberately its own verb rather than a flag on `veld doctor`. Doctor
+//! Restore is deliberately its own verb rather than a flag on `veld self doctor`. Doctor
 //! is a read-only diagnostic somebody runs when they are already worried, and a
 //! destructive flag on it is a different kind of command wearing the same name.
 //! Doctor's job here is to *report* the backups and name this command, which it
@@ -40,7 +40,7 @@ fn resolve_dir(explicit: Option<PathBuf>) -> Option<(PathBuf, &'static str)> {
 ///
 /// **`Db::open()` creates and migrates**, which is right for every other command
 /// and wrong for this one: somebody whose database has just vanished would have
-/// `veld backup` mint a fresh empty one as a side effect of asking what they can
+/// `veld self backup list` mint a fresh empty one as a side effect of asking what they can
 /// restore, and the restore would then file that empty database away as the
 /// evidence of what went wrong. So the existence check comes first, and a missing
 /// database simply means the settings are unreadable and the defaults apply.
@@ -52,7 +52,7 @@ fn open_existing_db() -> Option<Db> {
     Db::open().ok()
 }
 
-/// `veld backup` — list what is on disk, newest first.
+/// `veld self backup list` — list what is on disk, newest first.
 pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
     let Some((dir, source)) = resolve_dir(dir) else {
         output::print_error("Could not determine a backup directory.", json);
@@ -125,7 +125,7 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
         println!();
         output::print_info(
             "  No backups yet. The daemon writes one on the interval in \
-             `veld settings backup`; `veld backup now` takes one immediately.",
+             `veld self settings list backup`; `veld self backup now` takes one immediately.",
         );
         return 0;
     }
@@ -180,13 +180,13 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
     // `backup::restore` refuses.
     match backup::newest_restorable(&dir, chrono::Utc::now()) {
         Some(a) => output::print_info(&format!(
-            "  Restore the newest usable one with `veld backup restore`, or that exact \
-             one with `veld backup restore {}`.",
+            "  Restore the newest usable one with `veld self backup restore`, or that exact \
+             one with `veld self backup restore {}`.",
             a.path.display()
         )),
         None => output::print_info(
             "  None of these can be restored — see the reasons above. \
-             `veld backup now` takes a fresh one if the database still opens.",
+             `veld self backup now` takes a fresh one if the database still opens.",
         ),
     }
     0
@@ -205,7 +205,7 @@ pub fn list(dir: Option<PathBuf>, json: bool) -> i32 {
 /// there is no usable timestamp to measure — nothing written yet, or a
 /// future-dated newest artifact: the daemon waits for its own uptime to exceed
 /// the window (it may have started seconds ago), while this has no uptime to
-/// reason from and answers immediately. A person who typed `veld backup` is
+/// reason from and answers immediately. A person who typed `veld self backup list` is
 /// asking now and deserves the impatient answer.
 fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
     // One open, both questions: the settings and whether the database holds
@@ -225,7 +225,7 @@ fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
     // daemon's probe carries (`dbhealth::check_overdue_backup`) and for the same
     // reason: `backup::plan` deliberately declines to copy an empty one, so
     // reporting that as a fault is a warning about a machine behaving exactly as
-    // designed. Without this, `veld backup` on a fresh install printed "No backup
+    // designed. Without this, `veld self backup list` on a fresh install printed "No backup
     // has ever been written" directly above its own "No backups yet — the daemon
     // writes one on the interval" line.
     //
@@ -253,7 +253,7 @@ fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
     let Some(newest) = newest else {
         return Some(format!(
             "No backup has ever been written — one is due every {interval} minute(s). \
-             The reason is in the daemon log (`veld doctor` prints its location)."
+             The reason is in the daemon log (`veld self doctor` prints its location)."
         ));
     };
     // `taken_at <= now` as well as the upper bound: a future-dated artifact (an
@@ -272,7 +272,7 @@ fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
     if age <= limit {
         return None;
     }
-    // **Deliberately does not point at `veld doctor`.** Doctor judges staleness
+    // **Deliberately does not point at `veld self doctor`.** Doctor judges staleness
     // with its own, more generous rule (four intervals, floored at twelve hours
     // — see `backup::overdue_after` for why the two differ on purpose), so
     // between two and twelve hours this line would have said "doctor says why"
@@ -284,12 +284,12 @@ fn overdue_verdict(newest: Option<&backup::Artifact>) -> Option<String> {
     Some(format!(
         "The newest backup is {} — one is due every {interval} minute(s). \
          Backups have stopped: the reason is in the daemon log \
-         (`veld doctor` prints its location).",
+         (`veld self doctor` prints its location).",
         output::describe_age(age)
     ))
 }
 
-/// `veld backup now` — take one immediately, outside the daemon's schedule.
+/// `veld self backup now` — take one immediately, outside the daemon's schedule.
 pub fn now(dir: Option<PathBuf>, json: bool) -> i32 {
     let Some((dir, _)) = resolve_dir(dir) else {
         output::print_error("Could not determine a backup directory.", json);
@@ -300,7 +300,7 @@ pub fn now(dir: Option<PathBuf>, json: bool) -> i32 {
     // The tempting fallback — prune with the defaults — is the dangerous one, and it
     // is dangerous precisely on the path that reaches it: the settings are
     // unreadable because the database is gone or broken, which is the moment
-    // `veld doctor` tells somebody to run this. A user who set `backup.keep` to 200
+    // `veld self doctor` tells somebody to run this. A user who set `backup.keep` to 200
     // would have up to 188 of their remaining artifacts deleted by the command they
     // were sent to for help. Not pruning costs an unbounded directory for somebody
     // looping this by hand; the scheduled backup prunes it back the next time the
@@ -393,7 +393,7 @@ pub fn now(dir: Option<PathBuf>, json: bool) -> i32 {
     }
 }
 
-/// `veld backup restore` — put a backup back in place.
+/// `veld self backup restore` — put a backup back in place.
 pub async fn restore(
     path: Option<PathBuf>,
     dir: Option<PathBuf>,
@@ -415,9 +415,9 @@ pub async fn restore(
     // handle — but it is surprising enough to be worth refusing by default.
     if !force && daemon_is_up().await {
         // Names the command, because "stop it" is not an instruction anybody can
-        // follow here: there is no `veld stop-daemon`, the daemon is a
+        // follow here: there is no stop-daemon command, the daemon is a
         // service-manager job, and the person reading this arrived from
-        // `veld doctor` with a broken install.
+        // `veld self doctor` with a broken install.
         // Names *this* database's daemon. On a dev instance that is a node of a
         // veld run, not the installed launchd job — see `stop_hint`.
         let whose = if Db::uses_installed_database() {
@@ -471,7 +471,7 @@ pub async fn restore(
                 output::print_error(
                     &format!(
                         "None of the {} backup(s) in {} can be restored — see \
-                         `veld backup` for why.",
+                         `veld self backup list` for why.",
                         artifacts.len(),
                         dir.display()
                     ),
@@ -485,7 +485,7 @@ pub async fn restore(
 
     // **`--json` is an output format, not consent**, and neither is the absence of a
     // terminal. The first version read `!assume_yes && !json && is_tty()`, which
-    // made `veld backup restore --json` replace the live database silently and made
+    // made `veld self backup restore --json` replace the live database silently and made
     // any piped invocation do the same — a destructive default nothing announced,
     // in a command whose whole subject is a file you cannot regenerate. `-y` exists
     // to say yes; without a terminal to ask, the answer is no.
@@ -581,7 +581,7 @@ pub async fn restore(
 /// - The **installed** database is owned by the daemon on the **default** socket.
 ///   That is true whatever socket *this process* was pointed at, which is why this
 ///   asks the default socket rather than `daemon_socket()`. Reading the instance
-///   socket here would let `VELD_DAEMON_SOCK=… veld backup restore` skip the check
+///   socket here would let `VELD_DAEMON_SOCK=… veld self backup restore` skip the check
 ///   entirely while the installed daemon carried on writing the file being
 ///   replaced.
 /// - A **non-installed** database (a `VELD_DB_PATH` override, a cargo build's own)
@@ -608,10 +608,10 @@ async fn daemon_is_up() -> bool {
 /// Whether a human is there to answer the confirmation prompt.
 ///
 /// **Gated on the two streams this prompt actually uses, and on neither of the ones
-/// it does not** — the rule `veld start` already arrived at the hard way
+/// it does not** — the rule `veld orchestrator start` already arrived at the hard way
 /// (`commands/start.rs`, and its comment is worth reading before changing this).
 /// Not `output::is_tty()`, which reads **stdout**: the question goes to stderr, so
-/// `veld backup restore | tee log` from a real terminal would be declared
+/// `veld self backup restore | tee log` from a real terminal would be declared
 /// unattended and refused with a human sitting right there. Not stdin alone
 /// either, which is the trap on the way back — a process launched from a terminal
 /// can hand its tty to a child whose stderr is a log file nobody reads, and the
@@ -628,7 +628,7 @@ fn attended() -> bool {
 /// How to bring the daemon back onto the restored file.
 ///
 /// Printed rather than done: the installed daemon is a service-manager job, and a
-/// CLI that booted it out and back in would be reimplementing `veld setup`'s
+/// CLI that booted it out and back in would be reimplementing `veld self setup`'s
 /// launchd choreography for one line of convenience.
 ///
 /// **Which daemon this is depends on which database is being restored**, and
@@ -637,11 +637,11 @@ fn attended() -> bool {
 /// `launchctl kickstart … dev.veld.daemon` there points at the **installed**
 /// daemon, which does not own this database and whose restart would disturb the
 /// environments the developer actually has running. Found by restoring against a
-/// live `veld start --preset dev-headless` stack, which is the only place the two
+/// live `veld orchestrator start --preset dev-headless` stack, which is the only place the two
 /// differ.
 fn restart_hint() -> String {
     if !Db::uses_installed_database() {
-        return "veld start".to_string();
+        return "veld orchestrator start".to_string();
     }
     if cfg!(target_os = "macos") {
         "launchctl kickstart -k gui/$(id -u)/dev.veld.daemon".to_string()
@@ -658,7 +658,7 @@ fn restart_hint() -> String {
 /// within seconds, which would look like the refusal was wrong.
 fn stop_hint() -> String {
     if !Db::uses_installed_database() {
-        return "veld stop".to_string();
+        return "veld orchestrator stop".to_string();
     }
     if cfg!(target_os = "macos") {
         "launchctl bootout gui/$(id -u)/dev.veld.daemon".to_string()

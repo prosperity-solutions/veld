@@ -131,7 +131,7 @@ const EXPIRY_TICK: Duration = Duration::from_secs(30);
 /// renews.
 ///
 /// The gap between them is the slack: three renewals may fail — a helper being
-/// restarted by `veld update`, a moment of load — before the machine loses the
+/// restarted by `veld self update`, a moment of load — before the machine loses the
 /// battery half. Renewing far inside the lease is what keeps a healthy setup
 /// from flapping; the lease being *short* is what bounds how long a dead daemon
 /// keeps somebody's Mac awake. Both halves matter, so change neither alone.
@@ -157,7 +157,7 @@ const _: () =
 /// The probe is a real round trip with a 3s ceiling, and the idle status is
 /// polled by every open client on window focus — so caching is not an
 /// optimisation, it is what stops a tab switch costing a socket connection. The
-/// answer changes only when somebody runs `veld setup privileged`, and being a
+/// answer changes only when somebody runs `veld self setup privileged`, and being a
 /// minute stale about that shows up as one menu that has not caught up yet.
 const PRIVILEGED_PROBE_TTL: Duration = Duration::from_secs(60);
 
@@ -177,14 +177,14 @@ const _: () = assert!(POWER_TTL.as_secs() * 2 <= EXPIRY_TICK.as_secs());
 
 /// How many inhibitors may die on their own before this stops re-spawning them.
 ///
-/// Two rather than one, because a single death is also what a `veld update`
+/// Two rather than one, because a single death is also what a `veld self update`
 /// racing a spawn looks like, and giving up on the first would turn a transient
 /// into a session-long outage.
 const IMMEDIATE_DEATHS_BEFORE_GIVING_UP: u32 = 2;
 
 /// Ceiling on a helper round trip made while the session lock is held.
 ///
-/// `HelperClient` bounds its own sends at 15s, which is right for a `veld start`
+/// `HelperClient` bounds its own sends at 15s, which is right for a `veld orchestrator start`
 /// that cannot proceed without a route and wrong for this: taking and dropping
 /// the lease both happen under the session lock, so a wedged helper would stall
 /// the button *and* every status poll behind it for the whole of that budget.
@@ -277,7 +277,7 @@ static PRIVILEGED: LazyLock<Mutex<Option<(Instant, bool)>>> = LazyLock::new(|| M
 ///
 /// Separate from the cache above because that one is a *reachability* probe on a
 /// 60s TTL — it would expire this answer and flip back to "capable", swapping the
-/// actionable "run `veld setup privileged`" line for an unactionable fault report
+/// actionable "run `veld self setup privileged`" line for an unactionable fault report
 /// one minute into a session that may run all night. A helper only gains the
 /// command by being replaced, and that replaces this process's view with a
 /// restart.
@@ -416,7 +416,7 @@ async fn battery_capable() -> bool {
 /// the probe says capable, but this helper predates the feature and never will
 /// take a lease. Without this the menu shows "the privileged helper didn't take
 /// the lease" — a fault with no user action — instead of the actionable line
-/// naming `veld setup privileged`.
+/// naming `veld self setup privileged`.
 async fn mark_not_battery_capable() {
     *PRIVILEGED.lock().await = Some((Instant::now(), false));
     NO_BATTERY_HALF.store(true, Ordering::Relaxed);
@@ -473,7 +473,7 @@ async fn acquire_battery_lease() -> Option<HelperClient> {
 /// Renew the lease until the session ends or the helper stops answering.
 async fn renew_battery_lease(client: HelperClient, battery: Arc<AtomicBool>) {
     // The whole point of asking for 90s and renewing at 30s is that renewals may
-    // fail and the hold survives — `veld update` restarting the helper is the
+    // fail and the hold survives — `veld self update` restarting the helper is the
     // routine example. So a failure retries; only the lease *actually lapsing*
     // ends the loop and drops the claim. (Giving up on the first error, which is
     // what this did before review, made the 90/30 ratio buy nothing.)
@@ -817,7 +817,7 @@ pub(crate) async fn reconcile() {
     // this module's own `get_state` already avoids exactly that shape.
     // Falling back rather than returning. Bailing here looked safe and is the
     // opposite: nothing else prunes a deadline or stops a session, so a database
-    // that is briefly unreadable — locked, disk full, mid-`veld update` — would
+    // that is briefly unreadable — locked, disk full, mid-`veld self update` — would
     // leave the machine held awake for as long as it stayed that way, which is
     // the one direction this module promises never to fail in.
     let prefs = load_prefs().await.unwrap_or_else(fallback_prefs);
@@ -886,7 +886,7 @@ async fn cached_prefs() -> KeepAwakePrefs {
 /// `manual_on_battery` is deliberately **false** here rather than its real
 /// default: with the database unreadable we cannot know whether the user turned
 /// it off, and guessing `true` makes `plan` want a lease, find none held, and
-/// report `no_helper` — sending somebody to `veld setup privileged` to fix a
+/// report `no_helper` — sending somebody to `veld self setup privileged` to fix a
 /// lease they themselves declined.
 fn fallback_prefs() -> KeepAwakePrefs {
     KeepAwakePrefs {
@@ -1017,7 +1017,7 @@ pub(crate) fn shares_changed(count: usize, latest_expiry: Option<DateTime<Utc>>)
 /// `battery_capable` is passed in rather than looked up here because learning it
 /// is an `await` and this runs under the session lock. Note what the UI is given:
 /// `platform` plus two booleans, not a sentence. Composing "on mains power only,
-/// run `veld setup privileged`" is the bundle's job — the daemon knows the facts,
+/// run `veld self setup privileged`" is the bundle's job — the daemon knows the facts,
 /// and the copy belongs where it can be edited without a daemon release.
 fn status_of(
     machine: &Machine,
@@ -1427,7 +1427,7 @@ mod tests {
         }
     }
 
-    /// A status must never point somebody at `veld setup privileged` for a lease
+    /// A status must never point somebody at `veld self setup privileged` for a lease
     /// veld deliberately never asked for. This is the one that stops the existing
     /// lid note becoming a fault report on every automatic hold.
     #[tokio::test]

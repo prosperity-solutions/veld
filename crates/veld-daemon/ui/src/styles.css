@@ -297,7 +297,7 @@ body[data-fullscreen="true"] .topbar.electron {
  *
  * Scoped to `.topbar` so dialogs and panes keep Mantine's sizing; menus and
  * dropdowns portal to `body`, so their contents are outside this too. `.chip`
- * (the "no veld config" / "repository unavailable" label) is also deliberately
+ * (the "no veld.json" / "repository unavailable" label) is also deliberately
  * outside it: it is the one thing in the bar that is not a control, so it keeps
  * its smaller pill shape. Note that `.sep` is non-Mantine too but *is* levelled,
  * by its own `height: var(--topbar-control-h)` rule below — so "not a Mantine
@@ -4851,7 +4851,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   color: var(--muted);
 }
 
-/* A small inline state marker in a dense row — the top bar's "no veld config" and
+/* A small inline state marker in a dense row — the top bar's "no veld.json" and
    "repository unavailable" states. Also previously used and never defined, so it
    rendered as bare text between real controls. The unavailable case overrides the
    colour inline (`--warn`), which still wins over this. */

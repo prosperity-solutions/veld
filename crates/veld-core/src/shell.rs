@@ -302,7 +302,7 @@ const PROBE_RETRY_AFTER: Duration = Duration::from_secs(60);
 /// effect is a session stuck in posix mode for nothing. A version table would also
 /// have to be right about every distro's patched build, so this asks the binary
 /// instead: it is the same "probe the capability, don't guess it" rule the shims
-/// already follow for `veld open-url --help`.
+/// already follow for `veld ide open-url --help`.
 ///
 /// Cached per path for the life of the process, because the answer changes only
 /// when the binary does. A shell upgraded under a running daemon keeps the old
@@ -330,7 +330,7 @@ pub async fn supports_posix_env_handoff(shell: &str) -> bool {
         // The probe did not run — a spawn failure, or the timeout. That is not
         // evidence about the shell, and memoizing it as a definitive `false` would
         // switch the handoff off for the daemon's whole lifetime on one transient
-        // hiccup, while `veld doctor` (a separate process, probing afresh) reported
+        // hiccup, while `veld self doctor` (a separate process, probing afresh) reported
         // the opposite with no way to tell which was right. Same rule
         // `user_path::publish_value` states: a resolution that learned nothing never
         // displaces one that did.

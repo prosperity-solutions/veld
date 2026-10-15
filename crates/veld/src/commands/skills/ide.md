@@ -57,7 +57,7 @@ the window is showing, and never steals focus across worktrees.
 Run from a Veld terminal, it opens **beside that terminal** (it reads
 `VELD_PTY_SESSION`). Anywhere else, it uses the worktree that contains the current
 directory. It **never falls back to the system opener** — that is the difference
-from `veld open-url`, which stands in for `open` and must fall through. So a
+from `veld ide open-url`, which stands in for `open` and must fall through. So a
 non-zero exit means nothing was shown, and the message says why:
 
 | Exit | Meaning |
@@ -147,7 +147,7 @@ You do not need to know these to use the command, but they explain what the
 human may already have open:
 
 - **Clicking a path in terminal output** offers *View in Veld* first. If the
-  project declares editor actions (`accepts: "file"` — see `veld skills
+  project declares editor actions (`accepts: "file"` — see `veld agent skills
   ide-extensions`), they are listed under it, and the user's first choice is
   remembered (`terminal.fileAction`, where `"veld"` means the file pane).
 - **`open notes.md`** in a Veld terminal, for a text file inside the worktree,

@@ -1,4 +1,4 @@
-//! `veld stop` — a face of the engine.
+//! `veld orchestrator stop` — a face of the engine.
 
 use std::sync::Arc;
 
@@ -10,7 +10,7 @@ use veld_engine::api::{
 use crate::engine_client::EngineClient;
 use crate::output;
 
-/// `veld stop [--name <n>] [--all]`
+/// `veld orchestrator stop [--name <n>] [--all]`
 pub async fn run(name: Option<String>, all: bool) -> i32 {
     let Some(project_root) = super::project_root() else {
         return 1;

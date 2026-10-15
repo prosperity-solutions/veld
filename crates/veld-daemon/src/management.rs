@@ -49,7 +49,7 @@ pub fn routes() -> Router {
         // Same SPA; the join ticket rides in the URL fragment (client-only).
         .route("/join", get(dashboard))
         .route("/ide", get(ide_ui))
-        // Liveness + version probe. `veld update` polls this to confirm the
+        // Liveness + version probe. `veld self update` polls this to confirm the
         // daemon actually restarted onto the new binary (not just that *some*
         // daemon is reachable), mirroring the helper's version check.
         .route("/api/health", get(health))
@@ -132,7 +132,7 @@ struct RunInfo {
     /// stripped server-side when this is false.
     live: bool,
     /// Full run UUID of the latest run — `run_id` means the canonical UUID on
-    /// every veld JSON surface (`veld runs --json`, `veld status --json`).
+    /// every veld JSON surface (`veld orchestrator runs list --json`, `veld orchestrator status --json`).
     run_id: String,
     /// Git-style short prefix of `run_id`, for display.
     short_id: String,
@@ -167,7 +167,7 @@ struct RunInfo {
 /// (badge, outcome, node table) for any past run.
 #[derive(Serialize)]
 struct HistoryEntry {
-    /// Full run UUID (same contract as `veld runs --json`).
+    /// Full run UUID (same contract as `veld orchestrator runs list --json`).
     run_id: String,
     /// Git-style short prefix, for display.
     short_id: String,
@@ -963,7 +963,7 @@ struct LogQuery {
     node: Option<String>,
     /// Filter by source: "all" (default), "server" (node output), "client",
     /// "setup" (project setup/teardown steps, alias "teardown"), or "internal"
-    /// (alias "veld"). Mirrors `veld logs --source`.
+    /// (alias "veld"). Mirrors `veld orchestrator logs --source`.
     #[serde(default = "default_source")]
     source: String,
     /// Run instance to read (id prefix). Default: the environment's latest
@@ -1127,7 +1127,7 @@ fn get_logs_blocking(
     // Project setup/teardown output — shown as _veld:setup, like the internal
     // stream, since it belongs to the run rather than to any one node.
     // Not gated on `q.node`: `setup` is a run-level stream, so a node filter
-    // does not apply to it — the same rule `veld logs` follows for the run-level
+    // does not apply to it — the same rule `veld orchestrator logs` follows for the run-level
     // streams (see `crates/veld/src/commands/logs.rs`, run-level filter branch).
     if include_setup {
         // Labelled per step: the rows of every step share one section, and
@@ -1566,8 +1566,8 @@ pub fn sweep_spawn_logs() {
 /// undone it is not clutter but a hard blocker, because the container name
 /// interpolates `${veld.run}` — the *environment* name, not a per-run id — so
 /// the name is identical on every run of that environment and the next
-/// `veld start` fails with `container ... already exists` until somebody removes
-/// it by hand. `veld gc` does not help: it collects veld's own state and logs,
+/// `veld orchestrator start` fails with `container ... already exists` until somebody removes
+/// it by hand. `veld self gc` does not help: it collects veld's own state and logs,
 /// never the container runtime's.
 ///
 /// **Delegated to an engine worker rather than run in this process.** Resolving
@@ -1582,14 +1582,14 @@ pub fn sweep_spawn_logs() {
 /// owes. **Callers must gate this on their own guarded status transition**
 /// (`finalize_crashed` / `finalize_run` returning `true`): that single-winner
 /// election is what stops the 5s monitor, the 600s GC and a concurrent
-/// `veld start` sweep from each spawning one. Even so, a duplicate is harmless
+/// `veld orchestrator start` sweep from each spawning one. Even so, a duplicate is harmless
 /// rather than wrong — teardown's ledger is per node and persisted as each hook
 /// returns, so a second delegate resumes instead of repeating.
 ///
 /// Best-effort by design and not awaited: the worker's outcome is in its
 /// action's event log (`engine_actions`), not here. Neither a failed teardown
 /// nor a refused one (an update holding the lock) loses anything permanently:
-/// the next `veld start` for the project sweeps whatever its runs still owe.
+/// the next `veld orchestrator start` for the project sweeps whatever its runs still owe.
 pub(crate) async fn delegate_teardown(project_root: &std::path::Path, run_name: &str) {
     match super::engine::spawn_daemon_action(
         project_root,
@@ -1604,7 +1604,7 @@ pub(crate) async fn delegate_teardown(project_root: &std::path::Path, run_name: 
         }
         Err((code, message)) => warn!(
             "could not tear down the ended run '{run_name}' ({code}: {message}); its on_stop \
-             hooks run on the next `veld start` here"
+             hooks run on the next `veld orchestrator start` here"
         ),
     }
 }

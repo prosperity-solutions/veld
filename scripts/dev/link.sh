@@ -88,7 +88,7 @@ export VELD_PTY_DIR="\$HOME/.veld/pty-dv-$run_digest"
 
 # Warn, but do NOT refuse. This wrapper carries a port that was allocated to one
 # run; if that run crashed, nothing removed this file, because the \`on_stop\`
-# hook runs only on a deliberate \`veld stop\`. Saying so turns "my environments
+# hook runs only on a deliberate \`veld orchestrator stop\`. Saying so turns "my environments
 # vanished" into "the stack is down".
 #
 # Refusing outright was the first version and it was wrong: most of what you
@@ -102,7 +102,7 @@ export VELD_PTY_DIR="\$HOME/.veld/pty-dv-$run_digest"
 if ! (exec 3<>/dev/tcp/127.0.0.1/"\$VELD_DAEMON_PORT") 2>/dev/null; then
     echo "veld-dev-$run: nothing is listening on port \$VELD_DAEMON_PORT — that run is not up." >&2
     echo "  Commands that need the daemon will come back empty. Restart it with:" >&2
-    echo "    (cd $root && veld start --preset dev-keep)" >&2
+    echo "    (cd $root && veld orchestrator start --preset dev-keep)" >&2
 fi
 
 exec "$root/target/debug/veld" "\$@"

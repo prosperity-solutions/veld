@@ -10,7 +10,7 @@ fn management_url(https_port: u16) -> String {
     }
 }
 
-/// `veld ui` — open the management dashboard in the default browser.
+/// `veld ide dashboard` — open the management dashboard in the default browser.
 pub async fn run() -> i32 {
     // Determine HTTPS port from the helper.
     let https_port = match veld_core::helper::HelperClient::connect().await {
@@ -19,7 +19,10 @@ pub async fn run() -> i32 {
             .await
             .unwrap_or(veld_core::instance::UNPRIVILEGED_HTTPS_PORT),
         Err(_) => {
-            output::print_error("Veld helper not running. Run `veld setup` first.", false);
+            output::print_error(
+                "Veld helper not running. Run `veld self setup` first.",
+                false,
+            );
             return 1;
         }
     };

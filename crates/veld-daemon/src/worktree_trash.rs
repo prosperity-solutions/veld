@@ -16,7 +16,7 @@
 //! also a work item, because those two readings disagree about the case that matters:
 //! at boot, "in the bin" and "queued for removal" look identical on the row, and
 //! [`recover`] used to resume every trashed row — so restarting the daemon (a `veld
-//! update` does exactly that) permanently deleted the whole trash, with
+//! self update` does exactly that) permanently deleted the whole trash, with
 //! `worktree.trashRetentionDays` at its default `0` meaning *keep until I empty it*.
 //! The setting was read correctly by the sweep and bypassed entirely by recovery.
 //!
@@ -63,7 +63,7 @@ use veld_core::db::Db;
 /// "its run did not stop", which is a state the user can act on.
 const STOP_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Poll interval while waiting for teardown. `veld stop` is spawned
+/// Poll interval while waiting for teardown. `veld orchestrator stop` is spawned
 /// fire-and-forget, so the run's persisted status is the only observable.
 const STOP_POLL: Duration = Duration::from_secs(1);
 
@@ -423,7 +423,7 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
         )
         .await;
         // **Fail now, with the real reason, instead of after 120 seconds with the
-        // wrong one.** The engine refuses outright while `veld update` holds the
+        // wrong one.** The engine refuses outright while `veld self update` holds the
         // update lock, so nothing was spawned and nothing is going to stop — but
         // the poll below cannot tell that from a run that is merely slow, and it
         // would spend the whole `STOP_TIMEOUT` before reporting "stop it yourself
@@ -436,8 +436,8 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
         };
         if code == axum::http::StatusCode::SERVICE_UNAVAILABLE {
             return Err(
-                "a veld update is in progress, so runs cannot be stopped right now — try again \
-                 when it finishes (`veld update --status`)"
+                "a Veld update is in progress, so runs cannot be stopped right now — try again \
+                 when it finishes (`veld self update --status`)"
                     .to_owned(),
             );
         }
@@ -548,7 +548,7 @@ mod tests {
         );
     }
 
-    /// **The reported bug.** Restarting the daemon — which every `veld update` does —
+    /// **The reported bug.** Restarting the daemon — which every `veld self update` does —
     /// queues no removals while `worktree.trashRetentionDays` is at its default `0`,
     /// so a worktree the user binned and left alone is still there afterwards. Before
     /// the fix `recover` enqueued every row with a non-empty `trashed_at` and the whole

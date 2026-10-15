@@ -14,7 +14,7 @@
 //! Each pass records the tree **twice**: once as the aggregate
 //! ([`ProcessStats`], what a status table and a sparkline read) and once as one
 //! row per process ([`ProcessSample`], what the expandable UI graphs and
-//! `veld stats --processes` read). The per-process rows are not derived from the
+//! `veld orchestrator stats --processes` read). The per-process rows are not derived from the
 //! aggregate later because they cannot be — the parent links and per-PID figures
 //! only exist during the scan that produced them.
 //!
@@ -43,7 +43,7 @@
 //! which are never persisted anywhere. So no process is counted twice and no
 //! node key is written by both. Persisting a `command` step's PID would break
 //! that — and would also make a finished build look like a dead node to
-//! `veld stop` and to the orphan reaper.
+//! `veld orchestrator stop` and to the orphan reaper.
 
 mod procmem;
 mod recorder;
@@ -600,7 +600,7 @@ mod tests {
 
     /// The whole path, on real processes and a real database: sample a live
     /// process tree, persist both the aggregate and the per-process rows, then
-    /// read them back the way `veld stats` and `/api/stats/history` do.
+    /// read them back the way `veld orchestrator stats` and `/api/stats/history` do.
     ///
     /// The unit tests above cover the walk and the SQL separately; this is the
     /// only thing that would notice if the two stopped fitting together — a

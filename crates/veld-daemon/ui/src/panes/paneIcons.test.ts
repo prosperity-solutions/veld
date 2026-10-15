@@ -10,7 +10,7 @@ import { PANE_ICONS } from "./paneIcons";
  *
  * `veld_core::ide::PANE_ICON_NAMES` is checked against the schema enum by a Rust
  * test; this checks the *renderer* against the same enum. Without it a name can
- * be accepted by the config, validated by the editor, pass `veld lint` — and
+ * be accepted by the config, validated by the editor, pass `veld orchestrator lint` — and
  * then render as a fallback glyph with nothing anywhere saying why.
  */
 describe("pane icon names", () => {

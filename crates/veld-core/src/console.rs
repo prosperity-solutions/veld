@@ -1,6 +1,6 @@
 //! Open a real terminal window and run a command in it.
 //!
-//! Written for exactly one caller — `veld update`, when Veld Desktop handed the
+//! Written for exactly one caller — `veld self update`, when Veld Desktop handed the
 //! update over — and the two reasons it exists are worth stating, because both
 //! are properties of a *terminal*, not of a subprocess:
 //!
@@ -29,7 +29,7 @@
 //! Not much, and that is the important caveat. `open` and every Linux emulator
 //! are fire-and-forget: a zero exit status says a launcher was started, not that
 //! a window appeared or that anything ran in it. So a caller must **not** treat
-//! `Ok` as done. `veld update` confirms the real thing instead — it waits for the
+//! `Ok` as done. `veld self update` confirms the real thing instead — it waits for the
 //! update lock to be taken by a different pid, which only the command inside the
 //! window can do — and falls back to running headless when that never happens.
 
@@ -93,7 +93,7 @@ pub fn launch(
 /// Where the generated script lives.
 ///
 /// A stable path rather than a temp file, and owner-only: it is regenerated on
-/// every launch, it is one more thing `veld uninstall` already removes with
+/// every launch, it is one more thing `veld self uninstall` already removes with
 /// `~/.veld`, and a fixed name means a user who finds a stray window can see what
 /// produced it. The extension matters on macOS — LaunchServices routes `.command`
 /// to a terminal and nothing else does.
@@ -144,7 +144,7 @@ echo
 if [ "$status" -eq 0 ]; then
   echo {done_hint}
 {close_on_success}else
-  echo "veld update exited with status $status."
+  echo "veld self update exited with status $status."
   # Only on failure, and bounded. A window that closes takes the diagnosis with
   # it — but a window that waits forever for a user who has walked away is a
   # process sitting on nothing, so the prompt times out and closes on its own.

@@ -6,7 +6,7 @@ use crate::output;
 /// Maximum age for log lines before pruning (hours). Matches the daemon GC.
 const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 
-/// `veld gc` -- garbage-collect stale state, logs, orphaned processes, and routes.
+/// `veld self gc` -- garbage-collect stale state, logs, orphaned processes, and routes.
 pub async fn run() -> i32 {
     output::print_info("Running garbage collection...");
 
@@ -96,10 +96,10 @@ pub async fn run() -> i32 {
                     // `Failed`, not `Stopped`: `Stopped` is the per-node
                     // teardown ledger (`orchestrator::teardown_pending`) and
                     // this sweep runs no `on_stop` hook. Writing it here would
-                    // tell the next `veld start`'s sweep that a teardown which
+                    // tell the next `veld orchestrator start`'s sweep that a teardown which
                     // never happened already had, stranding the container the
                     // hook exists to remove. Hooks for a run reaped here run on
-                    // the next `veld start` for its project.
+                    // the next `veld orchestrator start` for its project.
                     //
                     // And *only* the spawned ones, because the same ledger reads
                     // `Failed` as "owes a hook". Relabelling a `Pending` node —
@@ -131,15 +131,15 @@ pub async fn run() -> i32 {
     //
     // The daemon gates the same work on `dbhealth::verified_not_corrupt()`, and
     // this path has to gate it too rather than being written off as "somebody
-    // typed `veld gc`". It is not hand-run in practice: `maybe_auto_gc` in
-    // `crates/veld/src/main.rs` detaches a `veld gc` subprocess from *any* CLI
-    // invocation once 30 minutes have passed — `veld logs`, `veld status`,
-    // `veld start`, precisely the commands somebody runs while diagnosing a
+    // typed `veld self gc`". It is not hand-run in practice: `maybe_auto_gc` in
+    // `crates/veld/src/main.rs` detaches a `veld self gc` subprocess from *any* CLI
+    // invocation once 30 minutes have passed — `veld orchestrator logs`, `veld orchestrator status`,
+    // `veld orchestrator start`, precisely the commands somebody runs while diagnosing a
     // corrupt database. Left ungated, the daemon's gate buys at most 30 minutes.
     //
     // This process has no `dbhealth` state (it is a one-shot CLI, and the
     // daemon's is process-local), so it asks SQLite directly. That is a
-    // `quick_check` — the same one `veld doctor` runs — and it is affordable
+    // `quick_check` — the same one `veld self doctor` runs — and it is affordable
     // here for the same reason the prune is: this runs at most once every 30
     // minutes, detached, off any foreground command's critical path.
     //
@@ -151,7 +151,7 @@ pub async fn run() -> i32 {
     let (logs_pruned, feedback_cleaned) = if damaged {
         output::print_info(
             "Database reports as damaged — skipping log retention and page reclaim, because \
-             both relocate pages in a file whose page map is not trustworthy. Run `veld doctor` \
+             both relocate pages in a file whose page map is not trustworthy. Run `veld self doctor` \
              for the details, and restore a backup to resume housekeeping.",
         );
         (0, 0)

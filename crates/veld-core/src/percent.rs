@@ -7,7 +7,7 @@
 //! dependency shared between the CLI, the daemon, the privileged helper and the
 //! gateway is not free.
 //!
-//! **One function, however many callers, deliberately.** `veld settings` encodes a
+//! **One function, however many callers, deliberately.** `veld self settings` encodes a
 //! setting key into a `DELETE` path and its database path into `X-Veld-Db`; the
 //! daemon encodes *its own* database path to compare against that header, and
 //! encodes each segment of a relative path into a file-serving URL

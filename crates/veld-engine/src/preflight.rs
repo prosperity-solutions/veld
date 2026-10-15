@@ -2,7 +2,7 @@
 //! which nodes, which run, which answers are missing, which env names the face
 //! must supply.
 //!
-//! This used to be the first half of `veld start`, `veld restart` and `veld stop`
+//! This used to be the first half of `veld orchestrator start`, `veld orchestrator restart` and `veld orchestrator stop`
 //! in the CLI. It moved here so every face asks the same questions and gets the
 //! same refusals — the IDE's start button no longer execs a CLI to find out.
 //! What stayed in the face is only what needs a human: the picker and the
@@ -42,9 +42,9 @@ pub fn load_config(project_root: &Path) -> Result<(PathBuf, VeldConfig), String>
 ///
 /// Two-tiered: if exactly one environment has a *live* run, that one; only when
 /// none is live, a sole environment (stopped ones persist as history, so `veld
-/// restart` finds last night's crashed run). The tiers are deliberately not
+/// orchestrator restart` finds last night's crashed run). The tiers are deliberately not
 /// collapsed — a crashed `dev` next to a running `staging` must not turn a bare
-/// `veld stop` into an ambiguity error.
+/// `veld orchestrator stop` into an ambiguity error.
 ///
 /// `Ok((name, note))`: `note` is the "Using environment …" line to show when the
 /// name was inferred.
@@ -91,11 +91,11 @@ pub fn resolve_run_name(
             names.join(", ")
         ));
     }
-    Err("No environments found. Start one with `veld start`.".to_owned())
+    Err("No environments found. Start one with `veld orchestrator start`.".to_owned())
 }
 
 /// Every env name `{ "env": … }` reads, in the config or in this machine's
-/// stored var sources (`veld config set X --env NAME`).
+/// stored var sources (`veld orchestrator vars set X --env NAME`).
 ///
 /// A superset of what any one plan reaches, on purpose: working out reachability
 /// is graph logic, and sending a value the plan does not read is harmless — the
@@ -233,7 +233,7 @@ fn preflight_start(
                         "presets": presets,
                         "hint": "Pass `--preset <name-or-key>`, explicit `node:variant` \
                                  selections, or set `default_preset` in veld.json so a bare \
-                                 `veld start` has an answer.",
+                                 `veld orchestrator start` has an answer.",
                     })),
                 };
             }
@@ -286,7 +286,7 @@ fn preflight_start(
                  system DNS, so only .localhost domains work (RFC 6761).\n\
                  \n  To fix this, either:\n  \
                  - Change your url_template to use .localhost (e.g. {service}.{run}.{project}.localhost)\n  \
-                 - Run `veld setup privileged` (one-time sudo) to enable custom domains",
+                 - Run `veld self setup privileged` (one-time sudo) to enable custom domains",
             );
             return refused(detail);
         }
@@ -369,7 +369,7 @@ fn preflight_restart(
     name: Option<String>,
     var_flags: &[String],
 ) -> PreflightResponse {
-    // `veld restart` has no `--var`; a face passes here only the prompt answers
+    // `veld orchestrator restart` has no `--var`; a face passes here only the prompt answers
     // a human kept for this run, so the stranded-teardown warning can name them.
     let flag_answers = match parse_var_answers(var_flags, &cfg) {
         Ok(a) => a,
@@ -560,7 +560,7 @@ fn unknown_preset_message(cfg: &VeldConfig, token: &str) -> String {
 /// compose up <service>`, `npm run <script>`, `just <recipe>` all take the thing
 /// you want as a positional. The error message reaches the agent exactly when the
 /// belief is wrong. Matches by **name only** — a key is a small integer and `veld
-/// start 2` is not a plausible thing to have meant. A token that names a real
+/// orchestrator start 2` is not a plausible thing to have meant. A token that names a real
 /// node is skipped even if a preset shares the name, so the scan does not accuse
 /// the innocent token. Not accepted as a preset silently: node and preset are
 /// separate namespaces, and the run records what it was started *from*.
@@ -576,7 +576,7 @@ fn with_preset_hint(message: &str, selections: &[String], cfg: &VeldConfig) -> S
     match hit {
         Some(p) => format!(
             "{message}\n\n  `{}` is a preset, not a node. Presets go behind the flag:\n    \
-             veld start --preset {}",
+             veld orchestrator start --preset {}",
             one_line(&p.name),
             one_line(&p.name),
         ),
@@ -733,7 +733,10 @@ mod tests {
             &config,
         );
         assert!(out.contains("is a preset, not a node"), "{out}");
-        assert!(out.contains("veld start --preset dev-headless"), "{out}");
+        assert!(
+            out.contains("veld orchestrator start --preset dev-headless"),
+            "{out}"
+        );
         // The original diagnostic survives: the hint adds, it does not replace.
         assert!(out.contains("unknown node"), "{out}");
     }
@@ -776,7 +779,7 @@ mod tests {
         drop(dir);
 
         // `web:nosuchvariant` is what failed; `api` is a node used correctly and
-        // must not be rewritten into `veld start --preset api`, which starts
+        // must not be rewritten into `veld orchestrator start --preset api`, which starts
         // something else.
         let out = with_preset_hint(
             "unknown variant \"nosuchvariant\"",
@@ -787,7 +790,7 @@ mod tests {
     }
 
     /// A genuinely unknown node must not be told it is a preset, and a numeric
-    /// token must not match a preset's printed key — `veld start 2` is not a
+    /// token must not match a preset's printed key — `veld orchestrator start 2` is not a
     /// plausible thing to have meant, and a node called `1` would be slandered.
     #[test]
     fn an_unrelated_token_is_left_alone() {

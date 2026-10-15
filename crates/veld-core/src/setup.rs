@@ -15,7 +15,7 @@ use crate::helper::{self, HelperClient};
 
 #[derive(Debug, Error)]
 pub enum SetupError {
-    #[error("veld setup has not been completed")]
+    #[error("veld self setup has not been completed")]
     Incomplete { missing: Vec<String> },
 }
 
@@ -104,9 +104,9 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     // launchd/systemd service that should already be running. Connect to *that*
     // helper and never silently bootstrap a throwaway auto-helper — doing so
     // used to clobber the persisted mode to "auto" and move every URL to
-    // :18443, which is exactly what forced users to re-run `veld setup
+    // :18443, which is exactly what forced users to re-run `veld self setup
     // privileged` after an update. If the service is momentarily down (e.g.
-    // launchd is relaunching it after `veld update` replaced the binary), wait
+    // launchd is relaunching it after `veld self update` replaced the binary), wait
     // for it; if it stays down, surface a clear error instead of downgrading.
     match read_setup_mode().as_deref() {
         Some("privileged") => {
@@ -219,7 +219,7 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 /// `$HOME` under `sudo` is root's, which has no `setup.json` — so without the
 /// fallback every sudo-run caller reads "no mode recorded" and takes whatever
 /// branch that implies. That is load-bearing in three places since #262:
-/// `veld doctor`'s helper row and `veld version`'s candidate list both gate the
+/// `veld self doctor`'s helper row and `veld self version`'s candidate list both gate the
 /// root-owned store on it (a privileged machine would report a helper it does
 /// not run), and `which_self` gates the store candidate the same way. On Linux
 /// `sudo` resets `HOME` by default, so this is not a hypothetical there.
@@ -230,7 +230,7 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
 /// The `setup.json` [`read_setup_mode`] actually reads.
 ///
 /// Exposed so that anything *displaying* the config location names the file the
-/// mode was read from. `veld doctor` had its own `dirs::home_dir()`-based path
+/// mode was read from. `veld self doctor` had its own `dirs::home_dir()`-based path
 /// and its own reader, which under `sudo` disagreed with `read_setup_mode` — the
 /// report would print "Not configured" in its Mode row while every check gated
 /// on the mode behaved as privileged.
@@ -262,7 +262,7 @@ pub fn read_setup_mode() -> Option<String> {
     // back to `$HOME` when `SUDO_USER` is unset, so without this the common
     // case — no `setup.json` at all, on an unprivileged or auto install — reads
     // the same missing file twice on every call, and `read_setup_mode` is on
-    // paths as hot as `veld start` and the daemon's pty setup.
+    // paths as hot as `veld orchestrator start` and the daemon's pty setup.
     let real = resolve_real_user_home()?;
     if Some(&real) == home.as_ref() {
         return None;
@@ -282,8 +282,8 @@ fn read_mode_at(home: PathBuf) -> Option<String> {
 
 /// Connect to a helper that `setup.json` says is a managed service on `socket`.
 ///
-/// Retries for a short bounded window so a `veld start` issued while launchd is
-/// relaunching the helper (e.g. right after `veld update` swapped the binary)
+/// Retries for a short bounded window so a `veld orchestrator start` issued while launchd is
+/// relaunching the helper (e.g. right after `veld self update` swapped the binary)
 /// rides out the gap. Never falls back to bootstrapping an auto-helper — a
 /// down managed helper is surfaced as an actionable error, not papered over
 /// with a mode downgrade.
@@ -295,10 +295,10 @@ async fn connect_managed_helper(
 
     // Bounded by wall-clock rather than a fixed attempt count: each
     // `connect_to` is itself capped at 3s (its status check timeout), so a fixed
-    // count could block `veld start` for over a minute on a wedged socket.
+    // count could block `veld orchestrator start` for over a minute on a wedged socket.
     // 20s is chosen to ride out a helper self-restart — the binary-change
     // watcher can take ~12s to trigger, plus the launchd/systemd relaunch — so a
-    // `veld start` issued mid-restart waits it out instead of bailing early.
+    // `veld orchestrator start` issued mid-restart waits it out instead of bailing early.
     // Usually succeeds on the first attempt.
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut announced = false;
@@ -322,7 +322,7 @@ async fn connect_managed_helper(
     anyhow::bail!(
         "the {mode} veld-helper is not responding at {}.\n\
          It is managed by launchd/systemd and should restart automatically — \
-         check `veld doctor`. If it stays down, re-run `veld setup {mode}`.",
+         check `veld self doctor`. If it stays down, re-run `veld self setup {mode}`.",
         socket.display()
     )
 }
@@ -331,13 +331,13 @@ async fn connect_managed_helper(
 pub fn setup_required_json(missing: &[String]) -> serde_json::Value {
     serde_json::json!({
         "error": "setup_required",
-        "message": "Run `veld setup` to complete one-time system setup.",
+        "message": "Run `veld self setup` to complete one-time system setup.",
         "missing": missing,
     })
 }
 
 // ---------------------------------------------------------------------------
-// Setup step results (used by `veld setup` command)
+// Setup step results (used by `veld self setup` command)
 // ---------------------------------------------------------------------------
 
 /// Short result message from a setup step.
@@ -367,7 +367,7 @@ fn is_port_in_use(port: u16) -> bool {
 /// Check that the required ports (https, http, 2019) are free.
 ///
 /// If Caddy is already running (admin API responds on 2019), all three ports
-/// are considered owned by Veld and the check passes — this makes `veld setup`
+/// are considered owned by Veld and the check passes — this makes `veld self setup`
 /// idempotent.
 pub async fn check_ports(https_port: u16, http_port: u16) -> Result<StepResult, anyhow::Error> {
     // If our own Caddy is already running, ports are ours — skip the check.
@@ -400,7 +400,7 @@ pub async fn check_ports(https_port: u16, http_port: u16) -> Result<StepResult, 
 }
 
 /// Check if our Caddy instance is responding on the admin API.
-async fn is_caddy_running() -> bool {
+pub async fn is_caddy_running() -> bool {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(2))
         .build()
@@ -537,7 +537,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                 Ok(Ok(status)) if status.success() => {}
                 Ok(Ok(_)) => {
                     return Ok(StepResult::success(
-                        "Caddy CA generated (could not add to keychain — try `veld setup privileged` or add manually)",
+                        "Caddy CA generated (could not add to keychain — try `veld self setup privileged` or add manually)",
                     ));
                 }
                 Ok(Err(e)) => {
@@ -563,7 +563,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                 .is_err()
             {
                 return Ok(StepResult::success(
-                    "Caddy CA generated (could not copy to ca-certificates — try `veld setup privileged` or add manually)",
+                    "Caddy CA generated (could not copy to ca-certificates — try `veld self setup privileged` or add manually)",
                 ));
             }
             let _ = Command::new("update-ca-certificates").status().await;
@@ -576,7 +576,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
     }
 
     // Make the CA certificate (but NOT the private key) readable by the
-    // normal user so `veld doctor` can verify it. In privileged mode Caddy
+    // normal user so `veld self doctor` can verify it. In privileged mode Caddy
     // runs as root and creates the pki/ tree with mode 700.
     let ca_dir = crate::paths::caddy_data_dir()
         .join("pki")
@@ -637,7 +637,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
 /// interpolated — the same reason `spawn_stderr_file` keeps captured output
 /// owner-only. launchd opens an existing file `O_APPEND` and does not reset its mode.
 ///
-/// Ownership is the trap and the reason for the `chown`: `veld setup` can be running
+/// Ownership is the trap and the reason for the `chown`: `veld self setup` can be running
 /// under `sudo`, and a root-owned `0600` log is precisely the unopenable file
 /// described above. If the file cannot end up owned by the user the job runs as, it
 /// is removed and `None` is returned.
@@ -656,7 +656,7 @@ fn prepare_daemon_log(
     let dir = log.parent()?;
 
     // The **directory** is checked as carefully as the file, and that is not
-    // symmetry for its own sake. Under `sudo veld setup` this is the first thing in
+    // symmetry for its own sake. Under `sudo veld self setup` this is the first thing in
     // the run to touch the *real* user's `~/.veld` (`setup.rs`'s own `create_dir_all`
     // goes through `dirs::home_dir()`, which under sudo is root's), so a `chown` that
     // does not take — an `NFSHomeDirectory` on a network share, the very case
@@ -752,7 +752,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                      <key>StandardErrorPath</key>\n    <string>{p}</string>\n",
                     p = p.display()
                 ),
-                // Silent here, said out loud by `veld doctor`'s `Daemon log:` row,
+                // Silent here, said out loud by `veld self doctor`'s `Daemon log:` row,
                 // which reads the plist and reports "not captured".
                 None => String::new(),
             };
@@ -774,7 +774,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     <!-- KeepAlive unconditionally true, like the helper's: install.sh restarts this
          job by signalling it to exit and relies on launchd bringing it back onto the
          new binary. A SuccessfulExit or crash-only condition here would make every
-         `veld update` leave the daemon dead — the failure that motivated
+         `veld self update` leave the daemon dead — the failure that motivated
          `restart_launch_agent`. That function kickstarts as a belt, so this is not
          the only thing holding it up, but it is the intended mechanism. -->
     <key>KeepAlive</key>
@@ -846,7 +846,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .await
             {
                 eprintln!(
-                    "  Warning: launchd does not report veld-daemon running; run `veld doctor` to check."
+                    "  Warning: launchd does not report veld-daemon running; run `veld self doctor` to check."
                 );
             }
         }
@@ -870,7 +870,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             // daemon's children include one holder process per open terminal,
             // whose entire purpose is to outlive it — under the default
             // control-group mode systemd SIGKILLs every one of them on
-            // `systemctl restart`, which is exactly the `veld update` failure the
+            // `systemctl restart`, which is exactly the `veld self update` failure the
             // holders exist to prevent. It also stops a restart from taking down
             // runs the daemon started on the user's behalf.
             let unit = format!(
@@ -889,7 +889,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .await
             {
                 eprintln!(
-                    "  Warning: systemd does not report veld-daemon running; run `veld doctor` to check."
+                    "  Warning: systemd does not report veld-daemon running; run `veld self doctor` to check."
                 );
             }
         }
@@ -904,7 +904,7 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
 /// Install (or verify) the Veld helper using an explicit binary path,
 /// then verify it is reachable and start Caddy through it.
 ///
-/// This variant is used by `veld setup privileged` where the binary path
+/// This variant is used by `veld self setup privileged` where the binary path
 /// was resolved before sudo escalation and passed as an argument.
 pub async fn install_helper_with_bin(
     veld_helper_bin: &std::path::Path,
@@ -932,13 +932,13 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
 /// it has today, which is the pre-existing state rather than a new one. Which
 /// path a failure falls back to is [`unverified_helper_path`]'s call: the store's
 /// verified copy when it holds one, `bin` otherwise. The refusal is logged, and
-/// `veld doctor`'s signature row is where a user sees the consequence.
+/// `veld self doctor`'s signature row is where a user sees the consequence.
 ///
 /// **The version floor still applies here**, and that is a change from the first
 /// version of this function, which passed the candidate's own version as the
 /// floor and so compared a value against itself. `Candidate::install` now
 /// derives the floor from what is already in the store, so an older release's
-/// `veld setup privileged` cannot silently walk the root daemon backwards past
+/// `veld self setup privileged` cannot silently walk the root daemon backwards past
 /// every gate — it keeps the newer helper the store already holds and points the
 /// service definition at that.
 fn stage_helper_in_store(bin: &Path) -> PathBuf {
@@ -948,14 +948,14 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
         Err(e) => return unverified_helper_path(bin, &e),
     };
     // The version this binary claims, not the one *this* process was compiled
-    // as: `veld setup` may be a different release from the helper it installs
-    // (a `veld setup privileged` run from an older CLI), and comparing against
+    // as: `veld self setup` may be a different release from the helper it installs
+    // (a `veld self setup privileged` run from an older CLI), and comparing against
     // our own would refuse a perfectly good newer helper. The floor that does
     // apply comes from the store, inside `install`.
     let version = match candidate.verified_version() {
         Ok(v) => v,
         // The size and digest `verified_version` leaves out, because the root
-        // helper shares it. This is `veld setup` under the user's own sudo, and
+        // helper shares it. This is `veld self setup` under the user's own sudo, and
         // the detail is what tells a re-signed release from a local build.
         Err(e) => {
             let e = match candidate.mismatch_detail() {
@@ -978,7 +978,7 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
         // every other failure — a full disk, or `assert_root_owned_chain`
         // finding the store's ownership no longer holds — behind a cheerful
         // "keeping the helper already in …", with the real error dropped. This
-        // is the path `veld doctor` sends people to when it reports the helper
+        // is the path `veld self doctor` sends people to when it reports the helper
         // directory unsafe, so a repair that reports nothing wrong while fixing
         // nothing is the worst outcome it could have.
         Err(e) if crate::helper_store::is_not_newer(&e) => {
@@ -1006,7 +1006,7 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
 /// **The store wins when it holds a helper of ours.** This used to hand `bin`
 /// straight back, and that is how a migrated machine got de-migrated: a lib-dir
 /// helper whose bytes no longer matched its `.sig` (install.sh's `codesign`
-/// re-sign truncated it on macOS 27) failed here silently, and `veld setup
+/// re-sign truncated it on macOS 27) failed here silently, and `veld self setup
 /// privileged` — the documented repair — rewrote the service definition from the
 /// root-owned store back onto `~/.local/lib/veld`, a path the user can write. The
 /// helper then refused to relaunch onto that same file and refused to migrate off
@@ -1015,7 +1015,7 @@ fn stage_helper_in_store(bin: &Path) -> PathBuf {
 /// Serving `bin` would put an unverified, user-writable binary under the root
 /// service. Serving the store keeps the helper that is already ours. The cost is
 /// that a developer's unsigned local build no longer replaces a migrated helper
-/// through `veld setup privileged` — which is the #262 boundary doing its job.
+/// through `veld self setup privileged` — which is the #262 boundary doing its job.
 ///
 /// With no org binary in the store (a fresh install of a local build, a machine
 /// that never migrated) nothing changes: `bin` is served, as before.
@@ -1042,7 +1042,7 @@ fn unverified_helper_path(bin: &Path, reason: &anyhow::Error) -> PathBuf {
 }
 
 /// What to tell a user whose privileged helper service points at a binary that
-/// does not verify — named once, because `veld doctor`, `veld update` and the
+/// does not verify — named once, because `veld self doctor`, `veld self update` and the
 /// version check all reach this state and must not disagree about the way out.
 ///
 /// **Never `launchctl kill` / `systemctl restart`.** Those relaunch the service
@@ -1050,7 +1050,7 @@ fn unverified_helper_path(bin: &Path, reason: &anyhow::Error) -> PathBuf {
 /// guard refuses to do that, and advice to go around it is the hole the guard
 /// closes. The installer replaces the file with the release's bytes, which is
 /// what lets the helper relaunch and move itself into its root-owned directory
-/// with no password. `sudo veld setup privileged` is offered alongside only when
+/// with no password. `sudo veld self setup privileged` is offered alongside only when
 /// the store holds a helper of ours, because then it re-points the service at
 /// that one instead (see `unverified_helper_path`).
 pub fn unverified_helper_remedy() -> String {
@@ -1069,7 +1069,7 @@ pub fn unverified_helper_remedy() -> String {
             .map(|v| format!("v{v} "))
             .unwrap_or_default();
         format!(
-            "{installer}, or run `sudo veld setup privileged` to point the service back at the \
+            "{installer}, or run `sudo veld self setup privileged` to point the service back at the \
              verified {version}helper in {} (then re-run the installer if that is older than \
              this release)",
             store.display()
@@ -1106,7 +1106,7 @@ pub async fn unverified_service_binary() -> Option<(PathBuf, String)> {
 /// Normally `bin` itself — the pre-existing behaviour, for a local build or a
 /// machine where the store cannot be written.
 ///
-/// **The exception is what makes `sudo veld setup privileged` still a repair.**
+/// **The exception is what makes `sudo veld self setup privileged` still a repair.**
 /// When there is no lib-dir copy and no sibling — a machine whose copy was
 /// removed by hand, or one being repaired after an unusual install —
 /// [`which_self`] ends at a bare `veld-helper` with no path. Writing *that* into
@@ -1151,7 +1151,7 @@ async fn install_helper_inner(
 
     // Serve the helper from the root-owned store when we can (#262), so the
     // service definition this writes never names a path the installing user can
-    // write. `veld setup privileged` already runs as root, so a fresh install
+    // write. `veld self setup privileged` already runs as root, so a fresh install
     // gets there directly and never spends a moment in the vulnerable shape;
     // existing installs are moved by the helper's own migration instead.
     //
@@ -1159,7 +1159,7 @@ async fn install_helper_inner(
     // helper has none, and sealing an unverified binary into a root-owned
     // directory would buy no boundary while making a developer's rebuild
     // unwritable — the store would pin whichever build was current at setup
-    // time. Such an install stays exactly as it is today, and `veld doctor`'s
+    // time. Such an install stays exactly as it is today, and `veld self doctor`'s
     // signature row already says so.
     let veld_helper_bin = stage_helper_in_store(&veld_helper_bin);
 
@@ -1178,13 +1178,13 @@ async fn install_helper_inner(
         // written into the definition verbatim and fail to exec.
         anyhow::bail!(
             "cannot install a veld-helper named by a relative path ({}); no helper binary was \
-             found to install. Reinstall with `veld update`",
+             found to install. Reinstall with `veld self update`",
             veld_helper_bin.display()
         );
     }
     if !veld_helper_bin.is_file() {
         anyhow::bail!(
-            "there is no veld-helper binary at {} to install — reinstall with `veld update`",
+            "there is no veld-helper binary at {} to install — reinstall with `veld self update`",
             veld_helper_bin.display()
         );
     }
@@ -1226,7 +1226,7 @@ async fn install_helper_inner(
         Err(e) => {
             return Err(e.context(
                 "veld-helper service registration failed — an unmanaged helper would die \
-                 permanently on the next update, so setup stops here. Re-run `veld setup`; \
+                 permanently on the next update, so setup stops here. Re-run `veld self setup`; \
                  set VELD_ALLOW_UNMANAGED_HELPER=1 to force a direct spawn anyway",
             ));
         }
@@ -1273,7 +1273,7 @@ async fn install_helper_inner(
     let via = if service_ok {
         "service registered and running"
     } else {
-        "started directly (service registration FAILED — helper will not survive reboots or updates; re-run `veld setup`)"
+        "started directly (service registration FAILED — helper will not survive reboots or updates; re-run `veld self setup`)"
     };
     Ok(StepResult::success(format!(
         "veld-helper {via}, Caddy started"
@@ -1305,7 +1305,7 @@ fn helper_plist_program_args(
 
 /// The privileged helper's macOS LaunchDaemon plist, as text. Pure so the
 /// wiring can be pinned by a test and so the self-migration path (#262) writes
-/// exactly the same definition `veld setup privileged` does.
+/// exactly the same definition `veld self setup privileged` does.
 fn helper_plist_body(bin: &Path, caddy_bin: Option<&Path>, allow_uid: Option<u32>) -> String {
     let label = HELPER_LABEL_MACOS;
 
@@ -1561,7 +1561,7 @@ async fn install_helper_macos(
             // plist until the next successful setup.
             eprintln!(
                 "  Warning: could not load the new veld-helper service definition; restarted \
-                 the existing registration instead. Re-run `veld setup privileged` if helper \
+                 the existing registration instead. Re-run `veld self setup privileged` if helper \
                  settings changed."
             );
         }
@@ -1582,7 +1582,7 @@ async fn install_helper_macos(
         }
         eprintln!(
             "  Warning: veld-helper is registered but launchd has not reported it running \
-             yet; run `veld doctor` to confirm it came up."
+             yet; run `veld self doctor` to confirm it came up."
         );
     }
     Ok(())
@@ -1809,7 +1809,7 @@ pub fn helper_plist_filename() -> String {
 }
 
 /// Upper bound on a single launchctl/systemctl query. These are queried from
-/// polling loops, `veld doctor`, and the helper's own binary watcher — a
+/// polling loops, `veld self doctor`, and the helper's own binary watcher — a
 /// wedged service manager must degrade to "unknown", never hang the caller.
 pub const SERVICE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -1818,13 +1818,13 @@ pub const SERVICE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// watcher.
 ///
 /// The helper's system-domain LaunchDaemon / systemd unit runs as root, so
-/// bouncing it needs privilege. `veld update` runs unprivileged, hence sudo:
+/// bouncing it needs privilege. `veld self update` runs unprivileged, hence sudo:
 /// try passwordless first (`sudo -n`, silent and instant when a cached/NOPASSWD
 /// credential exists), and only if that fails and `interactive` is set (the
 /// caller has a TTY) prompt once for the password. This is the reliable path —
 /// it removes the dependence on the ~12s watcher poll + launchd `WatchPaths`
-/// that could otherwise leave `veld update` waiting out its timeout and telling
-/// the user to re-run `veld setup privileged`.
+/// that could otherwise leave `veld self update` waiting out its timeout and telling
+/// the user to re-run `veld self setup privileged`.
 ///
 /// Returns `true` if a restart command was successfully issued (the caller
 /// should then verify the version flipped), `false` if sudo was unavailable or
@@ -1864,7 +1864,7 @@ pub async fn restart_privileged_helper(interactive: bool) -> bool {
     }
     // Fall back to an interactive prompt only when the caller says a human is
     // present (a TTY, and not VELD_NON_INTERACTIVE) — a headless/scripted
-    // `veld update` must never block on sudo's password prompt.
+    // `veld self update` must never block on sudo's password prompt.
     if interactive && run_sudo(false, &args).await {
         return true;
     }
@@ -1955,7 +1955,7 @@ pub async fn launchd_job_pid(domain: &str, label: &str) -> Option<u32> {
 /// Not `paths::lib_dir()`, and the difference is load-bearing: `lib_dir()` prefers
 /// `~/.local/lib/veld` whenever that directory merely *exists*, while a privileged
 /// install writes `/usr/local/lib/veld` and the plist/unit pins whichever absolute
-/// path `veld setup` chose. On a machine carrying both, guessing gets you the
+/// path `veld self setup` chose. On a machine carrying both, guessing gets you the
 /// binary the root service does **not** run — so anything reasoning about "the
 /// binary that is about to be relaunched" has to ask the service manager.
 ///
@@ -2090,15 +2090,15 @@ pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
     // **One attempt, deliberately — do not add a retry here.** It was tried and
     // reverted, because the caller that dominates this function is not the one it
     // looks like. `maybe_show_update_banner` in `main.rs` calls it on every
-    // `veld start|stop|restart|status|stats|urls|action|logs`, and it stamps
+    // `veld orchestrator start|stop|restart|status|stats|urls|action|logs`, and it stamps
     // `KV_UPDATE_LAST_CHECK` only after a *successful* fetch — so during a GitHub
     // outage the check is re-attempted on every one of those commands, including the
-    // `veld action` the IDE invokes. Three attempts two seconds apart measures ~4s,
+    // `veld orchestrator action` the IDE invokes. Three attempts two seconds apart measures ~4s,
     // which slips *under* that call site's 5s timeout and therefore gets paid in
     // full, every command, for the length of the outage. One request costs a round
     // trip.
     //
-    // The other caller loses little: `veld update` with no version pinned, where a
+    // The other caller loses little: `veld self update` with no version pinned, where a
     // transient failure costs one re-run and now says so. And the case that would
     // actually hurt — the Veld Desktop handoff, app already quit — never reaches
     // here at all: the app always passes `--target-version`
@@ -2212,7 +2212,7 @@ pub struct DesktopInstall {
     /// including the reason it failed.
     pub log: Option<PathBuf>,
     /// Let the install script narrate for itself instead of leaving the output
-    /// to the calling command. `veld update --verbose` sets it; see
+    /// to the calling command. `veld self update --verbose` sets it; see
     /// [`embedded_env`].
     ///
     /// Defaults to `false`, and that default is the one that matters: a caller
@@ -2227,7 +2227,7 @@ pub struct DesktopInstall {
 /// browser downloaded carries `com.apple.quarantine`, which is what makes
 /// Gatekeeper refuse the first launch of a build that is not notarized. curl does
 /// not set that attribute, so an app delivered by the installer simply opens.
-/// Keeping it in the script also means `veld update` keeps the app in step for
+/// Keeping it in the script also means `veld self update` keeps the app in step for
 /// free, rather than through a second implementation of download-and-verify here.
 ///
 /// Runs with `VELD_DESKTOP_ONLY=1`, which is what makes this an *app* operation:
@@ -2235,9 +2235,9 @@ pub struct DesktopInstall {
 /// service restarts and the PATH edits entirely. Without it, updating an app
 /// bounced the daemon and could prompt for a password.
 ///
-/// **Two callers, and a new one owes the preference a write.** `veld desktop
+/// **Two callers, and a new one owes the preference a write.** `veld self desktop
 /// install|update` (which records [`crate::desktop_pref::DesktopChoice::Wanted`]
-/// before calling — running the command *is* the answer) and `veld update`'s
+/// before calling — running the command *is* the answer) and `veld self update`'s
 /// `run_desktop_step`, which is reached only once `plan_desktop` has consulted
 /// the recorded answer. Since the app is optional, putting it on disk without
 /// recording that somebody asked for it leaves the machine in the one state
@@ -2307,7 +2307,7 @@ fn install_script_override_from(raw: Option<std::ffi::OsString>) -> Option<PathB
 /// The install script could not be fetched, so **nothing ran**.
 ///
 /// A distinct type rather than a plain `anyhow!`, for one reason: the caller
-/// follows a failed update with "re-run with `veld update --verbose` to see the
+/// follows a failed update with "re-run with `veld self update --verbose` to see the
 /// installer's own output", and on this path there is no installer output to see.
 /// A hint that points at a log that does not exist costs the reader the one
 /// minute they had to spend on the real cause. `is_install_script_unavailable`
@@ -2349,7 +2349,7 @@ pub fn is_install_script_unavailable(e: &anyhow::Error) -> bool {
 ///
 /// Takes the headers, not just the status, for one reason: GitHub's REST API
 /// answers an exhausted **unauthenticated** rate limit — 60 requests an hour, and
-/// `veld update` spends one on every run — with `403 Forbidden` as readily as with
+/// `veld self update` spends one on every run — with `403 Forbidden` as readily as with
 /// `429`, distinguished only by `x-ratelimit-remaining: 0`. On status alone that
 /// case reads as "Forbidden" with no explanation, which is the most misleading
 /// answer of the set: it invites the reader to go looking for a permission problem
@@ -2432,7 +2432,7 @@ const INSTALL_SCRIPT_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// script, and **that guarantee runs one way only.** This predicate ships inside
 /// released binaries; the script is fetched from `main`. So a commit that renames
 /// `VELD_VERSION` in `install.sh` *and* updates this predicate together is green in
-/// CI and breaks `veld update` for every CLI already installed, which is reading
+/// CI and breaks `veld self update` for every CLI already installed, which is reading
 /// the new script with the old predicate. Nothing can catch that from here — the
 /// only safe move is to treat the marker as a published contract and not rename it.
 fn looks_like_install_script(body: &str) -> bool {
@@ -2586,7 +2586,7 @@ async fn run_install_script(
     };
 
     // Run the install script with the target version pinned, in
-    // non-interactive mode (skip the `veld setup` prompt at the end).
+    // non-interactive mode (skip the `veld self setup` prompt at the end).
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(&script)
@@ -2629,7 +2629,7 @@ async fn run_install_script(
     // gets a *second* CLI in `~/.local/bin` and keeps running the old one.
     // Silently, exit 0.
     //
-    // **Appended, never prepended.** A terminal `veld update` already has a PATH
+    // **Appended, never prepended.** A terminal `veld self update` already has a PATH
     // that finds the right veld, and putting this directory first would let a
     // binary run from one location retarget an install the user's PATH says
     // belongs to another. Appending changes nothing when the inherited PATH can
@@ -2705,8 +2705,8 @@ async fn run_install_script(
 /// Mirrors the install script's own search exactly, including the part that is
 /// easy to miss: when `VELD_DESKTOP_DIR` is set it is the *only* place either
 /// side looks. A machine that sets it and a CLI that ignored it disagreed about
-/// whether the app existed at all — `veld desktop status` said "not installed",
-/// `veld update` never refreshed it, and a second copy landed in `/Applications`.
+/// whether the app existed at all — `veld self desktop status` said "not installed",
+/// `veld self update` never refreshed it, and a second copy landed in `/Applications`.
 ///
 /// `app_dir`, when given, overrides both: it is the caller naming the bundle it
 /// means (the app passing its own), not a machine-wide preference.
@@ -2846,9 +2846,9 @@ fn pids_running_from(ps_output: &str, bundle: &std::path::Path, uid: u32) -> Vec
 /// Every path that runs out of this budget leaves the bundle alone rather than
 /// forcing the issue.
 ///
-/// Lives here rather than in `veld update` because **four** commands now close
-/// the app — `veld update` (to swap the bundle, or to honour a "no" just typed),
-/// the app's own handoff, `veld desktop uninstall`, and `veld uninstall` — and
+/// Lives here rather than in `veld self update` because **four** commands now close
+/// the app — `veld self update` (to swap the bundle, or to honour a "no" just typed),
+/// the app's own handoff, `veld self desktop uninstall`, and `veld self uninstall` — and
 /// three of those go on to delete or replace the bundle. A second constant that
 /// drifted shorter would have one of them start deleting while the app was still
 /// on its way out.
@@ -2959,13 +2959,13 @@ pub async fn quit_desktop_app(bundle: &std::path::Path, timeout: Duration) -> Qu
 /// function's name is the way to check this list is still complete** — an
 /// enumeration in prose goes stale silently, and this one already did once:
 ///
-/// - `veld desktop uninstall` (`crates/veld/src/commands/desktop.rs`), which is
+/// - `veld self desktop uninstall` (`crates/veld/src/commands/desktop.rs`), which is
 ///   also how `install.sh` removes the app — it shells out to that command rather
 ///   than carrying its own `rm -rf`.
-/// - `veld update` (`plan_desktop`'s fresh-"no" arm in
+/// - `veld self update` (`plan_desktop`'s fresh-"no" arm in
 ///   `crates/veld/src/commands/update.rs`), the one place an *update* removes the
 ///   app, authorised by an answer given on that run.
-/// - `veld uninstall` (below), a different command from the first one.
+/// - `veld self uninstall` (below), a different command from the first one.
 ///
 /// A second copy of this in bash was the alternative, racing this one for the
 /// same directory; a second copy in `uninstall` was the *actual* state of this
@@ -3109,13 +3109,13 @@ pub fn desktop_update_report_path() -> Option<PathBuf> {
 ///
 /// The app's dialog and its retry advice differ, and getting it wrong is worse
 /// than saying nothing: telling someone whose *CLI* update failed to run
-/// `veld desktop update` would move the app and leave the daemon on the release
+/// `veld self desktop update` would move the app and leave the daemon on the release
 /// that actually broke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateHalf {
-    /// Veld Desktop only — `veld desktop install|update`.
+    /// Veld Desktop only — `veld self desktop install|update`.
     App,
-    /// The whole release, through `veld update`.
+    /// The whole release, through `veld self update`.
     Release,
 }
 
@@ -3241,7 +3241,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // uninstall that left an installed app behind would leave the most *visible*
     // half of veld on the machine — a Dock icon whose daemon no longer exists —
     // after promising to remove everything. The preference itself goes with the
-    // rest of `~/.veld` further down, which is right: `veld uninstall` is not an
+    // rest of `~/.veld` further down, which is right: `veld self uninstall` is not an
     // opt-out, it is a removal, and a later re-install deserves to ask again.
     if std::env::consts::OS == "macos" {
         if let Some((path, _)) = desktop_app_status() {
@@ -3287,7 +3287,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // (#262).
     //
     // Outside every lib dir the loop above sweeps, and root-owned by design —
-    // which is exactly why it needs naming here. `veld uninstall` re-execs
+    // which is exactly why it needs naming here. `veld self uninstall` re-execs
     // itself under `sudo` for a privileged install, so this runs as root and can
     // remove it; without this line a machine that had veld would keep a
     // root-owned binary and its signature forever, and a user with no veld left
@@ -3390,7 +3390,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         // would say where it is has just been deleted, and deleting from a path read
         // out of state veld no longer has is how an uninstall removes somebody's
         // Documents. Everything that tells a user what uninstall removes has to say
-        // "the default backup folder" for that reason — `veld uninstall`'s warning
+        // "the default backup folder" for that reason — `veld self uninstall`'s warning
         // and the README's Storage section both do.
         let backups = veld_data.with_file_name("veld-backups");
         if backups.exists() {
@@ -3401,7 +3401,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     }
 
     // The Spoon left over from the old Hammerspoon integration is removed by the
-    // caller (`veld uninstall`), not here — the removal has a report attached
+    // caller (`veld self uninstall`), not here — the removal has a report attached
     // and this function returns `Result<()>`.
 
     Ok(())
@@ -3417,13 +3417,13 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 /// **privileged** helper (#262).
 ///
 /// Separate from `which_self` rather than a mode check inside it, and the
-/// reason is that a mode check there does not work: `veld setup privileged`
+/// reason is that a mode check there does not work: `veld self setup privileged`
 /// resolves the binary *before* it writes `setup.json`, so `read_setup_mode()`
 /// cannot yet say "privileged" on the one call path that needs the store — the
 /// gate would be permanently false exactly where it matters. Asking the caller
 /// to state its intent is both correct and shorter.
 ///
-/// Last rather than first: `veld setup privileged` must still install a *newer*
+/// Last rather than first: `veld self setup privileged` must still install a *newer*
 /// lib-dir binary over the store, which is what an update leaves behind, so
 /// preferring the store would pin the machine on whatever it already had. This
 /// arm is for the case where there is nothing else — a lib-dir copy removed by
@@ -3447,7 +3447,7 @@ pub fn which_privileged_helper() -> Result<PathBuf, anyhow::Error> {
 }
 
 pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
-    // Prefer the canonical lib directory (where install.sh and veld update put
+    // Prefer the canonical lib directory (where install.sh and veld self update put
     // helper/daemon binaries). This avoids picking up stale copies that may
     // exist next to the CLI binary (e.g. ~/.local/bin/veld-daemon left over
     // from manual testing or a previous install layout).
@@ -3467,7 +3467,7 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     // The root-owned store (#262), **after** the two above and only when it
     // holds a properly signed helper.
     //
-    // Last rather than first, deliberately: `veld setup privileged` must still
+    // Last rather than first, deliberately: `veld self setup privileged` must still
     // install a *newer* lib-dir binary over the store, which is exactly what an
     // update leaves behind, so preferring the store would pin the machine on
     // whatever it already had. This arm is for the case where there is nothing
@@ -3588,7 +3588,7 @@ fn resolve_real_uid() -> Result<u32, anyhow::Error> {
         anyhow::bail!(
             "could not tell which user is installing: running as root with no SUDO_UID/SUDO_USER \
              (a root shell?). The privileged helper would then admit only root and the `veld` CLI \
-             could not drive it. Re-run as your own user and let it elevate: `veld setup privileged`"
+             could not drive it. Re-run as your own user and let it elevate: `veld self setup privileged`"
         );
     }
     Ok(uid)
@@ -3678,19 +3678,19 @@ pub struct LegacyHammerspoonRemoval {
 }
 
 /// Remove the Veld Spoon left over from the Hammerspoon menu bar integration
-/// veld used to ship (`veld setup hammerspoon`).
+/// veld used to ship (`veld setup hammerspoon`, a pre-#423 command).
 ///
 /// Best-effort and idempotent: a machine that never had the Spoon does nothing
 /// and reports nothing. Driven from the CLI by
 /// `commands::remove_legacy_hammerspoon`, which owns the user-facing report —
-/// both `veld update` arms and `veld uninstall` call it.
+/// both `veld self update` arms and `veld self uninstall` call it.
 ///
 /// This is a one-shot cleanup with an expiry, but **do not delete it after one
-/// release**. `veld update` runs the *old* binary — it installs the new one and
+/// release**. `veld self update` runs the *old* binary — it installs the new one and
 /// then calls its own copy of this step — so the release that carries this code
 /// is never the release that runs it. The no-op ("already on the latest
 /// version") arm is wired up for exactly that reason, which turns the wait into
-/// "any `veld update` after this one lands" rather than "the next version bump".
+/// "any `veld self update` after this one lands" rather than "the next version bump".
 /// Someone who only ever upgrades with `install.sh` (`curl … | sh`) still never
 /// runs it, and removes the Spoon by hand. Give it several releases.
 pub async fn remove_legacy_hammerspoon() -> LegacyHammerspoonRemoval {
@@ -3917,7 +3917,7 @@ mod tests {
     };
 
     /// Byte-for-byte what `raw.githubusercontent.com` served during the GitHub
-    /// incident of 2026-08-17, which `veld update` handed to `bash -c`. The first
+    /// incident of 2026-08-17, which `veld self update` handed to `bash -c`. The first
     /// line became `429:: command not found`; the parenthesis on the second became
     /// a syntax error; the user was told "install script exited with code 2".
     const GITHUB_429_BODY: &str = "429: Too Many Requests\nFor more on scraping GitHub and how it \
@@ -3927,7 +3927,7 @@ mod tests {
     /// The published install script is what production runs, and
     /// `looks_like_install_script` is the gate in front of it. If a refactor ever
     /// renames `VELD_VERSION` or drops the shebang, the gate starts rejecting the
-    /// real thing and *every* `veld update` fails with "did not return the install
+    /// real thing and *every* `veld self update` fails with "did not return the install
     /// script" — a self-inflicted outage that no other test in this repo would
     /// catch, because the CLI-side contract test checks the variables the script
     /// *reads*, not the bytes this predicate looks at.
@@ -4337,7 +4337,7 @@ mod tests {
         // `paths::privileged_helper_dir`.
         assert!(!shown.starts_with("/usr/local"), "{shown}");
         // And not inside the `0700` keep-awake marker directory, which `veld
-        // doctor` (running as the user) could not read through.
+        // self doctor` (running as the user) could not read through.
         assert_ne!(dir, crate::paths::sleep_marker_dir());
     }
 
@@ -4524,7 +4524,7 @@ mod tests {
             "the file launchd will append diagnostics to must not be world-readable"
         );
 
-        // Idempotent: `veld setup` is re-run routinely, and the second run must not
+        // Idempotent: `veld self setup` is re-run routinely, and the second run must not
         // fail or lose an existing log.
         std::fs::write(&log, b"an earlier daemon's line\n").unwrap();
         assert_eq!(
@@ -4589,7 +4589,7 @@ mod tests {
         // desktop/electron-builder.yml: `productName: Veld` +
         // `executableName: veld-desktop`, so the .deb lands in /opt/Veld with a
         // symlink on PATH. Renaming either without updating this list makes
-        // `veld desktop status` and `veld doctor` quietly stop seeing the app.
+        // `veld self desktop status` and `veld self doctor` quietly stop seeing the app.
         let c = linux_desktop_candidates();
         assert!(c.contains(&"/opt/Veld/veld-desktop"));
         assert!(c.contains(&"/usr/bin/veld-desktop"));
@@ -4704,8 +4704,8 @@ mod tests {
 
     #[test]
     fn remove_spoon_files_is_a_no_op_without_a_spoon() {
-        // A machine that never ran `veld setup hammerspoon` — the common case on
-        // every `veld update` from here on.
+        // A machine that never ran `veld setup hammerspoon` (a pre-#423 command) — the common case on
+        // every `veld self update` from here on.
         let home = tempfile::tempdir().expect("tempdir");
         std::fs::create_dir_all(home.path().join(".hammerspoon")).expect("create hs dir");
         std::fs::write(

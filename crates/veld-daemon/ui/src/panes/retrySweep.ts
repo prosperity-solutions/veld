@@ -11,7 +11,7 @@
  * The problem being solved: `maybeAutoReconnect`'s budget is spent in about
  * eleven seconds, and the two events that most often break a terminal's socket
  * outlast that by a long way — a laptop that slept, and a daemon restarted by
- * `veld update`. So the budget ran out while the cause was still present, and the
+ * `veld self update`. So the budget ran out while the cause was still present, and the
  * pane settled into `error` with a **live shell behind it**, waiting for a click
  * nobody knew to make.
  */

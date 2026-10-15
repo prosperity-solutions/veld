@@ -197,7 +197,7 @@ pub enum Coverage {
 ///
 /// Three genuinely different answers, and the reason this is an enum rather than a
 /// bool: the existing UI note for `NoHelper` tells the user to run
-/// `veld setup privileged`, which is right when veld asked and could not get it and
+/// `veld self setup privileged`, which is right when veld asked and could not get it and
 /// actively wrong when veld never asked. Reporting a fault for something never
 /// attempted is the failure this prevents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -905,7 +905,7 @@ mod tests {
         // The bug this seam exists for. Linux wants no lease *by construction*
         // (its lid inhibitor is unprivileged), so `lease_held` is always false —
         // and a gap derived from "on battery and no lease" told every Linux
-        // laptop to run `veld setup privileged` while its lid was already
+        // laptop to run `veld self setup privileged` while its lid was already
         // covered.
         let live = LiveHold {
             coverage: Coverage::LidToo,

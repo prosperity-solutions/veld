@@ -1,6 +1,6 @@
 //! Loading a config that is split across files (F2).
 //!
-//! One document type: **every** veld config file uses the same schema. All
+//! One document type: **every** veld.json file uses the same schema. All
 //! top-level keys are optional except in the root file, which requires
 //! `schemaVersion` and `name`. So `$schema` autocompletion works in every file,
 //! and there is exactly one schema to learn.
@@ -31,21 +31,21 @@ use crate::config::{
 };
 use crate::presets::PresetDef;
 
-/// One veld config file, as written.
+/// One veld.json file, as written.
 ///
 /// Every field is optional: this is the shape of *any* config file, root or
 /// included.
 ///
 /// **Unknown top-level keys are captured, not rejected.** F8 wants a typo in a
 /// top-level key to be an error — but `deny_unknown_fields` would make it a
-/// *load* error, and the loader runs on `veld stop`, `status`, `logs`, and in the
+/// *load* error, and the loader runs on `veld orchestrator stop`, `status`, `logs`, and in the
 /// daemon monitor (F0.1). Worse, it would be a **new** failure for v1 and v2
 /// documents, which previously ignored an unknown key silently: a project with a
 /// stray `"//": "comment"` (the pre-JSONC idiom) would upgrade into a config that
 /// cannot be stopped, so its teardown hooks never run.
 ///
 /// So unknown keys land in [`Self::unknown`] and become deferred findings —
-/// `veld start` and `veld lint` refuse, everything else keeps working. Same
+/// `veld orchestrator start` and `veld orchestrator lint` refuse, everything else keeps working. Same
 /// mechanism as duplicate keys; see [`crate::config::VeldConfig::deferred_findings`].
 #[derive(Debug, Default, Deserialize)]
 pub struct Document {
@@ -102,7 +102,7 @@ pub struct Document {
     /// Every top-level key that is not one of the above.
     ///
     /// Captured rather than rejected so a typo is still caught (as a finding) but
-    /// cannot strand `veld stop` — see the type's doc comment.
+    /// cannot strand `veld orchestrator stop` — see the type's doc comment.
     #[serde(flatten)]
     pub unknown: BTreeMap<String, serde_json::Value>,
 }
@@ -133,7 +133,7 @@ pub struct LoadedConfig {
     ///
     /// Hashing only the root file's bytes — as veld did when there was only one —
     /// would report "nothing changed" for almost every real change once the nodes
-    /// live in other files, which is exactly the question `veld runs diff` exists
+    /// live in other files, which is exactly the question `veld orchestrator runs diff` exists
     /// to answer.
     pub config_hash: String,
     /// Every path whose change could change this load's result: the root file
@@ -199,15 +199,15 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     // Problems in *included* files are reported, never fatal.
     //
     // F0.1 is absolute: no new failure may be reachable from the loader, because
-    // `veld stop` reads `on_stop` from the on-disk config at stop time and a config
+    // `veld orchestrator stop` reads `on_stop` from the on-disk config at stop time and a config
     // that will not load means teardown never runs. That applies to a broken
     // included file exactly as it applies to a duplicate key — a developer who
     // copies a node file while an environment is running must still be able to
     // stop it.
     //
     // "Never a silently absent node" is still honoured: the node is absent, but
-    // loudly — `veld start` and `veld lint` refuse with a finding naming the file,
-    // and `veld config --files` shows the gap. Silent was always the enemy, not
+    // loudly — `veld orchestrator start` and `veld orchestrator lint` refuse with a finding naming the file,
+    // and `veld orchestrator config --files` shows the gap. Silent was always the enemy, not
     // non-fatal.
     let mut file_findings: Vec<crate::config::Finding> = Vec::new();
 
@@ -384,7 +384,7 @@ fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
     })
 }
 
-/// Line number (1-based) of each node key in this file, for `veld nodes`.
+/// Line number (1-based) of each node key in this file, for `veld orchestrator nodes`.
 ///
 /// Found by scanning the text for the quoted key rather than by tracking spans:
 /// a node name is unique within its file (duplicates are rejected), and being off
@@ -832,7 +832,7 @@ mod tests {
         assert_eq!(
             api.relative,
             PathBuf::from("services/api/veld.node.json"),
-            "so `veld nodes` can say where a node is defined"
+            "so `veld orchestrator nodes` can say where a node is defined"
         );
         assert_eq!(api.matched_by.as_deref(), Some("services/*/veld.node.json"));
         assert!(api.nodes["api"] > 0, "and on which line");
@@ -842,7 +842,7 @@ mod tests {
     /// files named.
     ///
     /// Reported, **not fatal** — F0.1 again. Someone who copies a node file while
-    /// an environment is running must still be able to `veld stop` it, so this is a
+    /// an environment is running must still be able to `veld orchestrator stop` it, so this is a
     /// finding that blocks `start`/`lint` rather than a load error.
     #[test]
     fn duplicate_node_across_files_names_both_files() {
@@ -852,7 +852,7 @@ mod tests {
             ("services/b/veld.node.json", &node_file("api")),
         ]);
         let loaded = load(&dir.path().join("veld.json"))
-            .expect("a duplicate node must not strand `veld stop`");
+            .expect("a duplicate node must not strand `veld orchestrator stop`");
         let finding = loaded
             .config
             .deferred_findings
@@ -903,7 +903,7 @@ mod tests {
             ("services/broken/veld.node.json", "{ \"nodes\": { oops }"),
         ]);
         let loaded = load(&dir.path().join("veld.json"))
-            .expect("a broken included file must not strand `veld stop`");
+            .expect("a broken included file must not strand `veld orchestrator stop`");
         let finding = loaded
             .config
             .deferred_findings
@@ -912,7 +912,7 @@ mod tests {
             .unwrap_or_else(|| panic!("expected a finding: {:?}", loaded.config.deferred_findings));
         assert_eq!(finding.severity, crate::config::Severity::Error);
         assert_eq!(finding.location, "services/broken/veld.node.json");
-        // Not silent, which was always the real requirement: `veld start` refuses.
+        // Not silent, which was always the real requirement: `veld orchestrator start` refuses.
         assert!(crate::config::error_summary(&crate::config::validate(&loaded.config)).is_some());
         // The healthy sibling still loaded, so `stop` can still find its node.
         assert!(loaded.config.nodes.contains_key("api"));
@@ -922,7 +922,7 @@ mod tests {
     /// failure (F8 rule 2 reconciled with F0.1).
     ///
     /// `deny_unknown_fields` would have been the obvious implementation and is
-    /// wrong twice over: it puts a new failure on the loader that `veld stop`
+    /// wrong twice over: it puts a new failure on the loader that `veld orchestrator stop`
     /// uses, and it is a *regression for v1/v2 documents*, which previously
     /// ignored an unknown key silently. A project with a stray key would upgrade
     /// into a config that cannot be stopped, so its teardown never runs.
@@ -957,7 +957,7 @@ mod tests {
         // Lists the real keys, since the cause is a typo.
         assert!(finding.message.contains("nodes"), "{finding:?}");
 
-        // …and `validate` surfaces it, so `veld start` / `veld lint` refuse.
+        // …and `validate` surfaces it, so `veld orchestrator start` / `veld orchestrator lint` refuse.
         let findings = crate::config::validate(&loaded.config);
         assert!(findings.iter().any(|f| f.rule == "unknown-top-level-key"));
         assert!(crate::config::error_summary(&findings).is_some());
@@ -1070,7 +1070,7 @@ mod tests {
     /// [`merge`], or a copy in an included file is silently discarded.
     ///
     /// This test exists because that list had no coverage and `default_preset` was
-    /// duly added to `Document` without being added to the list — so `veld lint`
+    /// duly added to `Document` without being added to the list — so `veld orchestrator lint`
     /// passed a config whose `default_preset` did nothing, while the docs promised
     /// an error. Deriving the expectation from [`crate::config::KNOWN_TOP_LEVEL_KEYS`]
     /// means a *future* top-level key cannot be added without classifying it here.
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     /// `config_hash` must change when **any** loaded file changes, or
-    /// `veld runs diff` reports "nothing changed" for almost every real edit once
+    /// `veld orchestrator runs diff` reports "nothing changed" for almost every real edit once
     /// the nodes live outside the root file.
     #[test]
     fn config_hash_changes_on_any_included_file() {

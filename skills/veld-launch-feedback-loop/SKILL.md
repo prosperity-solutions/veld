@@ -30,7 +30,7 @@ pull the next item, fix it, reply, repeat — until the human clicks **Done**.
 ## Get the instructions from the CLI, then start looping
 
 ```sh
-veld skills feedback
+veld agent skills feedback
 ```
 
 That document is carried by the installed veld binary, so it describes the
@@ -54,13 +54,13 @@ loop:
 resumes cleanly after a restart. **Do not stop after one item.** Keep pulling
 until you get `"ended"`.
 
-If there is no run yet, ask the human to start one (`veld presets` shows what
+If there is no run yet, ask the human to start one (`veld orchestrator presets` shows what
 this project offers) rather than picking for them.
 
 ## If the CLI cannot answer
 
-- **`veld skills` says "unrecognized subcommand"** — this veld predates its own
-  documentation. `veld update`, then try again. Do not improvise the loop from
+- **`veld agent skills` says "unrecognized subcommand"** — this veld predates its own
+  documentation. `veld self update`, then try again. Do not improvise the loop from
   the sketch above; the reply/resolve policy is the part you would get wrong.
 - **`veld -V` says "command not found"** — veld is not installed and there is no
   run to pull feedback from. Say so rather than installing it for them.

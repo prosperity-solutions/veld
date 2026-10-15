@@ -20,7 +20,7 @@ const INIT_TEMPLATE: &str = r#"{
 }
 "#;
 // No `default_preset` in this template, deliberately: its `default` preset selects
-// nothing, and a declared default is *used* by a bare `veld start` — including with
+// nothing, and a declared default is *used* by a bare `veld orchestrator start` — including with
 // no TTY, where it would report a started environment with zero nodes and exit 0.
 // A scaffold must not hand a coding agent a success that did nothing. Add
 // `"default_preset"` once there are nodes to point it at; `generate_veld_json`
@@ -535,12 +535,12 @@ fn generate_veld_json(
         preset_entries.join(", ")
     ));
     json.push_str("  },\n");
-    // So a bare `veld start` — and a coding agent told "start the app" — has a
+    // So a bare `veld orchestrator start` — and a coding agent told "start the app" — has a
     // defined answer from the first run, rather than a prompt or an error.
     //
     // Only when the preset actually selects something. This function is also
     // reached with no detected services ("starting from scratch"), and pointing
-    // `default_preset` at an empty preset makes a bare `veld start` report a
+    // `default_preset` at an empty preset makes a bare `veld orchestrator start` report a
     // started environment with zero nodes and exit 0 — the same false success the
     // static template at the top of this file refuses to write.
     if !preset_entries.is_empty() {
@@ -660,11 +660,11 @@ fn add_veld_to_gitignore(root: &Path) {
 // Main entry point
 // ---------------------------------------------------------------------------
 
-/// `veld init` -- create a starter veld.json in the current directory.
+/// `veld orchestrator init` -- create a starter veld.json in the current directory.
 ///
 /// One default, though veld reads either spelling: writing `veld.json` next to an
 /// existing `veld.jsonc` would leave the directory holding both, which `validate`
-/// reports as `ambiguous-root-config` and `veld start` then refuses.
+/// reports as `ambiguous-root-config` and `veld orchestrator start` then refuses.
 pub async fn run() -> i32 {
     let target = Path::new("veld.json");
 
@@ -918,7 +918,7 @@ pub async fn run() -> i32 {
             output::print_info(&format!(
                 "  Next: edit {} to fine-tune, then run {}",
                 output::bold("veld.json"),
-                output::bold("veld start"),
+                output::bold("veld orchestrator start"),
             ));
             println!();
             0

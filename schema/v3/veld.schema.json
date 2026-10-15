@@ -57,7 +57,7 @@
     },
     "presets": {
       "type": "object",
-      "description": "Named selections for `veld start --preset <name-or-key>`. An entry starting with @ references another preset, so overlapping sets need not repeat every selection. Cycles are an error. A preset is either a bare list of selections, or an object adding a stable picker key and the metadata a person or a coding agent needs to choose it.",
+      "description": "Named selections for `veld orchestrator start --preset <name-or-key>`. An entry starting with @ references another preset, so overlapping sets need not repeat every selection. Cycles are an error. A preset is either a bare list of selections, or an object adding a stable picker key and the metadata a person or a coding agent needs to choose it.",
       "additionalProperties": {
         "$ref": "#/$defs/preset"
       },
@@ -86,7 +86,7 @@
     },
     "default_preset": {
       "type": "string",
-      "description": "The preset `veld start` runs when given nothing to start. Answers \"just start it\" — for a person pressing enter at the picker, and for a coding agent told to start the app — without a guess. Must name a preset defined in `presets`.",
+      "description": "The preset `veld orchestrator start` runs when given nothing to start. Answers \"just start it\" — for a person pressing enter at the picker, and for a coding agent told to start the app — without a guess. Must name a preset defined in `presets`.",
       "examples": [
         "dev-local"
       ]
@@ -126,7 +126,7 @@
     },
     "hooks": {
       "type": "object",
-      "description": "RESERVED. Repo-declared lifecycle hooks keyed by event (worktree.created, project.created, run.stopped). Parsed and stored but NOT EXECUTED by this version of veld \u2014 `veld lint` says so. Hooks are not nodes: no graph, no port, no probes. Repo-declared only, never from a fetched extension.",
+      "description": "RESERVED. Repo-declared lifecycle hooks keyed by event (worktree.created, project.created, run.stopped). Parsed and stored but NOT EXECUTED by this version of veld \u2014 `veld orchestrator lint` says so. Hooks are not nodes: no graph, no port, no probes. Repo-declared only, never from a fetched extension.",
       "additionalProperties": {
         "type": "array",
         "items": {
@@ -136,7 +136,7 @@
     },
     "ide": {
       "type": "object",
-      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins`, `panes`, `news` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
+      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins`, `panes`, `news` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld orchestrator lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
       "additionalProperties": true,
       "properties": {
         "quicklinks": {
@@ -240,7 +240,7 @@
         },
         "news": {
           "type": "array",
-          "description": "Cards this project shows its own team in the Veld IDE, through the same channel Veld uses to announce its own changes. Merge a card with the change it describes; a teammate pulls, and the next time they open the IDE they are told once. Only news in the repo's MAIN checkout counts — the primary clone, at whatever it currently has checked out — so a card being drafted in a WORKTREE cannot prompt anybody until it lands, and five worktrees cannot show the same card five times. (A branch in the main clone itself is live: the isolation is per worktree, not per branch.) Reading a card clears it; dismissing it stops the prompt but keeps it counted, and everything is revisitable from What's new… in the project ⋯ menu. Write the OUTCOME, not the mechanism: the headline is what a teammate can now do, or stop doing. At most 5 items may be live at once — counted ACROSS `include` files, which `maxItems` here cannot express, so splitting news over two files can validate green in your editor and still drop the oldest card at load (`veld lint` says which). Over the cap it is the entries with the oldest `since` that go — so an ordinary new card, dated today, survives; a BACKDATED addition can be the one dropped. RETIRING AN ITEM IS DELETING IT — the cap and the short field limits are what keep a surface that interrupts people worth being interrupted by. Items past the cap are dropped with a `veld lint` warning, as is any malformed entry; nothing here can fail a config load.",
+          "description": "Cards this project shows its own team in the Veld IDE, through the same channel Veld uses to announce its own changes. Merge a card with the change it describes; a teammate pulls, and the next time they open the IDE they are told once. Only news in the repo's MAIN checkout counts — the primary clone, at whatever it currently has checked out — so a card being drafted in a WORKTREE cannot prompt anybody until it lands, and five worktrees cannot show the same card five times. (A branch in the main clone itself is live: the isolation is per worktree, not per branch.) Reading a card clears it; dismissing it stops the prompt but keeps it counted, and everything is revisitable from What's new… in the project ⋯ menu. Write the OUTCOME, not the mechanism: the headline is what a teammate can now do, or stop doing. At most 5 items may be live at once — counted ACROSS `include` files, which `maxItems` here cannot express, so splitting news over two files can validate green in your editor and still drop the oldest card at load (`veld orchestrator lint` says which). Over the cap it is the entries with the oldest `since` that go — so an ordinary new card, dated today, survives; a BACKDATED addition can be the one dropped. RETIRING AN ITEM IS DELETING IT — the cap and the short field limits are what keep a surface that interrupts people worth being interrupted by. Items past the cap are dropped with a `veld orchestrator lint` warning, as is any malformed entry; nothing here can fail a config load.",
           "maxItems": 5,
           "items": { "$ref": "#/$defs/newsItem" },
           "examples": [
@@ -291,7 +291,7 @@
         "since": {
           "type": "string",
           "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$",
-          "description": "The day this was written, YYYY-MM-DD. REQUIRED, shown on every card, and it GATES: a teammate who imported this project after that day never sees the card, so cloning a repo with a year of history never means a stack of modals about changes that predate them. That is also what makes an item nobody deleted stop reaching people. There is deliberately no default — a defaulted date would gate the card wrongly and silently. Compared as a UTC day, and strictly BEFORE the import day, so a card written today still reaches somebody who joined this morning. A day in the FUTURE is refused with a `veld lint` warning and the card is dropped: it would be after every arrival forever, so nothing would ever retire it — and a transposed year is one keystroke.",
+          "description": "The day this was written, YYYY-MM-DD. REQUIRED, shown on every card, and it GATES: a teammate who imported this project after that day never sees the card, so cloning a repo with a year of history never means a stack of modals about changes that predate them. That is also what makes an item nobody deleted stop reaching people. There is deliberately no default — a defaulted date would gate the card wrongly and silently. Compared as a UTC day, and strictly BEFORE the import day, so a card written today still reaches somebody who joined this morning. A day in the FUTURE is refused with a `veld orchestrator lint` warning and the card is dropped: it would be after every arrival forever, so nothing would ever retire it — and a transposed year is one keystroke.",
           "examples": ["2026-08-12"]
         },
         "eyebrow": {
@@ -479,7 +479,7 @@
                 "type": "object",
                 "additionalProperties": false,
                 "oneOf": [{ "required": ["argv"] }, { "required": ["shell"] }],
-                "description": "How this pane offers sessions it did NOT start — the ones the tool already has lying around for this worktree. veld runs this command when the pane chooser is on screen and, by default, asks which session you want the moment you click the pane — starting fresh is the first row. It launches the pane's own `resume` against the one you pick, with ${veld.pane.token} set to it. So a picked value never becomes a command: it only chooses which session the command you already declared runs against. Requires `resume`, and that `resume` must reference ${veld.pane.token} — without either the pick has nowhere to go, and `veld lint` says so and drops the picker. STDOUT CONTRACT: one row per line, `value`, then optionally a TAB and the text to show, then optionally a second TAB and a quieter detail line. `ls -t ~/.claude/projects/$slug/*.jsonl | xargs -n1 basename -s .jsonl` is a working picker with no adapter at all. Exit 0 with NO output means there are none here and the pane simply does not offer the choice — the answer a fresh clone gives. A non-zero exit offers the choice and says it failed, with the stderr tail. A row whose value is not 1-128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or `/`, beginning with a letter or digit and containing no `..`, is dropped — that set keeps the value inert inside a `shell` command, stops a leading `-` being read as a flag, and stops a `..` reaching a tool that resolves the id against its own transcripts directory. At most 50 rows are shown. THE COMMAND RUNS WITHOUT YOU CLICKING THE PANE — once, while the pane chooser is on screen, never on a timer — so it sits under the same posture and the same machine-wide off switch as `ide.extensions`: Settings, run project commands automatically.",
+                "description": "How this pane offers sessions it did NOT start — the ones the tool already has lying around for this worktree. veld runs this command when the pane chooser is on screen and, by default, asks which session you want the moment you click the pane — starting fresh is the first row. It launches the pane's own `resume` against the one you pick, with ${veld.pane.token} set to it. So a picked value never becomes a command: it only chooses which session the command you already declared runs against. Requires `resume`, and that `resume` must reference ${veld.pane.token} — without either the pick has nowhere to go, and `veld orchestrator lint` says so and drops the picker. STDOUT CONTRACT: one row per line, `value`, then optionally a TAB and the text to show, then optionally a second TAB and a quieter detail line. `ls -t ~/.claude/projects/$slug/*.jsonl | xargs -n1 basename -s .jsonl` is a working picker with no adapter at all. Exit 0 with NO output means there are none here and the pane simply does not offer the choice — the answer a fresh clone gives. A non-zero exit offers the choice and says it failed, with the stderr tail. A row whose value is not 1-128 characters of letters, digits, `.`, `_`, `-`, `:`, `@` or `/`, beginning with a letter or digit and containing no `..`, is dropped — that set keeps the value inert inside a `shell` command, stops a leading `-` being read as a flag, and stops a `..` reaching a tool that resolves the id against its own transcripts directory. At most 50 rows are shown. THE COMMAND RUNS WITHOUT YOU CLICKING THE PANE — once, while the pane chooser is on screen, never on a timer — so it sits under the same posture and the same machine-wide off switch as `ide.extensions`: Settings, run project commands automatically.",
                 "properties": {
                   "label": {
                     "type": "string",
@@ -538,7 +538,7 @@
       ]
     },
     "extension": {
-      "description": "One badge, button or menu this project contributes to the IDE chrome. What it does is keyed by the `type` discriminator. NOTE: like `$defs.pane`, the per-type key checking lives in `if`/`then` branches with no `else`, so an entry whose `type` matches none of them is not validated here at all — that is deliberate, so a config written for a newer veld with more types is not red-squiggled wholesale, and the cost is that a *typo* in `type` passes the schema silently. `veld lint` is what catches it: the parser reports an unknown type, names the ones this version renders, and skips that entry while the rest of `ide.extensions` still applies.",
+      "description": "One badge, button or menu this project contributes to the IDE chrome. What it does is keyed by the `type` discriminator. NOTE: like `$defs.pane`, the per-type key checking lives in `if`/`then` branches with no `else`, so an entry whose `type` matches none of them is not validated here at all — that is deliberate, so a config written for a newer veld with more types is not red-squiggled wholesale, and the cost is that a *typo* in `type` passes the schema silently. `veld orchestrator lint` is what catches it: the parser reports an unknown type, names the ones this version renders, and skips that entry while the rest of `ide.extensions` still applies.",
       "type": "object",
       "required": [
         "id",
@@ -903,7 +903,7 @@
                   "type": "string",
                   "minLength": 1
                 },
-                "description": "The ids of the `action` extensions this menu offers, in order. **Ids, not nested objects**: a member is a first-class declaration that veld lint checks like any other, and referencing rather than nesting is what keeps a menu one level deep. An id that names nothing, or names something that is not an `action`, is dropped with a lint problem; a menu left with no usable members is dropped whole rather than rendering an empty popover."
+                "description": "The ids of the `action` extensions this menu offers, in order. **Ids, not nested objects**: a member is a first-class declaration that veld orchestrator lint checks like any other, and referencing rather than nesting is what keeps a menu one level deep. An id that names nothing, or names something that is not an `action`, is dropped with a lint problem; a menu left with no usable members is dropped whole rather than rendering an empty popover."
               },
               "label": {
                 "type": "string",
@@ -1093,7 +1093,7 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 4294967295,
-              "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key take the lowest unclaimed number, in declaration order — so appending a preset, or pinning one at the number it already shows, changes no other key; an unpinned key still moves when a preset is added or removed ahead of it, including from an include file that sorts earlier. `veld presets --pin` prints the current numbering as a block to paste."
+              "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key take the lowest unclaimed number, in declaration order — so appending a preset, or pinning one at the number it already shows, changes no other key; an unpinned key still moves when a preset is added or removed ahead of it, including from an include file that sorts earlier. `veld orchestrator presets --pin` prints the current numbering as a block to paste."
             },
             "label": {
               "type": "string",
@@ -1113,7 +1113,7 @@
     },
     "machineVar": {
       "type": "object",
-      "description": "A var whose answer belongs to the MACHINE, not the repo. The declaration is committed and shared; the answer lives in veld's database and is set with `veld config set <name> <value>` (or in the management UI). Use it for values that are facts about the developer's computer rather than about the project — which of two installed container runtimes to run containers with, a memory ceiling that differs between a laptop and a workstation, the path to a locally installed tool. The answer is keyed per project across every worktree of the repo, so it is given once per machine and not once per checkout; `veld config set --worktree` narrows it to one checkout. Legal only inside `vars`, deliberately: an `env` map has no name for `veld config set` to address. If there is no `default`, every machine must answer — `veld start` asks when it has a terminal and refuses with the exact command when it does not, and it never persists a value nobody chose.",
+      "description": "A var whose answer belongs to the MACHINE, not the repo. The declaration is committed and shared; the answer lives in veld's database and is set with `veld orchestrator vars set <name> <value>` (or in the management UI). Use it for values that are facts about the developer's computer rather than about the project — which of two installed container runtimes to run containers with, a memory ceiling that differs between a laptop and a workstation, the path to a locally installed tool. The answer is keyed per project across every worktree of the repo, so it is given once per machine and not once per checkout; `veld orchestrator vars set --worktree` narrows it to one checkout. Legal only inside `vars`, deliberately: an `env` map has no name for `veld orchestrator vars set` to address. If there is no `default`, every machine must answer — `veld orchestrator start` asks when it has a terminal and refuses with the exact command when it does not, and it never persists a value nobody chose.",
       "additionalProperties": false,
       "required": [
         "machine"
@@ -1137,7 +1137,7 @@
             },
             "description": {
               "type": "string",
-              "description": "What the value means. Shown by `veld config vars` and used as the prompt when no `prompt` is given."
+              "description": "What the value means. Shown by `veld orchestrator vars list` and used as the prompt when no `prompt` is given."
             },
             "prompt": {
               "type": "string",
@@ -1296,7 +1296,7 @@
       "type": "object",
       "propertyNames": {
         "pattern": "^[A-Za-z0-9_-]+$",
-        "description": "A port name becomes a DNS label (<node>-<port>.\u2026), an environment-variable suffix (VELD_PORT_<NAME>) and a segment of ${veld.ports.<name>} \u2014 so a dot, whitespace or `#` breaks one of those silently. `veld lint` reports the same thing as `port-name`."
+        "description": "A port name becomes a DNS label (<node>-<port>.\u2026), an environment-variable suffix (VELD_PORT_<NAME>) and a segment of ${veld.ports.<name>} \u2014 so a dot, whitespace or `#` breaks one of those silently. `veld orchestrator lint` reports the same thing as `port-name`."
       },
       "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, the sole entry, or the one explicitly marked `\"protocol\": \"http\"`. Every port gets its own hostname, ${veld.hosts.<name>} and VELD_HOST_<NAME>; the routed (http) ones additionally get ${veld.urls.<name>} and VELD_URL_<NAME>. Omit the key entirely for the historical behaviour (one allocated http port); set it to null for a long-running node that serves nothing.",
       "additionalProperties": {
@@ -1635,7 +1635,7 @@
     },
     "action": {
       "type": "object",
-      "description": "A user-invokable command on a node, exposed as `veld action <name>` and as a dashboard button.",
+      "description": "A user-invokable command on a node, exposed as `veld orchestrator action <name>` and as a dashboard button.",
       "required": [
         "name"
       ],
@@ -1696,7 +1696,7 @@
         },
         "hidden": {
           "type": "boolean",
-          "description": "Hide from `veld nodes`. Still participates in the graph."
+          "description": "Hide from `veld orchestrator nodes`. Still participates in the graph."
         },
         "url_template": {
           "type": "string"
@@ -1761,7 +1761,7 @@
               "type": "null"
             }
           ],
-          "description": "Default teardown hook for every variant of this node, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine. It receives every ${veld.*} the node itself had, the URL family and named ports included, so a resource named after the same built-ins in argv and here cannot drift."
+          "description": "Default teardown hook for every variant of this node, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld orchestrator stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine. It receives every ${veld.*} the node itself had, the URL family and named ports included, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"
@@ -1854,7 +1854,7 @@
               "type": "null"
             }
           ],
-          "description": "Teardown, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it. It receives every ${veld.*} this variant had at start — for a start_server that includes ${veld.url}, ${veld.url.*} and ${veld.ports.*} — plus ${output.KEY} and ${vars.*}, so a resource named after the same built-ins in argv and here cannot drift."
+          "description": "Teardown, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld orchestrator stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it. It receives every ${veld.*} this variant had at start — for a start_server that includes ${veld.url}, ${veld.url.*} and ${veld.ports.*} — plus ${output.KEY} and ${vars.*}, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"
@@ -2004,13 +2004,13 @@
           "type": "integer",
           "minimum": 5,
           "maximum": 480,
-          "description": "How long this project's peer share links live, in minutes. Overrides the machine's `sharing.peerTtlMinutes` setting; `veld share --ttl` overrides both for one share. Default 240. The daemon CLAMPS to this range rather than refusing, so a value outside it still loads and shares work — `veld lint` warns (share-ttl-range) and names the value that will apply. Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
+          "description": "How long this project's peer share links live, in minutes. Overrides the machine's `sharing.peerTtlMinutes` setting; `veld network share --ttl` overrides both for one share. Default 240. The daemon CLAMPS to this range rather than refusing, so a value outside it still loads and shares work — `veld orchestrator lint` warns (share-ttl-range) and names the value that will apply. Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
         },
         "web_ttl_minutes": {
           "type": "integer",
           "minimum": 5,
           "maximum": 480,
-          "description": "How long this project's `--web` share links live, in minutes. Shorter than peer by default because the audience is the open internet. Overrides the machine's `sharing.webTtlMinutes` setting; `veld share --ttl` overrides both. Default 120. Clamped, not refused, at the bounds above — `veld lint` warns (share-ttl-range). Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
+          "description": "How long this project's `--web` share links live, in minutes. Shorter than peer by default because the audience is the open internet. Overrides the machine's `sharing.webTtlMinutes` setting; `veld network share --ttl` overrides both. Default 120. Clamped, not refused, at the bounds above — `veld orchestrator lint` warns (share-ttl-range). Mirrors MIN/MAX_SHARE_TTL_MINUTES in veld-core."
         }
       }
     }

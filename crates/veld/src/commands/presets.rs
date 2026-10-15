@@ -1,7 +1,7 @@
 use crate::output;
 use veld_core::presets::{self, ResolvedPreset};
 
-/// `veld presets [--json] [--pin]`
+/// `veld orchestrator presets [--json] [--pin]`
 pub async fn run(json: bool, pin: bool) -> i32 {
     let Some((_config_path, config)) = super::parse_config(json) else {
         return 1;
@@ -32,7 +32,7 @@ pub async fn run(json: bool, pin: bool) -> i32 {
                 &format!(
                     "Refusing to pin: this config did not load completely, so the keys \
                      below are not the ones you would get once it does.\n{errors}\n  \
-                     Fix the above, then re-run `veld presets --pin`."
+                     Fix the above, then re-run `veld orchestrator presets --pin`."
                 ),
                 false,
             );
@@ -115,7 +115,7 @@ fn print_listing(config: &veld_core::config::VeldConfig, resolved: &[ResolvedPre
         output::print_info(&format!(
             "Auto-assigned keys: {}. These move when a preset is added or removed ahead of \
              them — including from an include file that sorts earlier. Freeze them with \
-             `veld presets --pin`, or pin one with \"key\": <n>.",
+             `veld orchestrator presets --pin`, or pin one with \"key\": <n>.",
             auto.join(", ")
         ));
     }
@@ -135,8 +135,12 @@ fn print_pin_block(resolved: &[ResolvedPreset]) {
     // included file. Say where each entry goes. Pinning a subset is safe precisely
     // because pinning a preset at the key it already shows moves nothing else.
     println!("// Add each entry's \"key\" to the file that already declares that preset");
-    println!("// (with `include` globs that is not always veld.json — `veld nodes` and");
-    println!("// `veld config --files` show which file is which). Pinning a few at a time");
+    println!(
+        "// (with `include` globs that is not always veld.json — `veld orchestrator nodes` and"
+    );
+    println!(
+        "// `veld orchestrator config --files` show which file is which). Pinning a few at a time"
+    );
     println!("// is safe: a key pinned at the number it already shows changes nothing else.");
     println!("{}", presets::pin_block(resolved));
 }

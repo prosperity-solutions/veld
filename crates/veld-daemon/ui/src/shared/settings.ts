@@ -43,7 +43,7 @@ export type WorktreeStorageMode = "sibling" | "custom";
  * Every line arrives from the daemon stamped in UTC (`db::ts_to_str` in
  * `veld-core`, because lexicographic order has to equal chronological order there),
  * so this is a rendering choice made at `fmtTs`/`fmtTsFull` and nowhere else. Mirrors
- * `LogTimeZone` in `veld-core/src/db/settings.rs`; `veld logs` reads the same key.
+ * `LogTimeZone` in `veld-core/src/db/settings.rs`; `veld orchestrator logs` reads the same key.
  */
 export type LogTimeZone = "local" | "utc";
 /** Which checkout's `veld.json` a project-declared surface reads its
@@ -766,7 +766,7 @@ export function focusSuppresses(fp: FocusPrefs, channel: string): boolean {
 /**
  * Which zone the logs view renders a line's timestamp in. **Defaults to `local`.**
  *
- * The same key `veld logs` reads, so the terminal and the app agree about what
+ * The same key `veld orchestrator logs` reads, so the terminal and the app agree about what
  * `09:12:33` means without either being told twice — which was the actual defect: the
  * CLI printed UTC, this view printed local, and the legacy dashboard printed UTC.
  */

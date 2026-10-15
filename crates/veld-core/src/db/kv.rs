@@ -309,7 +309,7 @@ impl Db {
     ///
     /// Deliberately **not** derived from anything that looks like database *age*.
     /// The tempting version — "a database with no rows is a new user" — is wrong
-    /// here in a way that bites daily: `veld start --preset dev` mints
+    /// here in a way that bites daily: `veld orchestrator start --preset dev` mints
     /// `.veld-dev/<run>/veld.db` several times a day, and either the CLI or the
     /// daemon may be the process that creates one. Note the asymmetry that makes
     /// the repo evidence safe where freshness is not: a repo row is proof the

@@ -1,6 +1,6 @@
 use crate::output;
 
-/// `veld setup` (no subcommand) -- show current setup status.
+/// `veld self setup` (no subcommand) -- show current setup status.
 pub async fn run() -> i32 {
     println!("{}", output::bold("Veld Setup"));
     println!();
@@ -72,8 +72,8 @@ pub async fn run() -> i32 {
 
     println!();
     println!("  {}", output::bold("Available commands:"));
-    println!("    veld setup unprivileged    No-sudo setup (port 18443)");
-    println!("    veld setup privileged      Clean URLs, ports 80/443 (one-time sudo)");
+    println!("    veld self setup unprivileged    No-sudo setup (port 18443)");
+    println!("    veld self setup privileged      Clean URLs, ports 80/443 (one-time sudo)");
 
     0
 }

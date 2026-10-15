@@ -63,7 +63,7 @@ const DURATIONS: Array<{ label: string; secs: number }> = [
  * - `no_helper` — veld asked and could not get it. Two sentences, split on
  *   `battery_capable`: no helper installed names the command that installs one,
  *   and a helper that refused the lease is a fault with nothing to suggest. This
- *   is the only note that should ever mention `veld setup privileged`.
+ *   is the only note that should ever mention `veld self setup privileged`.
  * - none, while active — one line of confirmation, because "will this survive me
  *   closing the laptop" is the actual question somebody opens this menu with.
  *
@@ -92,7 +92,7 @@ function LidNote(props: { state: CaffeinateState | null }) {
         // fault with no user action. Collapsing them dropped the instruction
         // entirely — the one actionable sentence this menu ever had.
         !state.battery_capable
-        ? "A closed lid on battery still sleeps. Run veld setup privileged to cover that too."
+        ? "A closed lid on battery still sleeps. Run veld self setup privileged to cover that too."
         : "A closed lid on battery still sleeps — the privileged helper didn’t take the lease."
       : state.lid_gap === "setting"
         ? "A closed lid on battery still sleeps — that’s off in Settings → Keep awake."

@@ -23,7 +23,7 @@ import tempfile
 FENCE = re.compile(r"```(?:json|jsonc)\n(.*?)```", re.S)
 # Deliberately shows the pre-v3 forms; see docs/migrating-to-v3.md.
 EXEMPT = {"docs/migrating-to-v3.md"}
-# `veld lint` needs a real config: schemaVersion plus at least one node.
+# `veld orchestrator lint` needs a real config: schemaVersion plus at least one node.
 REQUIRED = ('"schemaVersion"', '"nodes"')
 
 
@@ -133,14 +133,14 @@ def main():
             if count != 1:
                 # A root file shown beside an included file. Both parsed, and an
                 # included file legitimately has no schemaVersion/name, so there is
-                # nothing here `veld lint` can be pointed at.
+                # nothing here `veld orchestrator lint` can be pointed at.
                 skipped += 1
                 continue
             work = tempfile.mkdtemp()
             with open(os.path.join(work, "veld.json"), "w") as f:
                 f.write(block)
             r = subprocess.run(
-                [veld, "lint"], cwd=work, capture_output=True, text=True
+                [veld, "orchestrator", "lint"], cwd=work, capture_output=True, text=True
             )
             if r.returncode == 0:
                 ok += 1

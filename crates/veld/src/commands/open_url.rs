@@ -1,8 +1,8 @@
-//! `veld open-url` — open a web page in the Veld window that owns this terminal.
+//! `veld ide open-url` — open a web page in the Veld window that owns this terminal.
 //!
 //! Three callers, one code path:
 //!
-//! 1. A **person or an agent** typing `veld open-url https://…` in a Veld
+//! 1. A **person or an agent** typing `veld ide open-url https://…` in a Veld
 //!    terminal.
 //! 2. Anything honouring **`$BROWSER`**, which a Veld terminal points at the
 //!    generated `veld-open` shim: Claude Code, `gh`, `git web--browse`, Python's
@@ -42,7 +42,7 @@ use veld_core::opener::{Decision, Tool, real_opener};
 /// an rlimit. A guard whose failure mode is a fork bomb has to count.
 const DEPTH_VAR: &str = "VELD_OPEN_URL_DEPTH";
 
-/// How many nested `veld open-url` invocations to tolerate before refusing.
+/// How many nested `veld ide open-url` invocations to tolerate before refusing.
 ///
 /// One: a shim that reaches this command, whose passthrough reaches it again, is
 /// already a loop. Anything legitimate is depth zero.
@@ -66,7 +66,7 @@ fn child_depth(depth: u32) -> u32 {
     depth.saturating_add(1)
 }
 
-/// `veld open-url [--tool <t>] [--session <id>] -- <args>...`
+/// `veld ide open-url [--tool <t>] [--session <id>] -- <args>...`
 pub async fn run(tool: Option<String>, session: Option<String>, args: Vec<String>) -> i32 {
     let tool = match tool.as_deref() {
         None => Tool::Browser,

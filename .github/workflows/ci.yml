@@ -967,7 +967,7 @@ jobs:
           PY
 
       # `install.sh` is the largest program in this repo that nothing checked.
-      # It is what `curl | bash` runs, what `veld update` runs, and now what
+      # It is what `curl | bash` runs, what `veld self update` runs, and now what
       # Veld Desktop's own updater ends up in — and until this step it was
       # possible to ship it with a syntax error, because no test executes it and
       # no linter reads it. `--severity=warning` is where the file sits clean
@@ -1499,24 +1499,24 @@ jobs:
       - name: Test config parsing (testproject)
         working-directory: testproject
         run: |
-          ../target/debug/veld nodes
-          ../target/debug/veld nodes --json
-          ../target/debug/veld graph frontend:local
-          ../target/debug/veld config --files
-          # The issue's whole point for `veld lint` is CI. A fixture config that
+          ../target/debug/veld orchestrator nodes
+          ../target/debug/veld orchestrator nodes --json
+          ../target/debug/veld orchestrator graph frontend:local
+          ../target/debug/veld orchestrator config --files
+          # The issue's whole point for `veld orchestrator lint` is CI. A fixture config that
           # does not pass its own linter is not a fixture.
-          ../target/debug/veld lint
-          ../target/debug/veld lint --json
+          ../target/debug/veld orchestrator lint
+          ../target/debug/veld orchestrator lint --json
 
       - name: Lint every config in the repo
         run: |
           set -e
-          # `veld lint` exits 1 on any error-severity finding, so this gates the
+          # `veld orchestrator lint` exits 1 on any error-severity finding, so this gates the
           # repo's own configs against every rule in `config::validate`.
           for cfg in $(git ls-files '*veld.json' '*veld.jsonc' | grep -v node_modules); do
             dir=$(dirname "$cfg")
             echo "--- $cfg"
-            (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" lint)
+            (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" orchestrator lint)
           done
 
       - name: Doc examples load and lint clean
@@ -1539,6 +1539,16 @@ jobs:
           python3 tests/validate-doc-commands.py target/debug/veld --selftest
           python3 tests/validate-doc-commands.py target/debug/veld
 
+      - name: No code, CI step or script names a retired command
+        run: |
+          set -e
+          # The sibling of the step above for everything that is not Markdown —
+          # hint strings, CI steps, install.sh, the generated shims (#423). Here and
+          # not only in validate-schema.sh for the same reason: that script skips
+          # without a binary, and the schema job never builds one.
+          python3 tests/validate-cli-call-sites.py target/debug/veld --selftest
+          python3 tests/validate-cli-call-sites.py target/debug/veld
+
       - name: Reject a v1/v2 config with the upgrade instructions
         run: |
           set -e
@@ -1549,11 +1559,11 @@ jobs:
           sed 's/"schemaVersion": "3"/"schemaVersion": "2"/' testproject/veld.json \
             > "$work/veld.json"
           cd "$work"
-          out=$("$GITHUB_WORKSPACE/target/debug/veld" lint 2>&1) && {
+          out=$("$GITHUB_WORKSPACE/target/debug/veld" orchestrator lint 2>&1) && {
             echo "a schemaVersion 2 config must not load"; exit 1
           }
           echo "$out"
-          for needle in 'no longer supported' 'argv' 'shell' 'docs/migrating-to-v3.md' 'veld lint'; do
+          for needle in 'no longer supported' 'argv' 'shell' 'docs/migrating-to-v3.md' 'veld orchestrator lint'; do
             echo "$out" | grep -q -- "$needle" || {
               echo "rejection message lost: $needle"; exit 1
             }
@@ -1563,9 +1573,9 @@ jobs:
       - name: Verify setup subcommands exist
         run: |
           set -e
-          ./target/debug/veld setup --help | grep -q "unprivileged"
-          ./target/debug/veld setup --help | grep -q "privileged"
-          ./target/debug/veld doctor --help | grep -q "json"
+          ./target/debug/veld self setup --help | grep -q "unprivileged"
+          ./target/debug/veld self setup --help | grep -q "privileged"
+          ./target/debug/veld self doctor --help | grep -q "json"
           echo "Setup subcommands and doctor verified."
 
       - name: Test Python servers directly
@@ -1598,7 +1608,7 @@ jobs:
           #
           # Its own daemon instance too (`VELD_DAEMON_PORT`/`VELD_DAEMON_SOCK`): the
           # engine lives in the daemon, and the CLI refuses a daemon that drives a
-          # different database. `veld setup privileged` below installs the runner's
+          # different database. `veld self setup privileged` below installs the runner's
           # LaunchAgent daemon on the default port with the default database, so a
           # root CLI on the default port would meet it and refuse every command. On
           # its own port the CLI starts this build's sibling `veld-daemon` with root's
@@ -1614,7 +1624,7 @@ jobs:
         run: |
           sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" \
             VELD_DAEMON_PORT=19950 VELD_DAEMON_SOCK=/tmp/veld-ci-int.sock \
-            "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
+            "$(pwd)/target/debug/veld" self uninstall 2>/dev/null || true
           # The daemon the integration CLI started for itself (and any engine
           # worker still finishing) — no service manager knows them.
           sudo pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
@@ -1636,12 +1646,12 @@ jobs:
           VELD="$(pwd)/target/debug/veld"
           echo "=== Unprivileged setup ==="
           # Setup may fail on CA trust in CI (no keychain / Caddy timing) — allow partial success
-          $VELD setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed in CI)"
+          $VELD self setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed in CI)"
 
           echo ""
           echo "=== Run doctor (diagnostics) ==="
-          $VELD doctor || echo "WARNING: doctor reported issues (expected in CI — Caddy may not start)"
-          $VELD doctor --json > /tmp/doctor-unpriv.json 2>/dev/null || true
+          $VELD self doctor || echo "WARNING: doctor reported issues (expected in CI — Caddy may not start)"
+          $VELD self doctor --json > /tmp/doctor-unpriv.json 2>/dev/null || true
           cat /tmp/doctor-unpriv.json
 
           echo ""
@@ -1673,16 +1683,16 @@ jobs:
             echo ""
             echo "=== Start a service in unprivileged mode ==="
             cd testproject
-            $VELD start frontend:local --name unpriv-test
+            $VELD orchestrator start frontend:local --name unpriv-test
             sleep 2
 
             echo ""
             echo "=== Verify URLs have :18443 ==="
-            $VELD urls --name unpriv-test --json | grep -q "18443"
+            $VELD orchestrator urls --name unpriv-test --json | grep -q "18443"
 
             echo ""
             echo "=== Stop ==="
-            $VELD stop --name unpriv-test
+            $VELD orchestrator stop --name unpriv-test
             cd ..
           else
             echo "WARNING: Caddy did not start in CI (timing issue), skipping HTTPS tests"
@@ -1690,7 +1700,7 @@ jobs:
 
           echo ""
           echo "=== Uninstall (unprivileged) ==="
-          $VELD uninstall || echo "WARNING: uninstall returned non-zero"
+          $VELD self uninstall || echo "WARNING: uninstall returned non-zero"
 
           echo ""
           echo "=== Verify cleanup ==="
@@ -1731,12 +1741,12 @@ jobs:
           VELD="$(pwd)/target/debug/veld"
           echo "=== Privileged setup ==="
           # Root gets its own database — see the integration step above.
-          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD setup privileged
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD self setup privileged
           echo ""
 
           echo "=== Run doctor (diagnostics) ==="
-          $VELD doctor || echo "WARNING: doctor reported issues (expected in CI)"
-          $VELD doctor --json > /tmp/doctor-priv.json 2>/dev/null || true
+          $VELD self doctor || echo "WARNING: doctor reported issues (expected in CI)"
+          $VELD self doctor --json > /tmp/doctor-priv.json 2>/dev/null || true
           cat /tmp/doctor-priv.json
 
           echo ""
@@ -1765,14 +1775,14 @@ jobs:
           # Regression test: re-running privileged setup used to race launchctl
           # bootout against bootstrap, silently losing the launchd job and
           # leaving an unmanaged orphan helper that died on the next update.
-          # Stage Caddy in the user lib dir too: later steps (veld start) can
+          # Stage Caddy in the user lib dir too: later steps (veld orchestrator start) can
           # create ~/.local/lib/veld and flip lib_dir() resolution, so keep the
           # binary present in both candidate paths.
           mkdir -p "$HOME/.local/lib/veld"
           cp /tmp/caddy-preserve "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
           chmod +x "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
           # Root gets its own database — see the integration step above.
-          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD setup privileged
+          sudo env VELD_DB_PATH="${RUNNER_TEMP:-/tmp}/veld-ci-root.db" $VELD self setup privileged
           sleep 2
           if sudo launchctl print system/dev.veld.helper | grep -qE '^[[:space:]]*pid = [1-9]'; then
             echo "Helper job still registered and running after re-setup"
@@ -1780,7 +1790,7 @@ jobs:
             echo "FAIL: helper launchd job lost after re-running setup"
             exit 1
           fi
-          $VELD doctor --json > /tmp/doctor-resetup.json 2>/dev/null || true
+          $VELD self doctor --json > /tmp/doctor-resetup.json 2>/dev/null || true
           if grep -q "NOT managed" /tmp/doctor-resetup.json; then
             echo "FAIL: doctor reports unmanaged helper after re-setup"
             cat /tmp/doctor-resetup.json
@@ -1800,17 +1810,17 @@ jobs:
             # installed drives the installed database, which this cargo-built CLI
             # does not use — it would refuse to drive it.
             export VELD_DAEMON_PORT=19951 VELD_DAEMON_SOCK=/tmp/veld-ci-priv.sock
-            if $VELD start frontend:local --name priv-test 2>&1; then
+            if $VELD orchestrator start frontend:local --name priv-test 2>&1; then
               sleep 2
-              URLS=$($VELD urls --name priv-test --json 2>/dev/null || true)
+              URLS=$($VELD orchestrator urls --name priv-test --json 2>/dev/null || true)
               if echo "$URLS" | grep -q "18443"; then
                 echo "FAIL: URLs contain :18443 in privileged mode"
                 exit 1
               fi
               echo "Clean URLs OK"
-              $VELD stop --name priv-test 2>/dev/null || true
+              $VELD orchestrator stop --name priv-test 2>/dev/null || true
             else
-              echo "WARNING: veld start failed in CI (non-fatal)"
+              echo "WARNING: veld orchestrator start failed in CI (non-fatal)"
             fi
             cd ..
           else
@@ -1819,7 +1829,7 @@ jobs:
 
           echo ""
           echo "=== Uninstall (privileged) ==="
-          sudo $VELD uninstall || echo "WARNING: uninstall returned non-zero"
+          sudo $VELD self uninstall || echo "WARNING: uninstall returned non-zero"
 
           echo ""
           echo "=== Verify cleanup ==="
@@ -1834,7 +1844,7 @@ jobs:
       - name: "Cleanup between lifecycle tests (priv → auto)"
         if: always()
         run: |
-          # The daemon the privileged step's `veld start` started for itself —
+          # The daemon the privileged step's `veld orchestrator start` started for itself —
           # as the runner, so no sudo here (the integration daemon is root's).
           pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
           sudo curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
@@ -1854,7 +1864,7 @@ jobs:
           echo "=== Auto-bootstrap: start without any setup ==="
           cd testproject
           # Auto-bootstrap may fail in CI due to Caddy startup issues — allow soft failure
-          if $VELD start frontend:local --name auto-test 2>&1; then
+          if $VELD orchestrator start frontend:local --name auto-test 2>&1; then
             sleep 2
 
             echo ""
@@ -1864,13 +1874,13 @@ jobs:
 
             echo ""
             echo "=== Verify URLs have :18443 ==="
-            $VELD urls --name auto-test --json | grep -q "18443"
+            $VELD orchestrator urls --name auto-test --json | grep -q "18443"
 
             echo ""
             echo "=== Stop ==="
-            $VELD stop --name auto-test
+            $VELD orchestrator stop --name auto-test
           else
-            echo "WARNING: auto-bootstrap veld start failed in CI (Caddy may not start in this environment)"
+            echo "WARNING: auto-bootstrap veld orchestrator start failed in CI (Caddy may not start in this environment)"
             # Still verify the setup.json was written
             if [ -f ~/.veld/setup.json ]; then
               grep -q '"auto"' ~/.veld/setup.json && echo "setup.json mode=auto OK"
@@ -1881,7 +1891,7 @@ jobs:
           echo ""
           echo "=== Cleanup auto-bootstrap state ==="
           curl -s http://localhost:2019/stop >/dev/null 2>&1 || true
-          # The daemons `veld start` started for itself in this and the privileged step.
+          # The daemons `veld orchestrator start` started for itself in this and the privileged step.
           pkill -f "$(pwd)/target/debug/veld-daemon" 2>/dev/null || true
           rm -rf "$HOME/.veld"
           sleep 1
@@ -2008,7 +2018,7 @@ jobs:
 
       - name: Setup veld (unprivileged)
         run: |
-          ./target/debug/veld setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed)"
+          ./target/debug/veld self setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed)"
 
       - name: Wait for Caddy
         run: |
@@ -2030,7 +2040,7 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          ./target/debug/veld uninstall 2>/dev/null || true
+          ./target/debug/veld self uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true

@@ -116,12 +116,12 @@ export const PROMOTIONS: Promotion[] = [
     // The button is visible in the top bar; what it *covers* is not. Nobody
     // guesses that it holds through a closed lid, and — the reason this card
     // exists at all — nobody would connect a dead overnight run on a MacBook to
-    // `veld setup privileged`. That is the half a reader cannot find alone.
+    // `veld self setup privileged`. That is the half a reader cannot find alone.
     id: "keep-awake",
     since: "2026-08-13",
     eyebrow: "New",
     headline: "Close the lid, agent keeps running",
-    body: "Hold this machine awake from the cup beside search — 30 minutes, a few hours, or no limit. On a Mac on battery a shut lid also needs veld setup privileged.",
+    body: "Hold this machine awake from the cup beside search — 30 minutes, a few hours, or no limit. On a Mac on battery a shut lid also needs veld self setup privileged.",
     glyph: "device",
   },
   {
@@ -151,7 +151,7 @@ export const PROMOTIONS: Promotion[] = [
     // A **default that flipped**, which is the category this channel exists for:
     // it happens *to* the reader, with no action of theirs. The surface that
     // earns the card is the **in-page overlay**: it starts shares without ever
-    // opening a Veld window, and unlike `veld share` — which prints an `Awake:`
+    // opening a Veld window, and unlike `veld network share` — which prints an `Awake:`
     // line — it says nothing about the hold at all.
     //
     // A second card about keep-awake two days after `keep-awake` is real budget

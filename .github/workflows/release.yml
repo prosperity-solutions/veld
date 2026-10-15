@@ -254,7 +254,7 @@ jobs:
           APPLE_DEVID_P12_PASSWORD: ${{ secrets.APPLE_DEVID_P12_PASSWORD }}
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
 
-      # The client tarball carries only what `install.sh` / `veld update`
+      # The client tarball carries only what `install.sh` / `veld self update`
       # install on a developer machine. veld-gateway is a server binary — it
       # ships as its own artifact (below) so clients don't download a server
       # they never run, and install.sh's binary allow-list stays unchanged.
@@ -839,7 +839,7 @@ jobs:
       # five minutes and came back as GitHub's 500 HTML error page, the action
       # threw, the flip never ran, and the release stayed an invisible draft
       # while `releases/latest` still pointed at the previous version. Nothing
-      # a user touches — `veld update`, install.sh, Desktop auto-update — reads
+      # a user touches — `veld self update`, install.sh, Desktop auto-update — reads
       # a draft, so the release simply did not exist for them, and the only
       # signal was a red X on a job whose log was a page of HTML.
       #
@@ -1055,7 +1055,7 @@ jobs:
           # step advertises: publishing an OLD stranded draft after a newer
           # release has shipped would, with `true`, re-point `releases/latest`
           # backwards, and install.sh resolves `/releases/latest`, so every
-          # `curl | bash` install and `veld update` would silently downgrade.
+          # `curl | bash` install and `veld self update` would silently downgrade.
           # `legacy` lets GitHub choose by version and date, which is right for
           # a normal release and for a late top-up alike.
           publish() {

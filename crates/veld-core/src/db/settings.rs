@@ -220,7 +220,7 @@ pub const MAX_MAX_SESSIONS: i64 = 128;
 ///
 /// The shell survives the pipe (that is what the holder process and the detach
 /// grace exist for), so a dropped socket is usually a transient network blip —
-/// the machine slept, a proxy timed out, the daemon restarted mid-`veld update`
+/// the machine slept, a proxy timed out, the daemon restarted mid-`veld self update`
 /// — and a few automatic attempts reconnect without the user noticing. After the
 /// budget is spent the terminal settles in its `error` state and offers the
 /// manual Reconnect button, so this is a courtesy that can never wedge a shell
@@ -497,7 +497,7 @@ pub const DEFAULT_SHARING_WEB_TTL_MINUTES: i64 = 120;
 /// a machine is held awake, and a future change to one must not silently move the
 /// other. The floor is five minutes because a share nobody can finish opening is
 /// not a share; the ceiling is a working day because this is the value applied to
-/// **every** share without anybody typing it. `veld share --ttl` keeps the
+/// **every** share without anybody typing it. `veld network share --ttl` keeps the
 /// deliberate exception: no upper bound at all, floored only at 60 seconds so it
 /// cannot mint a share that expired before its link could be opened.
 pub const MIN_SHARE_TTL_MINUTES: i64 = 5;
@@ -616,7 +616,7 @@ const MAX_WORKTREE_STORAGE_DIR_LEN: usize = 1024;
 /// `super::ts_to_str` exists to make lexicographic order equal chronological order,
 /// which `logs_since`, the GC's pruning and both readers' interleave sorts all rely
 /// on. This is a rendering choice, and these are the surfaces that honour it:
-/// `veld logs`, `veld start`'s foreground log streaming (`--attach`), and the `/ide`
+/// `veld orchestrator logs`, `veld orchestrator start`'s foreground log streaming (`--attach`), and the `/ide`
 /// logs view. A new surface that prints `row.ts` raw shows a different clock than the
 /// terminal beside it, so it should read this key too.
 ///
@@ -643,8 +643,8 @@ impl LogTimeZone {
     /// Every zone this binary understands.
     ///
     /// The validator's allow-list and both **Rust** readers derive from this, so a new
-    /// variant cannot validate on write and then be ignored by `veld logs` or
-    /// `veld start` — which is the trap the string-enum shape invites: `one_of`
+    /// variant cannot validate on write and then be ignored by `veld orchestrator logs` or
+    /// `veld orchestrator start` — which is the trap the string-enum shape invites: `one_of`
     /// hand-listing `["local","utc"]` beside a `_ => Local` reader would accept
     /// `"Europe/Berlin"` and silently render local.
     ///
@@ -1264,7 +1264,7 @@ impl SettingKey {
                 )
             }
             // Clamped like the pair above, and against their own bounds — see
-            // `MIN_SHARE_TTL_MINUTES`. `veld share --ttl` is a separate path on
+            // `MIN_SHARE_TTL_MINUTES`. `veld network share --ttl` is a separate path on
             // purpose, with no upper bound (only a 60s floor): this is the number
             // applied to every share with nobody typing it, and that one is a
             // number somebody typed.
@@ -2332,7 +2332,7 @@ impl Db {
     /// the next time the default changes — the user asked for "whatever Veld
     /// thinks is right", not for the number that answered that question once.
     /// It is also what makes an unset distinguishable from a deliberate choice
-    /// that agrees with the default, which is what `veld settings` reports in its
+    /// that agrees with the default, which is what `veld self settings list` reports in its
     /// `FROM` column.
     ///
     /// Returns how many rows actually existed, so a caller can tell "reset" from
@@ -2356,7 +2356,7 @@ impl Db {
     /// Which settings have a stored row — i.e. have been set rather than left on
     /// their default.
     ///
-    /// The `FROM` column of `veld settings`, and the thing that makes an
+    /// The `FROM` column of `veld self settings list`, and the thing that makes an
     /// effective value legible: a document of forty-eight values says nothing
     /// about which of them anybody chose.
     pub fn settings_with_stored_value(&self) -> Result<Vec<String>, DbError> {
@@ -2603,7 +2603,7 @@ impl Db {
     }
 
     /// How long a share of this `mode` should live, in **seconds**, when neither
-    /// `veld share --ttl` nor the project's `veld.json` said.
+    /// `veld network share --ttl` nor the project's `veld.json` said.
     ///
     /// Seconds because that is the unit every consumer of a TTL already speaks
     /// (the wire, the manifest's `expires_at`, `--ttl`); minutes are the unit a
@@ -2869,8 +2869,8 @@ impl Db {
             .unwrap_or(true)
     }
 
-    /// Which zone a log timestamp is rendered in — read by `veld logs`,
-    /// `veld start --attach`'s streaming, and (over the settings API) the `/ide` view.
+    /// Which zone a log timestamp is rendered in — read by `veld orchestrator logs`,
+    /// `veld orchestrator start --attach`'s streaming, and (over the settings API) the `/ide` view.
     ///
     /// Has an accessor rather than being read raw because the **CLI** reads this one —
     /// it is not a value the daemon merely stores for a browser — and [`Db::setting`]
@@ -2992,7 +2992,7 @@ mod tests {
 
     #[test]
     fn a_share_ttl_outside_the_bounds_is_clamped_on_the_way_in() {
-        // The validator's half: `veld settings set` and the dialog both go through
+        // The validator's half: `veld self settings set` and the dialog both go through
         // it, so an out-of-range value is stored already narrowed rather than
         // refused (see `validate`).
         let (_dir, db) = test_db();

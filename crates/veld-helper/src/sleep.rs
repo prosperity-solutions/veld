@@ -18,7 +18,7 @@
 //! **1. veld only ever reverts what veld set.** `disablesleep` is a machine-wide
 //! setting with other legitimate owners — a developer who ran `pmset` by hand for
 //! a clamshell desk setup, or another tool. A helper that "cleaned up" on every
-//! start would silently switch that off, on every `veld update`, with nothing
+//! start would silently switch that off, on every `veld self update`, with nothing
 //! connecting the effect back to veld. So arming writes a **durable marker**
 //! recording that veld took the setting and what it read beforehand
 //! ([`Marker`]); nothing here touches `pmset` unless that marker says veld owns
@@ -311,7 +311,7 @@ pub struct SleepManager<S: SleepSetter = Pmset> {
 /// ~/.local/lib/veld` during a botched reinstall, or re-running `setup
 /// privileged` with a different Caddy location, orphans the marker.
 ///
-/// The path itself comes from `veld-core` because `veld uninstall` has to sweep
+/// The path itself comes from `veld-core` because `veld self uninstall` has to sweep
 /// the same directory, and two literals would drift.
 pub fn marker_dir() -> PathBuf {
     veld_core::paths::sleep_marker_dir()
@@ -444,7 +444,7 @@ impl<S: SleepSetter> SleepManager<S> {
             // follows fails, take it back. Otherwise a helper that cannot set the
             // value at all (an unprivileged one: `pmset -g` reads fine as the
             // user, `pmset disablesleep` does not) leaves a marker claiming veld
-            // holds a setting it never touched, which `status` and `veld doctor`
+            // holds a setting it never touched, which `status` and `veld self doctor`
             // would then report as a live hold.
             if let Err(e) = self.setter.set(true).await {
                 self.delete_marker();
@@ -933,7 +933,7 @@ mod tests {
     /// A helper that can read but not write — the unprivileged one, where
     /// `pmset -g` works as the user and `pmset disablesleep` does not — must not
     /// leave a marker behind claiming a hold it never took. `status` and
-    /// `veld doctor` read that marker.
+    /// `veld self doctor` read that marker.
     #[tokio::test]
     async fn a_first_take_that_cannot_write_leaves_no_ownership_claim() {
         let (mgr, fake, _dir) = manager();

@@ -18,9 +18,9 @@
 //! Two rules run through the whole module:
 //!
 //! - **Lenient, never fatal.** A malformed quicklink or permission rule is a
-//!   [`IdeProblem`] that `veld lint` reports and the loader ignores. It must never
-//!   become a load error: F0.1 says a config that will not load takes `veld stop`
-//!   and `veld logs` down with it, and a typo in a desktop-only convenience field
+//!   [`IdeProblem`] that `veld orchestrator lint` reports and the loader ignores. It must never
+//!   become a load error: F0.1 says a config that will not load takes `veld orchestrator stop`
+//!   and `veld orchestrator logs` down with it, and a typo in a desktop-only convenience field
 //!   has no business doing that.
 //! - **Fail closed.** An entry that cannot be understood grants nothing. A
 //!   permission rule with an unparseable origin, an unknown permission id or a
@@ -31,7 +31,7 @@
 //! (`desktop/src/permissions.js`), because that is where the request arrives. What
 //! crosses the wire is therefore *already normalised*: the origin is split into
 //! scheme/host/port here, once, so the matcher cannot disagree with what
-//! `veld lint` accepted. Matching a *URL being opened* is the other consumer of the
+//! `veld orchestrator lint` accepted. Matching a *URL being opened* is the other consumer of the
 //! same normalised shape and it runs in the daemon ([`route_url`]) — two consumers
 //! of one pattern rather than one implementation that could be shared, which is why
 //! [`origin_matches`] restates that matcher's rules and is tested on the same
@@ -184,7 +184,7 @@ pub const NEWS_GLYPHS: &[&str] = &["device", "inbox", "panes", "terminal"];
 ///
 /// Mirrors the schema's `$defs.newsItem`, which sets `additionalProperties:
 /// false` — so without this an editor red-squiggles `"headlines": "…"` while
-/// `veld lint` accepts it and the entry is dropped for a missing `headline` that
+/// `veld orchestrator lint` accepts it and the entry is dropped for a missing `headline` that
 /// the author can see right there in the file.
 pub const NEWS_ITEM_KEYS: &[&str] = &["body", "eyebrow", "glyph", "headline", "id", "since"];
 
@@ -219,7 +219,7 @@ pub const MAX_NEWS_ITEMS: usize = 5;
 ///
 /// Mirrors the schema's `$defs.pane` terminal branch, which sets
 /// `additionalProperties: false` — so without this an editor red-squiggles
-/// `"autoresume": true` while `veld lint` accepts it and the pane silently takes
+/// `"autoresume": true` while `veld orchestrator lint` accepts it and the pane silently takes
 /// the default. Every default a typo can reach changes behaviour
 /// (`auto_resume` false, `close_on_exit` true, `fixed_label` false), which is
 /// the worst shape for a silent one.
@@ -431,7 +431,7 @@ pub const DEFAULT_EXTENSION_REFRESH_SECONDS: u64 = 60;
 ///
 /// Eight is generous against the real shape: a project with eight distinct
 /// coding-agent panes has more agents than opinions. Over the cap the *pickers*
-/// past the eighth are dropped with a `veld lint` problem — never the panes,
+/// past the eighth are dropped with a `veld orchestrator lint` problem — never the panes,
 /// which keep working exactly as they would without the feature.
 pub const MAX_PANE_SESSION_LISTERS: usize = 8;
 
@@ -572,7 +572,7 @@ pub struct IdeSection {
     /// sorted order. F8 names them so an author can tell "reserved" from "typo".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uninterpreted: Vec<String>,
-    /// Everything wrong with the section. Reported by `veld lint` as warnings;
+    /// Everything wrong with the section. Reported by `veld orchestrator lint` as warnings;
     /// each one corresponds to an entry that was dropped.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<IdeProblem>,
@@ -757,7 +757,7 @@ pub enum ActionAccepts {
 /// `items` are ids of declared `action` extensions, not nested objects. Nesting is
 /// one level deep on purpose — two levels of popover in a 42px bar is worse than a
 /// second menu — and referencing rather than nesting means a menu member is a
-/// first-class declaration that `veld lint` checks for a duplicate id like any
+/// first-class declaration that `veld orchestrator lint` checks for a duplicate id like any
 /// other.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MenuExtension {
@@ -1140,7 +1140,7 @@ fn default_staleness_sensitivity() -> f64 {
 
 /// Parse `ide.git` — a per-project subscope for git-related IDE knobs. Only
 /// `stalenessSensitivity` is read today; other keys under `git` are reserved
-/// and parked in [`IdeSection::uninterpreted`] (as `git.<key>`) so `veld lint`
+/// and parked in [`IdeSection::uninterpreted`] (as `git.<key>`) so `veld orchestrator lint`
 /// can still tell a reserved key from a typo.
 fn parse_git(value: &serde_json::Value, out: &mut IdeSection) {
     let Some(map) = value.as_object() else {
@@ -2387,7 +2387,7 @@ fn parse_command_in_scope(
 /// A pane command is interpolated against a much smaller context than a node's
 /// ([`PANE_BUILTINS`]), and an unresolvable reference is not a soft failure at
 /// spawn time — the pane simply never starts, with an error the author has to
-/// read backwards from. Catching it in `veld lint` is the whole point of the
+/// read backwards from. Catching it in `veld orchestrator lint` is the whole point of the
 /// scope being closed.
 ///
 /// A second, narrower check rides along: [`SHELL_REFUSED_BUILTINS`] names are in
@@ -2669,7 +2669,7 @@ fn has_visible_text(text: &str) -> bool {
 /// Parse `ide.news` — the cards this project shows its own team.
 ///
 /// Lenient like every other `ide` key: a malformed entry is dropped with a
-/// problem that `veld lint` reports, never a load error. Note where this parser
+/// problem that `veld orchestrator lint` reports, never a load error. Note where this parser
 /// deliberately does **not** follow the module's fail-closed rule: an unknown key
 /// on an otherwise-valid entry reports a problem and *keeps* the card, exactly as
 /// `ide.panes` does. Fail-closed exists because guessing at a permission hands
@@ -3172,7 +3172,7 @@ pub fn parse_origin(raw: &str) -> Result<OriginPattern, String> {
     // and they accept forms this one does not: `new URL()` folds `127.1`,
     // `2130706433`, `0177.0.0.1` and `127.0.0.01` all to `127.0.0.1`. Stored
     // verbatim, such a rule could never fire — and `is_local_origin` would call it
-    // remote, so `veld lint` would warn the author that their own loopback grant
+    // remote, so `veld orchestrator lint` would warn the author that their own loopback grant
     // "is not this machine". Refused with the canonical spelling named, which is
     // the same treatment the IPv4-mapped and Unicode forms get above.
     let last_label = host.rsplit('.').next().unwrap_or("");
@@ -3963,7 +3963,7 @@ mod tests {
 
     /// The JSON schema is hand-maintained, so the id list can drift away from the
     /// parser and nothing would notice: the schema would accept a permission
-    /// `veld lint` then reports as unknown, or refuse one that works.
+    /// `veld orchestrator lint` then reports as unknown, or refuse one that works.
     ///
     /// The desktop app's own table is checked against the *schema* on its side
     /// (`desktop/src/permissions.test.js`), which makes this the single link that
@@ -4415,7 +4415,7 @@ mod tests {
 
     /// The extension key lists, slot set and type set are hand-maintained in two
     /// places — here and the JSON schema — and nothing but this ties them
-    /// together. A drifted schema red-squiggles a key `veld lint` accepts, or
+    /// together. A drifted schema red-squiggles a key `veld orchestrator lint` accepts, or
     /// accepts one the parser will report, and both failures are silent.
     #[test]
     fn the_schema_extension_branches_match_the_parser() {
@@ -4876,7 +4876,7 @@ mod tests {
 
     /// A pane command resolves against a much smaller variable scope than a
     /// node's, and an unresolvable reference means the pane never starts. The
-    /// author should learn that from `veld lint`, not from a dead tab.
+    /// author should learn that from `veld orchestrator lint`, not from a dead tab.
     #[test]
     fn a_variable_a_pane_will_not_have_is_refused() {
         for argv in [
@@ -5119,7 +5119,7 @@ mod tests {
         // **No run of spaces in a message a user reads.** `cargo fmt` reflows a
         // wrapped string literal and silently swallows a missing `\`
         // continuation, which shipped once in this very message — and `veld
-        // lint` prints it verbatim.
+        // orchestrator lint` prints it verbatim.
         for problem in &parsed.problems {
             assert!(
                 !problem.message.contains("  "),
@@ -5260,7 +5260,7 @@ mod tests {
     }
 
     /// The schema's terminal branch is `additionalProperties: false`, so an
-    /// editor already rejects these. `veld lint` accepting them meant a typo
+    /// editor already rejects these. `veld orchestrator lint` accepting them meant a typo
     /// silently took a default — and both reachable defaults change behaviour.
     #[test]
     fn an_unknown_key_inside_a_pane_is_named_rather_than_ignored() {
@@ -5364,7 +5364,7 @@ mod tests {
 
         // The nested `sessions` object is closed the same way and drifts the
         // same way, so it is checked here rather than left to be noticed by an
-        // author whose editor and `veld lint` disagree.
+        // author whose editor and `veld orchestrator lint` disagree.
         let sessions = &branch["properties"]["sessions"];
         assert_eq!(
             sessions["additionalProperties"],
@@ -5414,7 +5414,7 @@ mod tests {
     }
 
     /// `panes` moved out of `uninterpreted` when it gained a meaning; F8 must
-    /// stop naming it or `veld lint` tells authors their panes are not rendered.
+    /// stop naming it or `veld orchestrator lint` tells authors their panes are not rendered.
     #[test]
     fn panes_is_no_longer_reported_as_uninterpreted() {
         let parsed = one_pane(json!({ "id": "a", "type": "terminal", "argv": ["x"] }));
@@ -5731,7 +5731,7 @@ mod tests {
     }
 
     /// `news` moved out of `uninterpreted` when it gained a meaning; F8 must stop
-    /// naming it or `veld lint` tells authors their news is not rendered.
+    /// naming it or `veld orchestrator lint` tells authors their news is not rendered.
     #[test]
     fn news_is_no_longer_reported_as_uninterpreted() {
         let parsed = one_news(news_item(json!({})));
@@ -5779,7 +5779,7 @@ mod tests {
         // widening one in the schema alone fails in the worst direction: the
         // author's editor accepts a headline this parser then drops, so the change
         // the card was announcing never reaches the team, and the only report is a
-        // `veld lint` run by whoever thinks to.
+        // `veld orchestrator lint` run by whoever thinks to.
         for (key, max) in [
             ("eyebrow", MAX_NEWS_EYEBROW),
             ("headline", MAX_NEWS_HEADLINE),

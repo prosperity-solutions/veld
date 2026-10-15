@@ -1,4 +1,4 @@
-//! `veld desktop` -- install, update and report on Veld Desktop, the macOS app.
+//! `veld self desktop` -- install, update and report on Veld Desktop, the macOS app.
 //!
 //! The CLI installs the app for a reason that is not convenience: a build a
 //! browser downloaded carries `com.apple.quarantine`, and that attribute is what
@@ -7,7 +7,7 @@
 //! opens — no Developer ID required. The trust boundary is unchanged, since the
 //! script came from the same origin and the archive is checksum-verified.
 //!
-//! The work lives in the install script, so that `veld update` keeps the app in
+//! The work lives in the install script, so that `veld self update` keeps the app in
 //! step without a second implementation of download-verify-install
 //! (`veld_core::setup::install_desktop`). What lives *here* is everything the
 //! script cannot do from inside itself: knowing whether the app actually moved,
@@ -21,7 +21,7 @@ use veld_core::desktop_pref::{self, DesktopChoice};
 
 use crate::output;
 
-/// `veld desktop install` / `veld desktop update`.
+/// `veld self desktop install` / `veld self desktop update`.
 ///
 /// `wait_pid`, `relaunch` and `app_path` exist for the app updating *itself*: it
 /// hands off to the CLI and quits, because an Electron app reads from its own
@@ -44,7 +44,7 @@ pub async fn install(
     // **Running this command is the answer to "do you want the app?".** Recorded
     // before the download rather than after it, and that ordering is deliberate:
     // a failed install is a network problem, not a change of mind, and the
-    // preference is what stops the *next* `veld update` from asking again or
+    // preference is what stops the *next* `veld self update` from asking again or
     // skipping the app they just asked for. It overwrites an earlier "no" for the
     // same reason — this command is how somebody changes their mind.
     //
@@ -158,7 +158,7 @@ pub async fn install(
             &version,
             outcome.as_ref().map(|_| ()).map_err(|e| e.as_str()),
             // This command only ever installs the app, so a failure here is
-            // always retried with `veld desktop update`.
+            // always retried with `veld self desktop update`.
             veld_core::setup::UpdateHalf::App,
         );
     }
@@ -183,13 +183,13 @@ pub async fn install(
     }
 }
 
-/// `veld desktop uninstall` — remove the app and stop veld reinstalling it.
+/// `veld self desktop uninstall` — remove the app and stop veld reinstalling it.
 ///
 /// The other half of making the app optional, and the reason it is a command
 /// rather than only a prompt: someone who answered "yes" once, or who was never
 /// asked because they installed veld before this existed, needs a way to change
 /// their mind that does not involve dragging a bundle to the Trash and then
-/// watching the next `veld update` put it back.
+/// watching the next `veld self update` put it back.
 ///
 /// **The preference is recorded even when there is no bundle to remove.** That is
 /// not a degenerate case, it is a supported one: an orchestrator-only user who has
@@ -211,9 +211,9 @@ pub async fn uninstall(assume_yes: bool) -> i32 {
         // **The descriptors the question actually uses**, not `output::is_tty()`
         // — which reads *stdout*, while `confirm_removal` prints to stderr and
         // reads stdin. That mismatch cut both ways in front of an irreversible
-        // `remove_dir_all`: `veld desktop uninstall > log` from a terminal
+        // `remove_dir_all`: `veld self desktop uninstall > log` from a terminal
         // skipped the confirmation entirely and deleted the bundle unasked,
-        // while `veld desktop uninstall < /dev/null` in a pty answered its own
+        // while `veld self desktop uninstall < /dev/null` in a pty answered its own
         // prompt with EOF and refused a caller who meant it. Same defect the
         // bash half had (`[ -t 1 ]` where the prompt goes to fd 2) and the same
         // rule fixes both: ask only when the human can see the question *and*
@@ -229,17 +229,17 @@ pub async fn uninstall(assume_yes: bool) -> i32 {
     // `/Applications` this user cannot write, an app that will not quit — the
     // answer they just gave is still their answer, and the thing that actually
     // ends the complaint is veld not downloading the app again. Recording only on
-    // success would leave the next `veld update` re-fetching an app the user has
+    // success would leave the next `veld self update` re-fetching an app the user has
     // explicitly refused.
     remember(DesktopChoice::Unwanted);
 
     let Some(path) = installed else {
         output::print_success(
-            "Veld Desktop will not be installed — `veld update` skips the app half from now on.",
+            "Veld Desktop will not be installed — `veld self update` skips the app half from now on.",
         );
         println!(
             "  {}",
-            output::dim("Run 'veld desktop install' if you want it after all.")
+            output::dim("Run 'veld self desktop install' if you want it after all.")
         );
         return 0;
     };
@@ -250,7 +250,7 @@ pub async fn uninstall(assume_yes: bool) -> i32 {
             println!(
                 "  {}",
                 output::dim(
-                    "`veld update` skips the app half from now on. Run 'veld desktop install' if \
+                    "`veld self update` skips the app half from now on. Run 'veld self desktop install' if \
                      you want it back."
                 )
             );
@@ -331,7 +331,7 @@ fn remember(choice: DesktopChoice) {
 
 /// Ask whether this machine wants Veld Desktop, and remember the answer.
 ///
-/// Shared with `veld update`, which is where most existing users meet it: they
+/// Shared with `veld self update`, which is where most existing users meet it: they
 /// have the app because every release before this one installed it for them, and
 /// this is the one time they are asked whether they wanted it.
 ///
@@ -381,7 +381,7 @@ pub(crate) fn ask_desktop_choice(installed: Option<&Path>) -> Option<DesktopChoi
                 "  {}",
                 output::dim(
                     "Worktree tabs, terminal panes and browser panes in one window, over the same \
-                     daemon the CLI drives. A ~113 MB download, kept in step by `veld update`."
+                     daemon the CLI drives. A ~113 MB download, kept in step by `veld self update`."
                 )
             );
             print!("  Install Veld Desktop? [y/N] ");
@@ -403,8 +403,8 @@ pub(crate) fn ask_desktop_choice(installed: Option<&Path>) -> Option<DesktopChoi
     println!(
         "  {}",
         output::dim(
-            "Remembered. Change it any time with 'veld desktop install' or \
-             'veld desktop uninstall'."
+            "Remembered. Change it any time with 'veld self desktop install' or \
+             'veld self desktop uninstall'."
         )
     );
     Some(choice)
@@ -557,7 +557,7 @@ fn capabilities() -> Vec<&'static str> {
 /// user would be told to run curl by hand.
 ///
 /// So the app is told "no" and takes the app-only route it took before this
-/// existed — which works, and leaves `veld update` in a terminal (where sudo may
+/// existed — which works, and leaves `veld self update` in a terminal (where sudo may
 /// prompt) as the way those machines move both halves. Advertising a capability
 /// this binary cannot deliver would be worse than not having it.
 ///
@@ -572,7 +572,7 @@ fn can_hand_off_full_update(exe: &Path) -> bool {
     !dir.starts_with("/usr/local")
 }
 
-/// `veld desktop status` -- where the app is and whether it matches this CLI.
+/// `veld self desktop status` -- where the app is and whether it matches this CLI.
 ///
 /// Two different questions, depending on the platform, and conflating them was a
 /// bug: on macOS veld *manages* the app, so it can report a version and offer to
@@ -635,14 +635,14 @@ pub async fn status(json: bool) -> i32 {
                 println!(
                     "  {}",
                     output::dim(
-                        "You opted out of the app, so `veld update` leaves this copy alone. \
-                         'veld desktop install' opts back in; 'veld desktop uninstall' removes it."
+                        "You opted out of the app, so `veld self update` leaves this copy alone. \
+                         'veld self desktop install' opts back in; 'veld self desktop uninstall' removes it."
                     )
                 );
             } else if version != cli_version {
                 println!();
                 output::print_info(&format!(
-                    "The CLI is {cli_version}. Run 'veld desktop update' to match them."
+                    "The CLI is {cli_version}. Run 'veld self desktop update' to match them."
                 ));
             }
             0
@@ -652,16 +652,18 @@ pub async fn status(json: bool) -> i32 {
             match preference {
                 Some(DesktopChoice::Unwanted) => println!(
                     "  {}",
-                    output::dim("You opted out — 'veld desktop install' if you change your mind.")
+                    output::dim(
+                        "You opted out — 'veld self desktop install' if you change your mind."
+                    )
                 ),
-                _ => println!("  {}", output::dim("veld desktop install")),
+                _ => println!("  {}", output::dim("veld self desktop install")),
             }
             0
         }
     }
 }
 
-/// `veld desktop status` where veld does not install the app.
+/// `veld self desktop status` where veld does not install the app.
 ///
 /// `installed` is deliberately absent from the JSON when nothing was found: on
 /// Linux an AppImage lives wherever the user saved it, so "not in the three
@@ -798,7 +800,7 @@ mod tests {
     #[test]
     fn a_system_install_does_not_advertise_a_handoff_it_cannot_complete() {
         // The failure this guards is not subtle: advertise the capability from
-        // `/usr/local`, and the app quits into a `veld update` that needs
+        // `/usr/local`, and the app quits into a `veld self update` that needs
         // `sudo -n` it cannot get, fails, and leaves the user with a closed app
         // and no new version. install.sh refuses to relocate a system install
         // because a privileged LaunchDaemon still references those paths, so this
@@ -827,7 +829,7 @@ mod tests {
 
     #[test]
     fn the_default_answer_is_whatever_the_machine_already_looks_like() {
-        // App installed: Enter keeps it. The user is mid-`veld update` and did
+        // App installed: Enter keeps it. The user is mid-`veld self update` and did
         // not come here to lose an app.
         assert_eq!(
             desktop_answer(Some("\n"), true),

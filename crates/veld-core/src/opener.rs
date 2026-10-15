@@ -5,7 +5,7 @@
 //! - The **daemon** generates the little scripts a terminal session gets in its
 //!   environment (`veld-daemon/src/pty/shims.rs`), and bakes the real opener's
 //!   path into each one as its own fallback.
-//! - The **CLI** (`veld open-url`) decides whether an invocation is a plain
+//! - The **CLI** (`veld ide open-url`) decides whether an invocation is a plain
 //!   "open this web page" — in which case Veld may route it to a browser pane —
 //!   or something else entirely, which must reach the real tool unchanged.
 //!
@@ -50,7 +50,7 @@ use std::path::{Path, PathBuf};
 /// a URL".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tool {
-    /// `$BROWSER`, and `veld open-url` invoked by hand. Every argument is expected
+    /// `$BROWSER`, and `veld ide open-url` invoked by hand. Every argument is expected
     /// to be a URL, because that is all this convention carries.
     Browser,
     /// macOS `open`, which is a general-purpose "open this thing" command.

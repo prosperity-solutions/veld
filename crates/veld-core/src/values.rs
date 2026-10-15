@@ -2,13 +2,13 @@
 //!
 //! **Timing is the contract.** Resolution happens at most once per run, at start,
 //! *after* the graph is built — never during parse. That ordering is what makes
-//! `veld stop`, `veld status`, and the daemon monitor immune to a secret source
+//! `veld orchestrator stop`, `veld orchestrator status`, and the daemon monitor immune to a secret source
 //! that has since broken: they parse the config, they never resolve it.
 //!
 //! **Scope is the other half of the contract.** A value is resolved only if
 //! something in the resolved plan reaches for it. A node's `env` source always
 //! worked that way; [`resolve_vars`] does now too, so a var backed by a
-//! credential helper does not make every `veld start` — including one whose
+//! credential helper does not make every `veld orchestrator start` — including one whose
 //! nodes need no secret at all — reach for the credential store. `start`
 //! resolves in two passes over one cache (the vars a `setup` step names, before
 //! setup runs; the rest before the first node spawns), which is why this
@@ -121,7 +121,7 @@ pub enum ValueError {
     /// rather than silently handed to a process.
     #[error(
         "{at}: {source_label} produced a value that is not one of the declared choices \
-         ({choices}). Set a legal one:\n    veld config set {name} <value>"
+         ({choices}). Set a legal one:\n    veld orchestrator vars set {name} <value>"
     )]
     MachineVarNotAChoice {
         at: String,
@@ -163,7 +163,7 @@ pub fn set_caller_env(env: std::collections::BTreeMap<String, String>) -> bool {
 
 tokio::task_local! {
     /// [`CALLER_ENV`] for one request inside a long-lived process (the daemon
-    /// resolving `veld action` for a terminal), where a process-wide value would
+    /// resolving `veld orchestrator action` for a terminal), where a process-wide value would
     /// hand one caller's environment to the next.
     static SCOPED_CALLER_ENV: std::collections::BTreeMap<String, String>;
 }
@@ -283,7 +283,7 @@ async fn run_source_command(spec: &CommandSpec, at: &str) -> Result<String, Valu
 /// Write every declared file for one node, before its process starts (F9.1).
 ///
 /// Paths are resolved from the project root, like every other relative path in a
-/// veld config. Parent directories are created. The file is created with its
+/// veld.json. Parent directories are created. The file is created with its
 /// declared mode (default `0600`) **before** the content is written, so a secret is
 /// never briefly world-readable — creating then chmod-ing would leave exactly that
 /// window.
@@ -428,7 +428,7 @@ pub type VarOverrides = std::collections::BTreeMap<String, ConfigValue>;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnansweredVar {
     pub name: String,
-    /// What the value means, for the prompt and for `veld config vars`.
+    /// What the value means, for the prompt and for `veld orchestrator vars list`.
     pub description: Option<String>,
     /// The declared question, if the author wrote one.
     pub prompt: Option<String>,
@@ -462,7 +462,7 @@ impl UnansweredVar {
 /// three others are already running, and the choice at that point is between
 /// tearing down a half-started environment and prompting while it runs.
 ///
-/// Vars outside the plan are deliberately not reported: `veld start docs` must
+/// Vars outside the plan are deliberately not reported: `veld orchestrator start docs` must
 /// not demand an answer for a var only the database node uses.
 pub fn unanswered_machine_vars(
     config: &crate::config::VeldConfig,
@@ -545,7 +545,7 @@ pub async fn resolve_vars(
         // `"runtime": "docker"`, and every machine that had answered would
         // otherwise keep resolving its stale answer forever — with no `choices`
         // check (there is no declaration to check against) and no way to see it,
-        // since `veld config vars` lists only machine vars. The config is the
+        // since `veld orchestrator vars list` lists only machine vars. The config is the
         // authority on what is overridable; the database only remembers answers.
         let applicable = machine.and_then(|_| overrides.get(name.as_str()));
 
@@ -567,12 +567,12 @@ pub async fn resolve_vars(
                     at,
                     how: if m.secret {
                         format!(
-                            "veld config set {name} --env NAME   (or --file PATH, or \
+                            "veld orchestrator vars set {name} --env NAME   (or --file PATH, or \
                              --shell 'op read …')\n    `{name}` is declared secret, so veld \
                              stores where to read it rather than the value itself"
                         )
                     } else {
-                        format!("veld config set {name} <value>")
+                        format!("veld orchestrator vars set {name} <value>")
                     },
                     name: name.clone(),
                     choices: match &m.choices {
@@ -602,7 +602,7 @@ pub async fn resolve_vars(
                 choices: choices.join(", "),
                 // `applicable`, not a fresh lookup: a row that was skipped for
                 // not being declared `machine` did not produce this value, and
-                // blaming it would send the reader to `veld config set` for a
+                // blaming it would send the reader to `veld orchestrator vars set` for a
                 // value that came out of the config file.
                 source_label: match applicable {
                     Some(_) => "this machine's override".to_owned(),
@@ -856,7 +856,7 @@ mod tests {
     /// F1: a var literal is interpolated against the run-scoped builtins.
     ///
     /// It was not, and nothing said so: `"run_url": "https://web.${veld.run}.x"`
-    /// passed `veld lint` and delivered the literal text `${veld.run}` to the
+    /// passed `veld orchestrator lint` and delivered the literal text `${veld.run}` to the
     /// process, where it surfaced hours later as a bad hostname or a container
     /// named `foo-${veld.run}` rather than as a config error.
     #[tokio::test]
@@ -922,7 +922,7 @@ mod tests {
     ///
     /// The motivating case is a credential helper: putting the command in a var —
     /// the natural move, since it is one value used by several nodes — used to
-    /// make *every* `veld start` reach for the credential store, including runs
+    /// make *every* `veld orchestrator start` reach for the credential store, including runs
     /// whose nodes need no secret at all.
     #[tokio::test]
     async fn unreferenced_and_already_resolved_vars_are_not_run() {
@@ -1082,7 +1082,7 @@ mod tests {
             .expect_err("must refuse rather than resolve nothing");
         assert!(matches!(err, ValueError::MachineVarUnanswered { .. }));
         let msg = err.to_string();
-        assert!(msg.contains("veld config set v"), "{msg}");
+        assert!(msg.contains("veld orchestrator vars set v"), "{msg}");
     }
 
     /// Choices are enforced on the *effective* value, so an answer stored while
@@ -1106,7 +1106,7 @@ mod tests {
     /// A project that drops a `machine` block and hard-codes the value would
     /// otherwise keep serving every already-answered machine its stale answer,
     /// forever — unchecked against `choices` (there is no declaration left to
-    /// check) and invisible, because `veld config vars` lists only machine vars.
+    /// check) and invisible, because `veld orchestrator vars list` lists only machine vars.
     #[tokio::test]
     async fn an_override_for_a_var_that_is_no_longer_machine_is_ignored() {
         let vars: HashMap<String, VarDecl> =

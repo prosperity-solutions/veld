@@ -27,8 +27,8 @@
 //! by a raw path already. A cleverer identity here would mean overrides survive a
 //! move while the run history that explains them does not, and two disagreeing
 //! notions of "the same project" is a worse bug than the one it fixes. Moving a
-//! checkout orphans its overrides; `veld config vars` prints the id so the next
-//! `veld config set` is obvious.
+//! checkout orphans its overrides; `veld orchestrator vars list` prints the id so the next
+//! `veld orchestrator vars set` is obvious.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +74,7 @@ pub fn project_id_for(config_dir: &Path) -> ProjectId {
 /// not on it — and because this function never fails, a daemon that cannot run
 /// `git` silently gets the *fallback* id (the config directory) while the CLI, on
 /// the user's `PATH`, gets the git-derived one. The two then key the same project
-/// differently: the UI writes an answer, reports success, and `veld start` never
+/// differently: the UI writes an answer, reports success, and `veld orchestrator start` never
 /// reads it. AGENTS.md already requires the injection for the daemon's other git
 /// plumbing (`desktop.rs`); this is the same rule, and the silent-divergence
 /// failure mode is why it matters more here than a "command not found" would.
@@ -176,7 +176,7 @@ fn canonicalize(p: &Path) -> PathBuf {
 
 /// The stored string for a path. Matches `db::state::root_key`'s lossy
 /// conversion so a project id and a project root are comparable by eye in
-/// `veld config vars` output.
+/// `veld orchestrator vars list` output.
 fn path_key(p: &Path) -> String {
     p.to_string_lossy().into_owned()
 }

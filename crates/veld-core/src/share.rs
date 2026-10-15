@@ -406,7 +406,7 @@ pub struct ShareInfo {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub public_urls: Vec<GatewayPublicUrl>,
     /// The share password (password-protected hosted web shares only), so
-    /// `veld shares` / the dashboard can re-display it. Local control API only.
+    /// `veld network list` / the dashboard can re-display it. Local control API only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_password: Option<String>,
     /// Live tunnel transport per connected peer (hosted shares: one entry per
@@ -591,7 +591,7 @@ pub enum TicketError {
 /// Errors talking to the local daemon.
 #[derive(Debug, thiserror::Error)]
 pub enum DaemonError {
-    #[error("the veld daemon is not running (run `veld setup` or start the service)")]
+    #[error("the veld daemon is not running (run `veld self setup` or start the service)")]
     NotRunning,
     #[error("daemon request failed: {0}")]
     Http(#[from] reqwest::Error),
@@ -725,8 +725,8 @@ impl DaemonClient {
     /// The machine's keep-awake state (`GET /api/caffeinate`).
     ///
     /// On this client because the two CLI callers are both *about* sharing in the
-    /// end: `veld share` says whether the machine will stay up long enough to be
-    /// worth the link it just printed, and `veld doctor` answers "why won't this
+    /// end: `veld network share` says whether the machine will stay up long enough to be
+    /// worth the link it just printed, and `veld self doctor` answers "why won't this
     /// Mac sleep" for somebody with no window open. Neither adds a keep-awake
     /// subcommand — there deliberately still is none.
     pub async fn caffeinate(&self) -> Result<CaffeinateState, DaemonError> {
@@ -771,7 +771,7 @@ impl DaemonClient {
         Self::expect_empty(resp).await
     }
 
-    /// Stop all shares tied to a run (best-effort cleanup on `veld stop`).
+    /// Stop all shares tied to a run (best-effort cleanup on `veld orchestrator stop`).
     /// Returns how many shares were stopped.
     pub async fn unshare_run(&self, run_id: &str) -> Result<usize, DaemonError> {
         let resp = self

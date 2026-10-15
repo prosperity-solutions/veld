@@ -37,7 +37,7 @@ pub enum GraphError {
     /// defined, defined but not matched by a glob, its file renamed out of a glob,
     /// or its file present but unparseable. A bare name cannot tell them apart, so
     /// the error carries what the reader needs to: the nodes that *do* exist, and
-    /// a pointer at `veld config --files` for the glob→file→node chain.
+    /// a pointer at `veld orchestrator config --files` for the glob→file→node chain.
     #[error(
         "unknown node \"{name}\"{}{}",
         if known.is_empty() {
@@ -47,7 +47,7 @@ pub enum GraphError {
         },
         if *split {
             "\n  This project's config is split across files — run \
-             `veld config --files` to see which glob matched which file, and which \
+             `veld orchestrator config --files` to see which glob matched which file, and which \
              nodes each defines. A node can go missing because its file was renamed \
              out of an `include` glob."
                 .to_owned()
@@ -1003,7 +1003,7 @@ mod tests {
         assert!(msg.contains("typo"), "{msg}");
         assert!(msg.contains("api"), "must list what does exist: {msg}");
         assert!(
-            msg.contains("veld config --files"),
+            msg.contains("veld orchestrator config --files"),
             "a split config must point at the glob→file→node chain: {msg}"
         );
 
@@ -1020,7 +1020,7 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(msg.contains("api"));
-        assert!(!msg.contains("veld config --files"), "{msg}");
+        assert!(!msg.contains("veld orchestrator config --files"), "{msg}");
     }
 
     #[test]

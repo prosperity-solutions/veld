@@ -179,7 +179,7 @@ async function stopSharing(): Promise<void> {
  * Toast a plain-language status readout: the public URL and, for a
  * password-protected share, the viewer password — the split-channel secrecy
  * flow (send URL and password separately) the old card supported. No
- * relay/transport detail; that lives in `veld shares` / the management UI.
+ * relay/transport detail; that lives in `veld network list` / the management UI.
  */
 async function showSharingStatus(): Promise<void> {
   let list: SharesList;

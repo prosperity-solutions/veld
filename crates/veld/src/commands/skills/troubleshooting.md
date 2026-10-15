@@ -46,14 +46,14 @@ config *reload* cannot — Caddy will not re-examine a certificate already in it
 cache). So the first move is to look, not to fix:
 
 ```sh
-veld doctor          # `Certificate:` row, and the HTTPS certificate check
+veld self doctor          # `Certificate:` row, and the HTTPS certificate check
 ```
 
 - `valid, expires in …` — nothing to do.
 - `EXPIRED …` — the watchdog restarts Caddy to try to renew it: two bad probes a
   minute apart, then a restart, up to three times before it stops trying (a fault
   a new process cannot fix is not worth dropping every live connection for, over
-  and over). Run `veld doctor`
+  and over). Run `veld self doctor`
   again. If it stays expired, Caddy is failing to issue and the reason is in
   `~/.local/lib/veld/caddy-data/caddy.log` — the path doctor prints in its
   Installation block, which is the copy to trust if these ever disagree.
@@ -66,7 +66,7 @@ veld doctor          # `Certificate:` row, and the HTTPS certificate check
   start date. Fix the clock; reissuing under a wrong clock just produces another
   certificate the browser rejects, so veld does not restart Caddy for this.
 - `not trusted` on the `CA:` row instead is a different problem — the authority
-  was never trusted on this machine. Re-run `veld setup <mode>`.
+  was never trusted on this machine. Re-run `veld self setup <mode>`.
 
 The row names **one** hostname (`veld.localhost`). Every run URL has a
 certificate of its own, so a green row is not a verdict on all of them — the
@@ -78,4 +78,4 @@ what the shared and injected surfaces are served over too.
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

@@ -120,7 +120,7 @@ fn take_install_lock() -> Result<MutexGuard<'static, ()>> {
 const MAX_CANDIDATE_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Mode for the store directory: root-owned, and readable by everyone because
-/// `veld doctor` runs as the user and reports on the binary and its signature.
+/// `veld self doctor` runs as the user and reports on the binary and its signature.
 /// Readable is not writable; the whole point is the missing `w`.
 const DIR_MODE: u32 = 0o755;
 /// Mode for the installed binary — executable by launchd/systemd (root),
@@ -264,7 +264,7 @@ impl Candidate {
     /// on purpose, because the root helper builds candidates from a path its
     /// caller chose and both replies with and logs that error. Only a caller
     /// already running with the user's own privilege over the file — `veld
-    /// setup`, under the user's sudo — may attach it.
+    /// self setup`, under the user's sudo — may attach it.
     pub fn mismatch_detail(&self) -> Option<String> {
         (!signing::verify_data_slots(signing::ORG_SIGNING_KEYRING, &self.bytes, &self.sig)).then(
             || {
@@ -405,7 +405,7 @@ pub fn install_from(binary: &Path, running_version: &str) -> Result<String> {
 ///
 /// Carried as its own type inside the `anyhow` chain, and found with
 /// `downcast_ref`, because at least one caller has to treat it differently:
-/// `veld setup privileged` keeps the newer helper the store already holds and
+/// `veld self setup privileged` keeps the newer helper the store already holds and
 /// points the service definition at *that*, where any other failure means the
 /// store could not be written and must be reported. Distinguishing them by
 /// "does the store still verify?" instead — which is what this replaced — turns
@@ -582,7 +582,7 @@ fn write_atomically(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
     // same rule `signing::sig_path_for` follows and for the same reason.
     //
     // The pid makes it unique **across processes**, which the in-process
-    // `install_lock` cannot. `veld setup privileged` stages through here in the
+    // `install_lock` cannot. `veld self setup privileged` stages through here in the
     // `veld` process while the helper serves `install_helper` in its own — a
     // plausible pairing during a repair — and with one fixed name the second
     // writer's `remove_file` unlinks the first's in-flight temp, after which the
@@ -723,7 +723,7 @@ mod tests {
 
     /// The version refusal is **typed**, and every other failure is not.
     ///
-    /// `veld setup privileged` branches on this to decide between "the store
+    /// `veld self setup privileged` branches on this to decide between "the store
     /// already has something newer, serve that" and "the store could not be
     /// written, say so". Inferring it from "does the store still verify?" — the
     /// version this replaced — reported a full disk or a compromised store

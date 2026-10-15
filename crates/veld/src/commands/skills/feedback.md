@@ -166,7 +166,7 @@ Common issues when integrating veld with web applications:
 
 **Cause**: Dev servers (Next.js, Vite) reject WebSocket upgrades when the `Origin` header doesn't match `localhost`. The browser sends `Origin: https://your-app.run.project.localhost` but the dev server only accepts `Origin: http://localhost:<port>`.
 
-**Fix (veld side)**: veld 6.2+ strips the `Origin` header from upstream requests automatically. If you're on an older version, run `veld update`.
+**Fix (veld side)**: veld 6.2+ strips the `Origin` header from upstream requests automatically. If you're on an older version, run `veld self update`.
 
 **Fix (app side)**: If using Next.js, add your veld domain pattern to `allowedDevOrigins` in `next.config.js`:
 ```js
@@ -199,7 +199,7 @@ connect-src 'self' wss://*.dev.preview.life.li https://*.dev.preview.life.li
 
 ### Port conflicts
 
-**Symptom**: `veld start` fails with "port already in use" or the health check times out.
+**Symptom**: `veld orchestrator start` fails with "port already in use" or the health check times out.
 
 **Cause**: Veld allocates ports in the 19000–29999 range. Another process may be using the allocated port.
 
@@ -209,7 +209,7 @@ connect-src 'self' wss://*.dev.preview.life.li https://*.dev.preview.life.li
 
 **Symptom**: Browser shows "Your connection is not private" or certificate errors.
 
-**Fix**: Run `veld setup privileged` (or `veld setup unprivileged`) to generate and trust the local CA certificate. If already set up, run `veld doctor` to check CA trust status.
+**Fix**: Run `veld self setup privileged` (or `veld self setup unprivileged`) to generate and trust the local CA certificate. If already set up, run `veld self doctor` to check CA trust status.
 
 ## Launch the Veld Feedback Loop
 
@@ -225,7 +225,7 @@ drops off, and the next call returns the following one.
 
 1. **Find the run.** `veld feedback next` auto-selects the current run (a single
    active or recently-used run); if several exist, pass `--name <run>`. If there
-   is no run at all, ask the human to `veld start <node> --name <run>` first.
+   is no run at all, ask the human to `veld orchestrator start <node> --name <run>` first.
 2. **Enter the loop below and keep running it until you get `"ended"`.** Don't
    stop after one item — this is a Ralph loop; you keep pulling.
 
@@ -305,4 +305,4 @@ again — it picks up where it left off.
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

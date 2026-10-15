@@ -1,5 +1,5 @@
-//! `veld share` / `join` / `shares` / `unshare` / `leave` — peer-to-peer
-//! environment sharing. These are thin clients over the daemon's control API;
+//! `veld network share` / `join` / `list` / `unshare` / `leave` / `approve` /
+//! `deny` — peer-to-peer environment sharing. These are thin clients over the daemon's control API;
 //! the daemon holds the iroh endpoint and does the real work.
 
 use crate::output;
@@ -58,7 +58,7 @@ fn expires_note(expires_at: i64) -> String {
 ///
 /// The share is only half the answer: a laptop that suspends drops it, and the
 /// automatic keep-awake that prevents that is a *setting* — so the person who
-/// just ran `veld share` is exactly the person who needs to know which way it is
+/// just ran `veld network share` is exactly the person who needs to know which way it is
 /// set, and this is the only surface that reaches them. There is still no
 /// keep-awake subcommand; this reports state, it does not change any.
 ///
@@ -66,7 +66,7 @@ fn expires_note(expires_at: i64) -> String {
 /// a detached task after the share is inserted — deliberately, so a share start
 /// never waits on a process spawn and a privileged-helper round trip. So the
 /// first read usually lands before the hold exists. A second is bounded hard:
-/// this is a receipt line, and a `veld share` made slower to print it would be a
+/// this is a receipt line, and a `veld network share` made slower to print it would be a
 /// bad trade every time.
 async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
     for attempt in 0..5 {
@@ -74,7 +74,7 @@ async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
         // A daemon that cannot answer is not worth a line, and not worth a
-        // retry either — `veld share` has already succeeded by this point.
+        // retry either — `veld network share` has already succeeded by this point.
         let state = client.caffeinate().await.ok()?;
         if !state.supported {
             // Nothing can keep this machine awake and nothing the reader could
@@ -119,7 +119,7 @@ async fn keep_awake_line(client: &DaemonClient) -> Option<String> {
     Some("this machine may sleep and drop the share".to_owned())
 }
 
-/// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web]
+/// `veld network share [run] [--node ...] [--ttl secs] [--approve MODE] [--web]
 /// [--access MODE] [--password PW] [--json]`
 #[allow(clippy::too_many_arguments)]
 pub async fn share(
@@ -171,12 +171,12 @@ pub async fn share(
     // Project scope: a run name is unique per project, not globally, so tell the
     // daemon which project this invocation means.
     //
-    // Keyed on the config's EXISTENCE, not on parsing it — `veld share` never
+    // Keyed on the config's EXISTENCE, not on parsing it — `veld network share` never
     // reads the config, and `load_config_from_cwd().ok()` would silently drop
     // the scope for a veld.json that fails to parse or carries an unsupported
     // schema_version. Dropping it re-enables machine-wide name resolution on the
     // one path where a wrong answer publishes URLs. Still `None` outside any
-    // project, which is a real case: `veld share` works from anywhere.
+    // project, which is a real case: `veld network share` works from anywhere.
     let project_root = std::env::current_dir()
         .ok()
         .and_then(|cwd| veld_core::config::discover_config(&cwd).ok())
@@ -202,7 +202,7 @@ pub async fn share(
         Ok(resp) => {
             if json {
                 // The same fact the human receipt prints as `Awake:`, as a field
-                // — an agent driving `veld share` has exactly the same reason to
+                // — an agent driving `veld network share` has exactly the same reason to
                 // know whether this machine will still be up to serve the link,
                 // and the docs promise the line without qualifying it by output
                 // mode. `null` when there is nothing to say.
@@ -271,7 +271,7 @@ pub async fn share(
                 println!();
                 println!(
                     "  Stop:    {}",
-                    output::dim(&format!("veld unshare {}", resp.share_id))
+                    output::dim(&format!("veld network unshare {}", resp.share_id))
                 );
                 // The lifetime actually in force, which until now only `--json`
                 // carried. Three things can decide it (`--ttl`, the project's
@@ -315,11 +315,11 @@ pub async fn share(
                 println!();
                 println!(
                     "  …or run:  {}",
-                    output::dim(&format!("veld join {}", resp.ticket))
+                    output::dim(&format!("veld network join {}", resp.ticket))
                 );
                 println!(
                     "  Stop:     {}",
-                    output::dim(&format!("veld unshare {}", resp.share_id))
+                    output::dim(&format!("veld network unshare {}", resp.share_id))
                 );
                 println!(
                     "  Expires:  {}",
@@ -336,7 +336,9 @@ pub async fn share(
                 if approve_mode == ApprovalMode::Manual {
                     println!(
                         "  {}",
-                        output::dim("when they join, approve in the browser or run `veld approve`")
+                        output::dim(
+                            "when they join, approve in the browser or run `veld network approve`"
+                        )
                     );
                 }
             }
@@ -349,7 +351,7 @@ pub async fn share(
     }
 }
 
-/// `veld join <ticket> [--label ...] [--no-remember] [--json]`
+/// `veld network join <ticket> [--label ...] [--no-remember] [--json]`
 ///
 /// `remember` (default true; cleared by `--no-remember`) controls whether a
 /// relay token entered at the prompt is cached for next time.
@@ -436,7 +438,7 @@ pub async fn join(ticket: String, label: Option<String>, remember: bool, json: b
             println!();
             println!(
                 "  Leave with: {}",
-                output::dim(&format!("veld leave {}", resp.join_id))
+                output::dim(&format!("veld network leave {}", resp.join_id))
             );
         }
         return 0;
@@ -482,7 +484,7 @@ fn fragment_encode(s: &str) -> String {
     out
 }
 
-/// `veld shares [--json]`
+/// `veld network list [--json]`
 pub async fn list(json: bool) -> i32 {
     match DaemonClient::new().list().await {
         Ok(list) => {
@@ -634,7 +636,7 @@ async fn resolve_id(
                 }
                 _ => {
                     output::print_error(
-                        &format!("multiple {what}s — specify an id (see `veld shares`)"),
+                        &format!("multiple {what}s — specify an id (see `veld network list`)"),
                         json,
                     );
                     None
@@ -648,7 +650,7 @@ async fn resolve_id(
     }
 }
 
-/// `veld unshare [id] [--json]` — id optional when exactly one share is active.
+/// `veld network unshare [id] [--json]` — id optional when exactly one share is active.
 pub async fn unshare(id: Option<String>, json: bool) -> i32 {
     let client = DaemonClient::new();
     let Some(id) = resolve_id(&client, id, false, json).await else {
@@ -670,7 +672,7 @@ pub async fn unshare(id: Option<String>, json: bool) -> i32 {
     }
 }
 
-/// `veld approve <req-id> [--json]`
+/// `veld network approve <req-id> [--json]`
 pub async fn approve(id: String, json: bool) -> i32 {
     match DaemonClient::new().approve(&id).await {
         Ok(()) => {
@@ -688,7 +690,7 @@ pub async fn approve(id: String, json: bool) -> i32 {
     }
 }
 
-/// `veld deny <req-id> [--json]`
+/// `veld network deny <req-id> [--json]`
 pub async fn deny(id: String, json: bool) -> i32 {
     match DaemonClient::new().deny(&id).await {
         Ok(()) => {
@@ -706,7 +708,7 @@ pub async fn deny(id: String, json: bool) -> i32 {
     }
 }
 
-/// `veld leave [id] [--json]` — id optional when exactly one join is active.
+/// `veld network leave [id] [--json]` — id optional when exactly one join is active.
 pub async fn leave(id: Option<String>, json: bool) -> i32 {
     let client = DaemonClient::new();
     let Some(id) = resolve_id(&client, id, true, json).await else {

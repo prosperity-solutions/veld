@@ -43,7 +43,7 @@ fn source_name(s: SourceFilter) -> &'static str {
     }
 }
 
-/// `veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--json] [--source <s>] [--search <term>] [--context <n>]`
+/// `veld orchestrator logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--json] [--source <s>] [--search <term>] [--context <n>]`
 ///
 /// The engine (in the daemon) resolves the run, reads and filters the rows;
 /// this prints them and, with `-f`, polls it for newer ones.

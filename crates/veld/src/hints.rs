@@ -29,14 +29,16 @@ pub fn maybe_show_privileged_hint(https_port: u16) -> bool {
         eprintln!();
         eprintln!("  \x1b[1mTip:\x1b[0m URLs use port {https_port} in unprivileged mode.");
         eprintln!(
-            "  Run \x1b[36mveld setup privileged\x1b[0m for clean URLs without :{https_port} (one-time sudo)."
+            "  Run \x1b[36mveld self setup privileged\x1b[0m for clean URLs without :{https_port} (one-time sudo)."
         );
         eprintln!("  Set VELD_NO_HINTS=1 to silence this message.");
         true
     } else if count < 5 {
         // Brief reminder
         eprintln!();
-        eprintln!("  Tip: \x1b[36mveld setup privileged\x1b[0m for URLs without :{https_port}");
+        eprintln!(
+            "  Tip: \x1b[36mveld self setup privileged\x1b[0m for URLs without :{https_port}"
+        );
         true
     } else {
         false

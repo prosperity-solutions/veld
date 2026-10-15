@@ -786,11 +786,11 @@ export interface Preset {
    * unfilled). An empty `tokens` is a real `ok`: a preset whose selections are `[]`
    * expands to nothing.
    *
-   * `failed` is a preset that exists and does not expand — the state `veld status`
-   * calls "cannot be expanded — see `veld lint`", and lint does report it.
+   * `failed` is a preset that exists and does not expand — the state `veld orchestrator status`
+   * calls "cannot be expanded — see `veld orchestrator lint`", and lint does report it.
    *
    * `skipped` is a preset this *listing* did not expand (past its per-poll cap).
-   * Nothing is wrong with it, so a surface must not send the reader to `veld lint`;
+   * Nothing is wrong with it, so a surface must not send the reader to `veld orchestrator lint`;
    * treat it exactly like an unreadable config — cannot compare.
    */
   expansion:
@@ -884,7 +884,7 @@ export interface Repo {
  *
  * **Already validated by the daemon.** `veld_core::ide::parse_news` enforces the
  * copy caps, the glyph, the `YYYY-MM-DD` day, the id grammar and the
- * per-project item cap, and reports each breach through `veld lint` — because
+ * per-project item cap, and reports each breach through `veld orchestrator lint` — because
  * that is the process that reads `veld.json` and therefore the only one that can
  * tell an author their headline ran long. What the bundle still owns is
  * namespacing the id and deciding what any of it means; see
@@ -1559,7 +1559,7 @@ export interface CaffeinateState {
   covers_lid: boolean;
   /**
    * Why it does not, when it does not — and the reason this is not a boolean.
-   * `"no_helper"` is the only one that should ever point at `veld setup
+   * `"no_helper"` is the only one that should ever point at `veld self setup
    * privileged`: `"automatic"` means veld deliberately never asked (one click on
    * a duration buys it), and `"setting"` means it was told not to. Reporting a
    * fault for something never attempted is what these three prevent.
@@ -1595,7 +1595,7 @@ export interface CaffeinateState {
    * (the sharing panel, caught in review). So no consumer reads this field
    * alone: the two UI ones go through `attributesToShares` in
    * `shared/useCaffeinate.ts`, which is where the rule lives and is tested, and
-   * `veld share` / `veld doctor` pair it with `reason == "sharing"` in Rust.
+   * `veld network share` / `veld self doctor` pair it with `reason == "sharing"` in Rust.
    *
    * Also `true` for **any** number of live shares: it is derived from the latest
    * expiry across all of them, which is why the copy says "your shares" rather
@@ -2033,7 +2033,7 @@ export const api = {
   shellIntercept: () =>
     request<ShellIntercept>("/api/shells/intercept", { method: "POST" }),
   /**
-   * Whether the Claude Code a terminal would run loads Veld's mod — `veld doctor`'s
+   * Whether the Claude Code a terminal would run loads Veld's mod — `veld self doctor`'s
    * question, asked before the IDE offers to switch. A `POST` for
    * `shellIntercept`'s reason: it runs `claude`. Cached by the daemon for a minute.
    */
@@ -2097,7 +2097,7 @@ export const api = {
    * starting another, with `age_seconds` saying so.
    *
    * Returns an empty list when the machine's `extensions.autoRefresh` setting
-   * is off, or when the worktree has no loadable veld config.
+   * is off, or when the worktree has no loadable veld.json.
    */
   extensionStatus: (
     worktreeId: number,
@@ -2357,7 +2357,7 @@ export const api = {
    * The **daemon** decides, not this page, and that is the point: half the exempt
    * list is a setting and half is `ide.externalOrigins` in the project's
    * `veld.json`, which the renderer does not read. A process in the shell reaches
-   * the same endpoint through `$BROWSER` → `veld open-url`, so a click and a CLI
+   * the same endpoint through `$BROWSER` → `veld ide open-url`, so a click and a CLI
    * get the same answer from the same code.
    *
    * `pane` means the daemon has already pushed an `open_url` frame down this
@@ -2564,7 +2564,7 @@ export const api = {
    * `shell` (a pointer resolved at run start).
    *
    * A pointer is how a `secret` var is answered without the secret itself
-   * landing in veld's database — the same choice `veld config set` offers.
+   * landing in veld's database — the same choice `veld orchestrator vars set` offers.
    */
   setConfigVar: (body: SetConfigVarBody) =>
     request<{ name: string; scope: ConfigVarScope; value: string }>(

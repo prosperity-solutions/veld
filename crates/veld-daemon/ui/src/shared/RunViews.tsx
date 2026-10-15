@@ -190,7 +190,7 @@ export function LogsView(
       // Keyed by run *instance* only in a pane, where a worktree switch re-points
       // the view and another run's node filter would come along. A card is bound to
       // one environment for its lifetime, and keying it by instance would have
-      // silently changed runs-mode behaviour: `veld restart` mints a new run id, so
+      // silently changed runs-mode behaviour: `veld orchestrator restart` mints a new run id, so
       // the panel would remount and drop the search, filters and scroll position
       // that used to survive it.
       key={

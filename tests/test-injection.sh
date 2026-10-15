@@ -6,7 +6,7 @@
 #   ./tests/test-injection.sh --veld-bin <path> --project-dir <path>
 #
 # Prerequisites:
-#   - veld setup already done (Caddy running)
+#   - veld self setup already done (Caddy running)
 #   - Node.js available (for Next.js dev server)
 #   - npm install already run in the project dir
 # ---------------------------------------------------------------------------
@@ -95,7 +95,7 @@ cleanup() {
   echo ""
   echo -e "${YELLOW}Cleaning up...${NC}"
   cd "$PROJECT_DIR" 2>/dev/null || true
-  "$VELD_BIN" stop --name "$RUN_NAME" 2>/dev/null || true
+  "$VELD_BIN" orchestrator stop --name "$RUN_NAME" 2>/dev/null || true
   sleep 1
 }
 trap cleanup EXIT
@@ -107,14 +107,14 @@ echo "=== Injection E2E Tests ==="
 echo ""
 echo "Starting Next.js testproject via veld..."
 cd "$PROJECT_DIR"
-"$VELD_BIN" start web:local --name "$RUN_NAME"
+"$VELD_BIN" orchestrator start web:local --name "$RUN_NAME"
 
 # Get the URL from veld
-URLS_JSON=$("$VELD_BIN" urls --name "$RUN_NAME" --json 2>/dev/null)
+URLS_JSON=$("$VELD_BIN" orchestrator urls --name "$RUN_NAME" --json 2>/dev/null)
 BASE_URL=$(echo "$URLS_JSON" | grep -o '"https://[^"]*"' | head -1 | tr -d '"')
 
 if [[ -z "$BASE_URL" ]]; then
-  echo -e "${RED}Error: Could not determine URL from veld urls output${NC}"
+  echo -e "${RED}Error: Could not determine URL from veld orchestrator urls output${NC}"
   echo "Raw output: $URLS_JSON"
   exit 1
 fi

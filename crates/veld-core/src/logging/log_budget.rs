@@ -22,7 +22,7 @@
 //! - the **last [`SHED_TAIL_LINES`] dropped lines**, written back as ordinary lines
 //!   (original timestamps, original stream) once the burst is over or the process is
 //!   stopping. A token bucket sheds the *tail* of a burst, and the tail of a crash
-//!   loop's output is the fatal error that `veld start` and the orchestrator show the
+//!   loop's output is the fatal error that `veld orchestrator start` and the orchestrator show the
 //!   user. Keeping it costs at most [`SHED_TAIL_LINES`] rows per burst. A tail is kept
 //!   only while it *is* the end: once a later line is admitted, the tail is discarded
 //!   ([`LogGate::offer`]), because every log reader orders by row id, and rows written

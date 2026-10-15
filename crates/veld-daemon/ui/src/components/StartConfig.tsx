@@ -17,7 +17,7 @@ import type { Preset, Worktree } from "../api";
 /**
  * What ▶ starts: a preset, or an explicit set of `node:variant` selections.
  * The UI always resolves to one of the two before starting — sending neither is
- * not a no-op, since a bare `veld start` falls back to the project's
+ * not a no-op, since a bare `veld orchestrator start` falls back to the project's
  * `default_preset` when one is declared and only fails ("No selections provided")
  * when there isn't one.
  */
@@ -87,7 +87,7 @@ export function parseStartSelection(raw: string): StartSelection | null {
 
 /**
  * Drop stored choices the worktree's config no longer offers (preset renamed
- * away, node removed) — `veld start` would reject them. `null` means nothing
+ * away, node removed) — `veld orchestrator start` would reject them. `null` means nothing
  * usable survived and the caller should fall back to
  * [`defaultStartSelection`].
  */

@@ -1,4 +1,4 @@
-//! `veld skills` — the agent-facing documentation, carried by the binary it
+//! `veld agent skills` — the agent-facing documentation, carried by the binary it
 //! documents.
 //!
 //! # Why the binary and not a file
@@ -18,9 +18,9 @@
 //!   context the moment the skill matches, whether or not the task needs it — and
 //!   the previous `skills/veld/SKILL.md` was 100KB of that, plus a further ~35KB
 //!   from six `!`-prefixed shell invocations it ran at load time (this repo's own
-//!   `veld config` is 35KB of JSONC on its own). An index the agent can read in
+//!   `veld orchestrator config` is 35KB of JSONC on its own). An index the agent can read in
 //!   twenty lines, and one topic it then asks for, is the same information at a
-//!   fraction of the cost — and the state half (`veld presets`, `veld nodes`) is
+//!   fraction of the cost — and the state half (`veld orchestrator presets`, `veld orchestrator nodes`) is
 //!   better fetched when the question is actually asked, since by then it is also
 //!   *current*.
 //! * **Drift becomes a compile error rather than a silent lie.** A topic naming a
@@ -30,7 +30,7 @@
 //!
 //! # The contract
 //!
-//! `veld skills` prints the index; `veld skills <topic>` prints one document. Both
+//! `veld agent skills` prints the index; `veld agent skills <topic>` prints one document. Both
 //! go to **stdout** (AGENTS.md: machine-readable output on stdout) because the
 //! caller is an agent piping it into its own context, and both work with no
 //! `veld.json`, no daemon, and no project — an agent asking how to write a config
@@ -45,9 +45,9 @@ use crate::output;
 /// **Rust ignores SIGPIPE, so a `println!` into a reader that has already left
 /// panics** — `failed printing to stdout: Broken pipe (os error 32)`, plus a
 /// backtrace, on stderr. That is reachable here and effectively nowhere else in
-/// this binary: `veld skills config` is 78KB against a 64KB pipe buffer, so
+/// this binary: `veld agent skills config` is 78KB against a 64KB pipe buffer, so
 /// `| head -3` races the reader's exit. Measured on this tree it panicked **10
-/// times in 20**, while `veld config` (35KB, a single `println!`) panicked 0 in
+/// times in 20**, while `veld orchestrator config` (35KB, a single `println!`) panicked 0 in
 /// 20. Sampling a long document with `head` or `sed -n` is exactly what the
 /// caller — an agent piping this into its own context — is expected to do.
 ///
@@ -106,7 +106,7 @@ const TOPICS: &[Topic] = &[
     },
     Topic {
         name: "outputs",
-        summary: "Reading a run: node outputs, logs, and resource usage (`veld stats`).",
+        summary: "Reading a run: node outputs, logs, and resource usage (`veld orchestrator stats`).",
         body: include_str!("skills/outputs.md"),
     },
     Topic {
@@ -178,7 +178,7 @@ fn find(name: &str) -> Option<&'static Topic> {
     TOPICS.iter().find(|t| t.name == name)
 }
 
-/// `veld skills --json`. `bytes` is the document's size: the caller has a context
+/// `veld agent skills --json`. `bytes` is the document's size: the caller has a context
 /// budget, the topics run from 4K to 78K, and this is what lets it choose before
 /// it spends a call.
 fn index_json() -> serde_json::Value {
@@ -196,12 +196,12 @@ fn index_json() -> serde_json::Value {
     )
 }
 
-/// `veld skills <topic> --json`.
+/// `veld agent skills <topic> --json`.
 fn topic_json(t: &Topic) -> serde_json::Value {
     serde_json::json!({ "name": t.name, "summary": t.summary, "body": t.body })
 }
 
-/// `veld skills [TOPIC] [--json]`
+/// `veld agent skills [TOPIC] [--json]`
 ///
 /// Deliberately synchronous and dependency-free: no config, no database, no
 /// daemon. The whole answer is a compile-time string, which is also why this is
@@ -276,12 +276,12 @@ fn render_index() -> String {
     s.push_str(&format!(
         "\nRead one with {}. Every document describes {} — not whatever veld the \
          docs were written against.\n",
-        output::cyan("veld skills <topic>"),
+        output::cyan("veld agent skills <topic>"),
         output::bold("this binary")
     ));
     s.push_str(
         "Live project state is not in here on purpose — ask for it when you need it: \
-         `veld presets`, `veld nodes`, `veld status`, `veld config --files`.\n",
+         `veld orchestrator presets`, `veld orchestrator nodes`, `veld orchestrator status`, `veld orchestrator config --files`.\n",
     );
     s
 }
@@ -308,7 +308,7 @@ fn unknown_topic_message(name: &str) -> String {
 fn closest(name: &str) -> Option<&'static str> {
     let lower = name.to_lowercase();
     if lower.is_empty() {
-        // Every name `starts_with("")`, so without this `veld skills ""` answers
+        // Every name `starts_with("")`, so without this `veld agent skills ""` answers
         // "Did you mean `basics`?" — a suggestion derived from nothing.
         return None;
     }
@@ -453,7 +453,7 @@ mod tests {
                 }
                 panic!(
                     "topic `{}` links to `{}`, a repo path its reader cannot open. \
-                     Point at another topic in prose instead — `see `veld skills config``.",
+                     Point at another topic in prose instead — `see `veld agent skills config``.",
                     t.name, target
                 );
             }
@@ -465,7 +465,7 @@ mod tests {
                 panic!(
                     "topic `{}` names the repo path `{}` in a code span. Its reader \
                      has an installed binary and no checkout — name the topic \
-                     (`veld skills <topic>`) or give an absolute https URL.",
+                     (`veld agent skills <topic>`) or give an absolute https URL.",
                     t.name, path
                 );
             }
@@ -531,7 +531,7 @@ mod tests {
 
     /// The shells in `skills/` are the reason this module exists. If one grows a
     /// body again — or grows back the `!`-prefixed shell invocations that dumped
-    /// `veld config` into every agent's context — the saving is gone and nothing
+    /// `veld orchestrator config` into every agent's context — the saving is gone and nothing
     /// else would say so.
     #[test]
     fn the_installed_skill_shells_stay_shells() {
@@ -591,7 +591,7 @@ mod tests {
                 strays.is_empty(),
                 "a shipped skill carries only its SKILL.md shell; found {strays:?}. \
                  Documentation belongs in src/commands/skills/, served by \
-                 `veld skills` — a file here is a copy that freezes the day a user \
+                 `veld agent skills` — a file here is a copy that freezes the day a user \
                  installs it."
             );
         }
@@ -604,7 +604,7 @@ mod tests {
             );
             assert!(
                 text.len() < 6_000,
-                "{label} is {} bytes. A shell points at `veld skills`; it does not carry \
+                "{label} is {} bytes. A shell points at `veld agent skills`; it does not carry \
                  documentation, because a copy installed into somebody's project describes \
                  whichever veld they had the day they installed it.",
                 text.len()

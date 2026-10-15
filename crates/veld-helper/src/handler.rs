@@ -29,7 +29,7 @@ pub struct State {
     /// unsigned dev builds.
     privileged: bool,
     /// The peer-uid gate this helper enforces on its socket, reported over
-    /// `status`. Held here purely so `veld doctor` can tell an active gate from
+    /// `status`. Held here purely so `veld self doctor` can tell an active gate from
     /// an absent one — a privileged helper that is not gated serves every
     /// command to anybody and looks identical from the outside, which is the
     /// green-but-unprotected state #337 removes. The accept loop reads the same
@@ -153,7 +153,7 @@ impl State {
     /// Exit so the service manager relaunches us onto the binary now on disk,
     /// leaving Caddy running so every live URL stays up across the swap.
     ///
-    /// This is what `veld update` calls instead of waiting out the binary
+    /// This is what `veld self update` calls instead of waiting out the binary
     /// watcher's poll. The difference that matters is not speed: the CLI *knows*
     /// when the installer finished writing, where the watcher can only infer it
     /// from a settling size/mtime — an inference that has lost the race against
@@ -174,7 +174,7 @@ impl State {
 
     /// Install a new helper binary into the root-owned store (#262).
     ///
-    /// This is the command that lets an **unprivileged** `veld update` replace a
+    /// This is the command that lets an **unprivileged** `veld self update` replace a
     /// binary only root can write, with no sudo prompt — the requirement #338's
     /// rule 1 puts on every change in this chain. The caller downloads to a path
     /// it can write and names it here; root does the rest.
@@ -426,7 +426,7 @@ impl State {
             "version": env!("CARGO_PKG_VERSION"),
             "stored_routes": self.caddy.stored_route_count().await,
             // Whether a keep-awake lease is armed right now. Read by `veld
-            // doctor` (`crates/veld/src/commands/doctor.rs`, the helper row), so a
+            // self doctor` (`crates/veld/src/commands/doctor.rs`, the helper row), so a
             // support transcript can answer "why is this Mac not sleeping"
             // without anyone having to run `pmset -g` — including for a lease
             // taken straight on this socket, which the IDE never shows.
@@ -435,7 +435,7 @@ impl State {
                 None => false,
             },
             // The peer-uid gate, as this process actually resolved it — read by
-            // `veld doctor` (`crates/veld/src/commands/doctor.rs`). The service
+            // `veld self doctor` (`crates/veld/src/commands/doctor.rs`). The service
             // definition is NOT the answer: a privileged helper with no
             // `--allow-uid` derives the uid at startup (#337), so a plist with no
             // flag can front a perfectly gated helper, and reading the plist
@@ -509,7 +509,7 @@ impl State {
     /// is always reverted. A helper that exits is a helper that has stopped
     /// watching the lease, and an unwatched `disablesleep` is the failure this
     /// whole mechanism exists to prevent. It also covers the case with no other
-    /// answer: `veld uninstall` stops the service, and nothing would ever come
+    /// answer: `veld self uninstall` stops the service, and nothing would ever come
     /// back to clear the setting.
     pub async fn release_sleep_on_exit(&self) {
         let Some(sleep) = &self.sleep else {
@@ -610,7 +610,7 @@ mod tests {
     }
 
     /// The `status` response must carry the gate under the exact field names
-    /// `veld doctor` reads, with the uid as a bare number.
+    /// `veld self doctor` reads, with the uid as a bare number.
     ///
     /// Nothing else pins this. Rename a field or drop it and both crates still
     /// compile, while the doctor row degrades to "this helper is too old to

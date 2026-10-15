@@ -824,7 +824,7 @@ function openWindow(options = {}) {
     // without this the record keeps advertising tabs the window no longer draws
     // — and cycling then raises that window and asks a renderer that isn't
     // there to activate one, which reads as "the chord stole my focus and did
-    // nothing". A reload that fails outright (the daemon stopped, `veld update`
+    // nothing". A reload that fails outright (the daemon stopped, `veld self update`
     // mid-restart) leaves the stale strip there indefinitely.
     //
     // **`isSameDocument` matters as much as `isMainFrame`** — the same pair

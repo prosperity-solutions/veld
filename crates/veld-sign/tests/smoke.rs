@@ -1027,7 +1027,7 @@ fn adhoc_resign_after_ed25519_signing_is_byte_idempotent() {
     assert_eq!(sig_bytes.len(), 64);
 
     // install.sh's own `codesign --force --sign -`, as it runs on the machine
-    // of whoever ran `curl | bash` or `veld update`.
+    // of whoever ran `curl | bash` or `veld self update`.
     adhoc_sign(&binary);
     let resigned_bytes = std::fs::read(&binary).unwrap();
 
@@ -1183,7 +1183,7 @@ fn install_sh_leaves_a_verifying_binary_byte_for_byte_alone() {
 /// run keeps the inode and gets every later exec of the new bytes SIGKILLed. The
 /// old unconditional re-sign hid that by writing a new file; with it gone, only
 /// the stage-and-rename holds it — and the places it bites are the CLI replacing
-/// itself under `veld update`, the helper's `--version` probe, and a daemon that
+/// itself under `veld self update`, the helper's `--version` probe, and a daemon that
 /// launchd then crash-loops. Both fixtures verify, so neither is re-signed and
 /// nothing else gives the destination a fresh inode.
 ///
@@ -1270,7 +1270,7 @@ fn install_sh_replaces_a_running_binary_without_breaking_its_next_exec() {
         "install_bin did not write through a symlinked destination"
     );
     // A symlink loop: `cp` failed with ELOOP, so install_bin must fail too —
-    // promptly, not by walking the loop forever under `veld update`.
+    // promptly, not by walking the loop forever under `veld self update`.
     std::os::unix::fs::symlink("loop-b", lib.join("loop-a")).unwrap();
     std::os::unix::fs::symlink("loop-a", lib.join("loop-b")).unwrap();
     let started = std::time::Instant::now();

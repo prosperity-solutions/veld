@@ -302,7 +302,7 @@ describe("diagnosticsRun", () => {
 
 describe("runSignature", () => {
   it("changes when a restart swaps the run id but not the status", () => {
-    // The regression this exists for: `veld restart` tears down and starts a
+    // The regression this exists for: `veld orchestrator restart` tears down and starts a
     // fresh run, so a quick restart reads running → running. A status-only
     // check never observes it and the pending spinner runs to its timeout.
     const before = run("dev", "running");

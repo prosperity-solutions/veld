@@ -4,9 +4,9 @@
 
 Veld is configured through a single root config file placed in the root of your project. This file is committed to version control and defines your entire local development environment: the services to run, how they depend on each other, health checks, environment wiring, and URL routing.
 
-The root file may be named **`veld.json` or `veld.jsonc`** — both are read identically, and `veld init` writes `veld.json`. If a directory holds both, `veld.json` wins and `veld lint` reports `ambiguous-root-config` as an error, so `veld start` refuses until you delete or rename one. It is a *finding* rather than a load failure on purpose: discovery runs on every subcommand including `stop`, and a root config that refuses to load is one whose `on_stop` hooks never run, leaking the containers they exist to remove.
+The root file may be named **`veld.json` or `veld.jsonc`** — both are read identically, and `veld orchestrator init` writes `veld.json`. If a directory holds both, `veld.json` wins and `veld orchestrator lint` reports `ambiguous-root-config` as an error, so `veld orchestrator start` refuses until you delete or rename one. It is a *finding* rather than a load failure on purpose: discovery runs on every subcommand including `stop`, and a root config that refuses to load is one whose `on_stop` hooks never run, leaking the containers they exist to remove.
 
-Veld discovers it by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld init`.
+Veld discovers it by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld orchestrator init`.
 
 All relative paths in the configuration resolve relative to the directory containing the root config -- never the current working directory.
 
@@ -26,7 +26,7 @@ trailing commas — at every `schemaVersion`, whatever the file is called:
 
 A duplicate key is an error rather than silently last-wins, so a copy-pasted node
 or a doubled `variants` block cannot quietly drop half of itself. (It is reported
-by `veld lint` and `veld start`, not by the loader, so `veld stop` still works
+by `veld orchestrator lint` and `veld orchestrator start`, not by the loader, so `veld orchestrator stop` still works
 against a config you are in the middle of editing.)
 
 **Your editor does not know this.** A `veld.json` carrying a `$schema` is validated
@@ -48,12 +48,12 @@ language:
 
 Rename — do not copy. Keeping the old `veld.json` around "just in case" leaves the
 directory with two different root configs, which is an `ambiguous-root-config`
-error and refuses `veld start` until one of them goes.
+error and refuses `veld orchestrator start` until one of them goes.
 
 Included files have always been matched by glob, so `include: ["nodes/*.jsonc"]`
 worked before the root name did.
 
-The same applies to anything else that reads the file as strict JSON — `veld config
+The same applies to anything else that reads the file as strict JSON — `veld orchestrator config
 | jq` will break on a commented config.
 
 ### Minimal Example
@@ -86,7 +86,7 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 | `name`           | string | Yes      | Human-readable project name                       |
 | `url_template`      | string | No       | URL template for services (see [URL Templates])   |
 | `presets`           | object | No       | Named shortcuts for node:variant selections (see [Presets](#presets)) |
-| `default_preset`    | string | No       | Preset used when `veld start` is given nothing (see [`default_preset`](#default_preset)) |
+| `default_preset`    | string | No       | Preset used when `veld orchestrator start` is given nothing (see [`default_preset`](#default_preset)) |
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
@@ -130,7 +130,7 @@ every file.
 an error that states every change needed. There are three mechanical rewrites and
 one semantic change — [docs/migrating-to-v3.md](migrating-to-v3.md) is the complete
 rule set, written so you can hand it to a coding agent and check the result with
-`veld lint`.
+`veld orchestrator lint`.
 
 Supporting two readings was tried and abandoned: every rule then needed a severity
 that depended on the document's version, and every new field was silently live in an
@@ -157,7 +157,7 @@ Defines how Veld generates HTTPS URLs for your services. See the full [URL Templ
 
 ### `client_log_levels`
 
-Controls which browser console levels Veld captures from `long_running` nodes. Veld injects a small script into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`. Captured logs are sent to the Veld daemon and appear in `veld logs` and the management UI alongside server logs.
+Controls which browser console levels Veld captures from `long_running` nodes. Veld injects a small script into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`. Captured logs are sent to the Veld daemon and appear in `veld orchestrator logs` and the management UI alongside server logs.
 
 ```json
 "client_log_levels": ["log", "warn", "error"]
@@ -217,11 +217,11 @@ Controls which Veld capabilities are injected into `long_running` nodes' HTML re
 
 In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
 
-**The machine can override all of this.** The `feedback.suppressOverlay` Veld setting (`veld settings set feedback.suppressOverlay true`) forces the feedback overlay off on every routed site, for every project and node, even one whose config asks for it back on — for setups that use Veld purely as an orchestrator and don't collect feedback. It applies to routed sites you start after changing it, and leaves the client-log collector and the `/__veld__/*` routes alone.
+**The machine can override all of this.** The `feedback.suppressOverlay` Veld setting (`veld self settings set feedback.suppressOverlay true`) forces the feedback overlay off on every routed site, for every project and node, even one whose config asks for it back on — for setups that use Veld purely as an orchestrator and don't collect feedback. It applies to routed sites you start after changing it, and leaves the client-log collector and the `/__veld__/*` routes alone.
 
 ### `proxy`
 
-Reverse-proxy header rules applied when forwarding requests to a service and responses back to the browser. Rules apply to **both** the local Caddy reverse proxy (local dev) and the public web gateway (`veld share --web`). They do **not** apply to direct iroh peer sharing (`veld share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there. The same override hierarchy applies: variant > node > project.
+Reverse-proxy header rules applied when forwarding requests to a service and responses back to the browser. Rules apply to **both** the local Caddy reverse proxy (local dev) and the public web gateway (`veld network share --web`). They do **not** apply to direct iroh peer sharing (`veld network share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there. The same override hierarchy applies: variant > node > project.
 
 By default (`proxy` absent) Veld does **no** header manipulation — headers pass through with only the proxies' intrinsic, correctness-required rewrites.
 
@@ -279,7 +279,7 @@ A Next.js dev server that gates WS HMR on `Origin` may reject the passed-through
 "proxy": { "request": { "remove": ["Origin"] } }
 ```
 
-The local proxy route is (re)built when a run starts, so a `proxy` change — or the default change itself after an update — takes effect on the **next `veld start`** of that service, not for a service already running.
+The local proxy route is (re)built when a run starts, so a `proxy` change — or the default change itself after an update — takes effect on the **next `veld orchestrator start`** of that service, not for a service already running.
 
 #### Notes and limitations
 
@@ -349,9 +349,9 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 
 #### Step output
 
-Everything a step prints — stdout and stderr — is streamed into `veld start`'s
+Everything a step prints — stdout and stderr — is streamed into `veld orchestrator start`'s
 progress output as it arrives and recorded under the run's `setup` stream, so
-`veld logs --source setup` (and the management UI's **Setup** filter) shows it
+`veld orchestrator logs --source setup` (and the management UI's **Setup** filter) shows it
 after the fact. Lines are labelled `setup:<step name>` / `teardown:<step name>`,
 which is what tells two steps apart in one stream.
 
@@ -383,7 +383,7 @@ Setup and teardown steps run outside the node graph, so node-scoped variables �
 | `${vars.*}` | Any project [`vars`](#vars) entry |
 | Shell env vars | `$HOME`, `$PATH`, `$CI`, etc. — expanded by the shell (in a `shell` step; an `argv` step has no shell to expand them) |
 
-`${veld.run_id}` is also unavailable: a `teardown` step runs from `veld stop` after
+`${veld.run_id}` is also unavailable: a `teardown` step runs from `veld orchestrator stop` after
 the run row is gone, so there is no id to report. Use `${veld.run}`.
 
 > **Fixed in this release.** `${vars.*}` was documented here but silently empty —
@@ -401,7 +401,7 @@ The full execution lifecycle with setup and teardown is:
 4. **Per-node `on_stop`** — runs in reverse dependency order
 5. **Teardown** — runs sequentially, best-effort
 
-Steps 4 and 5 are reached by **every** way a run can end, not only `veld stop` —
+Steps 4 and 5 are reached by **every** way a run can end, not only `veld orchestrator stop` —
 see [When `on_stop` runs](#when-on_stop-runs).
 
 If setup fails, Veld runs teardown steps to clean up anything that earlier setup steps may have created.
@@ -437,7 +437,7 @@ If a node has multiple variants and no `default_variant` is set, the user must e
 
 ### `hidden`
 
-When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes still participate fully in the dependency graph — they are started, stopped, and have their `on_stop` hooks executed like any other node. This is useful for internal setup tasks (certificate generation, database seeding, etc.) that end users don't need to see.
+When set to `true`, the node is excluded from `veld orchestrator nodes` output. Hidden nodes still participate fully in the dependency graph — they are started, stopped, and have their `on_stop` hooks executed like any other node. This is useful for internal setup tasks (certificate generation, database seeding, etc.) that end users don't need to see.
 
 ```json
 "generate-certs": {
@@ -544,8 +544,8 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 - Supports the `skip_if` field for idempotency
 - Everything it prints (stdout and stderr, minus the `VELD_OUTPUT` control
   lines) goes to that node's log stream, exactly like a `long_running`'s: read
-  it live in `veld start`'s progress output, afterwards with
-  `veld logs --node <name>`, or in the management UI. A `skip_if` probe's output
+  it live in `veld orchestrator start`'s progress output, afterwards with
+  `veld orchestrator logs --node <name>`, or in the management UI. A `skip_if` probe's output
   is a predicate, not the node's, and is not logged
 
 ```json
@@ -608,7 +608,7 @@ common case rather than the contract: the type has only ever decided *lifecycle*
 and once a portless long-running node became legal, "server" described the
 minority of them.
 
-Nothing rewrites your file, and `veld lint` does not flag the old spelling.
+Nothing rewrites your file, and `veld orchestrator lint` does not flag the old spelling.
 `long_running` is the **canonical** one — it is the name Veld's own messages use
 and what gets persisted into run history and graph snapshots — but a config that
 says `start_server` is not wrong and is not deprecated.
@@ -801,7 +801,7 @@ socket, a built file, a pid file, a line in a log:
 
 `settle` is the honest fallback, not the recommendation, and it is **readiness
 only**. As a liveness probe it would report healthy forever — it describes
-startup, and the monitor has no notion of it — so `veld lint` rejects it there
+startup, and the monitor has no notion of it — so `veld orchestrator lint` rejects it there
 (`unknown-probe-type`).
 
 ### `probes`
@@ -859,7 +859,7 @@ and returning healthy. Absent is never zero.
 | `failure_threshold` | integer | No       | Consecutive failures before triggering recovery (default: 3) |
 | `max_recoveries`    | integer | No       | Max recovery attempts before permanent failure (default: 3)  |
 
-When `failure_threshold` consecutive liveness checks fail, Veld automatically restarts the entire environment (equivalent to `veld restart`). If the restart succeeds and the probe starts passing, the node returns to healthy. If `max_recoveries` restart attempts are exhausted, the node is marked as permanently failed and no further restarts are attempted. You can see recovery status via `veld status` and `veld logs --source internal`.
+When `failure_threshold` consecutive liveness checks fail, Veld automatically restarts the entire environment (equivalent to `veld orchestrator restart`). If the restart succeeds and the probe starts passing, the node returns to healthy. If `max_recoveries` restart attempts are exhausted, the node is marked as permanently failed and no further restarts are attempted. You can see recovery status via `veld orchestrator status` and `veld orchestrator logs --source internal`.
 
 ### `depends_on`
 
@@ -893,11 +893,11 @@ Extra environment variables injected into the process. Values support Veld varia
 
 **Precedence:** The merged `env` block takes strict precedence over the base environment of the node.
 
-**Nodes do not inherit your terminal's environment.** Every node — whether you ran `veld start`, pressed Start in the IDE, or Veld restarted the run itself — is spawned by the Veld daemon's engine, so its base environment is the daemon's own environment plus your login-shell `PATH`, resolved in the project directory so `npx`, `pg_isready`, `op` and version-manager shims are found. Other variables you export in a terminal or a shell rc file (`JAVA_HOME`, `LANG`, tokens) do **not** reach the node. Declare what a node needs in `env`; to take a value from the shell that ran `veld start`, use a [value source](#value-sources): `{ "env": "JAVA_HOME" }`. The one exception is `veld action`, which runs in your terminal with your full terminal environment.
+**Nodes do not inherit your terminal's environment.** Every node — whether you ran `veld orchestrator start`, pressed Start in the IDE, or Veld restarted the run itself — is spawned by the Veld daemon's engine, so its base environment is the daemon's own environment plus your login-shell `PATH`, resolved in the project directory so `npx`, `pg_isready`, `op` and version-manager shims are found. Other variables you export in a terminal or a shell rc file (`JAVA_HOME`, `LANG`, tokens) do **not** reach the node. Declare what a node needs in `env`; to take a value from the shell that ran `veld orchestrator start`, use a [value source](#value-sources): `{ "env": "JAVA_HOME" }`. The one exception is `veld orchestrator action`, which runs in your terminal with your full terminal environment.
 
 #### The veld-owned environment
 
-In addition to your declared `env`, Veld injects a set of `VELD_*` variables on **every** surface of a node — the node's own process, its readiness and liveness probes, its `on_stop` hook, and `veld action` — so a variable is never reachable in one place and not another. The always-on ones:
+In addition to your declared `env`, Veld injects a set of `VELD_*` variables on **every** surface of a node — the node's own process, its readiness and liveness probes, its `on_stop` hook, and `veld orchestrator action` — so a variable is never reachable in one place and not another. The always-on ones:
 
 | Variable | Meaning |
 |---|---|
@@ -972,7 +972,7 @@ An array of output key names whose values are sensitive. These outputs are:
 
 - Masked as `[REDACTED]` in all terminal output, debug logs, and run logs
 - Stored encrypted at rest using a machine-local key
-- Never visible in `veld graph` output
+- Never visible in `veld orchestrator graph` output
 
 ```json
 {
@@ -1045,7 +1045,7 @@ The `on_stop` command receives the same variable context that was available duri
 Naming a resource after the same built-ins in `argv` and in `on_stop` is the point:
 a container called `${veld.project}-${veld.node}-${veld.run}` in both places cannot
 drift, whereas the same name copied by hand into two places is exactly how a
-container survives a `veld stop`.
+container survives a `veld orchestrator stop`.
 
 > **Changed in this release.** `on_stop` used to receive `${veld.port}` but not
 > `${veld.url}`, `${veld.url.*}`, or `${veld.ports.*}` — an asymmetry with no
@@ -1056,28 +1056,28 @@ container survives a `veld stop`.
 > here. That let an output named like a built-in (`run`, `branch`, `port`) shadow it during
 > teardown but nowhere else, so the same string resolved to two different values. `veld.*`
 > is now a closed set. Rewrite `${veld.exit_code}` as `${output.exit_code}` and
-> `${veld.MY_OUTPUT}` as `${output.MY_OUTPUT}`. `veld lint` and `veld start` reject any
+> `${veld.MY_OUTPUT}` as `${output.MY_OUTPUT}`. `veld orchestrator lint` and `veld orchestrator start` reject any
 > `${veld.*}` name that is not a built-in, so this is caught before a run starts rather
 > than at teardown.
 
 #### When `on_stop` runs
 
-Every way a run can end, not just `veld stop`:
+Every way a run can end, not just `veld orchestrator stop`:
 
 | The run ends because… | `on_stop` runs |
 |---|---|
-| `veld stop` | immediately, in reverse dependency order |
-| a node's process died (crash, `kill -9`, OOM) | within seconds *while the Veld daemon is running* — it notices and hands the teardown to `veld stop`; with the daemon stopped, on the next `veld start` for that project |
+| `veld orchestrator stop` | immediately, in reverse dependency order |
+| a node's process died (crash, `kill -9`, OOM) | within seconds *while the Veld daemon is running* — it notices and hands the teardown to `veld orchestrator stop`; with the daemon stopped, on the next `veld orchestrator start` for that project |
 | a start failed and the run was aborted | immediately, for the nodes that had come up |
-| a new `veld start` replaced a live run of the same name | immediately, before the replacement creates anything |
-| Veld itself was killed, or the machine rebooted | on the next `veld start` for that project, before it creates anything |
+| a new `veld orchestrator start` replaced a live run of the same name | immediately, before the replacement creates anything |
+| Veld itself was killed, or the machine rebooted | on the next `veld orchestrator start` for that project, before it creates anything |
 
 This matters most for a container node, because `on_stop` is the only thing that
 removes its container: killing the `docker run` / `container run` client does not
 stop the container, and `--rm` only fires when the container itself exits. And
 because a container name usually interpolates `${veld.run}` — the *environment*
 name, not a per-run id — the name is identical on every run, so one survivor
-makes the next `veld start` fail with `container … already exists`. (`veld gc`
+makes the next `veld orchestrator start` fail with `container … already exists`. (`veld self gc`
 does not help: it collects Veld's own state and logs, never the container
 runtime's.)
 
@@ -1097,7 +1097,7 @@ counter, `rm -rf`) needs its own guard.
 **A hook that fails or times out is not retried.** The record says the hook was
 *attempted*, not that it succeeded — deliberately, because a hook against a
 permanently wedged runtime would otherwise be retried by every later
-`veld start` and tax each one by the full timeout without ever succeeding. Veld
+`veld orchestrator start` and tax each one by the full timeout without ever succeeding. Veld
 says so loudly on the stream you are reading; what a failed hook left behind is
 yours to remove.
 
@@ -1114,7 +1114,7 @@ A hook that **hangs** is killed (`SIGTERM`, then `SIGKILL`) after 30 seconds,
 Veld says so on the stream you are reading, and teardown continues with the
 remaining nodes. A teardown hook is the last thing between a run and history, so
 an unbounded one is a run that never *ends*: it sits in `stopping` with its
-processes already dead, `veld start` refuses the name, and the only way out is to
+processes already dead, `veld orchestrator start` refuses the name, and the only way out is to
 kill the stopper — which loses every hook it had not reached yet. Teardown is not
 where a long job belongs; if a hook legitimately needs longer, make it a project
 `teardown` step, or have it kick off the slow part and return.
@@ -1138,9 +1138,9 @@ whatever it would have removed has been left behind.
 
 ## Sharing
 
-Sharing has two config surfaces: an environment-wide `sharing` block (relays and the public gateway) and a `share` opt-in on each **port** you want exposed. A port is shareable **only** if it declares `share` (directly, or via the node-level shorthand below) — `veld share` refuses everything else. This makes what leaves your machine explicit and auditable.
+Sharing has two config surfaces: an environment-wide `sharing` block (relays and the public gateway) and a `share` opt-in on each **port** you want exposed. A port is shareable **only** if it declares `share` (directly, or via the node-level shorthand below) — `veld network share` refuses everything else. This makes what leaves your machine explicit and auditable.
 
-> **Behavior change:** earlier versions shared every URL-bearing service in a run. Now nothing is shared until a port declares `share.expose`; `veld share` errors (listing the candidate `node:variant#port`s) until you opt one in.
+> **Behavior change:** earlier versions shared every URL-bearing service in a run. Now nothing is shared until a port declares `share.expose`; `veld network share` errors (listing the candidate `node:variant#port`s) until you opt one in.
 
 ```json
 {
@@ -1164,7 +1164,7 @@ Sharing has two config surfaces: an environment-wide `sharing` block (relays and
 
 ### `sharing.relays`
 
-Which iroh relays share traffic routes through — a compliance control. Relays forward only sealed, end-to-end-encrypted bytes; they never see URLs or content. **Relays must be opted into explicitly — including public.** There is no implicit default, so nothing is routed over public relays by accident; `veld share` refuses a run whose config sets no relay (and no `VELD_SHARE_RELAY` env override is present).
+Which iroh relays share traffic routes through — a compliance control. Relays forward only sealed, end-to-end-encrypted bytes; they never see URLs or content. **Relays must be opted into explicitly — including public.** There is no implicit default, so nothing is routed over public relays by accident; `veld network share` refuses a run whose config sets no relay (and no `VELD_SHARE_RELAY` env override is present).
 
 - `"public"` — n0's public relays (an explicit opt-in, not a default). **Development and testing only.** These are a free community service shared across all iroh users worldwide: rate-limited, best-effort, no uptime or throughput guarantees. Per [iroh's guidance](https://docs.iroh.computer/concepts/relays), don't route production or high-volume sharing over them — self-host instead. (A fair-use recommendation from n0, not a licensing restriction — iroh is MIT/Apache-2.0.)
 - An array of relay entries — confine traffic to relays you self-host (a single Docker container). Must be non-empty; use `"public"` for public relays. Each entry is either a bare URL string or an object `{ "url": ..., "token": ... }` (see [Relay auth tokens](#relay-auth-tokens)). **The recommended choice for production sharing.**
@@ -1196,7 +1196,7 @@ Give a relay entry a `token` to send one:
 | Form | Meaning | Use for |
 |------|---------|---------|
 | `"a-string"` | Literal token, inline in config | Quick local setup — but it lands the secret in `veld.json` (and version control) |
-| `{ "env": "VAR" }` | Read environment variable `VAR` **from the daemon's process environment, not your shell** (so `export VAR=… && veld share` won't work — a running daemon doesn't inherit it) | 12-factor / CI secret injection |
+| `{ "env": "VAR" }` | Read environment variable `VAR` **from the daemon's process environment, not your shell** (so `export VAR=… && veld network share` won't work — a running daemon doesn't inherit it) | 12-factor / CI secret injection |
 | `{ "file": "/path" }` | Read the file's contents (trailing whitespace trimmed). Use an absolute path — a relative one resolves against the daemon's working directory, not your project | Docker / Kubernetes secret mounts (`/run/secrets/…`) |
 | `{ "argv": ["…"] }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed). Runs with your login-shell `PATH`, so user-installed CLIs (`op`, `vault`, brew tools) are found even though the command executes on the daemon — but *only* `PATH` is inherited, not other shell-exported variables or aliases | 1Password, Vault, or any secret-manager CLI |
 
@@ -1204,7 +1204,7 @@ All forms trim trailing whitespace (secret stores commonly append a newline). Pr
 
 **Running a token-gated relay.** The `token` here is only the *client* half — Veld sends it as an `Authorization: Bearer <token>` header. Your relay must be configured to *require* it, or it stays an open relay regardless. Veld's relays are [iroh relays](https://iroh.computer); a self-hosted `iroh-relay` enforces a shared token via its `access.shared_token` config (a list of accepted tokens). Deploy it with its own TLS on a reachable host — see iroh-relay's docs for the relay-side config; Veld only speaks the client side.
 
-**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order (highest first), the joiner's token comes from:
+**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld network share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order (highest first), the joiner's token comes from:
 
 1. **A token entered at the prompt** this attempt (see below).
 2. **The ticket itself** — only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
@@ -1213,7 +1213,7 @@ All forms trim trailing whitespace (secret stores commonly append a newline). Pr
 
 There is no `veld.json` path for a joiner's relay token.
 
-**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached so future joins to that relay don't re-prompt — clear the "remember" checkbox (browser) or pass `veld join --no-remember` to skip caching — and a wrong token re-prompts. `veld join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
+**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld network join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached so future joins to that relay don't re-prompt — clear the "remember" checkbox (browser) or pass `veld network join --no-remember` to skip caching — and a wrong token re-prompts. `veld network join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
 
 #### `sharing.dangerouslyEmbedRelayTokensInTicket`
 
@@ -1250,26 +1250,26 @@ How long this project's share **links** live, per audience, in minutes — `5`�
 
 With the defaults, the **cap** is the shorter one: a 2-hour mains cap under a 4-hour peer link means Veld holds the machine awake for two hours, and the link keeps working afterwards for as long as the machine happens to be up. That is deliberate — the two answer different questions, so they are not set to the same number.
 
-The share's expiry binds instead whenever it is the shorter of the two: a `veld share --ttl`, a project that shortens these fields, or a keep-awake cap raised past the link's life. The coffee menu, the sharing panel, `veld share` and `veld doctor` all say when that is the case, because a countdown showing the *share's* deadline next to a keep-awake setting you configured yourself is otherwise indistinguishable from the setting being ignored.
+The share's expiry binds instead whenever it is the shorter of the two: a `veld network share --ttl`, a project that shortens these fields, or a keep-awake cap raised past the link's life. The coffee menu, the sharing panel, `veld network share` and `veld self doctor` all say when that is the case, because a countdown showing the *share's* deadline next to a keep-awake setting you configured yourself is otherwise indistinguishable from the setting being ignored.
 
 Three places can answer "how long", most specific first:
 
 | Where | Scope | Bounded? |
 |-------|-------|----------|
-| `veld share --ttl <seconds>` | one share | no upper bound; floored at 60s |
+| `veld network share --ttl <seconds>` | one share | no upper bound; floored at 60s |
 | these config fields | the project, committed for the team | yes, 5–480 min |
-| `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld settings`) | this machine; carries the default | yes, 5–480 min |
+| `sharing.peerTtlMinutes` / `sharing.webTtlMinutes` (`veld self settings list`) | this machine; carries the default | yes, 5–480 min |
 
 A project that says nothing falls through to the machine setting rather than pinning the default, which is what keeps a team's answer and a personal one from silently shadowing each other. Each answer **replaces** the next rather than being `min`-ed with it, in both directions: a project asking for 480 minutes overrides a machine set to 5. The limit that bounds this is the 5–480 clamp, which applies to the project's number as much as the machine's — `min(config, setting)` was rejected because it turns a personal choice into a ceiling on every project you check out, with nothing saying why the repo's declared lifetime is not in force.
 
 Two things worth knowing before you rely on a committed value:
 
-- **Out of range is clamped, not refused.** `peer_ttl_minutes: 10000` loads and yields 480. `veld lint` warns (`share-ttl-range`) and names the value that will actually apply, which is the only surface that tells you — the daemon clamps silently at share time.
-- **A misspelled key is ignored, and fails *long*.** `sharing` has no `deny_unknown_fields`, so `web_ttl_mins` is dropped and that share falls through to the machine setting — 60 minutes rather than the shorter number you meant. `veld lint` cannot catch this one; check `veld share --json`'s `expires_at` if the value matters.
+- **Out of range is clamped, not refused.** `peer_ttl_minutes: 10000` loads and yields 480. `veld orchestrator lint` warns (`share-ttl-range`) and names the value that will actually apply, which is the only surface that tells you — the daemon clamps silently at share time.
+- **A misspelled key is ignored, and fails *long*.** `sharing` has no `deny_unknown_fields`, so `web_ttl_mins` is dropped and that share falls through to the machine setting — 60 minutes rather than the shorter number you meant. `veld orchestrator lint` cannot catch this one; check `veld network share --json`'s `expires_at` if the value matters.
 
 ### `sharing.gateway`
 
-The public web gateway this environment registers `web` shares with (used by `veld share --web`). A bare URL string, or an object carrying the gateway's registration auth token:
+The public web gateway this environment registers `web` shares with (used by `veld network share --web`). A bare URL string, or an object carrying the gateway's registration auth token:
 
 ```json
 {
@@ -1289,14 +1289,14 @@ The audiences a **port** may be shared to. A list; an empty list (or an absent `
 
 | Value  | Audience          | Requires | URL fidelity                       | Command |
 |--------|-------------------|----------|------------------------------------|---------|
-| `peer` | Other Veld users  | `http` or `tcp` | Verbatim — exact origin URL reproduced (`http`); a bare local TCP port (`tcp`, see below) | `veld share` |
-| `web`  | Any browser (no Veld needed) | **`http` only** | Best-effort — real public URL minted by the gateway, origin `Host` preserved toward the app, redirects/cookies adapted (see the [operator guide](gateway.md)) | `veld share --web` |
+| `peer` | Other Veld users  | `http` or `tcp` | Verbatim — exact origin URL reproduced (`http`); a bare local TCP port (`tcp`, see below) | `veld network share` |
+| `web`  | Any browser (no Veld needed) | **`http` only** | Best-effort — real public URL minted by the gateway, origin `Host` preserved toward the app, redirects/cookies adapted (see the [operator guide](gateway.md)) | `veld network share --web` |
 
 ```json
 "share": { "expose": ["peer", "web"] }
 ```
 
-The two audiences are independent shares with independent capabilities: `veld share` serves the `peer`-opted ports, `veld share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes something a port listens on, so `share` is meaningful on `long_running` variants; on a `command` variant it is accepted but inert (nothing to share).
+The two audiences are independent shares with independent capabilities: `veld network share` serves the `peer`-opted ports, `veld network share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes something a port listens on, so `share` is meaningful on `long_running` variants; on a `command` variant it is accepted but inert (nothing to share).
 
 #### Where `share` is written
 
@@ -1315,11 +1315,11 @@ On the port entry, which is where exposure happens. A node-level (or variant-lev
 }}}
 ```
 
-`veld share` names every port it excluded and why, so a partial share is never silent: one line for the ports with no opt-in for this audience (`api:dev#admin`), another for the ports that opted into the *other* audience only, and a third for `tcp` ports dropped from a `--web` share. The `--node` filter narrows *within* the opted-in set and can never widen it.
+`veld network share` names every port it excluded and why, so a partial share is never silent: one line for the ports with no opt-in for this audience (`api:dev#admin`), another for the ports that opted into the *other* audience only, and a third for `tcp` ports dropped from a `--web` share. The `--node` filter narrows *within* the opted-in set and can never widen it.
 
 #### `web` requires `protocol: "http"`
 
-The gateway speaks HTTP/1.1 over the tunnel, and a browser cannot speak a raw protocol through it whatever the gateway does. `"expose": ["web"]` on a `tcp` port is therefore **`web-share-needs-http`, a lint error** — not a limitation waiting to be lifted, but a statement of what "web" means. Three gates enforce it: `veld lint` (and `veld start`) rejects the config, the daemon refuses the port at share time and says why, and the gateway drops any non-routed entry it is somehow handed.
+The gateway speaks HTTP/1.1 over the tunnel, and a browser cannot speak a raw protocol through it whatever the gateway does. `"expose": ["web"]` on a `tcp` port is therefore **`web-share-needs-http`, a lint error** — not a limitation waiting to be lifted, but a statement of what "web" means. Three gates enforce it: `veld orchestrator lint` (and `veld orchestrator start`) rejects the config, the daemon refuses the port at share time and says why, and the gateway drops any non-routed entry it is somehow handed.
 
 A database you want a colleague to reach goes to the `peer` audience instead.
 
@@ -1327,7 +1327,7 @@ A database you want a colleague to reach goes to the `peer` audience instead.
 
 A `tcp` port opted into `peer` is carried over the same encrypted iroh tunnel as an HTTP one and reproduced on the joining machine as a **bare local TCP port** — a listener spliced to the origin, with no Caddy route in front of it (a raw connection carries no hostname to match a route on).
 
-**The port number on the consumer is their local listener's, not yours.** Nothing is in front of the socket to preserve the original number, so the joiner must use the address `veld join` prints and not the one from your `veld.json`:
+**The port number on the consumer is their local listener's, not yours.** Nothing is in front of the socket to preserve the original number, so the joiner must use the address `veld network join` prints and not the one from your `veld.json`:
 
 ```
 ✓ Joined — 3 endpoint(s) now reachable on this machine:
@@ -1352,19 +1352,19 @@ How a browser viewer is admitted to this service's public URL (web shares only):
 
 | Value | Meaning |
 |-------|---------|
-| `password` | **Default (also when absent).** The gateway shows a password page before serving; `veld share --web` generates and prints the share password (`--password` to choose your own). One password per web share, entered once per service — a session cookie (12 h, never outliving the share) keeps the viewer in. |
+| `password` | **Default (also when absent).** The gateway shows a password page before serving; `veld network share --web` generates and prints the share password (`--password` to choose your own). One password per web share, entered once per service — a session cookie (12 h, never outliving the share) keeps the viewer in. |
 | `link` | Anyone with the URL is served. The unguessable 128-bit slug is the only gate — treat the link as a secret. |
 
 ```json
 "share": { "expose": ["web"], "web": { "access": "link" } }
 ```
 
-An **explicit** value here always wins over the `veld share --web --access …` flag — the flag only sets the mode for services whose config is silent. Config is the reviewable compliance surface; the CLI can never weaken it.
+An **explicit** value here always wins over the `veld network share --web --access …` flag — the flag only sets the mode for services whose config is silent. Config is the reviewable compliance surface; the CLI can never weaken it.
 
 Two things `share.web` deliberately does **not** hold:
 
 - **The password value.** It is generated per share (or set with `--password`, min 8 chars) — never stored in `veld.json`, where it would land in version control. A `"password"` key under `share.web` is rejected at config load: unlike most config blocks, `share.web` rejects unknown keys outright, so a typo'd or unsupported key fails loudly instead of being silently ignored. (One consequence: a `veld.json` using a `share.web` key added by a *newer* Veld won't load on an older daemon — keep the toolchain aligned when you adopt a new `share.web` field.)
-- **Live-share edits.** The policy is captured when the share starts; editing `share.web.access` (or wanting a new password) while a web share is live has no effect on it. Re-run `veld share --web` — this replaces the share and **rotates the public URLs and the password** (old links die; the CLI warns when a replacement happened).
+- **Live-share edits.** The policy is captured when the share starts; editing `share.web.access` (or wanting a new password) while a web share is live has no effect on it. Re-run `veld network share --web` — this replaces the share and **rotates the public URLs and the password** (old links die; the CLI warns when a replacement happened).
 
 Practical note for multi-service shares: the viewer's session cookie is scoped per public host, so a password-protected API called cross-origin by a shared frontend gets 401s. Give API nodes `"web": { "access": "link" }` — their slug is unguessable and only the app's code ever uses it.
 
@@ -1426,13 +1426,13 @@ place.
 ### Finding out why a node seems missing
 
 ```sh
-veld config --files
+veld orchestrator config --files
 ```
 
 prints each glob, the files it matched, and the nodes each defines. Under globs,
 "unknown node" has four different causes — never defined, defined but not matched
 by a glob, its file renamed out of a glob, or its file present but unparseable —
-and this is what tells them apart. `veld nodes` also shows `file:line` per node.
+and this is what tells them apart. `veld orchestrator nodes` also shows `file:line` per node.
 
 ---
 
@@ -1551,7 +1551,7 @@ it — a node in the plan, or a project-level surface like `env`, `setup`, or
 `teardown`, which every node inherits. This is the same laziness a node-level
 `env` source always had. It matters when the source is a credential helper:
 putting the command in a var is the natural move, since it is one value used by
-several nodes, and it used to mean *every* `veld start` reached for the credential
+several nodes, and it used to mean *every* `veld orchestrator start` reached for the credential
 store — including runs whose nodes need no secret at all.
 
 ### `${veld.*}` inside a var
@@ -1585,7 +1585,7 @@ reference in no Veld namespace — `"cache": "${HOME}/.cache"` — is a
 the shell, or make the var a value source: `{ "env": "HOME" }`.
 
 ```sh
-veld config --why nodes.api.variants.dev.env.DATABASE_URL
+veld orchestrator config --why nodes.api.variants.dev.env.DATABASE_URL
 ```
 
 prints the effective value, where it was defined, and what it overrides. A
@@ -1626,20 +1626,20 @@ It is consumed like any other var — `${vars.container_runtime}` in `argv`, `en
 |---|---|
 | `default` | The checked-in fallback for a machine with no answer. Omit it to require every machine to answer. May itself be a [value source](#value-sources) (`{ "env": "…" }`), but never another machine var — that is a type error, not a lint |
 | `choices` | The legal answers. Enforced when setting **and** when resolving, because the config can change under an answer that was valid when it was stored. `[]` is a lint error: nothing could satisfy it |
-| `description` | What the value means. Shown by `veld config vars` |
+| `description` | What the value means. Shown by `veld orchestrator vars list` |
 | `prompt` | The question asked when there is no default and no answer. Falls back to `description` |
 | `secret` | Sits beside `machine`, not inside it — it describes the var, not one of its layers |
 
-An unknown key under `machine` is a `machine-var-unknown-key` **error finding**, not a load failure. That split is deliberate: a typo (`defualt`) silently costs the var its default, so it must block `veld start` and `veld lint` — but a config written for a *newer* veld has to stay loadable by an older one, or `veld stop` cannot tear down a run that is already going and its containers leak.
+An unknown key under `machine` is a `machine-var-unknown-key` **error finding**, not a load failure. That split is deliberate: a typo (`defualt`) silently costs the var its default, so it must block `veld orchestrator start` and `veld orchestrator lint` — but a config written for a *newer* veld has to stay loadable by an older one, or `veld orchestrator stop` cannot tear down a run that is already going and its containers leak.
 
 ```sh
-veld config vars                              # name, effective value, and which scope it came from
-veld config set container_runtime podman      # this machine, every worktree of the project
-veld config set container_runtime podman --worktree   # this checkout only
-veld config unset container_runtime           # back to the next scope, then the default
+veld orchestrator vars list                              # name, effective value, and which scope it came from
+veld orchestrator vars set container_runtime podman      # this machine, every worktree of the project
+veld orchestrator vars set container_runtime podman --worktree   # this checkout only
+veld orchestrator vars unset container_runtime           # back to the next scope, then the default
 ```
 
-**Resolution is most-specific-first:** `veld start --var NAME=VALUE` (this run
+**Resolution is most-specific-first:** `veld orchestrator start --var NAME=VALUE` (this run
 only, never stored) → the worktree-scoped answer → the project-scoped answer →
 the config's `default` → an error naming the var and printing the command that
 sets it.
@@ -1652,12 +1652,12 @@ the feature. The key is where this config lives in the repo's *main* checkout, s
 six worktrees of one repo share one answer, and two configs in one monorepo stay
 separate. Outside a git repo it falls back to the config's own directory.
 
-`veld config vars` always prints which scope a value came from. That is not
+`veld orchestrator vars list` always prints which scope a value came from. That is not
 decoration: a value arriving silently from a scope you had forgotten is worse
 than no feature at all.
 
 Moving or renaming a checkout orphans its answers — the key is a path, like every
-other project-scoped thing Veld stores. Re-set it, or `veld config vars` will
+other project-scoped thing Veld stores. Re-set it, or `veld orchestrator vars list` will
 show the var back on its default.
 
 #### Secrets
@@ -1666,15 +1666,15 @@ A `secret` machine var **is** overridable, because an override is a
 [value source](#value-sources) and not necessarily a literal:
 
 ```sh
-veld config set vendor_token --env VENDOR_TOKEN     # a pointer
-veld config set vendor_token --shell 'op read op://dev/vendor/token'
-veld config set vendor_token sk_live_…              # the value itself
+veld orchestrator vars set vendor_token --env VENDOR_TOKEN     # a pointer
+veld orchestrator vars set vendor_token --shell 'op read op://dev/vendor/token'
+veld orchestrator vars set vendor_token sk_live_…              # the value itself
 ```
 
 The first two keep Veld carrying *a pointer plus a sensitivity flag*, which is
 the rule everywhere else in this file. The third stores the value in Veld's
 database (owner-readable, not encrypted) and says so when you run it. Either way
-the value is redacted in `veld config vars`, in `--json`, and in the management
+the value is redacted in `veld orchestrator vars list`, in `--json`, and in the management
 UI — there is no flag or endpoint that prints it.
 
 #### Asking, and refusing to guess
@@ -1685,7 +1685,7 @@ transitive dependencies, so it can never surface after half the graph is up.
 
 At a terminal, Veld asks, and saves the answer only if you say yes. With no
 terminal — CI, a scripted start, a run launched by the daemon for the management
-UI — it refuses with the exact `veld config set` command instead. It never
+UI — it refuses with the exact `veld orchestrator vars set` command instead. It never
 resolves a default nobody chose, and it never persists a guess: a background
 process quietly taking a default is indistinguishable from a human choosing it,
 and the wrong value then sticks around.
@@ -1723,7 +1723,7 @@ optional `secret` flag.
 | Source | Meaning |
 |---|---|
 | `value` | An inline literal. This object form exists so a literal can carry `secret: true` |
-| `env` | Read the variable from the terminal of the command that asked for the run (`veld start`, `veld restart`, `veld stop`). Veld sends the values of exactly the names your config reads this way, with that request, and stores nothing. A run started with no terminal behind it — the IDE, automatic recovery, a crash teardown — has no such values. In the IDE and in recovery the variable is therefore **missing, which is an error naming the node and the variable** (as it is at any start where it is unset). For a value that must also work from the IDE, use a `file`, `argv` or `shell` source instead. A stored `veld config set NAME --env VAR` pointer behaves the same way as `{ "env": … }` here. (For share relay and gateway tokens `env` means the *daemon's* environment — see [relay auth tokens](#relay-auth-tokens).) |
+| `env` | Read the variable from the terminal of the command that asked for the run (`veld orchestrator start`, `veld orchestrator restart`, `veld orchestrator stop`). Veld sends the values of exactly the names your config reads this way, with that request, and stores nothing. A run started with no terminal behind it — the IDE, automatic recovery, a crash teardown — has no such values. In the IDE and in recovery the variable is therefore **missing, which is an error naming the node and the variable** (as it is at any start where it is unset). For a value that must also work from the IDE, use a `file`, `argv` or `shell` source instead. A stored `veld orchestrator vars set NAME --env VAR` pointer behaves the same way as `{ "env": … }` here. (For share relay and gateway tokens `env` means the *daemon's* environment — see [relay auth tokens](#relay-auth-tokens).) |
 | `file` | The (trimmed) contents of a file, relative to the project root |
 | `argv` / `shell` | Run a command, take its trimmed stdout |
 
@@ -1747,7 +1747,7 @@ and `include` — those must be statically known for graph building and linting.
 ### Timing
 
 Sources are resolved **at most once per run, at start, after the graph is built**
-— never during parse. That ordering is what keeps `veld stop`, `veld status`, and
+— never during parse. That ordering is what keeps `veld orchestrator stop`, `veld orchestrator status`, and
 the daemon monitor working against a config whose secret source has since broken:
 they parse the config, they never resolve it.
 
@@ -1779,7 +1779,7 @@ not into `--json` output, not into the share payload.
 
 That is a rule about what *Veld* does with the value. It cannot un-print what a
 process does with it: a node or step that echoes its own environment puts the
-value in that run's log, which `veld logs` and the management UI will show. Veld
+value in that run's log, which `veld orchestrator logs` and the management UI will show. Veld
 records process output verbatim and never redacts it.
 
 **Two different rules, because there are two different risks.**
@@ -1822,7 +1822,7 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 | `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}` | **error** |
 | `secret-shell-expansion` | A bare `$NAME` matching a secret. The shell expands it, so it leaks only if the expansion becomes another program's argument — Veld cannot tell, so it says so instead of guessing | warn |
 | `var-unresolvable-reference` | A `${…}` in a `vars` literal that names no Veld namespace (`${HOME}`). Var literals are interpolated, so it fails the run | **error** |
-| `ambiguous-root-config` | A directory holding `veld.json` and `veld.jsonc` as two *different* files (a symlink between them is fine). Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld stop` still works) |
+| `ambiguous-root-config` | A directory holding `veld.json` and `veld.jsonc` as two *different* files (a symlink between them is fine). Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld orchestrator stop` still works) |
 | `credential-shaped-literal` | A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
 | `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
 | `long-running-needs-readiness` | A `long_running` node with no readiness probe. Reached by either spelling of the type; the remedy it prints differs for a portless node, which cannot use a `port` probe | **error** |
@@ -1851,8 +1851,8 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 A declared `env` source missing at start is not a lint rule — it cannot be known
 statically — but it is an **error** at start, naming the node and the variable.
 
-All of them run in `veld lint`; the errors also run inside `veld start`. None of
-them runs in the loader, so `veld stop` is never blocked by one. `veld lint --json`
+All of them run in `veld orchestrator lint`; the errors also run inside `veld orchestrator start`. None of
+them runs in the loader, so `veld orchestrator stop` is never blocked by one. `veld orchestrator lint --json`
 emits the rule id with each finding.
 
 ---
@@ -2017,7 +2017,7 @@ covers the node covers its extra ports for free; a deeper label
 
 The cost is that the port-hostname space and the node-hostname space stop being
 provably disjoint: node `web`'s `admin` port and a node actually named
-`web-admin` claim the same name. That is caught loudly at `veld start`, before
+`web-admin` claim the same name. That is caught loudly at `veld orchestrator start`, before
 anything is spawned, naming both owners:
 
 ```
@@ -2233,7 +2233,7 @@ the same parser: `scheme://host[:port]`, `http` or `https`, no path, a leading
 `*.` for any depth of subdomain (label-wise, so `evilokta.com` does not match
 `*.okta.com`), `*` in the port position for any port, and an **omitted port
 meaning the scheme's default port exactly**. A malformed entry is dropped and
-reported by `veld lint` as a warning, like every other `ide` problem.
+reported by `veld orchestrator lint` as a warning, like every other `ide` problem.
 
 Two limits worth knowing, both of which end with the URL in a *pane* rather than
 somewhere unexpected: an origin is matched, not a path — you cannot exempt
@@ -2285,7 +2285,7 @@ name in the hostname**. Run names come from the worktree folder, the branch, or
 
 **Write `:*` for veld's own URLs**, as above. An omitted port means the scheme's
 *default* port (see below), and only a **privileged** install serves on 443 —
-`veld setup unprivileged`, the no-sudo default, uses **18443**. A rule written
+`veld self setup unprivileged`, the no-sudo default, uses **18443**. A rule written
 `https://*.veld.localhost` therefore matches nothing on that install, and nothing
 tells you: the grant is simply never applied.
 
@@ -2353,7 +2353,7 @@ browser shows.
 `speaker-selection`, `storage-access`, `usb`, `window-management`.
 
 Anything malformed here — an unparseable origin, an unknown id, a wrong-typed
-field — is **dropped and reported by `veld lint` as a warning**, never a load
+field — is **dropped and reported by `veld orchestrator lint` as a warning**, never a load
 error. The dropped entry grants nothing: a permission rule that cannot be
 understood must not be half-applied.
 
@@ -2426,7 +2426,7 @@ There is no config key for it. A worktree is named by the agent working in it:
 Veld tells every agent in a Veld terminal to run `veld ide worktree name "<a few
 words>"` once it knows what the task is, which sets the label the rail shows —
 never the alias or the branch. `ide.worktreeName`, the command that used to do
-this from the create prompt, is no longer read; `veld lint` names it so it can be
+this from the create prompt, is no longer read; `veld orchestrator lint` names it so it can be
 deleted.
 
 ### `ide.news`: telling your own team something changed
@@ -2518,7 +2518,7 @@ new card, dated today, survives and you never need to delete a good one to make
 room. It goes by the date, not by where the entry sits, so a *backdated* addition
 can be the one dropped.
 Items over the cap are
-dropped with a `veld lint` warning, as is any malformed entry — nothing here can
+dropped with a `veld orchestrator lint` warning, as is any malformed entry — nothing here can
 fail a config load. Delete a card once it has stopped being news; the caps and the
 scarcity are the whole reason a surface that interrupts people stays worth being
 interrupted by.
@@ -2630,7 +2630,7 @@ shown disabled, and spends that line on the reason instead.
 
 `fixed_label` replaced an earlier key, `allow_terminal_renaming`, whose default
 was the opposite — a pane kept its `label` unless the repo opted in. That key is
-gone with no alias: delete it, whichever value it held. `veld lint` names it as
+gone with no alias: delete it, whichever value it held. `veld orchestrator lint` names it as
 an unknown key and the pane still works, but the schema's terminal branch is
 closed, so an editor or a schema check reports it as an error. Only a pane that
 set it to `false` changes behaviour, and `"fixed_label": true` is the
@@ -2644,7 +2644,7 @@ resume flag is called, lives in your repo.
 #### Faking a session that survived a reboot
 
 Nothing can carry a running process across a reboot — Veld's terminals already
-survive a daemon restart and a `veld update` (each shell lives in its own holder
+survive a daemon restart and a `veld self update` (each shell lives in its own holder
 process), but a reboot ends every one of them.
 
 What *can* survive is the conversation. A coding-agent CLI keeps its own
@@ -2747,7 +2747,7 @@ launch command:
   ordinary **Resume** button with no further machinery.
 - A `resume` that never mentions `${veld.pane.token}` cannot deliver a pick — the
   `codex resume --last` shape above is the example — so declaring `sessions`
-  alongside one is a `veld lint` problem and the picker is dropped rather than
+  alongside one is a `veld orchestrator lint` problem and the picker is dropped rather than
   silently opening the same session whatever you chose.
 
 ##### The click asks, and that is the default on purpose
@@ -2853,7 +2853,7 @@ looking at, with its own branch.
 > also what hands somebody else's branch the same capability.
 
 At most **8 panes in one project** may declare a lister, because they all run at
-once on a screen somebody is waiting for. Past that, `veld lint` drops the extra
+once on a screen somebody is waiting for. Past that, `veld orchestrator lint` drops the extra
 *pickers* and leaves the panes alone. Repeated requests inside a few seconds are
 answered from the previous run rather than starting another, and two windows
 asking at the same moment spend one child process between them.
@@ -2879,7 +2879,7 @@ already gone. Concretely:
 |---|---|
 | You picked the pane from a menu | Runs the launch command. The click is the consent. |
 | App restarted / rebooted, shell gone | `auto_resume: true` resumes; otherwise the pane waits with a **Resume** button. |
-| The daemon restarted, or you ran `veld update` | Nothing — the shell survived, and the pane simply reattaches. |
+| The daemon restarted, or you ran `veld self update` | Nothing — the shell survived, and the pane simply reattaches. |
 | The tool exited while you were looking at it | Buttons, always. `auto_resume` is not consulted; an exit you saw is one you get to answer. |
 | The session was reaped after the detach grace — no window had the pane for the whole of it | Buttons, next time you look at it. |
 | You dragged the pane to another window | Nothing — the shell is alive and moves with the pane. |
@@ -2938,7 +2938,7 @@ lost, so the pane says so and offers **Start fresh** as a separate button.
 as `false`.
 
 **What `auto_resume` actually consents to.** The rest of veld runs a config
-command because you asked — `veld start`, an action button, a pane you clicked.
+command because you asked — `veld orchestrator start`, an action button, a pane you clicked.
 This is the one place a repo-declared command can run when you merely *open the
 app*, so it is worth being precise about what the consent covers.
 
@@ -2947,7 +2947,7 @@ that ran. The `resume` command is re-read from the worktree's `veld.json` every
 time, so a `git pull` that rewrites it — or flips `auto_resume` from `false` to
 `true` on a pane you once started by hand — changes what runs unattended on your
 next Desktop start. That is in keeping with a config file you already trust to
-run `veld start`, but it means `auto_resume` is trust in the *repository*, not
+run `veld orchestrator start`, but it means `auto_resume` is trust in the *repository*, not
 in the specific command you clicked. On a repo whose config you do not control,
 leave it off.
 
@@ -2969,7 +2969,7 @@ spaces, quotes or backticks can never change the argument count. Prefer it.
 
 Need the real, unslugified branch name (`feat/foo`, not `feat-foo`) — say for a
 `gh`/`glab` call that takes a ref? Use **`${veld.branch_raw}`**, but only in
-`argv`. `veld lint` refuses it in `shell`: `git check-ref-format --branch`
+`argv`. `veld orchestrator lint` refuses it in `shell`: `git check-ref-format --branch`
 accepts a branch named `foo$(id)` or `foo'bar`, so a `shell` string built from
 it is command execution on checkout of someone else's pull request, and no
 amount of quoting fixes it — `foo'bar` breaks out of a single-quoted
@@ -3006,7 +3006,7 @@ dies on launch:
 
 **One exception, and it is the same list minus one name:** a `sessions` command
 may not reference `${veld.pane.token}`, because it runs to decide *which* session
-there will be — there is no token yet. `veld lint` says so rather than letting it
+there will be — there is no token yet. `veld orchestrator lint` says so rather than letting it
 resolve to nothing. Everything else on that line works there.
 
 They mean exactly what they mean everywhere else — in particular
@@ -3047,7 +3047,7 @@ drift out of date:
 
 It is an allowlist rather than "any Tabler name" because the app has to bundle
 every icon that can be rendered. An ASCII string means "this is a name", so a
-misspelled one is reported by `veld lint` instead of rendering as the literal
+misspelled one is reported by `veld orchestrator lint` instead of rendering as the literal
 text.
 
 #### There are no pane variants
@@ -3140,7 +3140,7 @@ with the same meaning they have everywhere else in this file. Interpolation uses
 the [pane variables](#variables-in-a-pane-command) minus the `pane.*` family:
 `${veld.root}`, `${veld.branch}`, `${veld.branch_raw}` (`argv` only),
 `${veld.worktree}`, `${veld.project}`, `${veld.username}`. Anything else is a
-`veld lint` finding rather than a badge that fails to run.
+`veld orchestrator lint` finding rather than a badge that fails to run.
 
 **`${veld.branch}` is slugified, so it is not a git ref.** `feat/foo` reaches the
 command as `feat-foo`, and `Fix.Thing` as `fix-thing`. That is deliberate — the same
@@ -3155,7 +3155,7 @@ create a second one. Use **`${veld.branch_raw}`** instead, in `argv`:
 "argv": ["gh", "pr", "view", "${veld.branch_raw}"]
 ```
 
-`veld lint` refuses `${veld.branch_raw}` in `shell` — a branch name is legal git
+`veld orchestrator lint` refuses `${veld.branch_raw}` in `shell` — a branch name is legal git
 syntax even as `foo$(id)` or `foo'bar`, so a `shell` string built from it is
 command execution on checkout, and quoting cannot close that hole. `argv`
 substitutes it as one fixed argument, which closes that particular hole. A
@@ -3308,7 +3308,7 @@ of each is wrong:
   characters *and* the real values are appended after it —
   `["code", "-g", "$1:$2"]` runs `code -g $1:$2 <path> <line>`, and the editor is
   what complains. An `argv` action is simply handed the two values as its last two
-  arguments; `veld lint` refuses one that names them, because nothing downstream
+  arguments; `veld orchestrator lint` refuses one that names them, because nothing downstream
   would.
 
 **`$1` can be a directory.** `ls some/dir/` prints those too, and every editor
@@ -3356,7 +3356,7 @@ This is not cosmetic: the top bar already carries around sixteen controls, so a
 project with three editor buttons and two badges needs grouping to stay usable.
 
 `items` are ids rather than nested objects, which is what keeps a menu one level
-deep and makes each member a first-class declaration `veld lint` checks like any
+deep and makes each member a first-class declaration `veld orchestrator lint` checks like any
 other. An id that names nothing, or names something that is not an `action`, is
 dropped with a lint problem; a menu left with no usable members is dropped whole
 rather than rendering an empty popover.
@@ -3444,7 +3444,7 @@ that budget went instead.
 ## Reserved: `hooks` and the rest of `ide`
 
 Both are **reserved**: they parse, are stored, and are **not executed by this
-version**. `veld lint` says so, so a hook that does nothing is distinguishable
+version**. `veld orchestrator lint` says so, so a hook that does nothing is distinguishable
 from a config mistake. For `ide` the notice now names the specific keys that are
 inert, since `quicklinks`, `permissions`, `externalOrigins`, `panes`,
 `extensions`, `news` and `git` are not.
@@ -3472,9 +3472,9 @@ model:
    extension — hooks run arbitrary code on a developer machine, and keeping them
    in reviewed repo files is what preserves Veld's no-remote-execution guarantee.
 
-Every **other** unknown top-level key is an **error reported by `veld lint` and
-`veld start`** — not a load failure. A typo is still caught, but it cannot strand
-`veld stop`, whose job is to tear down an environment that is already running (see
+Every **other** unknown top-level key is an **error reported by `veld orchestrator lint` and
+`veld orchestrator start`** — not a load failure. A typo is still caught, but it cannot strand
+`veld orchestrator stop`, whose job is to tear down an environment that is already running (see
 [the parse/validate split](#veld-lint)). If you are upgrading a config that used
 the pre-JSONC `"//": "…"` comment idiom, that key now reports a finding telling you
 to make it a real comment.
@@ -3498,14 +3498,14 @@ that adds a picker key and a description -- see [Describing a
 preset](#describing-a-preset). Use presets with:
 
 ```sh
-veld start --preset fullstack --name my-feature
+veld orchestrator start --preset fullstack --name my-feature
 ```
 
-In interactive mode (TTY with presets defined), `veld start` with no arguments presents a preset selector. Presets are purely additive -- they select end nodes that Veld then resolves through the dependency graph, starting all required upstream nodes automatically.
+In interactive mode (TTY with presets defined), `veld orchestrator start` with no arguments presents a preset selector. Presets are purely additive -- they select end nodes that Veld then resolves through the dependency graph, starting all required upstream nodes automatically.
 
 ### Preset keys: the number people actually type
 
-Most people run `veld start` and type a number. That number is a preset's **key**,
+Most people run `veld orchestrator start` and type a number. That number is a preset's **key**,
 and a key is an identity, not a position in the list:
 
 ```jsonc
@@ -3524,7 +3524,7 @@ say to a colleague.
 > list, and they are now assigned in declaration order -- so for a config whose
 > presets are not written alphabetically, they change once. See
 > [the migration note](./migrating-to-v3.md#presets-gained-keys-and-metadata), and
-> run `veld presets --pin` to freeze them.
+> run `veld orchestrator presets --pin` to freeze them.
 
 Presets without a `key` take the **lowest number not already claimed**, in the
 order they are declared. A preset *named* like a number (`"7"`) claims that number,
@@ -3540,28 +3540,28 @@ so its name and its key agree. Two consequences worth knowing:
   `veld.d/web.jsonc`. Pin the keys people actually type and this stops being your
   problem.
 
-`veld presets` marks which keys are auto-assigned, and `veld presets --pin` prints
+`veld orchestrator presets` marks which keys are auto-assigned, and `veld orchestrator presets --pin` prints
 the current numbering as a block to paste:
 
 ```sh
-veld presets --pin
+veld orchestrator presets --pin
 ```
 
 Veld never rewrites your config, so applying the block is your call -- run
-`veld lint` afterwards to check it. Two things to know when you do:
+`veld orchestrator lint` afterwards to check it. Two things to know when you do:
 
 - **A preset is defined in exactly one file.** The block is one merged
   `presets` object, so in a split config add each entry's `key` to the file that
   already declares that preset -- pasting the whole block into the root file is a
-  `duplicate-definition` error. `veld config --files` shows which file is which.
+  `duplicate-definition` error. `veld orchestrator config --files` shows which file is which.
   Pinning a few at a time is safe, precisely because pinning a preset at the
   number it already shows moves nothing else.
 - `--pin` refuses to run if the config did not load completely (say an included
   file has a syntax error), because the keys it would freeze are not the ones
   you will get once it does.
 
-`--preset` accepts a key as well as a name, so `veld start --preset 2` and
-`veld start --preset dev-staging` are the same thing.
+`--preset` accepts a key as well as a name, so `veld orchestrator start --preset 2` and
+`veld orchestrator start --preset dev-staging` are the same thing.
 
 In a **script**, prefer the name, or a key you have pinned. An unpinned key is a
 convenience for whoever is looking at the list right now; passing one from a script
@@ -3571,7 +3571,7 @@ The two differ only for a config that has a preset *named* like a number. A
 preset named `7` takes key 7, so normally there is nothing to disambiguate; if
 some other preset pins key 7 as well, then `--preset 7` means the preset **named**
 `7` -- names are what scripts and runbooks were written against -- while typing
-`7` at the picker selects whatever the list showed beside `[7]`. `veld lint` warns
+`7` at the picker selects whatever the list showed beside `[7]`. `veld orchestrator lint` warns
 about that config either way.
 
 ### Describing a preset
@@ -3601,7 +3601,7 @@ form is for a list that has grown past what anyone can identify at a glance.
 | `selections` | Required. `node:variant` entries and `@preset` references -- the array form is exactly this field |
 | `key` | The picker number, pinned permanently (see above) |
 | `label` | Human-readable name, shown instead of the config key in the picker and the desktop UI |
-| `when_to_use` | When to pick this one. Read by anyone who did not write the config -- and by coding agents, which get it from `veld presets --json` and from `veld presets` output. Say what it gives you and what it costs (start time, network, credentials) |
+| `when_to_use` | When to pick this one. Read by anyone who did not write the config -- and by coding agents, which get it from `veld orchestrator presets --json` and from `veld orchestrator presets` output. Say what it gives you and what it costs (start time, network, credentials) |
 | `group` | Optional heading to chunk the list under. Purely visual |
 
 Groups are ordered by their lowest member key, and presets within a group by key
@@ -3619,16 +3619,16 @@ and presets with no `group` in a config that uses them are collected under
 "default_preset": "dev-local"
 ```
 
-The preset `veld start` uses when given nothing to start. At the interactive
+The preset `veld orchestrator start` uses when given nothing to start. At the interactive
 picker, pressing enter takes it. Without a TTY -- a script, CI, or a coding agent
-running `veld start` in a non-interactive shell -- it is used directly, where a
-bare `veld start` would otherwise fail with "No selections provided".
+running `veld orchestrator start` in a non-interactive shell -- it is used directly, where a
+bare `veld orchestrator start` would otherwise fail with "No selections provided".
 
-It must name a preset that exists; `veld lint` reports it if not.
+It must name a preset that exists; `veld orchestrator lint` reports it if not.
 
-Without a TTY and with no `default_preset` declared, a bare `veld start` still
+Without a TTY and with no `default_preset` declared, a bare `veld orchestrator start` still
 exits 1 with a JSON payload on stdout: `error`, `nodes`, `presets` (the same
-records `veld presets --json` emits), and a `hint` naming the three ways to give it
+records `veld orchestrator presets --json` emits), and a `hint` naming the three ways to give it
 something to start.
 
 ### Composing presets
@@ -3646,13 +3646,13 @@ repeat every selection and then drift:
 Selections are de-duplicated, so two references to the same preset never start
 anything twice. A cycle is an error naming the path (`@a → @b → @a`).
 
-`veld lint` checks all of this **statically**, so a broken preset fails at lint time
-rather than at `veld start`:
+`veld orchestrator lint` checks all of this **statically**, so a broken preset fails at lint time
+rather than at `veld orchestrator start`:
 
 | Rule | Fires when |
 |---|---|
 | `preset-unresolvable` | an `@ref` names a preset that does not exist, the references form a cycle, or expansion exceeds its bounds (below) |
-| `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
+| `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld orchestrator config --files` prints the glob → file → node chain |
 | `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
 | `preset-missing-node-ref` | a node in this preset's plan references `${nodes.X.…}` and `X` is not in that plan — the message names both the preset and the reference |
 | `preset-duplicate-key` | two presets pin the same `key`. A key is the number a person types, so it cannot mean two things |
@@ -3674,7 +3674,7 @@ expansion steps. A preset referenced from two places is expanded once per refere
 so a tree that doubles at each level costs 2^depth while every individual path
 through it stays acyclic — and expansion runs inside the daemon, on the endpoint the
 desktop app polls, so an unbounded one is a config that can hang the daemon rather
-than just a slow `veld start`. Both numbers are far above any hand-written preset
+than just a slow `veld orchestrator start`. Both numbers are far above any hand-written preset
 (real trees are 2-3 levels and a few dozen steps). Exceeding either is reported as
 "cannot be expanded" wherever a preset is named; flatten the tree.
 
@@ -3721,12 +3721,12 @@ process's environment `VELD_URL_<NAME>` — mirroring `VELD_PORT_<NAME>`, and
 uppercased the same way (`-` becomes `_`).
 
 A `tcp` port has a `${veld.ports.<name>}` and no URL, because Veld gives it no
-hostname. `veld lint` says exactly that, naming the port and its protocol, rather
+hostname. `veld orchestrator lint` says exactly that, naming the port and its protocol, rather
 than reporting an unknown built-in.
 
 **`veld.*` is a closed set.** A node's *outputs* are **not** in it — they are
-`${output.KEY}` (this node) and `${nodes.<node>.KEY}` (any node). `veld lint` and
-`veld start` reject any `${veld.*}` name that is not listed above, so a typo or a
+`${output.KEY}` (this node) and `${nodes.<node>.KEY}` (any node). `veld orchestrator lint` and
+`veld orchestrator start` reject any `${veld.*}` name that is not listed above, so a typo or a
 leftover `${veld.MY_OUTPUT}` is caught before a run starts.
 
 > **Changed in this release.** Node outputs used to *also* be reachable as
@@ -3740,7 +3740,7 @@ leftover `${veld.MY_OUTPUT}` is caught before a run starts.
 #### Availability
 
 The set is closed but **not uniform** — each context populates what it can know.
-`veld lint` and `veld start` check a reference against the context it sits in
+`veld orchestrator lint` and `veld orchestrator start` check a reference against the context it sits in
 (`builtin-not-in-scope`), so `${veld.url}` on a `command` node is refused before
 the run rather than failing mid-start with `unknown built-in variable`.
 
@@ -3768,7 +3768,7 @@ Precedence (lowest to highest): inherited parent env < node `env` < node outputs
 Notes:
 
 - **`run_id`** is absent in a project step because a `teardown` also runs from
-  `veld stop` after the run row is gone. Use `${veld.run}`, the name you started
+  `veld orchestrator stop` after the run row is gone. Use `${veld.run}`, the name you started
   with.
 - **`port` / `url` / `ports.*` / `urls.*`** exist only where a port is allocated
   and a route registered, which is a `long_running` step — and only one that has
@@ -3901,7 +3901,7 @@ All values are slugified automatically (lowercased, non-alphanumeric characters 
 `{branch}` and `{worktree}` are evaluated at run creation time and frozen into the run state. URLs never change if you switch branches mid-run.
 
 **That table is the whole list.** There is no `{port}` placeholder — an unknown
-key is an error at `veld start`, not an empty string, so a template that reaches
+key is an error at `veld orchestrator start`, not an empty string, so a template that reaches
 for one never runs. Ports are the thing URL templates exist to hide: Veld routes
 the hostname to the allocated port itself, and `${veld.port}` / `${veld.url.port}`
 are how a *command* or `env` value reads a number.
@@ -3948,7 +3948,7 @@ For custom apex domains, Veld manages exact DNS entries via `veld-helper`:
 
 Veld writes exact host entries only -- never wildcard rules. Real domains and unrelated subdomains continue resolving normally via public DNS.
 
-**Important:** Custom (non-`.localhost`) domains require `veld setup privileged`. In unprivileged or auto-bootstrap mode, Veld cannot write to `/etc/hosts` or manage system DNS, so only `.localhost` domains are supported. If you use a custom apex domain in your `url_template` and are not in privileged mode, `veld start` will exit with an error explaining how to fix it.
+**Important:** Custom (non-`.localhost`) domains require `veld self setup privileged`. In unprivileged or auto-bootstrap mode, Veld cannot write to `/etc/hosts` or manage system DNS, so only `.localhost` domains are supported. If you use a custom apex domain in your `url_template` and are not in privileged mode, `veld orchestrator start` will exit with an error explaining how to fix it.
 
 ### URL Template Cascade
 
@@ -4158,7 +4158,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 ### What Happens When You Run This
 
 ```sh
-veld start --preset fullstack --name my-feature
+veld orchestrator start --preset fullstack --name my-feature
 ```
 
 1. Veld resolves the dependency graph: `frontend:local` and `admin:local` both depend on `backend:local`, which depends on `database:docker`.
@@ -4166,34 +4166,34 @@ veld start --preset fullstack --name my-feature
 3. `backend:local` starts next -- Veld allocates a port, injects `${nodes.database.DATABASE_URL}` into the env, and waits for `/health` to return 200.
 4. `frontend:local` and `admin:local` start in parallel -- both depend only on `backend:local`, which is now healthy.
 5. Each service gets a stable HTTPS URL like `https://frontend.my-feature.my-project.localhost`.
-6. `veld start` returns once everything is healthy; the environment keeps running. Add `--attach` from a terminal to follow every node's logs afterwards, with Ctrl+C stopping the lot.
+6. `veld orchestrator start` returns once everything is healthy; the environment keeps running. Add `--attach` from a terminal to follow every node's logs afterwards, with Ctrl+C stopping the lot.
 
 ### Detached vs `--attach`
 
-**`veld start` detaches.** It brings the environment up, prints where to find it, and exits, leaving the services running (like `docker compose up -d`). There is no `--detach` / `-d` flag, because there is nothing to opt into.
+**`veld orchestrator start` detaches.** It brings the environment up, prints where to find it, and exits, leaving the services running (like `docker compose up -d`). There is no `--detach` / `-d` flag, because there is nothing to opt into.
 
-Use `--attach` / `-a` for the other behaviour: the run still starts detached (the engine in the daemon owns it, not your terminal), then `veld` follows its logs like `veld logs -f` and, on Ctrl+C, stops the environment:
+Use `--attach` / `-a` for the other behaviour: the run still starts detached (the engine in the daemon owns it, not your terminal), then `veld` follows its logs like `veld orchestrator logs -f` and, on Ctrl+C, stops the environment:
 
 ```sh
 # Detached (the default) — starts and exits, services keep running
-veld start --preset fullstack --name my-feature
+veld orchestrator start --preset fullstack --name my-feature
 
 # Attached — follows logs, Ctrl+C stops everything
-veld start --preset fullstack --name my-feature --attach
+veld orchestrator start --preset fullstack --name my-feature --attach
 
 # View logs later, either way
-veld logs -f
+veld orchestrator logs -f
 ```
 
-Because the run is the daemon's, closing the terminal or killing `veld` does not stop it — Ctrl+C is the stop. `--attach` needs a terminal. Piped or in a script it is ignored and `veld start` returns as usual, so a CI job never hangs waiting on a stream nobody reads.
+Because the run is the daemon's, closing the terminal or killing `veld` does not stop it — Ctrl+C is the stop. `--attach` needs a terminal. Piped or in a script it is ignored and `veld orchestrator start` returns as usual, so a CI job never hangs waiting on a stream nobody reads.
 
-**Ctrl+C while `veld start` (or `veld restart`) is still bringing the environment up** asks the engine to cancel: it cleans up what it had started and `veld` exits `130`. A second Ctrl+C stops waiting; the engine carries on cleaning up.
+**Ctrl+C while `veld orchestrator start` (or `veld orchestrator restart`) is still bringing the environment up** asks the engine to cancel: it cleans up what it had started and `veld` exits `130`. A second Ctrl+C stops waiting; the engine carries on cleaning up.
 
-**The daemon starts if it is not running.** Every engine command (`start`, `stop`, `restart`, `status`, `logs`, `action`) is a client of the daemon's engine; when no daemon answers, `veld` starts it (through launchd or `systemd --user` when it is installed as a service, otherwise a detached `veld-daemon`) and waits for it. During `veld update` the daemon is unavailable and these commands exit `75` — try again shortly. Runs and in-flight actions survive both a daemon restart and an update.
+**The daemon starts if it is not running.** Every engine command (`start`, `stop`, `restart`, `status`, `logs`, `action`) is a client of the daemon's engine; when no daemon answers, `veld` starts it (through launchd or `systemd --user` when it is installed as a service, otherwise a detached `veld-daemon`) and waits for it. During `veld self update` the daemon is unavailable and these commands exit `75` — try again shortly. Runs and in-flight actions survive both a daemon restart and an update.
 
 ### One-off runs (`--oneshot`)
 
-`veld start <node> --oneshot` turns a `command` node into the run's **terminal
+`veld orchestrator start <node> --oneshot` turns a `command` node into the run's **terminal
 node**: Veld starts the node's dependencies, waits for them to become healthy,
 then runs the node to completion — streaming its output live — and, the moment
 it exits, tears the whole environment down in reverse dependency order and exits
@@ -4208,7 +4208,7 @@ exit code.
 ```sh
 # Start db + api + web (e2e's dependencies), run the e2e suite, tear down,
 # and exit with the suite's exit code.
-veld start e2e --oneshot
+veld orchestrator start e2e --oneshot
 ```
 
 ```json
@@ -4239,7 +4239,7 @@ Details:
   startup summary, "Running…", teardown lines, and the non-TTY NDJSON progress
   stream) all go to **stderr**, so a CI job or coding agent can capture stdout
   and get just the program's output. Dependency logs are recorded (read them
-  with `veld logs --node <dep>`), not streamed; pass `--all-logs` to interleave
+  with `veld orchestrator logs --node <dep>`), not streamed; pass `--all-logs` to interleave
   them (on stderr) during the run.
 - **The terminal node must be a `command` type** (a `long_running` never exits,
   so it can't be the thing whose exit ends the run). Veld errors otherwise —
@@ -4250,11 +4250,11 @@ Details:
   the graph and started automatically.
 - **The exit code is the node's own.** A non-zero exit (failing tests) is the
   node's *result*, not a startup error — Veld propagates it as its own exit
-  code so `veld start e2e --oneshot && deploy` works.
+  code so `veld orchestrator start e2e --oneshot && deploy` works.
 - **Teardown always runs** — on normal completion and on Ctrl+C (which aborts
   the run and exits `130`) — and runs to completion once started; a further
   Ctrl+C during teardown is ignored. Per-node `on_stop` hooks and project
-  `teardown` steps run in reverse order, exactly as `veld stop` does.
+  `teardown` steps run in reverse order, exactly as `veld orchestrator stop` does.
 - **Dependencies are not health-monitored while the terminal node runs.** If a
   dependency crashes mid-run it surfaces only as the node's own failure (e.g. a
   connection error), not a distinct diagnostic.
@@ -4262,26 +4262,26 @@ Details:
 
 ### Log Timestamps
 
-All log output (both `long_running` stdout/stderr and internal Veld events) is timestamped when the line is emitted, which is what lets `veld logs` merge nodes chronologically.
+All log output (both `long_running` stdout/stderr and internal Veld events) is timestamped when the line is emitted, which is what lets `veld orchestrator logs` merge nodes chronologically.
 
-**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted — in `veld logs`, in `veld start --attach`'s live streaming, and in the `/ide` logs view:
+**Stored in UTC, shown in your time zone.** Every line is stored as RFC 3339 UTC with microsecond precision — not a display choice but a requirement, since Veld orders and interleaves lines by comparing those strings. What you *read* is converted — in `veld orchestrator logs`, in `veld orchestrator start --attach`'s live streaming, and in the `/ide` logs view:
 
 ```
-$ veld logs
+$ veld orchestrator logs
 web:local [2026-03-12T09:30:01.123456+01:00] Server listening on port 3000
 web:local [2026-03-12T09:30:01.456789+01:00] Connected to database
 
-$ veld logs --utc
+$ veld orchestrator logs --utc
 web:local [2026-03-12T08:30:01.123456Z] Server listening on port 3000
 web:local [2026-03-12T08:30:01.456789Z] Connected to database
 ```
 
-- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command, and the two cannot be combined with each other or with `--json`. `veld start --attach` has no such flags — it follows the setting, so a `veld logs` beside it shows the same clock.
+- `--utc` prints the stored string verbatim; `--local` forces local. Either overrides the `logs.timeZone` setting for one command, and the two cannot be combined with each other or with `--json`. `veld orchestrator start --attach` has no such flags — it follows the setting, so a `veld orchestrator logs` beside it shows the same clock.
 - **`--json` always emits UTC**, whatever the setting says. It is the machine-readable shape, so `timestamp` has exactly one spelling regardless of who ran the command.
-- The setting lives at **Settings → General** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. From a terminal it is `veld settings set logs.timeZone utc` (see [Veld Settings](#veld-settings)). The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
+- The setting lives at **Settings → General** in the `/ide` management UI (and Veld Desktop), and defaults to `local`. From a terminal it is `veld self settings set logs.timeZone utc` (see [Veld Settings](#veld-settings)). The `/ide` logs view follows it, and each timestamp's tooltip carries the full date, both zones, and the exact stored value.
 - **The first-generation dashboard at `https://veld.localhost/` always shows local time** and does not read this setting — it fetches no settings at all. So with `logs.timeZone` set to `utc`, that one page still shows local. It is a frozen surface; `/ide` is where the setting applies.
-- **"Local" means each reader's own clock, not one shared clock.** The setting fixes the policy; the zone is resolved where the timestamp is rendered — from the process environment for the CLI, from the browser for `/ide`. So a `veld logs` run with an empty `TZ` prints `+00:00` (an empty `TZ` resolves to UTC) while the same daemon's `/ide` shows your machine's zone, and a browser on another machine shows that machine's. Use `--utc` when two readers must agree exactly.
-- **One hour a year, the displayed time is not monotonic.** At the DST fall-back the local clock repeats an hour, so correctly-ordered lines can render `02:59:00` then `02:01:00`. The lines are not misordered and nothing is wrong with the data — the stored UTC values are strictly increasing, which is what Veld sorts by. `veld logs` shows the offset inline (`+02:00` then `+01:00`), and in `/ide` the tooltip's offset is the tiebreak. `--utc` avoids the ambiguity entirely.
+- **"Local" means each reader's own clock, not one shared clock.** The setting fixes the policy; the zone is resolved where the timestamp is rendered — from the process environment for the CLI, from the browser for `/ide`. So a `veld orchestrator logs` run with an empty `TZ` prints `+00:00` (an empty `TZ` resolves to UTC) while the same daemon's `/ide` shows your machine's zone, and a browser on another machine shows that machine's. Use `--utc` when two readers must agree exactly.
+- **One hour a year, the displayed time is not monotonic.** At the DST fall-back the local clock repeats an hour, so correctly-ordered lines can render `02:59:00` then `02:01:00`. The lines are not misordered and nothing is wrong with the data — the stored UTC values are strictly increasing, which is what Veld sorts by. `veld orchestrator logs` shows the offset inline (`+02:00` then `+01:00`), and in `/ide` the tooltip's offset is the tiebreak. `--utc` avoids the ambiguity entirely.
 
 ### Searching From a Browser Pane's Address Bar
 
@@ -4346,27 +4346,27 @@ They are the settings the IDE's settings dialog edits, and they are reachable fr
 a terminal:
 
 ```sh
-veld settings                          # all of them: value, whether it was set, what it is
-veld settings keepAwake                # narrowed to one key prefix
-veld settings --json                   # the agent-facing form
+veld self settings list                          # all of them: value, whether it was set, what it is
+veld self settings list keepAwake                # narrowed to one key prefix
+veld self settings list --json                   # the agent-facing form
 
-veld settings get terminal.shell
-veld settings set terminal.shell /bin/bash
-veld settings unset terminal.shell     # back to the default
-veld settings describe terminal.shell  # type, default, allowed values, and any dependency
+veld self settings get terminal.shell
+veld self settings set terminal.shell /bin/bash
+veld self settings unset terminal.shell     # back to the default
+veld self settings describe terminal.shell  # type, default, allowed values, and any dependency
 ```
 
 **`describe` is the one to reach for first**, because two of Veld's rules make
 guessing unsafe:
 
-- **Numbers are clamped, not refused.** `veld settings set
+- **Numbers are clamped, not refused.** `veld self settings set
   keepAwake.sharingOnBatteryMinutes 900` stores `480` and says so. Without the
   range in front of you, a wrong guess otherwise looks exactly like a success.
 - **Strings and enums are refused, not coerced** — and the refusal now carries the
   reason (`must not put %s in the host — it belongs in the path or query`).
 
 ```
-$ veld settings describe worktree.trashRetentionDays
+$ veld self settings describe worktree.trashRetentionDays
 worktree.trashRetentionDays
   Empty the worktree trash after
 
@@ -4386,7 +4386,7 @@ worktree.trashRetentionDays
 
 Every setting's type, default, allowed values, title and help text live in **one
 catalog in `veld-core`**, which the daemon serves at `GET /api/settings/catalog`.
-The settings dialog renders from it and `veld settings` prints from it, so the two
+The settings dialog renders from it and `veld self settings list` prints from it, so the two
 cannot describe a setting differently — and the values a dialog offers are the
 same literal the daemon's validator accepts.
 
@@ -4401,7 +4401,7 @@ path. `describe` shows both.
 `sharing.peerTtlMinutes` and `sharing.webTtlMinutes` — how long a share link lives
 — are the machine's *default* answer, and a project's `veld.json` overrides them
 via [`sharing.peer_ttl_minutes` / `sharing.web_ttl_minutes`](#sharingpeer_ttl_minutes--sharingweb_ttl_minutes);
-`veld share --ttl` overrides both for one share. That is deliberate rather than an
+`veld network share --ttl` overrides both for one share. That is deliberate rather than an
 exception to the table below: a share's useful life is a property of *what is being
 shared*, so the repo describing the environment is the right place to bound it, and
 a fresh checkout gets the team's answer without configuring a machine.
@@ -4436,21 +4436,21 @@ rather than cleaned up, so a folder full of them says so.
 
 Before pointing it at shared storage: **a copy carries everything the database
 does, including your relay auth tokens.** Veld writes each one readable only by
-you and warns — in `veld backup now`, in the daemon log and in `veld doctor` —
+you and warns — in `veld self backup now`, in the daemon log and in `veld self doctor` —
 when the filesystem cannot express that, which is the case on FAT-formatted drives
-and most network shares. `veld uninstall` removes the *default* folder for the same
+and most network shares. `veld self uninstall` removes the *default* folder for the same
 reason it removes the database; a custom `backup.dir` is your folder and is left
 alone.
 
 See the [README's Storage section](../README.md#storage) for what a copy contains
-and how a restore works, and `veld backup` / `veld backup restore` for the
+and how a restore works, and `veld self backup list` / `veld self backup restore` for the
 commands.
 
-### `veld settings` vs `veld config`
+### `veld self settings` vs `veld orchestrator vars`
 
 Different things, and the distinction is not cosmetic:
 
-| | `veld settings` | `veld config vars` / `set` / `unset` |
+| | `veld self settings` | `veld orchestrator vars list` / `set` / `unset` |
 |---|---|---|
 | What it holds | Veld's own preferences | a **project's** machine-specific values, declared in its `veld.json` |
 | Who defines the keys | Veld | the repo, via `vars` with a `machine` block |

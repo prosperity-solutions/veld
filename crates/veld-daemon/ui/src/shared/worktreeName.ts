@@ -9,7 +9,7 @@
  * - **The alias has to be an identifier.** `validate_alias` accepts 1–64 characters
  *   of letters, digits, `-`, `_` and `.` — no spaces — because the alias is also the
  *   default *run* name for that checkout, and a run name is addressed from a shell
- *   (`veld start --name …`) and slugified into a hostname. So `Checkout V2 (final)`
+ *   (`veld orchestrator start --name …`) and slugified into a hostname. So `Checkout V2 (final)`
  *   cannot be stored verbatim; it becomes `checkout-v2-final`.
  * - **The branch may keep its slashes.** `feat/Checkout V2` is a branch name with a
  *   conventional prefix, and flattening the `/` into a `-` would quietly rename

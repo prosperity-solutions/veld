@@ -57,11 +57,11 @@ pub fn share_release_notice(release: &ShareRelease, whose: &str, now: &str) -> O
         )),
         ShareRelease::Failed(e) => Some(format!(
             "Could not release {whose}'s shares ({e}) — any share of it now points at {now}. \
-             Check `veld shares` and stop it with `veld unshare <id>`."
+             Check `veld network list` and stop it with `veld network unshare <id>`."
         )),
         ShareRelease::TimedOut => Some(format!(
             "Timed out releasing {whose}'s shares — any share of it now points at {now}. \
-             Check `veld shares` and stop it with `veld unshare <id>`."
+             Check `veld network list` and stop it with `veld network unshare <id>`."
         )),
     }
 }

@@ -687,7 +687,7 @@ fn warn_unhelpful_path() {
 /// resolution.
 ///
 /// A dedicated task rather than a piggyback on the health monitor's scan: that
-/// loop awaits per-node liveness probes (30s each) and `veld restart` recovery
+/// loop awaits per-node liveness probes (30s each) and `veld orchestrator restart` recovery
 /// (up to 300s), so it cannot be relied on to refresh anything on a cadence.
 /// Spawn once at daemon start; never returns. The first tick fires immediately,
 /// so the cell is populated within one resolution of boot. It ticks every

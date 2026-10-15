@@ -11,7 +11,7 @@
 # Cmd+Q took the dev daemon and the vite server down with it — measured.
 #
 # So the NODE is this script, not Electron. It stays alive across a quit; the
-# stack stays up; and `veld action open --node dev-electron` brings the window
+# stack stays up; and `veld orchestrator action open --node dev-electron` brings the window
 # back.
 #
 # WHY EVERYTHING ARRIVES AS AN ARGUMENT
@@ -135,7 +135,7 @@ for _ in $(seq 1 "$((grace * 10))"); do
 done
 
 echo "Electron supervised as pid $child. Quit it freely — the stack stays up." >&2
-echo "Bring it back with: veld action open --node dev-electron" >&2
+echo "Bring it back with: veld orchestrator action open --node dev-electron" >&2
 
 while true; do
     if kill -0 "$child" 2>/dev/null; then

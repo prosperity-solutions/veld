@@ -409,7 +409,7 @@ async fn send(
             if e.is_connect() {
                 Refusal {
                     message: format!(
-                        "could not reach the daemon ({e}) — is it running? Try `veld doctor`."
+                        "could not reach the daemon ({e}) — is it running? Try `veld self doctor`."
                     ),
                     code: None,
                 }
@@ -433,7 +433,7 @@ async fn send(
         // that predates them, which is what a CLI updated ahead of its daemon meets.
         None if matches!(status.as_u16(), 404 | 405) => {
             "the running Veld daemon is older than this command — restart it (or run \
-             `veld doctor`) and try again"
+             `veld self doctor`) and try again"
                 .to_owned()
         }
         None => format!("the daemon refused ({status})"),

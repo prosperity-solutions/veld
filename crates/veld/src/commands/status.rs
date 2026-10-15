@@ -12,7 +12,7 @@ pub(super) fn client_failed(e: &ClientError, json: bool) -> i32 {
     if e.is_update_in_progress() { 75 } else { 1 }
 }
 
-/// `veld status [--name <n>] [--outputs] [--json]`
+/// `veld orchestrator status [--name <n>] [--outputs] [--json]`
 ///
 /// The engine (in the daemon) resolves the environment, checks liveness and
 /// reads the stats; this renders its report.
@@ -161,7 +161,7 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             };
             let (cpu_str, mem_str) = match node_stats.get(key.as_str()) {
                 // Footprint, not RSS: summing RSS over a process tree counts every
-                // page shared inside the tree once per process. `veld stats` breaks
+                // page shared inside the tree once per process. `veld orchestrator stats` breaks
                 // the same number down further.
                 Some(s) => (
                     output::fmt_cpu(s.cpu_percent),

@@ -7,7 +7,7 @@
 //! can read what the shell prints and write its input. When the last holder of
 //! the master goes away the kernel hangs up the shell's foreground process
 //! group, and a shell told its terminal was unplugged exits, taking whatever ran
-//! inside it. While the daemon held the master, `veld update` — which restarts
+//! inside it. While the daemon held the master, `veld self update` — which restarts
 //! the daemon — therefore ended every terminal, and no amount of care on the
 //! daemon's shutdown path could change that: the descriptor dies with the
 //! process. `pty::shutdown_sessions` used to hang the shells up *deliberately*,
@@ -90,13 +90,13 @@ const OUTPUT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 /// already attached, before it is allowed to take the session over.
 ///
 /// **This is what stops a liveness probe from killing a terminal.** Connecting
-/// to a holder is how everything decides whether one is alive: `veld doctor`
+/// to a holder is how everything decides whether one is alive: `veld self doctor`
 /// walks the socket directory, and [`bind`] connects to a path already in use to
 /// tell a leftover file from a live holder. Both connect and close immediately.
 /// While *any* accepted connection displaced the attached daemon on the spot,
 /// each of those probes severed a live session — the daemon read EOF, published
 /// an exit for a shell that was still running, and the reaper eventually hung
-/// that shell up. One `veld doctor` did it to every terminal on the machine.
+/// that shell up. One `veld self doctor` did it to every terminal on the machine.
 ///
 /// A real peer, by contrast, connects and stays. So a newcomer is greeted at
 /// once (which is what keeps the hangup-and-close contract in [`wire`] working)
@@ -361,7 +361,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     /// whether or not its branch is being polled, so a holder that spent longer
     /// than the grace *with a daemon attached* would find the deadline already
     /// expired the instant it lost that daemon — and would hang up the shell
-    /// immediately on the next `veld update`, which is exactly the failure this
+    /// immediately on the next `veld self update`, which is exactly the failure this
     /// module exists to prevent. Every disconnect therefore resets it.
     macro_rules! mark_disconnected {
         () => {{
@@ -540,7 +540,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // no connection is established at all. It is the one frame
                     // whose entire purpose is to work in degraded conditions — a
                     // peer that could not be greeted, an unknown protocol version,
-                    // `veld uninstall` — and gating it on being the current writer
+                    // `veld self uninstall` — and gating it on being the current writer
                     // is what made those callers silently ineffective. It ends a
                     // session rather than writing to it, so the one-writer rule
                     // does not apply.
@@ -666,7 +666,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         }
                     } else if pending.as_ref().is_some_and(|c| c.generation == seq) {
                         // A probationary connection went away before proving
-                        // itself — a `veld doctor` probe, or a holder that found
+                        // itself — a `veld self doctor` probe, or a holder that found
                         // this socket occupied and gave up. The attached daemon is
                         // untouched, which is the entire point of the probation.
                         debug!(session = %cfg.session_id, "a probationary peer disconnected");
@@ -975,7 +975,7 @@ async fn attach(
     //
     // A peer is allowed to connect, write `HANGUP`, and close — that is the whole
     // point of pinning one frame across every protocol version, and three callers
-    // now do exactly it (`veld uninstall`'s sweep, the recovery test's cleanup
+    // now do exactly it (`veld self uninstall`'s sweep, the recovery test's cleanup
     // guard, and the daemon refusing an unknown protocol version). Greeting first
     // made every one of them silently ineffective: the peer had already closed, so
     // our `HELLO` write failed EPIPE, this function returned before spawning a
@@ -1536,7 +1536,7 @@ mod tests {
     /// `sleep(grace)` created once at startup elapses on its own schedule whether
     /// or not its `select!` branch is being polled, so the naive version killed
     /// the shell the instant a long-lived terminal lost its daemon — i.e. on
-    /// every `veld update` of a terminal older than the grace, which is the exact
+    /// every `veld self update` of a terminal older than the grace, which is the exact
     /// thing this module exists to prevent. The shell survives here only if
     /// disconnecting re-arms the deadline.
     #[tokio::test]
@@ -1925,7 +1925,7 @@ mod tests {
     }
 
     /// A peer may connect, write the five bytes of `HANGUP`, and close
-    /// immediately — the contract `veld uninstall`'s sweep, the recovery test's
+    /// immediately — the contract `veld self uninstall`'s sweep, the recovery test's
     /// cleanup guard and the version-refusal path all rely on.
     ///
     /// It did not work: the holder wrote its greeting first, that write failed
@@ -2061,14 +2061,14 @@ mod tests {
     /// A bare connect — the shape of every liveness probe there is — must not
     /// take the session away from the daemon that has it.
     ///
-    /// This is the whole bug. `veld doctor` walks the holder directory and
+    /// This is the whole bug. `veld self doctor` walks the holder directory and
     /// connects to each socket to count the live ones; `bind` connects to a path
     /// already in use to tell a stale file from a running holder, which happens on
     /// every resume of a session whose holder outlived its daemon link. Both close
     /// immediately. While an accepted connection displaced the attached daemon on
     /// the spot, both severed live sessions: the daemon read EOF, published an exit
     /// for a shell that was still running, and the reaper hung that shell up half
-    /// an hour later. One `veld doctor` did it to every terminal on the machine.
+    /// an hour later. One `veld self doctor` did it to every terminal on the machine.
     #[tokio::test]
     async fn a_probe_connection_does_not_take_a_terminal_from_its_daemon() {
         let dir = tempfile::tempdir().unwrap();

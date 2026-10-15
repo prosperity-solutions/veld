@@ -1251,10 +1251,10 @@ impl Db {
     /// Environment names of every live run rooted at `project_root`.
     ///
     /// The background remover's stop step needs two things from this: which runs to
-    /// ask `veld stop` about, and — by polling until it returns empty — whether
+    /// ask `veld orchestrator stop` about, and — by polling until it returns empty — whether
     /// teardown has actually finished. Runs became two-phase in #162 precisely so
     /// that the persisted status is the thing to observe rather than the exit of a
-    /// spawned command, and `veld stop` is fire-and-forget from the daemon's side,
+    /// spawned command, and `veld orchestrator stop` is fire-and-forget from the daemon's side,
     /// so there is nothing else to wait on.
     pub fn live_run_names(&self, project_root: &Path) -> Result<Vec<String>, DbError> {
         let live = super::state::LIVE_SET;
@@ -1389,7 +1389,7 @@ impl Db {
     ///
     /// The bin's contents, **not** a work queue, and deliberately not read as one:
     /// the background remover used to enqueue this whole list at daemon boot, which
-    /// meant every restart — including the one `veld update` performs — permanently
+    /// meant every restart — including the one `veld self update` performs — permanently
     /// deleted the entire trash. Being in the bin is not a request to delete anything.
     /// The only thing that promotes a row to a removal on its own is the retention
     /// sweep ([`Self::expired_trashed_worktrees`]).

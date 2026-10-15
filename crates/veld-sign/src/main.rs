@@ -1055,7 +1055,7 @@ mod tests {
     use std::io::Read;
 
     // A throwaway ed25519 key (NOT the org key), generated with `openssl
-    // genpkey -algorithm ED25519` — the exact format `veld update`/CI feed in
+    // genpkey -algorithm ED25519` — the exact format `veld self update`/CI feed in
     // via the `SIGNING_PRIVATE_KEY` secret. Pins the production parse path.
     const TEST_PRIVATE_PEM: &str = "-----BEGIN PRIVATE KEY-----\n\
         MC4CAQAwBQYDK2VwBCIEIG6yQcLcN3khrsV3dAHJmX/loSUSEoU9FVYNd4mqV+S1\n\

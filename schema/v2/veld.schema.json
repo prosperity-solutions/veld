@@ -132,7 +132,7 @@
         },
         "hidden": {
           "type": "boolean",
-          "description": "When true, this node is hidden from `veld nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
+          "description": "When true, this node is hidden from `veld orchestrator nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
           "default": false
         },
         "client_log_levels": {
@@ -157,7 +157,7 @@
         },
         "actions": {
           "type": "array",
-          "description": "User-invokable actions for this node, exposed on the CLI (`veld action <name>`) and as buttons in the management dashboard.",
+          "description": "User-invokable actions for this node, exposed on the CLI (`veld orchestrator action <name>`) and as buttons in the management dashboard.",
           "items": {
             "$ref": "#/$defs/ActionConfig"
           }
@@ -260,7 +260,7 @@
         },
         "on_stop": {
           "type": "string",
-          "description": "Teardown command, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. Supports Veld variable substitution."
+          "description": "Teardown command, run in reverse dependency order whenever the run ends \u2014 a deliberate `veld orchestrator stop`, a node crash, a start that failed and aborted, or a run replaced by a new start. It runs at most once per teardown pass (two passes of one run can overlap, so write it idempotently), a failure or timeout is not retried, and it is killed after 30s so a wedged hook cannot stop the run from ending. Supports Veld variable substitution."
         },
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",
@@ -280,7 +280,7 @@
         },
         "share": {
           "$ref": "#/$defs/SharePolicy",
-          "description": "Sharing opt-in for this variant. Absent (or an empty expose list) means the service can never be shared — veld share refuses it."
+          "description": "Sharing opt-in for this variant. Absent (or an empty expose list) means the service can never be shared — veld network share refuses it."
         }
       },
       "allOf": [
@@ -340,7 +340,7 @@
       "properties": {
         "name": {
           "type": "string",
-          "description": "Stable identifier used to invoke the action: `veld action <name>`.",
+          "description": "Stable identifier used to invoke the action: `veld orchestrator action <name>`.",
           "pattern": "^[a-zA-Z0-9._-]+$"
         },
         "label": {
@@ -349,7 +349,7 @@
         },
         "description": {
           "type": "string",
-          "description": "Optional one-line description shown in `veld actions` output and as a button tooltip."
+          "description": "Optional one-line description shown in `veld orchestrator actions` output and as a button tooltip."
         },
         "command": {
           "type": "string",
@@ -470,7 +470,7 @@
     },
     "ProxyConfig": {
       "type": "object",
-      "description": "Reverse-proxy header rules applied by the local Caddy proxy and the public web gateway when forwarding to/from a service. Absent = no manipulation (the default): headers pass through with only the proxies' intrinsic, correctness-required rewrites. Resolvable at project/node/variant level (most specific wins; remove lists union, set maps merge). NOTE: does NOT apply to direct iroh peer sharing (veld share without --web), which is a transport-level byte splice with no HTTP layer.",
+      "description": "Reverse-proxy header rules applied by the local Caddy proxy and the public web gateway when forwarding to/from a service. Absent = no manipulation (the default): headers pass through with only the proxies' intrinsic, correctness-required rewrites. Resolvable at project/node/variant level (most specific wins; remove lists union, set maps merge). NOTE: does NOT apply to direct iroh peer sharing (veld network share without --web), which is a transport-level byte splice with no HTTP layer.",
       "additionalProperties": false,
       "properties": {
         "request": {
@@ -537,7 +537,7 @@
       "additionalProperties": false,
       "properties": {
         "relays": {
-          "description": "Which iroh relays to route share traffic through. Must be opted into explicitly (no implicit default) — veld share is refused if unset and no VELD_SHARE_RELAY env override is present. \"public\" uses n0's public relays; an array confines traffic to self-hosted relays. Each array entry is either a bare relay URL string or a { url, token } object; the optional token gates a self-hosted relay via an Authorization: Bearer header. When set, config wins over the VELD_SHARE_RELAY env override.",
+          "description": "Which iroh relays to route share traffic through. Must be opted into explicitly (no implicit default) — veld network share is refused if unset and no VELD_SHARE_RELAY env override is present. \"public\" uses n0's public relays; an array confines traffic to self-hosted relays. Each array entry is either a bare relay URL string or a { url, token } object; the optional token gates a self-hosted relay via an Authorization: Bearer header. When set, config wins over the VELD_SHARE_RELAY env override.",
           "oneOf": [
             {
               "const": "public"
@@ -552,7 +552,7 @@
           ]
         },
         "gateway": {
-          "description": "The public web gateway this environment registers web shares with (used by `veld share --web`). Either a bare base-URL string (e.g. https://share.acme.internal), or an object carrying the gateway's registration auth token. Only needed for services that expose \"web\".",
+          "description": "The public web gateway this environment registers web shares with (used by `veld network share --web`). Either a bare base-URL string (e.g. https://share.acme.internal), or an object carrying the gateway's registration auth token. Only needed for services that expose \"web\".",
           "oneOf": [
             {
               "type": "string",
@@ -655,7 +655,7 @@
       "properties": {
         "expose": {
           "type": "array",
-          "description": "Audiences this service may be exposed to. Empty means not shareable. \"peer\" = other Veld users via `veld share` (verbatim URL). \"web\" = any browser, no Veld needed, via `veld share --web` and the sharing.gateway (real public URL, best-effort fidelity).",
+          "description": "Audiences this service may be exposed to. Empty means not shareable. \"peer\" = other Veld users via `veld network share` (verbatim URL). \"web\" = any browser, no Veld needed, via `veld network share --web` and the sharing.gateway (real public URL, best-effort fidelity).",
           "items": {
             "type": "string",
             "enum": [
@@ -671,7 +671,7 @@
           "properties": {
             "access": {
               "type": "string",
-              "description": "Viewer access control. \"password\" (the default, also when absent): the gateway requires the share password — generated and printed by `veld share --web` — before serving. \"link\": anyone with the URL is served; the unguessable slug is the only gate. An explicit value here always wins over the `--access` CLI flag.",
+              "description": "Viewer access control. \"password\" (the default, also when absent): the gateway requires the share password — generated and printed by `veld network share --web` — before serving. \"link\": anyone with the URL is served; the unguessable slug is the only gate. An explicit value here always wins over the `--access` CLI flag.",
               "enum": [
                 "password",
                 "link"

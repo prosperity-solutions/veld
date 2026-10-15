@@ -69,7 +69,7 @@ pub fn cross() -> String {
 /// Render a config-authored string as one line of inert text.
 ///
 /// Free-prose config fields (a preset's `label`, `when_to_use`, `group`) reach
-/// this program's stdout, and a coding agent runs `veld presets` and pipes that
+/// this program's stdout, and a coding agent runs `veld orchestrator presets` and pipes that
 /// stdout straight into its context — which the `veld` skill now tells it to do
 /// at the moment it needs to choose something to start. Printed raw, one line in
 /// a `veld.json` — or in any file an `include` glob matches, such as a vendored
@@ -78,7 +78,7 @@ pub fn cross() -> String {
 /// * erase and rewrite what it already printed (`ESC [ 2K`, `CR`), so the human's
 ///   terminal and the agent's context see different text; and
 /// * emit a newline plus spaces to **forge an entire extra list row**, so
-///   `veld presets` appears to offer a preset that does not exist.
+///   `veld orchestrator presets` appears to offer a preset that does not exist.
 ///
 /// Control characters become spaces rather than being dropped, so the text stays
 /// legible and nothing silently closes up around the removal. Bidi overrides go
@@ -111,7 +111,7 @@ pub fn step(current: usize, total: usize, label: &str) -> String {
 /// colored cell carries SGR escape bytes that occupy no cells at all, and a
 /// glyph like `\u{2713}` is three bytes wide but one cell. Padding on
 /// `str::len` therefore under-pads exactly the cells that are colored, which is
-/// what pulled every column after `STATUS` out of alignment in `veld status`.
+/// what pulled every column after `STATUS` out of alignment in `veld orchestrator status`.
 pub fn display_width(s: &str) -> usize {
     let mut width = 0;
     let mut chars = s.chars();
@@ -177,7 +177,7 @@ pub fn fmt_bytes(bytes: u64) -> String {
 /// a stale one look fresh, so the hour branch keeps it until it really is a day.
 ///
 /// Lives here rather than in `doctor` because two surfaces now report the age of
-/// the same thing — the doctor's backup row and `veld backup`'s overdue warning —
+/// the same thing — the doctor's backup row and `veld self backup list`'s overdue warning —
 /// and two formatters for one concept drift into saying different things about
 /// the same file.
 pub fn describe_age(age: chrono::Duration) -> String {
@@ -346,7 +346,7 @@ mod tests {
     };
 
     /// A preset's `label`/`when_to_use`/`group` is free prose from a config file,
-    /// and a coding agent pipes `veld presets` output into its own context. So the
+    /// and a coding agent pipes `veld orchestrator presets` output into its own context. So the
     /// two things one line of `veld.json` must not be able to do are rewrite what
     /// was already printed, and forge an extra list row.
     #[test]
@@ -391,7 +391,7 @@ mod tests {
         assert!(padded.starts_with(cell), "{padded:?}");
     }
 
-    /// `veld status` colors its `STATUS` cell, and the column arithmetic used
+    /// `veld orchestrator status` colors its `STATUS` cell, and the column arithmetic used
     /// to measure that cell in bytes — so every column to its right printed
     /// short of its own header. Each column must start at the same cell on
     /// every line.
@@ -481,7 +481,7 @@ mod tests {
         // gets at least the shortest block. With `round` instead, a tiny value
         // would land on index 0 and be indistinguishable from `None` — "absent"
         // and "nearly zero" would become the same character, in every
-        // `veld stats --history`.
+        // `veld orchestrator stats --history`.
         let s = sparkline(&[None, Some(0.0001), Some(100.0)]);
         let chars: Vec<char> = s.chars().collect();
         assert_eq!(chars.len(), 3);

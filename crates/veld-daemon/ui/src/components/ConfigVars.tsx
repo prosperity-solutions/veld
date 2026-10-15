@@ -26,7 +26,7 @@ import { api, type ConfigVar, type ConfigVarScope } from "../api";
  * Editing surface for vars the config declared machine-overridable.
  *
  * The CLI can ask a human at a terminal; a run started from here cannot — there
- * is no TTY, so `veld start` refuses rather than guessing at a value nobody
+ * is no TTY, so `veld orchestrator start` refuses rather than guessing at a value nobody
  * chose. That refusal is the right behaviour and a dead end in a GUI, which is
  * what this panel exists to resolve: the human is present, so we ask them.
  *
@@ -97,7 +97,7 @@ const POINTER_LABEL: Record<PointerKind, string> = {
 
 const POINTER_HELP: Record<PointerKind, string> = {
   // The caveat is here rather than in the docs because *this* surface is where
-  // it bites. A variable exported in a shell profile is visible to `veld start`
+  // it bites. A variable exported in a shell profile is visible to `veld orchestrator start`
   // typed in a terminal and invisible to one this app spawns, since the daemon
   // has its own environment — so the reader most likely to pick `env` is the one
   // it will fail for. `shell` does not have the problem: those commands run with
@@ -173,7 +173,7 @@ export function ConfigVarsPanel({
         Saved on this computer only — never committed, never shared with your
         team. Answers marked “your answer” apply everywhere you have{" "}
         <Code>{projectId}</Code> checked out. The same values show up in a
-        terminal with <Code>veld config vars</Code>.
+        terminal with <Code>veld orchestrator vars list</Code>.
       </Text>
     </Stack>
   );

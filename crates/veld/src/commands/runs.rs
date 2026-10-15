@@ -3,7 +3,7 @@ use veld_core::state::RunState;
 
 use crate::output;
 
-/// `veld runs [--name <n>] [--json]` — run history: one row per execution
+/// `veld orchestrator runs list [--name <n>] [--json]` — run history: one row per execution
 /// instance, newest first. Without `--name`, all environments' runs grouped
 /// by environment.
 pub async fn list(name: Option<&str>, json: bool) -> i32 {
@@ -122,7 +122,7 @@ fn colorize_outcome(run: &RunState) -> String {
     }
 }
 
-/// `veld runs show <id-prefix> [--json]` — one run in full: identity,
+/// `veld orchestrator runs show <id-prefix> [--json]` — one run in full: identity,
 /// outcome, node results, and the graph snapshot it was started with.
 pub async fn show(id_prefix: &str, json: bool) -> i32 {
     let Some((config_path, cfg)) = super::parse_config(json) else {
@@ -136,7 +136,9 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
         Ok(Some(r)) => r,
         Ok(None) => {
             output::print_error(
-                &format!("No run matches id prefix '{id_prefix}' (see `veld runs`)."),
+                &format!(
+                    "No run matches id prefix '{id_prefix}' (see `veld orchestrator runs list`)."
+                ),
                 json,
             );
             return 1;
@@ -150,7 +152,7 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
     if json {
         // The FULL RunState (nodes as a map of complete node states, plus
         // graph_snapshot/execution_order) with the display short id added.
-        // Deliberately richer than `veld runs --json`'s list entries — this
+        // Deliberately richer than `veld orchestrator runs list --json`'s list entries — this
         // is the drill-down; don't parse the two `.nodes` shapes the same way.
         let mut payload = serde_json::to_value(&run).unwrap_or_default();
         if let Some(obj) = payload.as_object_mut() {
@@ -253,7 +255,7 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
     0
 }
 
-/// `veld runs diff <old> [<new>] [--json]` — what changed in the config
+/// `veld orchestrator runs diff <old> [<new>] [--json]` — what changed in the config
 /// between two runs. With one id, the run is compared against its
 /// predecessor in the same environment.
 pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
@@ -269,7 +271,7 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
         match db.get_run_by_id_prefix(&project_root, prefix) {
             Ok(Some(r)) => Ok(r),
             Ok(None) => Err(format!(
-                "No run matches id prefix '{prefix}' (see `veld runs`)."
+                "No run matches id prefix '{prefix}' (see `veld orchestrator runs list`)."
             )),
             Err(e) => Err(e.to_string()),
         }
@@ -647,7 +649,7 @@ mod tests {
     /// A machine override changes the effective configuration without changing a
     /// byte of `veld.json`, so two runs that behaved differently have identical
     /// hashes and identical `NodeSnapshot`s (env is names-only). Before this,
-    /// `veld runs diff` recorded the provenance and then printed "Resolved graph
+    /// `veld orchestrator runs diff` recorded the provenance and then printed "Resolved graph
     /// is identical" — the field existed and answered nothing.
     #[test]
     fn diff_reports_a_var_answered_differently_between_two_runs() {
@@ -679,7 +681,7 @@ mod tests {
 
     /// **The rename is not a config change.** Snapshots taken before it recorded
     /// `start_server`; later ones record `long_running` for the same unchanged
-    /// config. Comparing the strings made the first `veld runs diff` spanning the
+    /// config. Comparing the strings made the first `veld orchestrator runs diff` spanning the
     /// upgrade report a type change on every long-running node in the project —
     /// in the one tool whose entire job is answering "what changed since it
     /// worked". A real change between the two types still reports.

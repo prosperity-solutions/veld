@@ -144,7 +144,7 @@ interface Handlers {
   onLayoutChanged(worktreeId: number, version: number): void;
   /**
    * The socket came up. `sameEpoch` is false when the daemon restarted since
-   * the last connection — `veld update` replaces the binary while pages stay
+   * the last connection — `veld self update` replaces the binary while pages stay
    * open — which means every claim this client held is gone and anything it
    * cached about the daemon's state has to be re-read rather than trusted.
    */
@@ -524,7 +524,7 @@ class Channel {
    * The terminal sessions this page's layouts still name.
    *
    * What keeps the daemon's detach reaper off them. A terminal is *detached* the
-   * instant its socket drops — a slept laptop, a `veld update`, a spent
+   * instant its socket drops — a slept laptop, a `veld self update`, a spent
    * reconnect budget — and the grace used to run from there, so a shell could be
    * hung up half an hour later with its pane sitting on screen. Telling the
    * daemon which panes exist is the only way it can tell a dropped socket from a

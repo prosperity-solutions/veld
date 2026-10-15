@@ -19,7 +19,7 @@
 //! reader of this module sees.
 //!
 //! The crypto and the org key live **here** in `veld-core`, not in `veld-helper`,
-//! so `veld doctor` can check a helper's signature with the exact same
+//! so `veld self doctor` can check a helper's signature with the exact same
 //! primitive and key — a duplicated constant would drift when the key rotates,
 //! and two different verify paths would disagree about the one thing a security
 //! gate must not guess.
@@ -432,7 +432,7 @@ pub fn verify_data_slots(keyring: &[PubKey], data: &[u8], sig: &[u8]) -> bool {
 /// somewhere unexpected in a rotation window: a helper's keyring and a release's
 /// slots are two lists that move at different times, and "signature OK" is the same
 /// sentence whether this machine is on the key before the rotation or the one
-/// after. `veld doctor` says which; nothing else does, and nothing on the machine
+/// after. `veld self doctor` says which; nothing else does, and nothing on the machine
 /// records it.
 ///
 /// A public key, so there is nothing here that must not be printed.
@@ -453,7 +453,7 @@ pub fn verifying_key(keyring: &[PubKey], data: &[u8], sig: &[u8]) -> Option<PubK
 ///
 /// The index is the key's **permanent identity**: rows are appended and never
 /// reordered, so key 2 stays key 2 across every later rotation and retirement, and
-/// the number in a `veld doctor` row a user pastes into an issue means the same
+/// the number in a `veld self doctor` row a user pastes into an issue means the same
 /// thing a year later. Falls back to `None` for a key that is not in the table,
 /// which is only reachable from a test.
 pub fn org_key_position(key: &PubKey) -> Option<(usize, usize)> {
@@ -505,7 +505,7 @@ pub fn sig_path_for(binary: &Path) -> PathBuf {
 /// Measured rather than guessed, because the failure mode of a bound set too low is
 /// refusing a genuine artifact: the largest thing that legitimately reaches this is
 /// a **debug** build of the helper, 31 MB on this machine, and that only on a
-/// developer running `veld doctor` against `target/debug`. A release helper is
+/// developer running `veld self doctor` against `target/debug`. A release helper is
 /// ~6 MB. So this is four times the largest real artifact — deliberately the same
 /// figure `helper_store`'s `MAX_CANDIDATE_BYTES` uses, since they bound the same
 /// hostile shape for the same reason.
@@ -541,7 +541,7 @@ pub const MAX_VERIFIED_BINARY_BYTES: u64 = 128 * 1024 * 1024;
 ///     open can undo that;
 ///   * `O_NONBLOCK`, because a plain `open(O_RDONLY)` on a **FIFO blocks until
 ///     somebody opens the write end** — parking the helper's watcher, its
-///     `shutdown` handler, `veld doctor`, or a blocking-pool thread of the root
+///     `shutdown` handler, `veld self doctor`, or a blocking-pool thread of the root
 ///     daemon, permanently and uncancellably;
 ///   * an `is_file()` check on the **descriptor**, never on the path, because a
 ///     path can be swapped between the check and the open and a descriptor cannot;
@@ -678,7 +678,7 @@ pub enum SigTrust {
     /// Nothing is compromised — the bytes are genuine and no *incoming* candidate
     /// is accepted on this basis — and re-running the installer
     /// ([`INSTALLER_COMMAND`]) writes the full slot list and clears it.
-    /// **Not `veld update`**, which is a no-op on a machine already on the latest
+    /// **Not `veld self update`**, which is a no-op on a machine already on the latest
     /// release, and a machine in this state is on the latest release by
     /// construction; see [`INSTALLER_COMMAND`] for why. Fail-closed still applies:
     /// this is not accepted anywhere, it is only *diagnosed* differently.
@@ -690,7 +690,7 @@ pub enum SigTrust {
 /// The no-password repair for [`SigTrust::RetiredOnly`], named in one place
 /// because three messages and a runbook have to agree on it.
 ///
-/// **Not `veld update`**, and that was the first answer. `veld update` resolves a
+/// **Not `veld self update`**, and that was the first answer. `veld self update` resolves a
 /// target and takes its "already on the latest version" branch when there is
 /// nothing newer, so the installer never runs — and a machine in the RetiredOnly
 /// state is by construction *on* the latest release, because installing it is how
@@ -799,7 +799,7 @@ pub fn classify_data_detail(
 /// worth stating rather than overclaiming: the retry is immediate, and one pass over
 /// a release helper is a few tens of milliseconds against a window that includes
 /// writing and `fsync`ing the whole binary. A second pass can land inside the same
-/// window. `veld doctor` additionally knows when an update is in progress and is the
+/// window. `veld self doctor` additionally knows when an update is in progress and is the
 /// right place to suppress the paragraph outright if this proves not enough.
 pub fn classify_binary_signature(binary: &Path) -> SigTrust {
     classify_binary_signature_detail(binary).trust
@@ -807,7 +807,7 @@ pub fn classify_binary_signature(binary: &Path) -> SigTrust {
 
 /// [`classify_binary_signature`], naming the key that answered.
 ///
-/// The one caller is `veld doctor`'s signature row. Everything that *gates* on a
+/// The one caller is `veld self doctor`'s signature row. Everything that *gates* on a
 /// signature wants the verdict alone and takes [`classify_binary_signature`].
 pub fn classify_binary_signature_detail(binary: &Path) -> SigVerdict {
     classify_with_retry(|| classify_binary_signature_once(binary, MAX_VERIFIED_BINARY_BYTES))
@@ -907,7 +907,7 @@ pub fn verify_binary_signed(binary: &Path) -> bool {
 /// The refusal text for a binary signed only by a retired key.
 ///
 /// Split out so the test that holds its remedy honest reads the real string
-/// rather than a copy: the advice was wrong once (`veld update`, which is a no-op
+/// rather than a copy: the advice was wrong once (`veld self update`, which is a no-op
 /// on every machine that can reach this state) and both `SigTrust` arms are
 /// unreachable in this build, so nothing else would catch it.
 fn relaunch_guard_message_for_retired(binary: &Path) -> String {
@@ -915,7 +915,7 @@ fn relaunch_guard_message_for_retired(binary: &Path) -> String {
         "the binary at {} is signed with an org key this release has retired, and its {} \
          carries no slot for a current one; refusing to relaunch onto it. The binary itself is \
          genuine — re-run the installer ({INSTALLER_COMMAND}) to write the full signature back; \
-         no password is needed, and `veld update` will not do it when you are already on the \
+         no password is needed, and `veld self update` will not do it when you are already on the \
          latest release",
         binary.display(),
         sig_path_for(binary).display()
@@ -978,7 +978,7 @@ fn org_binary_verdict(trust: SigTrust, root_owned: bool) -> bool {
 /// A reason when `binary` is NOT safe to relaunch onto, or `None` when it
 /// verifies. Wraps [`classify_binary_signature`] with a diagnosable message for
 /// the fail-closed callers (the helper's watcher/`restart`/`shutdown`, and `veld
-/// doctor`) — **not** [`verify_binary_signed`], which this said before and which
+/// self doctor`) — **not** [`verify_binary_signed`], which this said before and which
 /// has no production callers at all: three verdicts need three messages, and a
 /// bool cannot carry the retired-key one.
 pub fn relaunch_guard(binary: &Path) -> Option<String> {
@@ -991,7 +991,7 @@ pub fn relaunch_guard(binary: &Path) -> Option<String> {
         // A fixed sentence, not [`untrusted_cause`]: this runs inside the root
         // helper and its text goes back over the socket (`shutdown`), so it must
         // not describe a file root read on a caller's behalf. The cause is for
-        // processes running as the user — `veld doctor`, `veld update`.
+        // processes running as the user — `veld self doctor`, `veld self update`.
         SigTrust::Untrusted => Some(format!(
             "the binary at {} is not signed with the org's key (or its {} is \
              missing/invalid); refusing to relaunch onto it",
@@ -1395,7 +1395,7 @@ fn parse_version_field(field: &[u8]) -> Option<String> {
 ///
 /// Equal passes: an install RPC that refused the version already running could
 /// not repair a corrupted helper, and re-installing the same release is exactly
-/// what `veld update --target-version` and a re-run of `install.sh` do.
+/// what `veld self update --target-version` and a re-run of `install.sh` do.
 ///
 /// A version either side cannot be read as a triple returns `false` — fail
 /// closed, like everything else here. A pre-release suffix (`1.2.3-rc1`) is
@@ -1696,7 +1696,7 @@ mod tests {
     /// A FIFO where the signature should be is refused, not waited on.
     ///
     /// Without `O_NONBLOCK` this test hangs rather than fails — which is exactly
-    /// what the helper's binary watcher, `veld doctor`, and a blocking-pool
+    /// what the helper's binary watcher, `veld self doctor`, and a blocking-pool
     /// thread of the root daemon would do on a machine where somebody left one
     /// in the lib dir.
     #[test]
@@ -1733,7 +1733,7 @@ mod tests {
     /// A [`SigVerdict`] carrying just a trust level.
     ///
     /// The retry rule and the once-pass both branch on the trust level alone —
-    /// the key rides along for `veld doctor` and nothing else reads it — so the
+    /// the key rides along for `veld self doctor` and nothing else reads it — so the
     /// tests below say what they mean and let this fill in the rest.
     fn verdict(trust: SigTrust) -> SigVerdict {
         SigVerdict { trust, key: None }
@@ -1987,7 +1987,7 @@ mod tests {
 
     /// A key's position is its row, 1-based, and every row has one.
     ///
-    /// `veld doctor` prints this number, so it is a string a user pastes into an
+    /// `veld self doctor` prints this number, so it is a string a user pastes into an
     /// issue and somebody reads a year later. It only means anything because rows
     /// are append-only — nothing else pins that beyond row 0
     /// (`org_key_1_holds_slot_zero_forever`), so a future edit that reordered the
@@ -2602,8 +2602,8 @@ mod tests {
 
     /// The retired-key refusal names a remedy that actually works.
     ///
-    /// The first version said "run `veld update`", which is a **no-op** on the one
-    /// machine that can reach this state: `veld update` resolves a target, finds
+    /// The first version said "run `veld self update`", which is a **no-op** on the one
+    /// machine that can reach this state: `veld self update` resolves a target, finds
     /// nothing newer, and takes its "already on the latest version" branch without
     /// running the installer — and a RetiredOnly machine is on the latest release
     /// by construction, because installing it is how it got there. Both arms of
@@ -2631,17 +2631,17 @@ mod tests {
         };
         assert!(reason.contains(INSTALLER_COMMAND), "{reason}");
         assert!(reason.contains("no password is needed"), "{reason}");
-        // `veld update` may be *mentioned* — the message says explicitly that it
+        // `veld self update` may be *mentioned* — the message says explicitly that it
         // will not do this — but never in the imperative, which is the form the
         // wrong version used.
         for imperative in [
-            "run `veld update`",
-            "Run `veld update`",
-            "with `veld update`",
+            "run `veld self update`",
+            "Run `veld self update`",
+            "with `veld self update`",
         ] {
             assert!(
                 !reason.contains(imperative),
-                "the remedy must not be `veld update`: it does nothing on a machine \
+                "the remedy must not be `veld self update`: it does nothing on a machine \
                  already on the latest release, which is every machine that can reach \
                  this state.\n{reason}"
             );
@@ -2655,7 +2655,7 @@ mod tests {
     ///
     /// The distinction is reachable rather than theoretical: `install.sh` writes the
     /// lib-dir `.sig` with `cp`, which truncates in place, so the file really does
-    /// pass through zero length while the helper's watcher and `veld doctor` may be
+    /// pass through zero length while the helper's watcher and `veld self doctor` may be
     /// reading it. Classifying that as "unreadable" answered it once and printed the
     /// tampered-root-binary paragraph on a machine where nothing was wrong.
     #[test]

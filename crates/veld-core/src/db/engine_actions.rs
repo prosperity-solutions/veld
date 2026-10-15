@@ -2,7 +2,7 @@
 //! carry out, and the events it reported while doing it.
 //!
 //! The engine runs each action in its own worker process (`veld-daemon
-//! --engine-worker`) so that a daemon restart or a `veld update` does not cut it
+//! --engine-worker`) so that a daemon restart or a `veld self update` does not cut it
 //! in half. These tables are how the pieces find each other across that
 //! restart: the worker appends events and finally its outcome; the daemon (old
 //! or new) streams them to whichever face asked; a face that lost its stream

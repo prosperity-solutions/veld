@@ -144,7 +144,7 @@ fn run_once() {
         Err(e) => {
             // Loud, and recorded: a backup subsystem that fails silently is
             // indistinguishable from one that is working, right up until somebody
-            // needs it. `veld doctor` reads this back.
+            // needs it. `veld self doctor` reads this back.
             tracing::warn!("backup failed: {e}");
             crate::dbhealth::note_backup_failure(&e);
             record(
@@ -172,7 +172,7 @@ pub fn plan(db: &Db) -> Option<BackupPlan> {
     // rather than corrupt — removed, lost to a disk repair, a partial restore, a
     // restored home directory — an empty one is minted and then backed up. That
     // artifact carries a valid provenance row, passes every check, wins
-    // `newest_usable`, and has `veld doctor` report "Database backup OK … newest 0
+    // `newest_usable`, and has `veld self doctor` report "Database backup OK … newest 0
     // minute(s) old": the exact second failure of the incident this feature was
     // filed against, manufactured by the feature itself. Worse, the lost database
     // took `backup.dir` with it, so the empties land in the derived default folder
@@ -236,7 +236,7 @@ pub fn plan(db: &Db) -> Option<BackupPlan> {
 /// Written on failure too, and that is the point: the interval is measured from the
 /// last attempt rather than the last success, so a backup that fails every time
 /// fails on its own schedule instead of retrying every minute forever — and
-/// `veld doctor` has something to show other than silence.
+/// `veld self doctor` has something to show other than silence.
 fn record(db: &Db, outcome: serde_json::Value) {
     if let Err(e) = db.kv_set(backup::LAST_RUN_KEY, &outcome.to_string()) {
         tracing::debug!("could not record the backup outcome: {e}");
@@ -284,7 +284,7 @@ mod tests {
     /// `Db::open()` creates and migrates, and `monitor.rs` and `stats.rs` call it on
     /// a 5-second timer — so on a machine whose `veld.db` was deleted, an empty one
     /// is back long before this tick. Backing *that* up produces an artifact that
-    /// passes every check, wins `newest_usable` and turns the `veld doctor` row
+    /// passes every check, wins `newest_usable` and turns the `veld self doctor` row
     /// green: the incident's own second failure, manufactured by the feature meant
     /// to prevent it. Checking the file merely *exists* — which is what the first
     /// version of this guard did — cannot see that.
@@ -364,7 +364,7 @@ mod tests {
 
     /// A failure is recorded at the stamp the next attempt is measured from, so a
     /// backup that fails every time fails on its own schedule rather than retrying
-    /// every minute — and `veld doctor` has something to show.
+    /// every minute — and `veld self doctor` has something to show.
     #[test]
     fn a_failure_is_recorded_where_doctor_reads_it() {
         let (_dir, db) = test_db();

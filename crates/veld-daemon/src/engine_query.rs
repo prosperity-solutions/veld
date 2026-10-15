@@ -1,9 +1,12 @@
-//! The engine's read-only queries over HTTP: `veld status` and `veld logs`.
+//! The engine's read-only queries over HTTP: `veld orchestrator status`, `veld
+//! orchestrator logs`, and bare `veld`'s overview.
 //!
 //! Plain JSON, no streaming: a follower polls `/api/engine/logs` with
 //! `after_id`, exactly as the CLI used to poll the database. Errors carry the
-//! engine's user-facing message verbatim as `{"error": …}` with a 400 — the CLI
-//! prints it unchanged.
+//! engine's user-facing message verbatim as `{"error": …}` — a 400 for status and
+//! logs, whose failures are about the request, and a 500 for the overview, which
+//! takes no input and so can only fail on the machine. The CLI prints the message
+//! unchanged.
 
 use std::path::PathBuf;
 
@@ -18,12 +21,26 @@ use veld_engine::api::LogsQuery;
 use super::engine::{into_response, project_root_of};
 
 pub(crate) fn routes() -> Router {
+    super::agent_overview::mark_start();
     Router::new()
         .route("/api/engine/status", get(status))
         .route("/api/engine/logs", get(logs))
+        .route("/api/engine/overview", get(overview))
         // Logs and outputs are what a rebound page would come to read. Every route
         // goes ABOVE this line: `route_layer` wraps only the routes added before it.
         .route_layer(axum::middleware::from_fn(super::engine::host_guard))
+}
+
+/// The bare `veld` summary: what is running and which agents want the human. No
+/// scope parameter: it is the whole machine, which is why it sits behind the
+/// same host guard as the routes that read a project's logs.
+async fn overview() -> Response {
+    let live = super::pty::live_sessions().await;
+    into_response(
+        crate::offload::blocking(move || super::agent_overview::overview(live))
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e)),
+    )
 }
 
 #[derive(Deserialize)]
@@ -115,7 +132,7 @@ mod tests {
             let (code, body) = get_json(&format!("/api/engine/{path}?project_root={root}")).await;
             assert_eq!(code, StatusCode::BAD_REQUEST, "{path}");
             assert_eq!(
-                body["error"], "No environments found. Start one with `veld start`.",
+                body["error"], "No environments found. Start one with `veld orchestrator start`.",
                 "{path}"
             );
         }
@@ -125,7 +142,7 @@ mod tests {
         .await;
         assert_eq!(
             body["error"],
-            "No run matches id prefix 'deadbeef' (see `veld runs`)."
+            "No run matches id prefix 'deadbeef' (see `veld orchestrator runs list`)."
         );
         unsafe { std::env::remove_var("VELD_DB_PATH") };
     }

@@ -2,7 +2,7 @@ use veld_core::state::RunStatus;
 
 use crate::output;
 
-/// `veld list [--urls] [--json]`
+/// `veld self projects list [--urls] [--json]`
 pub async fn run(urls: bool, json: bool) -> i32 {
     let Some(db) = super::open_db(json) else {
         return 1;

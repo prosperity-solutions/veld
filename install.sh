@@ -17,7 +17,7 @@
 #                         one the user can be asked about and change.
 #   VELD_DESKTOP_ONLY=1   Install ONLY the app: no CLI tarball, no binaries, no
 #                         service restarts, no sudo, no PATH edits. macOS only.
-#                         This is what `veld desktop install|update` runs, and
+#                         This is what `veld self desktop install|update` runs, and
 #                         what Veld Desktop's own updater ends up in — an app
 #                         update has no business bouncing the daemon or asking
 #                         for a password.
@@ -31,14 +31,14 @@
 #                         it so an authorization prompt raised on their behalf (1Password,
 #                         sudo) shows the Veld mark instead of a generic "exec" tile.
 #   VELD_EMBEDDED=1       This script is running *inside* another veld command
-#                         (`veld update` and friends run it with stdout
+#                         (`veld self update` and friends run it with stdout
 #                         inherited). Two consequences: progress chatter, the
 #                         next-steps footer and the success banner are suppressed
 #                         so the caller owns the output (warnings and errors are
 #                         not), and the privileged helper restart is left to the
 #                         caller, which can do it without sudo and then verify it
 #                         worked. Always set on a CLI-driven run.
-#   VELD_VERBOSE=1        Print the chatter anyway. `veld update --verbose` sets
+#   VELD_VERBOSE=1        Print the chatter anyway. `veld self update --verbose` sets
 #                         it to get the raw installer stream back for debugging.
 #                         Deliberately does NOT hand the privileged helper
 #                         restart back to this script — that is VELD_EMBEDDED's
@@ -48,7 +48,7 @@
 #                         so an unhandled failure would otherwise leave the user
 #                         with no window and no message.
 #
-# Related (read by `veld setup`, not this script):
+# Related (read by `veld self setup`, not this script):
 #   VELD_ALLOW_UNMANAGED_HELPER=1   Let setup direct-spawn the helper when
 #                                   service registration fails (containers/CI
 #                                   without launchd/systemd). Unmanaged helpers
@@ -60,7 +60,7 @@ REPO="prosperity-solutions/veld"
 
 # --- Output mode ---
 #
-# `veld update` runs this script with VELD_EMBEDDED=1 and inherits its stdout, so
+# `veld self update` runs this script with VELD_EMBEDDED=1 and inherits its stdout, so
 # every line printed here lands in the middle of the CLI's own output. Left
 # unchecked that produces one command with three "installed successfully!"
 # banners, a first-install footer emitted halfway through an update, and two raw
@@ -79,7 +79,7 @@ REPO="prosperity-solutions/veld"
 # then verify it worked). `VELD_VERBOSE` only asks for the chatter back.
 #
 # Keeping them apart is the point: tying the privileged-restart hand-off to the
-# output mode meant `veld update --verbose` silently re-enabled this script's own
+# output mode meant `veld self update --verbose` silently re-enabled this script's own
 # `sudo launchctl kill`, so a debug flag bounced a root service and raced the CLI
 # for it.
 EMBEDDED=""
@@ -239,6 +239,24 @@ else
   VERSION="${TAG#v}"
 fi
 
+# The spelling of the commands this script tells people to run. #423 moved every
+# command under a part — the old `setup` became `veld self setup` — and an old name
+# now only prints where it went. Which spelling is right depends on the binary
+# being installed, not on this script: it is served from `main`, so between a merge
+# and the next release it installs a CLI older than itself, and `VELD_VERSION` can
+# pin any release. So ask that binary, as the app does (a capability, not a version
+# floor); before it is on disk, assume the new spelling.
+v_self() {
+  if [ -x "${INSTALL_DIR:-}/veld" ] && ! "${INSTALL_DIR}/veld" self --help >/dev/null 2>&1; then
+    printf 'veld'
+  else
+    printf 'veld self'
+  fi
+}
+v_orc() {
+  if [ "$(v_self)" = "veld" ]; then printf 'veld'; else printf 'veld orchestrator'; fi
+}
+
 if [ -z "$VERSION" ]; then
   # A neutral first line and the causes underneath it as possibilities, because
   # three unrelated failures land here and the script cannot tell which: GitHub
@@ -258,8 +276,8 @@ if [ -z "$VERSION" ]; then
 fi
 
 if [ -n "$DESKTOP_ONLY" ]; then
-  # No mention of VELD_DESKTOP_ONLY: nobody typed that variable — `veld desktop
-  # install`, `veld update` and the app's own updater all set it — so naming it
+  # No mention of VELD_DESKTOP_ONLY: nobody typed that variable — `veld self desktop
+  # install`, `veld self update` and the app's own updater all set it — so naming it
   # reads as a debug print rather than an explanation.
   say "Installing Veld Desktop ${VERSION} (the CLI is left alone)..."
 else
@@ -432,7 +450,7 @@ verify_checksum() {
 # ~/Applications, and whichever exists is what gets updated.
 #
 # Separate from `install_desktop_app` because two other things need the answer
-# even when the app half does not run: the closing "Run 'veld desktop install'"
+# even when the app half does not run: the closing "Run 'veld self desktop install'"
 # hint, and the icon step below.
 find_desktop_app() {
   DESKTOP_APP=""
@@ -513,7 +531,7 @@ record_desktop_preference() {
 # file reads `/dev/tty` instead — and the test has to match: `[ -t 0 ]` is false
 # on the standard install path, which is precisely the path that must be able to
 # ask. `VELD_NON_INTERACTIVE=1` is the caller's way of saying "nobody is
-# watching" and is set by every veld-driven run, so a `veld update` never reaches
+# watching" and is set by every veld-driven run, so a `veld self update` never reaches
 # a prompt in here (the CLI owns that question — see `plan_desktop` in
 # `crates/veld/src/commands/update.rs`).
 #
@@ -576,14 +594,14 @@ ask_desktop_preference() {
     prompt="Install Veld Desktop? [y/N] "
     echo "Veld Desktop — the Mac app for Veld's IDE — is not installed on this machine." >&2
     echo "  Worktree tabs, terminal panes and browser panes in one window, over the same" >&2
-    echo "  daemon the CLI drives. It is a ~113 MB download, kept in step by veld update." >&2
+    echo "  daemon the CLI drives. It is a ~113 MB download, kept in step by $(v_self) update." >&2
   else
     default="y"
     prompt="Install Veld Desktop? [Y/n] "
     echo "Veld Desktop is the Mac app for Veld's IDE — worktree tabs, terminal panes and" >&2
     echo "  browser panes in one window, over the same daemon the CLI drives." >&2
     echo "  The CLI does everything without it; the app is a window onto it." >&2
-    echo "  It is a ~113 MB download, kept in step by veld update." >&2
+    echo "  It is a ~113 MB download, kept in step by $(v_self) update." >&2
   fi
   echo "" >&2
   printf '%s' "$prompt" >&2
@@ -632,7 +650,7 @@ warn_unrecorded() {
 #
 # Delegated to the CLI rather than done with an `rm -rf` here, and that is the
 # whole reason this function is short: deleting an app bundle is the one
-# destructive act in this script, `veld desktop uninstall` already has to do it
+# destructive act in this script, `veld self desktop uninstall` already has to do it
 # (it is the command a user runs by hand), and one implementation that quits the
 # running app before unlinking its bundle is worth more than two that race it.
 #
@@ -657,13 +675,14 @@ remove_desktop_app_via_cli() {
   # The captured stderr is re-printed for the failures where it is the only
   # explanation: "Veld Desktop did not quit … it may be showing a dialog" and
   # "could not remove <path>: Permission denied". Discarding all of it — the first
-  # version of this — left the caller's "run 'veld desktop uninstall' to finish"
+  # version of this — left the caller's "run 'veld self desktop uninstall' to finish"
   # pointing at a command that would fail the same way with no reason given.
   #
   # Two exit codes are filtered instead, because for both this function has a
   # better explanation of its own: **2** is clap's usage dump from a binary too
   # old to have the subcommand, and **75** is EX_TEMPFAIL from the update gate,
   # answered below. Reprinting either puts veld's two lines in front of ours.
+  # Old spelling on purpose (#423): $cli may be an older CLI that has no `self desktop`.
   err="$("$cli" desktop uninstall --yes 2>&1 >/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 2 ] && [ "$rc" -ne 75 ] && [ -n "$err" ]; then
     printf '%s\n' "$err" >&2
@@ -675,14 +694,14 @@ remove_desktop_app_via_cli() {
   if [ "$rc" -eq 0 ]; then
     return 0
   fi
-  # 75 is EX_TEMPFAIL: `veld desktop uninstall` is on the list of commands an
-  # in-flight `veld update` refuses (`command_survives_an_update` in
+  # 75 is EX_TEMPFAIL: `veld self desktop uninstall` is on the list of commands an
+  # in-flight `veld self update` refuses (`command_survives_an_update` in
   # crates/veld/src/main.rs), because it would delete the bundle that update is
   # swapping. Named separately because it is the one failure here that is neither
   # the user's problem nor permanent.
   if [ "$rc" -eq 75 ]; then
-    echo "  Another veld update is running, so the app was left in place."
-    echo "  Run 'veld desktop uninstall' once it has finished."
+    echo "  Another $(v_self) update is running, so the app was left in place."
+    echo "  Run '$(v_self) desktop uninstall' once it has finished."
   fi
   return 1
 }
@@ -730,7 +749,7 @@ apply_binary_icons() {
   return "$rc"
 }
 
-# The app is installed by two processes that can overlap — `veld update` and the
+# The app is installed by two processes that can overlap — `veld self update` and the
 # app's own updater — and the loser of that race would delete the winner's only
 # backup.
 #
@@ -968,8 +987,8 @@ install_desktop_app() {
 # **decided** — which is a weaker and more accurate claim than "already answered",
 # the one an earlier version of this comment made and two review angles refuted:
 #
-# - `veld desktop install|update` records "wanted" before spawning this script.
-# - `veld update` reaches its app half only through `plan_desktop`, which either
+# - `veld self desktop install|update` records "wanted" before spawning this script.
+# - `veld self update` reaches its app half only through `plan_desktop`, which either
 #   read a recorded "yes" *or* took the "an app is already installed and nobody
 #   could be asked, so keep it in step" default (`desktop_gate`'s `None if
 #   installed` arm). Nothing is recorded on that second route, and that is
@@ -978,23 +997,23 @@ install_desktop_app() {
 # Re-checking here would not be a second line of defence, it would be a
 # contradiction: the preference write is deliberately best-effort (see `remember`
 # in crates/veld/src/commands/desktop.rs), so on a machine where it fails a
-# `veld desktop install` typed by hand would be refused by a stale "no" it could
+# `veld self desktop install` typed by hand would be refused by a stale "no" it could
 # not overwrite.
 #
 # Two consequences this script cannot fix, both stated rather than papered over.
 # A veld binary older than the preference reads no `desktop.json` at all, so its
-# `veld update` still moves the app half through here — self-healing on the next
+# `veld self update` still moves the app half through here — self-healing on the next
 # update, and the caller's version is not something a child process gets to audit.
 # And `VELD_DESKTOP_ONLY=1` is a documented variable (see the header), so a human
 # can set it by hand and install the app while recording nothing. What happens
 # next depends on what was already on disk, and it is worth being exact because an
 # earlier version of this paragraph named a message that cannot fire:
 #
-# - Nothing recorded: the next `veld update` either asks (interactively) or keeps
+# - Nothing recorded: the next `veld self update` either asks (interactively) or keeps
 #   the now-installed app in step without asking. Neither is wrong.
-# - A recorded "no": that answer still stands, so every later `veld update` says
+# - A recorded "no": that answer still stands, so every later `veld self update` says
 #   the app "was left alone" and the bundle goes stale where it is. Recovered with
-#   one `veld desktop install`, which is what that message names.
+#   one `veld self desktop install`, which is what that message names.
 if [ -n "$DESKTOP_ONLY" ]; then
   if ! install_desktop_app; then
     echo ""
@@ -1025,7 +1044,7 @@ for entry in $TAR_CONTENTS; do
   case "$entry" in
     # Binaries, plus the attribution files release tarballs carry since v10.6.x
     # (release.yml copies LICENSE + THIRD-PARTY-LICENSES.md into dist/). New
-    # non-binary entries must be added here or `veld update` refuses the tarball.
+    # non-binary entries must be added here or `veld self update` refuses the tarball.
     veld|veld-helper|veld-helper.sig|veld-daemon|caddy|LICENSE|THIRD-PARTY-LICENSES.md|"") ;;
     *) echo "Error: unexpected file in tarball: ${entry}"; exit 1 ;;
   esac
@@ -1044,7 +1063,7 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
   case "$EXISTING_DIR" in
     /usr/local/*)
       if [ -n "${VELD_NON_INTERACTIVE:-}" ]; then
-        # Non-interactive mode (e.g. called from `veld update`).
+        # Non-interactive mode (e.g. called from `veld self update`).
         # Try passwordless sudo; if unavailable, FAIL rather than silently
         # moving binaries (which would break a privileged LaunchDaemon that
         # still references /usr/local paths).
@@ -1092,7 +1111,7 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
         echo "    [2] Move to user-level install (no sudo needed)"
         echo "        Installs to ~/.local/bin instead. If you are in"
         echo "        privileged mode, you will need to run"
-        echo "        'veld setup unprivileged' afterwards."
+        echo "        '$(v_self) setup unprivileged' afterwards."
         echo ""
         echo "============================================================"
         echo ""
@@ -1140,7 +1159,7 @@ fi
 # JSON-per-run storage did. Service processes are independent of the CLI,
 # daemon, and helper (the helper leaves Caddy running across its own restart, so
 # URLs stay up), and they pick up the new orchestrator on the next
-# `veld start`/`veld restart`.
+# `veld orchestrator start`/`veld orchestrator restart`.
 
 say "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
@@ -1167,19 +1186,19 @@ $NEED_SUDO mkdir -p "$LIB_DIR"
 # and truncates the file (by 18000 bytes on v16.74.0), so re-signing a perfectly
 # good release helper made the `.sig` beside it fail on every update. The running
 # root helper then refused to relaunch onto it, refused to migrate itself into its
-# root-owned directory, and `veld setup privileged` fell back to serving it from
+# root-owned directory, and `veld self setup privileged` fell back to serving it from
 # here. A binary whose signature verifies already runs; leave its bytes alone.
 # $1 = source, $2 = destination, $3 = "sign" (macOS re-sign if needed) | "nosign".
 install_bin() {
   # Replaced by rename, never overwritten in place: `cp` onto an existing file
   # keeps its inode, and macOS caches a binary's code signature per vnode, so
-  # once the old bytes have run (the CLI driving `veld update`, a live helper or
+  # once the old bytes have run (the CLI driving `veld self update`, a live helper or
   # daemon) every later exec of the new bytes is SIGKILLed. The unconditional
   # re-sign this function used to do hid that by writing a new file itself.
   local dst="$2" link stage hops=0 team
   # `cp` wrote through a symlink, so the rename lands where its bytes did rather
   # than silently swapping a dev's link for a real file. Bounded, because `cp`
-  # failed on a loop with ELOOP and an unbounded walk would hang `veld update`.
+  # failed on a loop with ELOOP and an unbounded walk would hang `veld self update`.
   while [ -L "$dst" ]; do
     hops=$((hops + 1))
     if [ "$hops" -gt 40 ]; then
@@ -1273,7 +1292,7 @@ fi
 # The lib-dir copy above is deliberately LEFT in place on a migrated machine even
 # though nothing executes it; see `_WHY_THE_LIB_DIR_COPY_STAYS` in
 # `crates/veld/src/commands/helper_install.rs`. Deleting it would strand an older
-# CLI's `veld setup privileged`, which has no way to find the store.
+# CLI's `veld self setup privileged`, which has no way to find the store.
 #
 # Both halves of the guard are required. The `.sig` copy above already treats the
 # signature as optional (a `VELD_VERSION` pinned to a pre-signing release has
@@ -1299,11 +1318,12 @@ if [ -f "${TMP_DIR}/veld-helper" ] && [ -f "${TMP_DIR}/veld-helper.sig" ]; then
   # or the exit 2 below, which is the *expected* path on an older CLI — would
   # abort the whole install before the services are restarted.
   HELPER_INSTALL_RC=0
+  # `_helper-install` is hidden plumbing and keeps its name (#423).
   "${INSTALL_DIR}/veld" _helper-install --binary "${TMP_DIR}/veld-helper" \
     || HELPER_INSTALL_RC=$?
   # Exit 2 is clap's "unrecognized subcommand": the CLI just installed is OLDER
   # than this script and has no `_helper-install`. That happens on
-  # `veld update --target-version <older>`, where the script always comes from
+  # `veld self update --target-version <older>`, where the script always comes from
   # the current release but the binary does not. Such a CLI predates the
   # root-owned store, so its install is the lib-dir copy above and this is
   # correctly a no-op — not a refusal to warn about.
@@ -1332,7 +1352,7 @@ fi
 
 # If the user chose to move from system to user paths while in privileged mode,
 # stop the system LaunchDaemon and remove the plist so it doesn't try to launch
-# a binary that no longer exists. The user must run `veld setup unprivileged`
+# a binary that no longer exists. The user must run `veld self setup unprivileged`
 # to set up user-level services.
 if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
   echo ""
@@ -1347,7 +1367,7 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
         # The root-owned helper directory goes with the daemon that used it
         # (issue #262). Removed here, under the sudo this branch already holds,
         # because after this point `setup.json` no longer says "privileged" and
-        # `veld uninstall` will not escalate — the directory would otherwise
+        # `veld self uninstall` will not escalate — the directory would otherwise
         # survive as root-owned files with no veld able to delete them.
         sudo rm -rf /var/db/veld-helper 2>/dev/null || true
         echo "System LaunchDaemon stopped and removed."
@@ -1377,13 +1397,13 @@ if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
   # running in privileged mode.
   if [ -f "$SETUP_JSON" ]; then
     echo "Clearing privileged mode from setup.json..."
-    # Simple: overwrite with empty mode. `veld setup unprivileged` will set it properly.
+    # Simple: overwrite with empty mode. `veld self setup unprivileged` will set it properly.
     echo '{}' > "$SETUP_JSON"
   fi
 
   echo ""
   echo "============================================================"
-  echo "  IMPORTANT: Run 'veld setup unprivileged' to set up"
+  echo "  IMPORTANT: Run '$(v_self) setup unprivileged' to set up"
   echo "  user-level services after this install completes."
   echo "============================================================"
   echo ""
@@ -1394,10 +1414,10 @@ fi
 # Deliberately NOT `bootout` followed by `bootstrap`. `bootout` returns before
 # launchd has finished tearing the job down, and a `bootstrap` into that window
 # fails with exit 5 — which this script swallows, leaving NO service registered
-# and, for the daemon, nothing running at all. `veld setup` hit the same race and
+# and, for the daemon, nothing running at all. `veld self setup` hit the same race and
 # fixed it by waiting for the teardown to drain (`wait_for_launchd_job_removal`
 # in crates/veld-core/src/setup.rs); this path never got the fix, which is why an
-# update usually ended with a dead daemon and a manual `veld setup` to revive it.
+# update usually ended with a dead daemon and a manual `veld self setup` to revive it.
 #
 # A job that is already registered does not need re-registering: an update
 # changes the binary and not the definition launchd holds. The consequence is
@@ -1405,11 +1425,11 @@ fi
 # update is no longer a point where a plist file that is newer than launchd's
 # registration converges.
 #
-# Two writers of the privileged helper's plist now exist, not one. `veld setup`
+# Two writers of the privileged helper's plist now exist, not one. `veld self setup`
 # is still the deliberate convergence point, and the helper's own one-time
 # migration onto its root-owned directory (issue #262) is the other — that one
-# re-registers itself, from a detached child, and `veld doctor` reports the
-# drift if it does not. So a stale registration is still repaired by `veld setup` — which is where such a mismatch comes from in the first place (a bootstrap
+# re-registers itself, from a detached child, and `veld self doctor` reports the
+# drift if it does not. So a stale registration is still repaired by `veld self setup` — which is where such a mismatch comes from in the first place (a bootstrap
 # that lost the race and fell back to kickstarting the stale registration, the
 # `BootstrapOutcome::KickstartedStale` warning), and that warning already tells the
 # user to re-run setup.
@@ -1452,7 +1472,7 @@ if [ "$OS" = "macos" ]; then
     # Privileged mode (staying in place): helper runs as a system LaunchDaemon
     # (root), so restarting it in the system domain requires root.
     #
-    # Embedded runs skip this entirely. `veld update` restarts the privileged
+    # Embedded runs skip this entirely. `veld self update` restarts the privileged
     # helper itself — over the helper's own socket, which needs no root — and it
     # is the half that can then wait for the version to flip and report the
     # result. Racing it from here would bounce the helper twice and, worse, print
@@ -1511,7 +1531,7 @@ if [ "$OS" = "macos" ]; then
   fi
 else
   # Linux: restart systemd services if they exist (skip if switching to user paths).
-  # Embedded: `veld update` owns the privileged restart (see the macOS branch).
+  # Embedded: `veld self update` owns the privileged restart (see the macOS branch).
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ] && [ -z "$EMBEDDED" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
       if [ -n "$HELPER_INSTALL_OK" ]; then
@@ -1538,7 +1558,7 @@ else
     # of the daemon (`veld-daemon --pty-holder`), and systemd's default
     # KillMode=control-group SIGKILLs every one of them on `systemctl restart` —
     # i.e. an update would end the shells the holders exist to keep alive. Only
-    # `veld setup` writes the unit, and an update deliberately does not run setup,
+    # `veld self setup` writes the unit, and an update deliberately does not run setup,
     # so without this an existing install never gets the setting.
     DAEMON_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/veld-daemon.service"
     if [ -f "$DAEMON_UNIT" ] && ! grep -q '^KillMode=' "$DAEMON_UNIT"; then
@@ -1557,7 +1577,7 @@ else
       else
         echo "  Warning: could not add KillMode=process to $DAEMON_UNIT."
         echo "           Open terminals in Veld Desktop will not survive this restart."
-        echo "           Run 'veld setup' to rewrite the service file."
+        echo "           Run '$(v_self) setup' to rewrite the service file."
       fi
     fi
     if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
@@ -1570,7 +1590,7 @@ fi
 # --- Clean up stale binaries from alternate install locations ---
 #
 # Previous installs may have placed binaries in a different location.
-# Remove stale copies so `veld version` doesn't pick them up.
+# Remove stale copies so `veld self version` doesn't pick them up.
 
 # Stale user-level binaries when installing to system paths.
 if [ "$LIB_DIR" != "$HOME/.local/lib/veld" ] && [ -d "$HOME/.local/lib/veld" ]; then
@@ -1697,9 +1717,9 @@ if [ -n "$WANT_DESKTOP" ]; then
         else
           echo "Warning: could not remove ${DESKTOP_APP}."
           if [ -n "$DESKTOP_RECORDED" ]; then
-            echo "  Your answer is recorded. Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+            echo "  Your answer is recorded. Run '$(v_self) desktop uninstall' to finish, or drag it to the Trash."
           else
-            echo "  Run 'veld desktop uninstall' to finish, or drag it to the Trash."
+            echo "  Run '$(v_self) desktop uninstall' to finish, or drag it to the Trash."
           fi
         fi
       else
@@ -1707,7 +1727,7 @@ if [ -n "$WANT_DESKTOP" ]; then
         # or left behind by a removal that failed. Left alone and named, because
         # a recent manual install is a better signal than an old answer.
         echo "Veld Desktop is at ${DESKTOP_APP} but you opted out, so it was left alone."
-        echo "  'veld desktop install' opts back in; 'veld desktop uninstall' removes it."
+        echo "  '$(v_self) desktop install' opts back in; '$(v_self) desktop uninstall' removes it."
       fi
       ;;
     *)
@@ -1719,25 +1739,25 @@ if [ -n "$WANT_DESKTOP" ]; then
         # between paying the download forever and knowing they need not.
         #
         # Only on success, and that is not pedantry: on failure the caller prints
-        # "Run 'veld desktop install' to retry the app on its own", and "was kept
+        # "Run 'veld self desktop install' to retry the app on its own", and "was kept
         # up to date" immediately above it is a straight contradiction.
         if install_desktop_app; then
-          say "Veld Desktop was kept up to date. 'veld desktop uninstall' removes it and stops that; 'veld desktop install' records that you want it."
+          say "Veld Desktop was kept up to date. '$(v_self) desktop uninstall' removes it and stops that; '$(v_self) desktop install' records that you want it."
         else
           DESKTOP_FAILED="1"
         fi
       elif [ -n "$DESKTOP_ASKED" ]; then
         # Asked, and the answer was not yes or no. Saying "nobody to ask" to
         # somebody who was just asked is the wrong sentence.
-        say "No answer, so Veld Desktop was not installed. Run 'veld desktop install' when you want it."
+        say "No answer, so Veld Desktop was not installed. Run '$(v_self) desktop install' when you want it."
       else
-        say "Skipping Veld Desktop — nobody to ask. Run 'veld desktop install' to add it."
+        say "Skipping Veld Desktop — nobody to ask. Run '$(v_self) desktop install' to add it."
       fi
       ;;
   esac
 fi
 if [ -n "$DESKTOP_FAILED" ]; then
-  echo "  Run 'veld desktop install' to retry the app on its own."
+  echo "  Run '$(v_self) desktop install' to retry the app on its own."
 fi
 
 # --- Binary icons (macOS) ---
@@ -1759,19 +1779,19 @@ if [ "$OS" = "macos" ] && [ -n "$WANT_BINARY_ICONS" ] && [ -n "$DESKTOP_APP" ]; 
   fi
 fi
 
-# --- Next steps (no auto-run of veld setup) ---
+# --- Next steps (no auto-run of veld self setup) ---
 #
-# Suppressed when embedded: this is a *first install*'s footer, and `veld update`
+# Suppressed when embedded: this is a *first install*'s footer, and `veld self update`
 # printed it halfway through an update — telling someone who has been running
-# veld for months to run `veld start` to get going.
+# veld for months to run `veld orchestrator start` to get going.
 
 say ""
-say "Run 'veld start' in any project to get going."
-say "Run 'veld setup' for more options."
+say "Run '$(v_orc) start' in any project to get going."
+say "Run '$(v_self) setup' for more options."
 # Not offered to somebody who just declined it, or who declined it once before:
 # an installer that answers "no" with "here is how to say yes" is asking again.
 if [ "$OS" = "macos" ] && [ -z "$DESKTOP_APP" ] && [ -z "$DESKTOP_DECLINED" ]; then
-  say "Run 'veld desktop install' for the Mac app."
+  say "Run '$(v_self) desktop install' for the Mac app."
 fi
 
 # --- PATH handling ---
@@ -1814,7 +1834,7 @@ fi
 
 # --- Print success ---
 #
-# Suppressed when embedded: `veld update` prints one summary of its own, at the
+# Suppressed when embedded: `veld self update` prints one summary of its own, at the
 # true end of the run. Left in, this banner claimed the update was finished while
 # the service restarts and the app half were still to come — and it was one of
 # three "installed successfully!" lines in a single command.
@@ -1827,7 +1847,7 @@ say "  veld-helper:   ${LIB_DIR}/veld-helper"
 say "  veld-daemon:   ${LIB_DIR}/veld-daemon"
 say "  caddy:         ${LIB_DIR}/caddy"
 # An `[ … ] && say` here would be the script's last command, so a machine with no
-# app installed would exit non-zero — and `veld update` reads that exit code.
+# app installed would exit non-zero — and `veld self update` reads that exit code.
 # (`say` is a function, so it exits 0 even when it prints nothing; the hazard is
 # the `[ … ] &&` test itself, which is why this stays an `if`.)
 if [ -n "$DESKTOP_APP" ]; then

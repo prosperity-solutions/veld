@@ -86,7 +86,7 @@ export async function copyPublicUrl(): Promise<void> {
 
   const target = findPublicUrl(list, window.location.hostname);
   if (!target) {
-    toast("Not shared to the web yet — run: veld share --web");
+    toast("Not shared to the web yet — run: veld network share --web");
     return;
   }
 

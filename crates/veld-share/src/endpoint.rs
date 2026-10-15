@@ -102,7 +102,7 @@ impl RelayChoice {
     /// absent, the `VELD_SHARE_RELAY` env override applies; otherwise `None`.
     ///
     /// The env var is read from the *daemon* process's environment at bind time,
-    /// not the shell that ran `veld share` — a long-lived daemon won't see an
+    /// not the shell that ran `veld network share` — a long-lived daemon won't see an
     /// export made after it started. Prefer `sharing.relays` in config.
     pub fn resolve(policy: Option<&RelayPolicy>) -> Option<Self> {
         Self::resolve_with_env(

@@ -33,7 +33,7 @@ veld/
 │   │   └── ui/            # npm: management UI (React+Mantine), served at /ide
 │   ├── veld-helper/       # Privileged daemon (DNS, Caddy routes)
 │   ├── veld-share/        # Shared P2P transport (iroh) — used by daemon + gateway
-│   └── veld-gateway/      # Public web gateway server (veld share --web)
+│   └── veld-gateway/      # Public web gateway server (veld network share --web)
 ├── desktop/               # Veld Desktop: Electron shell around /ide (ARCHITECTURE.md)
 ├── website/               # Marketing website (one static HTML page)
 │   ├── index.html         # The whole site (/, single boring page)
@@ -43,15 +43,15 @@ veld/
 ├── schema/                # JSON Schema for veld.json
 ├── scripts/dev/           # What the dev-stack nodes in veld.json run
 ├── testproject/           # Example project for manual testing
-├── veld.json              # This repo's own veld config: the dev stack, and the website
+├── veld.json              # This repo's own veld.json: the dev stack, and the website
 └── AGENTS.md              # This file
 ```
 
 ### How a run is driven
 
-The orchestration lives in `crates/veld-engine` (orchestrator, progress events, the `api` wire types, preflight, the action runner, status/log queries) and runs on the daemon's side, never in the `veld` CLI. The CLI (`veld start|stop|restart|status|logs|action`), the IDE buttons, the daemon's crash teardown and its recovery restart are all faces of that one engine: each posts a typed request to `/api/engine/*` and follows an NDJSON event stream (`GET /api/engine/actions/{id}/events`, resumable with `?after=`). The CLI's one job of its own is bootstrapping the daemon when it is not running (`launchctl kickstart` / `systemctl --user start` / a detached `veld-daemon`), and it refuses a daemon whose `/api/health` `db_path` is not its own database. The daemon never execs `veld`.
+The orchestration lives in `crates/veld-engine` (orchestrator, progress events, the `api` wire types, preflight, the action runner, status/log queries) and runs on the daemon's side, never in the `veld` CLI. The CLI (`veld orchestrator start|stop|restart|status|logs|action`), the IDE buttons, the daemon's crash teardown and its recovery restart are all faces of that one engine: each posts a typed request to `/api/engine/*` and follows an NDJSON event stream (`GET /api/engine/actions/{id}/events`, resumable with `?after=`). The CLI's one job of its own is bootstrapping the daemon when it is not running (`launchctl kickstart` / `systemctl --user start` / a detached `veld-daemon`), and it refuses a daemon whose `/api/health` `db_path` is not its own database. The daemon never execs `veld`.
 
-The daemon does not run an action itself: it spawns a short-lived **worker per action** (`veld-daemon --engine-worker`, own process group, request and secrets on stdin, liveness an `flock` in `<database file>.engine/` beside the database, or `VELD_ENGINE_DIR`) and records it in `engine_actions` / `engine_action_events`. Two reasons, both load-bearing: a worker survives a daemon restart and `veld update`, so a start or an `on_stop` teardown in flight is not cut in half; and the orchestrator calls the daemon's own HTTP API (share release), which from inside a daemon handler is a circular wait — in a separate process it is an ordinary request. The supervisor in `crates/veld-daemon/src/engine.rs` marks a worker whose lock is gone `lost`. Node output reaches the database through `veld-daemon --log-sink …` (the CLI has no hidden `_log` any more). **Secrets travel only on a worker's stdin** — never argv, never the environment, never an event or a table row. **The engine has no HTTP or CLI code**: a side effect that lives outside it (today, releasing shares, which the daemon holds in memory; the command-stats recorder) goes through the `EngineHost` trait, and a test hands it a recording host.
+The daemon does not run an action itself: it spawns a short-lived **worker per action** (`veld-daemon --engine-worker`, own process group, request and secrets on stdin, liveness an `flock` in `<database file>.engine/` beside the database, or `VELD_ENGINE_DIR`) and records it in `engine_actions` / `engine_action_events`. Two reasons, both load-bearing: a worker survives a daemon restart and `veld self update`, so a start or an `on_stop` teardown in flight is not cut in half; and the orchestrator calls the daemon's own HTTP API (share release), which from inside a daemon handler is a circular wait — in a separate process it is an ordinary request. The supervisor in `crates/veld-daemon/src/engine.rs` marks a worker whose lock is gone `lost`. Node output reaches the database through `veld-daemon --log-sink …` (the CLI has no hidden `_log` any more). **Secrets travel only on a worker's stdin** — never argv, never the environment, never an event or a table row. **The engine has no HTTP or CLI code**: a side effect that lives outside it (today, releasing shares, which the daemon holds in memory; the command-stats recorder) goes through the `EngineHost` trait, and a test hands it a recording host.
 
 **Adding an engine capability** (a new `ActionKind`) touches, in order: the variant in `crates/veld-engine/src/api.rs` plus its arms in `label()`, `run()`, `gates_recovery()`, `gates_whole_project()` and `cancellable()` (exhaustive on purpose — a new kind must decide whether it switches crash recovery off and whether Ctrl-C may undo it); its runner arm in `crates/veld-engine/src/action.rs`; a preflight plan if a face must resolve or ask anything first; the face (`crates/veld/src/commands/…` through `engine_client`, and the IDE route in `crates/veld-daemon/src/management.rs`/`desktop.rs` through `engine::spawn_daemon_action`); and the docs. Things not to do: put HTTP or a `std::env::set_var` in the engine, put a secret in `ActionRequest` (it is stored), emit `EngineEvent::Finished` yourself (the worker writes it atomically with the action's end — `DbSink` drops yours), add a route below the `host_guard` layer in `engine.rs`/`engine_query.rs`, or exec the `veld` CLI from the daemon (`the_daemon_never_execs_the_veld_cli` fails). Run state and status go through the engine; `commands::open_db` is for local data a command owns.
 
@@ -67,7 +67,7 @@ cargo build --release
 The root `veld.json` serves the website for local development and feedback:
 
 ```sh
-veld start website:local --name dev     # or: veld start --preset website
+veld orchestrator start website:local --name dev     # or: veld orchestrator start --preset website
 ```
 
 This starts a local HTTP server for the `website/` directory with an HTTPS URL like `https://website.dev.veld.localhost`. You can use `veld feedback` to leave feedback on the website via the in-browser overlay, enabling human-agent collaboration on design and content changes.
@@ -75,18 +75,18 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 Two knobs on that server are **machine-overridable vars** — the root `veld.json` declares them, your answers live in Veld's database, and they are shared across every worktree of this repo rather than asked for in each one. Defaults reproduce browser-sync's own behaviour, so a fresh clone needs no setup:
 
 ```sh
-veld config vars                              # both, with their effective value and its scope
-veld config set website_log_level debug       # chasing a proxy or reload problem
-veld config set website_log_level silent      # when the server is just noise in the logs
-veld config set website_reload_delay 300      # filesystem reports the save before the write lands
-veld config unset website_log_level           # back to the default
+veld orchestrator vars list                              # both, with their effective value and its scope
+veld orchestrator vars set website_log_level debug       # chasing a proxy or reload problem
+veld orchestrator vars set website_log_level silent      # when the server is just noise in the logs
+veld orchestrator vars set website_reload_delay 300      # filesystem reports the save before the write lands
+veld orchestrator vars unset website_log_level           # back to the default
 ```
 
-Change them with `veld config set`, **never by editing `veld.json`** — the declaration is committed and shared, your answer is not.
+Change them with `veld orchestrator vars set`, **never by editing `veld.json`** — the declaration is committed and shared, your answer is not.
 
 ### Feedback workflow
 
-1. Start the website: `veld start website:local --name dev`
+1. Start the website: `veld orchestrator start website:local --name dev`
 2. Open the URL in your browser
 3. Use the feedback overlay to leave comments on the website
 4. The agent pulls the next item: `veld feedback next --wait --name dev --json`
@@ -97,15 +97,15 @@ Change them with `veld config set`, **never by editing `veld.json`** — the dec
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
-**A shipped skill is a pointer, and the documentation lives in the binary.** The fourteen topics `veld skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld skills`. Three reasons, and the first is the one that decided it:
+**A shipped skill is a pointer, and the documentation lives in the binary.** The fourteen topics `veld agent skills` serves are `crates/veld/src/commands/skills/*.md`, `include_str!`d by `commands/skills.rs`; `skills/veld/SKILL.md` and `skills/veld-launch-feedback-loop/SKILL.md` are ~2-4KB shells that say to run `veld agent skills`. Three reasons, and the first is the one that decided it:
 
 - **An installed skill is a copy, frozen the day somebody ran `npx skills add`.** Documentation for a CLI, living in that copy, describes whichever veld they had then. The same text inside the binary describes the veld they are running, which is the only version whose behaviour makes the answer right or wrong. It also means the shells never need re-adding, and `.releaserc.json` no longer touches `skills/veld/SKILL.md` at all: the `compatibility:` pin is gone (pinning the current release made every user on a slightly older build read a false "your veld is too old"), and so is the release-time rewrite of `metadata.version`, which now belongs to the *shell* and is bumped by hand on the rare occasion the pointer itself changes. A release that rewrote the shell would contradict the claim on the website that it never changes.
-- **A skill's whole body enters context the moment the skill matches**, needed or not. The previous `skills/veld/SKILL.md` was 100KB, its `reference/` another 136KB, and six `!`-prefixed shell invocations in the body ran `veld -V`, `veld config`, `veld nodes`, `veld presets`, `veld runs` and `veld --help` at load time — in this repo `veld config` alone is 35KB of JSONC. An index plus the one topic a task reaches is the same information for a fraction of it, and the *state* half is better fetched when the question is asked, since by then it is also current. **Do not reintroduce a `!`-prefixed command in a shipped skill**; `commands/skills.rs`'s `the_installed_skill_shells_stay_shells` test fails on one, and on a shell over 6KB.
-- **Drift becomes reviewable.** A topic naming a flag sits in the same crate and the same pull request as the clap definition of that flag, and `tests/validate-doc-commands.py` reads every documented `veld …` invocation with the real binary's `--help`.
+- **A skill's whole body enters context the moment the skill matches**, needed or not. The previous `skills/veld/SKILL.md` was 100KB, its `reference/` another 136KB, and six `!`-prefixed shell invocations in the body ran `veld -V`, `veld orchestrator config`, `veld orchestrator nodes`, `veld orchestrator presets`, `veld orchestrator runs list` and `veld --help` at load time — in this repo `veld orchestrator config` alone is 35KB of JSONC. An index plus the one topic a task reaches is the same information for a fraction of it, and the *state* half is better fetched when the question is asked, since by then it is also current. **Do not reintroduce a `!`-prefixed command in a shipped skill**; `commands/skills.rs`'s `the_installed_skill_shells_stay_shells` test fails on one, and on a shell over 6KB.
+- **Drift becomes reviewable.** A topic naming a flag sits in the same crate and the same pull request as the clap definition of that flag, and `tests/validate-doc-commands.py` reads every documented `veld …` invocation with the real binary's `--help`; its sibling `tests/validate-cli-call-sites.py` asks the binary about every `veld <word>` spelled in code, CI and scripts, so a retired name cannot hide in a hint string.
 
-A topic body is printed as plain text to a reader with no filesystem, so **a topic may not carry a relative Markdown link** — point at another topic in prose (`` see `veld skills config` ``) instead. `no_document_links_to_a_file_that_only_existed_in_the_repo` enforces that, and checks that an in-document `#anchor` still matches a heading in the same body.
+A topic body is printed as plain text to a reader with no filesystem, so **a topic may not carry a relative Markdown link** — point at another topic in prose (`` see `veld agent skills config` ``) instead. `no_document_links_to_a_file_that_only_existed_in_the_repo` enforces that, and checks that an in-document `#anchor` still matches a heading in the same body.
 
-The class of error the gate *cannot* catch is a well-formed command with a wrong argument — `veld start dev-headless` names a preset where a `node:variant` goes, and no help text distinguishes that from a node veld has not heard of. That one is answered in the binary: `start.rs`'s `with_preset_hint` appends the `--preset` correction when a rejected selection token is a preset of the project. Documentation cannot reach an agent that never had the question; an error message arrives exactly when the belief is wrong.
+The class of error the gate *cannot* catch is a well-formed command with a wrong argument — `veld orchestrator start dev-headless` names a preset where a `node:variant` goes, and no help text distinguishes that from a node veld has not heard of. That one is answered in the binary: `start.rs`'s `with_preset_hint` appends the `--preset` correction when a rejected selection token is a preset of the project. Documentation cannot reach an agent that never had the question; an error message arrives exactly when the belief is wrong.
 
 For **contributors** working on this repo, the ship workflow is the required path for every change — measure a reported bug before designing a fix → kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → mark ready for review → wait for green CI → bypass-merge when authorized. It's a dev tool, not a published consumer skill.
 
@@ -165,8 +165,8 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 |------|----------------|
 | `README.md` | Features list, CLI reference table, Configuration section |
 | `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
-| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld skills`.** Fourteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
-| `skills/*/SKILL.md` | The shipped skill **shells**. Rarely — they say to run `veld skills` and little else, and a change here is a change to the pointer, not to the documentation. Keep them under 6KB and free of `!`-prefixed commands; a test enforces both |
+| `crates/veld/src/commands/skills/*.md` | **Agent-facing documentation, served by `veld agent skills`.** Fourteen topics compiled into the binary — `basics` (the command surface and the traps), `config` (the full `veld.json` reference), `gotchas`, and the rest. A new flag, subcommand or config field belongs in the topic that covers it. No relative links: a reader has no filesystem. Register a *new* topic in `TOPICS` in `commands/skills.rs` |
+| `skills/*/SKILL.md` | The shipped skill **shells**. Rarely — they say to run `veld agent skills` and little else, and a change here is a change to the pointer, not to the documentation. Keep them under 6KB and free of `!`-prefixed commands; a test enforces both |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
 | `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
 | `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
@@ -216,7 +216,7 @@ and several were paid for in this codebase already.
   is read from the on-disk config *at stop time*, so a config that fails to load
   means teardown never runs and containers leak with no way to clean them up. Put
   semantic checks in `config::validate`, which returns `Finding`s and is called
-  only from `veld start`, `veld lint`, and the share flow. `validate` returns a type
+  only from `veld orchestrator start`, `veld orchestrator lint`, and the share flow. `validate` returns a type
   `ConfigError` does not contain, so this is enforced by the compiler — keep it that
   way.
 - **`veld.*` is a closed set.** Node outputs live in `${output.*}` and
@@ -369,7 +369,7 @@ and several were paid for in this codebase already.
   `ci.yml` and `release.yml` also carry `concurrency` with `cancel-in-progress` scoped to
   `pull_request` only — a superseded PR run is waste, but a half-cancelled push
   to `main` is a release that tagged without publishing.
-- **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Pass it via `.env("PATH", …)`, resolved by one of the two helpers in `veld_core::user_path`. Anything inside a daemon whose PATH need is directory-independent uses `cached_user_path()` — the desktop directory picker and git plumbing, and `SecretSource::Command` token resolution in `veld-share/src/endpoint.rs` (which `POST /api/shares` reaches while the caller waits); a dedicated `warm_user_path_cache` task keeps that entry warm, deliberately not tied to the health monitor's own scan cadence, which stretches to 300s during a recovery restart. (The engine worker and the health monitor's own liveness probes have since moved onto the directory-scoped sibling below — this paragraph is still the shape every daemon PATH lookup follows.) `resolve_user_path()` is the uncached primitive, for a one-shot context that resolves once and exits — today only an engine worker's lazy var sources. Resolution spawns a login shell: sub-second normally, up to 10s on a stalled rc file, and the slow rc files belong to exactly the users who need the resolved PATH — which is why a handler must not resolve inline. The cache is one writer (the warm task) publishing into a cell that readers only read, with a single rule doing the work: **a resolution that learned nothing never displaces one that did.** A stall, or a shell that exits zero while answering with nothing better than the process's own `PATH`, leaves the previous value alone — because that value is the bare service PATH, i.e. the bug itself. Resist adding a TTL or a which-resolution-wins rule back: the first version of this cache had both, and each grew its own bug. **The shell resolution spawns is a parameter, and a test never publishes one.** `set_preferred_shell` is process-wide state that *every* concurrently running test in the crate reads through `resolution_shell()`, so a test needing a stub shell hands it to `cached_user_path_for_with_shell`/`resolve_with_fallback` rather than publishing it — the daemon is `set_preferred_shell`'s only caller. Two tests published a stub and made `veld-core`'s suite permanently a few tests red locally while CI stayed green (#310): whichever `values` test ran alongside them resolved `PATH=/old/bin` and could not spawn `cat`. The daemon's own `after_settings_write` republishes on *every* settings write, so a `veld-daemon` test that PATCHes `terminal.shell` is that caller too — patch it back, or don't route through the handler. Same rule for any other process-wide value a test publishes (`HOME`, the `VELD_*` instance variables): take **the crate-wide `test_support::process_state_guard`**, not a module-local mutex — two mutexes over one variable exclude nothing — and restore the previous value on drop. **Two caches, chosen by whether the command belongs to a project.** `cached_user_path()` is the process-wide answer above, right for anything directory-independent (the health monitor's own PATH used to be read once for every project this way; `SecretSource::Command` token resolution; the desktop directory picker). `cached_user_path_for(project_root)` is the per-directory sibling — the one to reach for by default for anything spawning *a project's own declared command*: an engine worker (every start/stop/restart/action, from the CLI or the IDE — `engine.rs` resolves it and hands it over as the worker's `PATH`), a liveness probe's `command`/`bash` check, an `ide.extensions` command, a pane's `requires_bin` preflight. A directory-based version-manager hook (`.nvmrc` + `.zshrc`, fnm's directory hook) only fires when the login shell doing the resolving actually starts inside that project's directory; `cached_user_path()` resolves wherever the daemon process itself happens to sit and is shared by every project, so it structurally cannot represent "what would this project's shell see" — however often it is refreshed. This shipped broken once already: a top-bar-started run picked the wrong Node version while the identical command from a terminal pane worked, because the pane's shell resolves its `PATH` by actually sitting in the project directory (see the PTY exception below) and the old exec of the CLI did not. Never spawn a config-declared, project-scoped command on a daemon with the *global* cache; use the directory-scoped one unless there genuinely is no project directory in scope (a `SecretSource::Command` reached from a standalone gateway boot, with no single project to key on, is the one place that line is still fuzzy — flagged, not yet resolved). **A login shell is not a substitute for the injection.** `$SHELL -l -c` sources `.zprofile` but not `.zshrc`, which is where version managers (nvm, fnm, rbenv) and `brew shellenv` live on most machines; on Debian `/etc/profile` overwrites `PATH` outright, so a login shell wrapped around an injected PATH *discards* it. That mistake shipped in the old IDE start path and made every UI- or Desktop-initiated `veld start` resolve node commands against the bare launchd PATH (`sh: npx: command not found`). Spawn the binary directly with the injected PATH; don't reach for a shell to get it. **The PTY holder is the documented exception, and a pane is now part of it.**
+- **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Pass it via `.env("PATH", …)`, resolved by one of the two helpers in `veld_core::user_path`. Anything inside a daemon whose PATH need is directory-independent uses `cached_user_path()` — the desktop directory picker and git plumbing, and `SecretSource::Command` token resolution in `veld-share/src/endpoint.rs` (which `POST /api/shares` reaches while the caller waits); a dedicated `warm_user_path_cache` task keeps that entry warm, deliberately not tied to the health monitor's own scan cadence, which stretches to 300s during a recovery restart. (The engine worker and the health monitor's own liveness probes have since moved onto the directory-scoped sibling below — this paragraph is still the shape every daemon PATH lookup follows.) `resolve_user_path()` is the uncached primitive, for a one-shot context that resolves once and exits — today only an engine worker's lazy var sources. Resolution spawns a login shell: sub-second normally, up to 10s on a stalled rc file, and the slow rc files belong to exactly the users who need the resolved PATH — which is why a handler must not resolve inline. The cache is one writer (the warm task) publishing into a cell that readers only read, with a single rule doing the work: **a resolution that learned nothing never displaces one that did.** A stall, or a shell that exits zero while answering with nothing better than the process's own `PATH`, leaves the previous value alone — because that value is the bare service PATH, i.e. the bug itself. Resist adding a TTL or a which-resolution-wins rule back: the first version of this cache had both, and each grew its own bug. **The shell resolution spawns is a parameter, and a test never publishes one.** `set_preferred_shell` is process-wide state that *every* concurrently running test in the crate reads through `resolution_shell()`, so a test needing a stub shell hands it to `cached_user_path_for_with_shell`/`resolve_with_fallback` rather than publishing it — the daemon is `set_preferred_shell`'s only caller. Two tests published a stub and made `veld-core`'s suite permanently a few tests red locally while CI stayed green (#310): whichever `values` test ran alongside them resolved `PATH=/old/bin` and could not spawn `cat`. The daemon's own `after_settings_write` republishes on *every* settings write, so a `veld-daemon` test that PATCHes `terminal.shell` is that caller too — patch it back, or don't route through the handler. Same rule for any other process-wide value a test publishes (`HOME`, the `VELD_*` instance variables): take **the crate-wide `test_support::process_state_guard`**, not a module-local mutex — two mutexes over one variable exclude nothing — and restore the previous value on drop. **Two caches, chosen by whether the command belongs to a project.** `cached_user_path()` is the process-wide answer above, right for anything directory-independent (the health monitor's own PATH used to be read once for every project this way; `SecretSource::Command` token resolution; the desktop directory picker). `cached_user_path_for(project_root)` is the per-directory sibling — the one to reach for by default for anything spawning *a project's own declared command*: an engine worker (every start/stop/restart/action, from the CLI or the IDE — `engine.rs` resolves it and hands it over as the worker's `PATH`), a liveness probe's `command`/`bash` check, an `ide.extensions` command, a pane's `requires_bin` preflight. A directory-based version-manager hook (`.nvmrc` + `.zshrc`, fnm's directory hook) only fires when the login shell doing the resolving actually starts inside that project's directory; `cached_user_path()` resolves wherever the daemon process itself happens to sit and is shared by every project, so it structurally cannot represent "what would this project's shell see" — however often it is refreshed. This shipped broken once already: a top-bar-started run picked the wrong Node version while the identical command from a terminal pane worked, because the pane's shell resolves its `PATH` by actually sitting in the project directory (see the PTY exception below) and the old exec of the CLI did not. Never spawn a config-declared, project-scoped command on a daemon with the *global* cache; use the directory-scoped one unless there genuinely is no project directory in scope (a `SecretSource::Command` reached from a standalone gateway boot, with no single project to key on, is the one place that line is still fuzzy — flagged, not yet resolved). **A login shell is not a substitute for the injection.** `$SHELL -l -c` sources `.zprofile` but not `.zshrc`, which is where version managers (nvm, fnm, rbenv) and `brew shellenv` live on most machines; on Debian `/etc/profile` overwrites `PATH` outright, so a login shell wrapped around an injected PATH *discards* it. That mistake shipped in the old IDE start path and made every UI- or Desktop-initiated `veld orchestrator start` resolve node commands against the bare launchd PATH (`sh: npx: command not found`). Spawn the binary directly with the injected PATH; don't reach for a shell to get it. **The PTY holder is the documented exception, and a pane is now part of it.**
 `spawn_shell` skips the helper when the thing it spawns *is* a login shell,
 which computes the same `PATH` itself. A config-declared pane (`ide.panes`) is
 **not** spawned as a bare `argv` any more: `resolve_pane` wraps its command in
@@ -423,7 +423,7 @@ run, while a plain terminal in the same app works perfectly.
   machine, so that heuristic switches contented zsh users and is worse than the
   bug it would fix.
 
-  Scope: the rule covers every command a daemon-side process spawns, which since the engine moved into the daemon is **every node command** (`command`/`long_running` steps, setup checks, probes, hooks, teardown) — a worker's base environment is the daemon's own plus the directory-scoped user `PATH`, whichever face asked for the run. The one command that still inherits a terminal is `veld action`, which the CLI runs itself, deliberately, with the full terminal environment. **The terminal's environment no longer reaches nodes, from any face:** the only values that cross from it are those of the names veld.json (or a stored `veld config set X --env NAME`) reads through `{ "env": "NAME" }`. The preflight reports those names, the CLI sends their values in the request's `secrets.env`, the worker installs them with `veld_core::values::set_caller_env`, and nothing is stored. When that map is installed it is the *only* source — a name not sent is missing, never quietly read from the daemon's environment, so a run behaves the same however it was started. A restart or teardown with no terminal (IDE, auto-recovery, crash teardown) has no values and fails or skips naming the variable, as before. A node that needs a non-`PATH` variable declares it in `env` (or reads it via `{ "env": … }`); "works in my terminal, fails from the UI" is no longer an asymmetry between faces, and `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) reach no node from any of them. Never `std::env::set_var` the caller's values into the worker: that hands every one to every node it spawns.
+  Scope: the rule covers every command a daemon-side process spawns, which since the engine moved into the daemon is **every node command** (`command`/`long_running` steps, setup checks, probes, hooks, teardown) — a worker's base environment is the daemon's own plus the directory-scoped user `PATH`, whichever face asked for the run. The one command that still inherits a terminal is `veld orchestrator action`, which the CLI runs itself, deliberately, with the full terminal environment. **The terminal's environment no longer reaches nodes, from any face:** the only values that cross from it are those of the names veld.json (or a stored `veld orchestrator vars set X --env NAME`) reads through `{ "env": "NAME" }`. The preflight reports those names, the CLI sends their values in the request's `secrets.env`, the worker installs them with `veld_core::values::set_caller_env`, and nothing is stored. When that map is installed it is the *only* source — a name not sent is missing, never quietly read from the daemon's environment, so a run behaves the same however it was started. A restart or teardown with no terminal (IDE, auto-recovery, crash teardown) has no values and fails or skips naming the variable, as before. A node that needs a non-`PATH` variable declares it in `env` (or reads it via `{ "env": … }`); "works in my terminal, fails from the UI" is no longer an asymmetry between faces, and `.zprofile` exports (`JAVA_HOME`, `LANG`, tool tokens) reach no node from any of them. Never `std::env::set_var` the caller's values into the worker: that hands every one to every node it spawns.
 - **A transient PID is measured, never persisted — and the two stats producers
   stay disjoint by node kind.** Resource samples come from two places:
   `veld-daemon` samples every node with a persisted `NodeState.pid`, and the
@@ -434,10 +434,10 @@ run, while a plain terminal in the same app works perfectly.
   cannot drift in what a number means. The obvious "simplification" — persist the
   `command` step's PID so the daemon can sample it like everything else — is the
   one thing that must not happen: `NodeState.pid` is a claim that the node has a
-  process *now*, read by `veld stop`, the health monitor, the GC, the registry's
+  process *now*, read by `veld orchestrator stop`, the health monitor, the GC, the registry's
   "has ever spawned" query and `is_reapable_orphan`, so a finished build sitting
   there makes a run that is still legitimately coming up look like one that
-  spawned and died, and eventually has `veld stop` signal whatever recycled the
+  spawned and died, and eventually has `veld orchestrator stop` signal whatever recycled the
   number. A sample is the opposite kind of fact — "at time T this tree looked like
   this" — and stays true afterwards.
   `only_one_site_in_this_module_persists_a_live_node_pid` is a tripwire, not a
@@ -532,16 +532,16 @@ run, while a plain terminal in the same app works perfectly.
 
   | Command | What it does |
   |---|---|
-  | `veld start --preset dev` | The whole dev stack as a veld run — see the convention below. Its database is `.veld-dev/<run>/veld.db`, one per run |
-  | `veld start dev-db:from-real dev-electron dev-link` | The migration rehearsal, for that stack: snapshot the **real** DB into this run's. The real file is never written. **macOS-only path today** |
-  | `veld start dev-db:fresh dev-electron dev-link` | The same, starting from an empty database |
+  | `veld orchestrator start --preset dev` | The whole dev stack as a veld run — see the convention below. Its database is `.veld-dev/<run>/veld.db`, one per run |
+  | `veld orchestrator start dev-db:from-real dev-electron dev-link` | The migration rehearsal, for that stack: snapshot the **real** DB into this run's. The real file is never written. **macOS-only path today** |
+  | `veld orchestrator start dev-db:fresh dev-electron dev-link` | The same, starting from an empty database |
   | `just dev-db-list` | Every per-run dev database in the worktree, with its schema version |
   | `just dev <cmd>` | Bootstrap tier: run the dev CLI against `.veld-dev/veld.db` (gitignored) on its own daemon port |
   | `just dev-db-from-real` | Bootstrap tier: snapshot the **real** DB into that one |
   | `just dev-db-reset` | Wipe the bootstrap dev DBs for a fresh-install path (per-run DBs are untouched) |
 
   **Drive your own change against a running stack before you call it done.**
-  `veld start --preset dev-headless` (no Electron shell — `dev` if you want it)
+  `veld orchestrator start --preset dev-headless` (no Electron shell — `dev` if you want it)
   brings up a daemon, a `/ide` and a database that are *this worktree's*, and
   `dev-link` writes `~/.local/bin/veld-dev-<worktree>`: a wrapper that runs
   **your** `target/debug/veld` with that run's `VELD_DB_PATH`, daemon port and
@@ -558,7 +558,7 @@ run, while a plain terminal in the same app works perfectly.
     runs it. Watching one fire, and watching it *not* fire when a guard says it
     should not, is a different kind of evidence.
   - **An installed-instance assumption reads as correct until a dev instance
-    disproves it.** `veld backup restore`'s refusal told the user to
+    disproves it.** `veld self backup restore`'s refusal told the user to
     `launchctl bootout … dev.veld.daemon` — right for the installed daemon, and
     on a dev instance it names a *different* daemon that does not own that
     database and whose restart disturbs the environments the developer is
@@ -567,14 +567,14 @@ run, while a plain terminal in the same app works perfectly.
     `Db::uses_installed_database()` is the predicate for telling the two apart.
   - **The `/ide` is served by your daemon**, so a settings row, a pane, a badge
     or a toast is inspectable in a browser tab at that run's dashboard URL
-    (`veld urls`) without building or launching Veld Desktop.
+    (`veld orchestrator urls`) without building or launching Veld Desktop.
 
   Prefer `dev-headless` when you only need the CLI and the web UI — it starts
   faster and needs no app. Use `dev-db:from-real` when the change touches a
   migration, and `dev-db:fresh` when it has to behave on an empty install; both
   are real states worth seeing, and they are not the same test.
 
-  **`dev` and `dev-headless` carry `dev-db:fresh`, so `veld restart` empties that
+  **`dev` and `dev-headless` carry `dev-db:fresh`, so `veld orchestrator restart` empties that
   database.** That is the variant's job, and it is a trap while testing anything
   stateful: state you set up, and any conclusion you drew from it, is gone after a
   restart that looked routine — a restore verified before the restart reads as
@@ -640,7 +640,7 @@ run, while a plain terminal in the same app works perfectly.
   is optional: the helper's unit has carried `KillMode=process` since Caddy was
   first spawned from it, and the *daemon's* unit gained it when terminal holders
   arrived (`veld-daemon --pty-holder`, one process per terminal session, which
-  owns the PTY master precisely so `veld update` stops ending every shell — see
+  owns the PTY master precisely so `veld self update` stops ending every shell — see
   `crates/veld-daemon/src/pty/holder.rs`). Under the default control-group kill
   mode, `systemctl restart veld-daemon` SIGKILLs every descendant, which silently
   reintroduces exactly the failure the out-of-process design removes. The
@@ -651,17 +651,17 @@ run, while a plain terminal in the same app works perfectly.
 
   **Connecting to a holder is a probe, not a takeover.** Every piece of code that
   wants to know whether a holder is alive says so the same way — by connecting to
-  its socket, greeting and all: `veld doctor` counts live holders, `holder::bind`
+  its socket, greeting and all: `veld self doctor` counts live holders, `holder::bind`
   tells a leftover socket file from a running holder before it refuses to start,
   `pump_holder` asks whether the holder it just lost is really gone, and
-  `veld uninstall` sweeps every instance's. All of those close again immediately;
+  `veld self uninstall` sweeps every instance's. All of those close again immediately;
   adoption (`adopt_one`, and `obtain_session` when a holder is already serving the
   session) is the counter-example that *keeps* what it connects to. So a newly
   accepted connection is greeted at once (the connect-write-`HANGUP`-close
   contract in `pty/wire.rs` depends on that) but does **not** displace the
   attached daemon until it has either stayed connected for
   `holder::TAKEOVER_PROBATION` or sent a frame only a daemon sends. While any
-  accepted connection displaced the incumbent on the spot, one `veld doctor` cut
+  accepted connection displaced the incumbent on the spot, one `veld self doctor` cut
   every terminal on the machine loose from its daemon — and the daemon then
   published exit code 1 for shells that were still running, which is the second
   half of the rule: **losing the connection to a holder is not the same fact as
@@ -698,7 +698,7 @@ run, while a plain terminal in the same app works perfectly.
 
   The mechanism is `veld_core::agent` plus a generated wrapper
   (`pty/shims::agent_script`) that hands the real binary an **ephemeral `--settings`
-  file** installing lifecycle hooks which call `veld agent-state`. Everything downstream
+  file** installing lifecycle hooks which call `veld agent state`. Everything downstream
   of that is already generic — the daemon endpoint takes a `State` and not a vendor
   payload, the wire carries a tool *name*, and the rail glyph, the pane dot and the
   notification table key on the state — so **a new tool is five edits and no new
@@ -730,7 +730,7 @@ run, while a plain terminal in the same app works perfectly.
   can, where an organization has unseated that mod: `classic.Notification` for the
   dialogs no native event shows, and `classic.Stop` for the one refused stop that
   holds Claude to naming its worktree; and an `env.CLAUDE_CODE_PLUGIN_DIRS` in the user's
-  Claude settings **replaces** the terminal's value, which `veld doctor` reports
+  Claude settings **replaces** the terminal's value, which `veld self doctor` reports
   rather than fixes. The mod's files are rewritten only when their bytes change,
   because Claude reloads a watched plugin folder on any write.
   The same wrapper also carries **what the agent is told** (`agent_context`, gated on
@@ -772,12 +772,12 @@ run, while a plain terminal in the same app works perfectly.
   refusal carries the holder's *kind* and the UI says where the worktree is
   instead of promising a raise that will not happen; do not "fix" that by calling
   `focus()` anyway.
-- **`veld update` holds a lock, and nothing that the update replaces may own it.**
+- **`veld self update` holds a lock, and nothing that the update replaces may own it.**
   One update at a time is enforced by `veld_core::update_lock`: a lock *directory*
   at `~/.veld/update.lock` (`mkdir` is the create-or-fail primitive, and already
   the idiom `install.sh` uses) with a `state.json` inside carrying pid, origin,
   target version, phase and `phase_at`. The same file is the **progress feed** —
-  `veld update --status`, `veld doctor`, the command gate in `main.rs` and the
+  `veld self update --status`, `veld self doctor`, the command gate in `main.rs` and the
   Electron app's startup check all read it, which is why it is a small JSON file
   and not something cleverer. Both of the obvious cleverer options are
   disqualified for the same structural reason: the **daemon** cannot arbitrate,
@@ -794,7 +794,7 @@ run, while a plain terminal in the same app works perfectly.
   enough. Every long step calls `set_phase`, which is what keeps a slow-but-
   healthy install from looking abandoned; a step added without one silently
   shortens the timeout for everything after it. Release happens on `Drop`, and
-  `veld update` gives the guard up **before** it reopens Veld Desktop, because the
+  `veld self update` gives the guard up **before** it reopens Veld Desktop, because the
   app quits itself when it sees a live lock — hold it one line longer and the
   update closes the window it exists to give back. The blocked-command list is an
   **allow-list** (`command_survives_an_update`) so a new subcommand is refused by
@@ -802,7 +802,7 @@ run, while a plain terminal in the same app works perfectly.
   **75** (`EX_TEMPFAIL`) so an agent can tell "retry shortly" from a real failure.
 - **veld's own dev stack is a veld environment, and it is per-run.** The root
   `veld.json` declares `dev-build`, `dev-db`, `dev-daemon`, `dev-ui`,
-  `dev-electron` and `dev-link`; `veld start --preset dev` brings up the lot.
+  `dev-electron` and `dev-link`; `veld orchestrator start --preset dev` brings up the lot.
   Everything that used to be a constant is now the run's: the daemon port is
   allocated, its socket is `~/.veld/dev-<that port>.sock`, its database is
   `.veld-dev/<run>/veld.db`, its dashboard hostname is the one veld routes the
@@ -820,7 +820,7 @@ run, while a plain terminal in the same app works perfectly.
     directory is `~/.veld/pty-<daemon port>`, which was stable only while that
     port was a constant. Allocated afresh each start, the default would strand
     every previous start's holder processes in a directory nothing looks at
-    again. Keep the `pty-` prefix — `veld uninstall` finds every instance's
+    again. Keep the `pty-` prefix — `veld self uninstall` finds every instance's
     holders by it.
   - **A `depends_on` pins a variant, so naming a different one runs both.**
     veld's execution plan is keyed on `(node, variant)`, so the `dev` preset's
@@ -836,7 +836,7 @@ run, while a plain terminal in the same app works perfectly.
     (`monitor.rs`). Correct for a service, wrong for a desktop app: run bare,
     one Cmd+Q on Electron took the dev daemon and vite down with it. So
     `dev-electron`'s node is `scripts/dev/electron.sh`, which outlives the quit
-    and relaunches on `veld action open --node dev-electron`. Two consequences
+    and relaunches on `veld orchestrator action open --node dev-electron`. Two consequences
     to keep. It must **forward SIGTERM to its child** — a supervisor that just
     exits orphans the app. And it must **die with a failed first launch**: the
     probe is `settle`, which asks only whether the node's process is still
@@ -850,7 +850,7 @@ run, while a plain terminal in the same app works perfectly.
 
   The justfile's `just dev` / `just dev-daemon` tier is deliberately still a
   singleton on fixed ports. It is the **bootstrap** tier: the way to run the
-  daemon when the thing you broke is `veld start`, and the only path a fresh
+  daemon when the thing you broke is `veld orchestrator start`, and the only path a fresh
   clone has. Do not delete it in the name of having one way to do things —
   `daemon_upstream()` is baked into every run's Caddy route, so a `just dev` run
   whose daemon port nothing binds writes a dead upstream into shared Caddy.
@@ -910,7 +910,7 @@ run, while a plain terminal in the same app works perfectly.
   day they upgrade and "now" would declare them brand new, auto-reading the very
   promotion that release shipped. That last one is the load-bearing part, and the tempting
   alternative is the trap: **nothing may key any of this on database freshness**,
-  because `veld start --preset dev` mints `.veld-dev/<run>/veld.db` several times
+  because `veld orchestrator start --preset dev` mints `.veld-dev/<run>/veld.db` several times
   a day and either the CLI or the daemon may be the process that creates one, so
   a freshness test concludes "brand-new human" repeatedly. A stamp written on
   first contact stays true afterwards; database age does not.
@@ -937,7 +937,7 @@ run, while a plain terminal in the same app works perfectly.
   `veld-gateway`'s `pages::shell`) instead of writing bespoke HTML.
 - **Diagnostics go to stderr; machine-readable output goes to stdout.** Tracing
   logs, progress, and human status/receipt lines are stderr; `--json` payloads
-  and the terminal node's own output under `veld start --oneshot` are the only
+  and the terminal node's own output under `veld orchestrator start --oneshot` are the only
   things on stdout. A stray `println!`/`tracing::*!`-to-stdout in a command
   silently corrupts an agent's or CI's stdout capture — keep chrome on stderr.
 - **A veld config is JSONC.** Comments and trailing commas are legal in every
@@ -946,21 +946,21 @@ run, while a plain terminal in the same app works perfectly.
   strip comments first (`tests/validate-schema.sh` shows the pattern, mirroring
   `veld_core::jsonc::strip`).
 - **The root config has two legal names, so never hardcode one.** `veld.json` and
-  `veld.jsonc` are both read (`config::ROOT_CONFIG_NAMES`; `veld init` writes the
+  `veld.jsonc` are both read (`config::ROOT_CONFIG_NAMES`; `veld orchestrator init` writes the
   first). Code that walks upward uses `config::discover_config`; code that already
   knows the project root uses `config::root_config_in(dir)` — never
   `project_root.join("veld.json")`. The daemon shipped five of those, and each was
   a `veld.jsonc` project it could not see at all: no liveness probes, no actions
-  in the dashboard, `veld share` refusing outright, while the CLI worked fine.
+  in the dashboard, `veld network share` refusing outright, while the CLI worked fine.
   `tests/validate-schema.sh` greps for the pattern, because nothing in the type
   system does.
-- **veld does not rewrite a user's config.** `veld init` writes one when none
+- **veld does not rewrite a user's config.** `veld orchestrator init` writes one when none
   exists; nothing else edits one. A serde round-trip deletes every comment, and
   the byte-level alternative cannot see structure — which is exactly how the
-  removed `veld config --migrate --write` ended up editing the `hooks`/`ui` blobs
+  removed `config --migrate --write` command ended up editing the `hooks`/`ui` blobs
   veld promises not to interpret. If a change seems to need a config rewriter,
   emit a precise diagnostic instead and let the author (or their agent) apply it;
-  `veld lint` is the verification step.
+  `veld orchestrator lint` is the verification step.
 - **Adding a file type to the file pane touches both sides, and a fixture ties
   them.** The daemon and the CLI route by name with `veld_core::files::text_kind`
   / `readable_text_kind`; the `/ide` bundle picks a renderer with

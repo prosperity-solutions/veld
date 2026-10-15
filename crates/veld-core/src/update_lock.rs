@@ -1,16 +1,16 @@
-//! Single-flight for `veld update`, and the progress feed that falls out of it.
+//! Single-flight for `veld self update`, and the progress feed that falls out of it.
 //!
 //! Two problems, one artifact. An update replaces `veld`, `veld-daemon`,
 //! `veld-helper` and `caddy` in place and then restarts both services, so two of
 //! them at once is not a slow update — it is two processes swapping the same
 //! files and bouncing the same daemons in an interleaving nobody designed. And
 //! for the 1–4 minutes one takes, everything else about the machine looks
-//! unexplained: a `veld start` fails against a daemon that is mid-restart, and a
+//! unexplained: a `veld orchestrator start` fails against a daemon that is mid-restart, and a
 //! Veld Desktop launched from the Dock reconnects to nothing.
 //!
 //! So the lock is not just a flag. Whoever holds it publishes **what it is
-//! doing** into the same file, and every other reader — a second `veld update`,
-//! `veld doctor`, the command gate in `main.rs`, the Electron app at startup —
+//! doing** into the same file, and every other reader — a second `veld self update`,
+//! `veld self doctor`, the command gate in `main.rs`, the Electron app at startup —
 //! gets the answer from one `read()` of one small JSON file.
 //!
 //! ## Why a file, and not the obvious alternatives
@@ -68,7 +68,7 @@ pub const PHASE_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Where an update is in its run.
 ///
 /// Ordered as they happen, and each one is a thing a user recognises rather than
-/// a function name — this string is rendered in `veld doctor`, in a blocked
+/// a function name — this string is rendered in `veld self doctor`, in a blocked
 /// command's error, and in the Electron app's "an update is in progress" dialog.
 ///
 /// **The granularity stops at the `install.sh` boundary, and cannot be pushed
@@ -108,9 +108,9 @@ pub enum Phase {
     /// *field* is ignored, an unknown *variant* is a hard error) — and every
     /// consequence of that is the opposite of safe. `read_state` returns `None`,
     /// `peek` reports `Unreadable`, the command gate reads "no update running"
-    /// and lets `veld start` through mid-restart, and `acquire` classifies a
+    /// and lets `veld orchestrator start` through mid-restart, and `acquire` classifies a
     /// **live** holder as stealable: two concurrent updates, from nothing worse
-    /// than a later release adding a phase. `veld update` runs the *old* binary,
+    /// than a later release adding a phase. `veld self update` runs the *old* binary,
     /// so the old binary reading the new one's file is the normal case here, not
     /// an edge one.
     #[serde(other)]
@@ -306,7 +306,7 @@ fn state_path(dir: &Path) -> PathBuf {
 /// steal. Readers that only care about "is an update happening" want
 /// [`current`].
 ///
-/// **Never mutates.** A `veld status` that garbage-collects somebody's lock as a
+/// **Never mutates.** A `veld orchestrator status` that garbage-collects somebody's lock as a
 /// side effect of being run is how a race gets introduced by a read.
 pub fn peek() -> Option<(UpdateState, Option<StaleReason>)> {
     let dir = lock_dir()?;
@@ -425,7 +425,7 @@ pub fn acquire(origin: Origin, version: Option<String>, force: bool) -> io::Resu
                 // for "the lock could not be created" and exactly the wrong one
                 // here: a directory this process may not remove is one somebody
                 // else owns, and proceeding is the two-concurrent-updates case the
-                // whole module exists to prevent. `veld update` now refuses to run
+                // whole module exists to prevent. `veld self update` now refuses to run
                 // under sudo (see `commands/update.rs`), so the root-owned-lock
                 // route into this is closed — it stays because "somebody else's
                 // directory" is the general case and the consequence of getting
@@ -615,7 +615,7 @@ impl UpdateGuard {
 
     /// Give the lock up early.
     ///
-    /// The one caller that needs this is the end of `veld update`: it reopens
+    /// The one caller that needs this is the end of `veld self update`: it reopens
     /// Veld Desktop, and the app quits itself on startup when an update is in
     /// progress. Reopening while still holding would have the update close the
     /// very window it exists to give back.
@@ -957,11 +957,11 @@ mod tests {
 
     #[test]
     fn a_state_file_from_a_newer_veld_still_reads_as_a_live_update() {
-        // `veld update` runs the **old** binary, so an old binary reading a newer
+        // `veld self update` runs the **old** binary, so an old binary reading a newer
         // one's state file is the normal case, not an edge one. Without
         // `#[serde(other)]` a single unknown variant fails the whole parse, and
         // every downstream consequence is the unsafe direction: the command gate
-        // reads "no update running" and lets `veld start` through mid-restart,
+        // reads "no update running" and lets `veld orchestrator start` through mid-restart,
         // and `acquire` treats a **live** holder as stealable.
         let tmp = tempfile::tempdir().unwrap();
         let _env = isolated(tmp.path());

@@ -1,8 +1,8 @@
 //! Presets: the named starting points a human picks from a list and a coding
-//! agent picks from `veld presets --json`.
+//! agent picks from `veld orchestrator presets --json`.
 //!
 //! The problem this module exists to solve is that the number people actually
-//! type — `veld start`, then `3` — used to be a *position* in an alphabetically
+//! type — `veld orchestrator start`, then `3` — used to be a *position* in an alphabetically
 //! sorted list. Adding a preset renumbered every entry after it, so the number
 //! somebody memorised, wrote in a runbook, or pasted into Slack silently came to
 //! mean something else. Positions cannot be memorised in a config that grows.
@@ -17,7 +17,7 @@
 //!   still moves when a preset is added or removed *ahead of it* in declaration
 //!   order — including from another `include` file that sorts earlier, which in a
 //!   monorepo means a team can renumber presets it does not own. That is the whole
-//!   reason `key` exists, and why `veld presets` marks which keys are promises.
+//!   reason `key` exists, and why `veld orchestrator presets` marks which keys are promises.
 //! * A preset *named* like a number claims that number as its key, so `7` cannot
 //!   come to mean two things merely because a config grew past seven presets.
 //! * Display order is derived from keys and never feeds back into them. Grouping
@@ -27,7 +27,7 @@
 //! [`find_by_key_then_name`] for the picker (the number is on screen) and
 //! [`find_by_name_then_key`] for `--preset` (scripts and runbooks were written
 //! against names, before keys existed). They differ only for a config that both
-//! names a preset like a number and pins that number elsewhere — which `veld lint`
+//! names a preset like a number and pins that number elsewhere — which `veld orchestrator lint`
 //! warns about.
 
 use crate::config::VeldConfig;
@@ -183,11 +183,11 @@ fn preset_def_from_value(value: serde_json::Value) -> Result<PresetDef, String> 
 // ---------------------------------------------------------------------------
 
 /// A preset with its key assigned and its metadata flattened — what every
-/// surface (picker, `veld presets`, `--json`, the management UI) renders.
+/// surface (picker, `veld orchestrator presets`, `--json`, the management UI) renders.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct ResolvedPreset {
     /// The preset's config key, e.g. `dev-staging`. Always usable with
-    /// `veld start --preset`.
+    /// `veld orchestrator start --preset`.
     pub name: String,
     /// The number to type at the picker.
     pub key: u32,
@@ -226,7 +226,7 @@ impl ResolvedPreset {
 /// displaying renumbered all the others — the exact breakage this module exists to
 /// prevent, triggered by the action the docs recommend. Here, pinning a preset at
 /// its current key is a no-op for every other preset, which is what makes
-/// `veld presets --pin` output idempotent (see
+/// `veld orchestrator presets --pin` output idempotent (see
 /// `pinning_the_current_numbering_is_a_no_op`). It also removes the `u32::MAX`
 /// hole: counting up from 1 cannot saturate into a collision.
 ///
@@ -239,8 +239,8 @@ impl ResolvedPreset {
 /// separately, and it buys exactly one number in the config controlling
 /// everything.
 ///
-/// This function is total. A config with duplicate pinned keys is a `veld lint`
-/// error (`preset-duplicate-key`) and `veld start` refuses to run on it, but this
+/// This function is total. A config with duplicate pinned keys is a `veld orchestrator lint`
+/// error (`preset-duplicate-key`) and `veld orchestrator start` refuses to run on it, but this
 /// still returns every preset — a diagnostic that cannot list the thing it is
 /// complaining about is not much of a diagnostic.
 #[must_use]
@@ -429,7 +429,7 @@ fn non_blank(value: Option<&str>) -> Option<String> {
 /// Prints rather than writes: veld does not rewrite a user's config (a serde
 /// round-trip deletes every comment, and these files are JSONC precisely so those
 /// comments can exist). So the author — or their agent — applies it, and
-/// `veld lint` is the check afterwards.
+/// `veld orchestrator lint` is the check afterwards.
 ///
 /// Every preset is emitted in object form with its key pinned, including ones
 /// currently in the array form, because a key cannot be added to an array. The
@@ -667,7 +667,7 @@ mod tests {
     }
 
     /// The property that makes pinning safe to recommend, and that
-    /// `veld presets --pin` depends on: pinning presets at the keys they are
+    /// `veld orchestrator presets --pin` depends on: pinning presets at the keys they are
     /// already displaying changes nothing for anyone.
     ///
     /// Under the previous `max(pinned) + 1` scheme this failed — pinning `beta` at
@@ -702,7 +702,7 @@ mod tests {
 
     /// A pinned key at the top of the range must not make auto keys collide.
     /// `max(pinned) + 1` saturated at `u32::MAX`, silently handing three presets
-    /// the same number while `veld lint` reported the config valid.
+    /// the same number while `veld orchestrator lint` reported the config valid.
     #[test]
     fn a_pinned_key_at_the_ceiling_does_not_collide() {
         let config = config_with(
@@ -940,7 +940,7 @@ mod tests {
         assert!(default_preset(&broken).is_none());
     }
 
-    /// `resolve` has to stay total on a config `veld lint` rejects, or the
+    /// `resolve` has to stay total on a config `veld orchestrator lint` rejects, or the
     /// diagnostic cannot list the presets it is complaining about.
     #[test]
     fn duplicate_pinned_keys_still_resolve_deterministically() {

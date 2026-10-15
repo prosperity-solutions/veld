@@ -14,16 +14,16 @@ After installing, run setup to configure HTTPS and the background services:
 
 ```bash
 ## Unprivileged mode — no sudo, uses port 18443 for HTTPS
-veld setup unprivileged
+veld self setup unprivileged
 
 ## OR: Privileged mode — one-time sudo, uses port 443 for clean URLs
-veld setup privileged
+veld self setup privileged
 ```
 
 ## Verify Installation
 
 ```bash
-veld doctor
+veld self doctor
 ```
 
 ## Veld Desktop (macOS app)
@@ -32,13 +32,13 @@ veld doctor
 orchestrator and never open the IDE; some use it as their IDE. The installer asks
 once, records the answer in `~/.veld/desktop.json`, and every install and update
 after that obeys it — so an orchestrator-only machine stops paying a ~113 MB
-download on every `veld update`.
+download on every `veld self update`.
 
 ```bash
-veld desktop status         # where it is, whether it matches the CLI, and the recorded answer
-veld desktop install        # add it — and record "yes"
-veld desktop uninstall      # remove it — and record "no". Works with no app installed
-veld desktop update         # bring it to this CLI's version
+veld self desktop status         # where it is, whether it matches the CLI, and the recorded answer
+veld self desktop install        # add it — and record "yes"
+veld self desktop uninstall      # remove it — and record "no". Works with no app installed
+veld self desktop update         # bring it to this CLI's version
 ```
 
 Three states, not two: yes, no, and **never asked**. The third is where every
@@ -60,12 +60,12 @@ without one, so a run that cannot ask does not decide by downloading it.
 **`VELD_DESKTOP=0` is a per-run override, not an answer.** It skips the app for
 that invocation (CI boxes, servers) and deliberately records nothing — an
 environment variable is a statement about one command, while the preference is
-something a user can be asked about and change. Use `veld desktop uninstall` to
+something a user can be asked about and change. Use `veld self desktop uninstall` to
 say "never" durably.
 
 **Answering "no" while the app is installed removes it**, on the spot, on the run
 where the answer was given. A *stored* "no" never removes anything later: if the
-app reappears — a `.dmg` dragged to `/Applications` — `veld update` leaves it
+app reappears — a `.dmg` dragged to `/Applications` — `veld self update` leaves it
 alone and says so, because a recent manual install is a better signal than an old
 answer, and silently deleting an app is not something an update may do.
 
@@ -74,32 +74,32 @@ without a Gatekeeper prompt too. Arriving through the CLI additionally sets no
 `com.apple.quarantine` flag. macOS only — on Linux the AppImage updates itself and a `.deb` belongs to
 the package manager.
 
-On Linux `veld desktop status` therefore **reports rather than manages**: it
+On Linux `veld self desktop status` therefore **reports rather than manages**: it
 names the `.deb`'s binary if it finds one and says the version belongs to your
 package manager. Finding nothing is not the same as nothing being installed —
 an AppImage lives wherever you saved it — so it says that too, and the `--json`
 output omits `installed` entirely rather than asserting `false`.
 
-**`veld desktop install|update` never touches the CLI.** It runs the installer
+**`veld self desktop install|update` never touches the CLI.** It runs the installer
 with `VELD_DESKTOP_ONLY=1`, which skips the CLI tarball, the binary swap, the
 service restarts and the sudo negotiation entirely — so *that command* cannot
 restart your daemon or ask for a password. Note the scope: it is a property of
 these two subcommands, not of "updating the app". The app's own updater goes
-through `veld update` and deliberately does move everything (see below).
+through `veld self update` and deliberately does move everything (see below).
 
 | Variable | Effect |
 |---|---|
 | `VELD_DESKTOP=0` | Skip the app **for this run**. Records no preference — see above |
 | `VELD_DESKTOP_ONLY=1` | Install *only* the app: no CLI, no services, no sudo. macOS only |
-| `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld desktop status` |
+| `VELD_DESKTOP_DIR=<dir>` | Where the app lives. When set it is the **only** location consulted, by the installer and by `veld self desktop status` |
 | `VELD_BINARY_ICONS=0` | Leave the CLI/daemon/helper with the generic executable icon (see below) |
 
-**`veld uninstall` removes the app too**, and `veld doctor` reports it — where it
+**`veld self uninstall` removes the app too**, and `veld self doctor` reports it — where it
 is, which version, whether it matches the CLI, and whether you opted out (which
-is why an app can be legitimately stale). `veld desktop status --json` carries the
+is why an app can be legitimately stale). `veld self desktop status --json` carries the
 same answer as `preference`: `"wanted"`, `"unwanted"`, or `null` for never asked.
 
-**If the app cannot find a CLI that understands `veld desktop`**, it falls back
+**If the app cannot find a CLI that understands `veld desktop`** (the spelling the app uses, which every CLI with the app half answers — before and after #423 renamed it to `veld self desktop`), it falls back
 to pointing you at the release page rather than handing over to a CLI that would
 exit with an unknown-subcommand error after the app had already quit. Update the
 CLI (`curl -fsSL https://veld.oss.life.li/get | bash`) and the in-app updater
@@ -112,10 +112,10 @@ get CLI access", a sudo sheet — otherwise shows a generic `exec` tile, i.e. as
 the user to approve access to their secrets on behalf of something they cannot
 identify. The icon comes from the installed app, so a machine with
 `VELD_DESKTOP=0` simply skips this; `VELD_BINARY_ICONS=0` skips it explicitly.
-This runs on a full install (`curl | bash` or `veld update`), not on
-`veld desktop install|update` — those are app-only by design and must not touch
+This runs on a full install (`curl | bash` or `veld self update`), not on
+`veld self desktop install|update` — those are app-only by design and must not touch
 binaries a root helper is among. A machine that installed the app on its own
-therefore keeps the generic icon until its next `veld update`.
+therefore keeps the generic icon until its next `veld self update`.
 
 One documented cost: a custom icon lives in the file's resource fork, and
 `codesign --verify --strict` rejects a Mach-O carrying one. Plain
@@ -137,8 +137,8 @@ day. `relaxed` checks every twelve hours, waits three days, and leaves two days
 between prompts. A release you have answered about — Later, or Install —
 stays quiet for a week rather than coming back at the next launch. None of this touches the two things a person or an agent does on
 purpose: *Check for Updates…* answers immediately and spends none of the budget,
-and `veld update` in a terminal is unaffected. Read it with
-`veld settings describe desktop.updateFrequency`. Only Veld Desktop reads this —
+and `veld self update` in a terminal is unaffected. Read it with
+`veld self settings describe desktop.updateFrequency`. Only Veld Desktop reads this —
 the CLI has never nagged and still does not.
 
 **`--console` re-runs the update in a terminal window**, which fixes two things a
@@ -155,7 +155,7 @@ a bare `open`, so LaunchServices routes it to whatever the user registered for
 
 A launcher exiting 0 is **not** evidence a window opened — `open` and every Linux
 emulator are fire-and-forget. So the outer process waits up to 20s for the update
-lock to be claimed by a different pid, which only a `veld update` that really
+lock to be claimed by a different pid, which only a `veld self update` that really
 started can do, and runs the update itself (headless, as before) when that never
 happens. `VELD_UPDATE_ORIGIN=console` is exported into the window so the run knows what it
 is. Two paths read it: a console run that finds the lock already held stays
@@ -163,7 +163,7 @@ silent rather than writing a failure report over the parent's success, and the
 handshake only accepts a holder whose origin is `console`.
 
 **`--console` is gated on its own capability, `console-handoff`**, and not on
-`full-update-handoff`. The two are genuinely independent: `veld desktop update`
+`full-update-handoff`. The two are genuinely independent: `veld self desktop update`
 moves the app half *alone*, so a new app can be driving an old CLI — one that has
 always had `--wait-pid`/`--relaunch` and therefore advertises the full handoff,
 while its clap rejects `--console` with a usage error and a non-zero exit. That
@@ -174,11 +174,11 @@ binary's vocabulary, not about whether the machine can finish an unattended
 update, and the flag degrades to a headless run on its own.
 
 Which command it spawns is a **capability** decision, not a version comparison:
-`veld desktop status --json` carries a `capabilities` array, and the app uses the
+`veld self desktop status --json` carries a `capabilities` array, and the app uses the
 full route only when it contains `full-update-handoff`. A CLI without it gets the
 app-only `veld desktop update --version <v>` (which needs the explicit version, or
 an older CLI reinstalls its own and re-offers the newer one forever), and the
-dialog says the CLI half still needs `veld update`. A CLI with no `veld desktop`
+dialog says the CLI half still needs `veld self update`. A CLI with no `veld desktop`
 at all is not handed anything — the app points at the release page instead.
 
 **A CLI under `/usr/local` withholds the capability on purpose**, however new it
@@ -191,7 +191,7 @@ prompt in, and it is still not enough to advertise the capability: the terminal 
 best-effort and the headless fallback is the path that cannot finish on these
 machines. Advertising a capability the binary can only *sometimes*
 deliver would turn a working app-only update into a failed full one, so those
-machines keep the app-only route from the GUI and use `veld update` in a terminal
+machines keep the app-only route from the GUI and use `veld self update` in a terminal
 — where sudo can prompt — to move both halves. Deliberately *not* probed with
 `sudo -n`: this runs on the app's six-hourly update check, and a status command
 must not poke sudo on a timer.
@@ -204,7 +204,7 @@ reopened on the old version.
 
 That report carries a `half` field, `"app"` or `"release"`, because the retry
 advice depends on it: a full handoff can fail on the *CLI* half and never reach
-the app, and telling that user to run `veld desktop update` would move the app
+the app, and telling that user to run `veld self desktop update` would move the app
 while leaving the daemon on the release that actually broke. A report with no
 `half` is read as `"app"` — the only thing that could have written one before the
 field existed.
@@ -212,14 +212,14 @@ field existed.
 ## Updating
 
 ```bash
-veld update
+veld self update
 ```
 
-**Only one update runs at a time.** `veld update` takes a lock at
+**Only one update runs at a time.** `veld self update` takes a lock at
 `~/.veld/update.lock` (a directory — `mkdir` is the create-or-fail primitive) and
 publishes `{pid, origin, version, started_at, phase, phase_at, tty}` into
 `state.json` inside
-it. A second `veld update` refuses with **exit 75** (`EX_TEMPFAIL`, so an agent
+it. A second `veld self update` refuses with **exit 75** (`EX_TEMPFAIL`, so an agent
 can tell "retry shortly" from a real failure) and names the holder and its phase.
 So does every other veld command except a small allow-list — `update`, `doctor`,
 `version`, `config`, `lint`, `init`, `desktop status`, and the internal log sinks
@@ -232,8 +232,8 @@ A lock is written off — and stolen by the next `acquire` — when **either** t
 holder's pid is gone, or its `phase_at` is more than 30 minutes old. Both
 conditions are needed: a liveness check cannot see a run wedged at an unanswered
 `sudo` prompt, and a timeout alone cannot tell a crash from a slow download.
-`veld update --force` skips the wait; `veld update --status [--json]` reports the
-current state without installing anything, and `veld doctor` prints the same
+`veld self update --force` skips the wait; `veld self update --status [--json]` reports the
+current state without installing anything, and `veld self doctor` prints the same
 thing at the top of its report (deliberately not as a check, since an update in
 flight is not a failure — but it does explain why the versions below it disagree).
 
@@ -264,13 +264,13 @@ and EOF on stdin counts as "no" — an answer nobody gave is not consent.
 There is deliberately no flag to answer it in advance, and piping in a `y` does
 not work either: a pipe is not a TTY, so that run is non-interactive and skips
 the app rather than reading the input. A script that wants the app updated should
-**quit the app itself** and then run `veld update` — with nothing running from the
+**quit the app itself** and then run `veld self update` — with nothing running from the
 bundle there is no question to ask, and the app half proceeds normally.
 
 ## Uninstalling
 
 ```bash
-veld uninstall
+veld self uninstall
 ```
 
 ## Requirements
@@ -282,12 +282,12 @@ veld uninstall
 ## Troubleshooting
 
 - **"command not found: veld"** — add `~/.local/bin` to your PATH: `export PATH="$HOME/.local/bin:$PATH"` (add to your shell profile)
-- **"Version mismatch detected"** — run `veld update` to sync all binaries. The message says where the helper version came from: the **running** helper (asked over its socket, in privileged mode), or a file on disk, named by path — when the helper does not answer, and always in unprivileged and auto mode. If the running helper stays behind after an update, the message names the cause when it can (an unsigned file, or a service still on an older verified copy — re-run the installer for both), and `veld doctor`'s signature row says why
-- **"not signed with the org's key"** for the privileged helper — the file the service would run does not match its `.sig`, so the helper refuses to relaunch onto it or move into its root-owned directory. The message gives the cause (missing `.sig`, or the file's size and sha256 when its bytes changed after signing — a local `codesign` re-sign does that). Re-run the installer (`curl -fsSL https://veld.oss.life.li/get | bash`); `sudo veld setup privileged` re-points the service at the verified copy in the root-owned helper directory (`/var/db/veld-helper` on macOS, `/var/lib/veld-helper` on Linux) when there is one. Never `launchctl kill` it: that runs the unverified file as root
-- **HTTPS certificate warnings** — run `veld setup unprivileged` (or `privileged`) to trust the local CA
+- **"Version mismatch detected"** — run `veld self update` to sync all binaries. The message says where the helper version came from: the **running** helper (asked over its socket, in privileged mode), or a file on disk, named by path — when the helper does not answer, and always in unprivileged and auto mode. If the running helper stays behind after an update, the message names the cause when it can (an unsigned file, or a service still on an older verified copy — re-run the installer for both), and `veld self doctor`'s signature row says why
+- **"not signed with the org's key"** for the privileged helper — the file the service would run does not match its `.sig`, so the helper refuses to relaunch onto it or move into its root-owned directory. The message gives the cause (missing `.sig`, or the file's size and sha256 when its bytes changed after signing — a local `codesign` re-sign does that). Re-run the installer (`curl -fsSL https://veld.oss.life.li/get | bash`); `sudo veld self setup privileged` re-points the service at the verified copy in the root-owned helper directory (`/var/db/veld-helper` on macOS, `/var/lib/veld-helper` on Linux) when there is one. Never `launchctl kill` it: that runs the unverified file as root
+- **HTTPS certificate warnings** — run `veld self setup unprivileged` (or `privileged`) to trust the local CA
 - **Port conflicts** — veld uses ports 18080/18443 (unprivileged) or 80/443 (privileged) and 19000-29999 for services
-- **Where the service logs are** — macOS: the daemon logs to `~/.veld/veld-daemon.log` (owner-only; in the user's directory because launchd will not run a user agent whose log file it cannot create, and a `/usr/local` lib dir is root-owned), and the *privileged* helper beside its own binary in the root-owned directory it is served from — `/var/db/veld-helper/veld-helper.log` (world-readable, so no `sudo` to read it); on an install still awaiting that move it is `<lib dir>/veld-helper.log`. **Linux has no helper log file** — the privileged helper is a systemd service, so its output is in `journalctl -u veld-helper`. The unprivileged helper has no log file. **Caddy** logs to `~/.local/lib/veld/caddy-data/caddy.log` (rolling, 0644) — in its data directory rather than beside the other logs because in privileged mode Caddy is root and that directory is root-owned, and it is the only place certificate issuance and renewal are ever reported. Linux: `journalctl --user -u veld-daemon`. `veld doctor` prints the daemon's log location under `Installation`, read from the service definition itself; "not captured" means the install predates it — `veld setup unprivileged` (or `privileged`) rewrites the definition
+- **Where the service logs are** — macOS: the daemon logs to `~/.veld/veld-daemon.log` (owner-only; in the user's directory because launchd will not run a user agent whose log file it cannot create, and a `/usr/local` lib dir is root-owned), and the *privileged* helper beside its own binary in the root-owned directory it is served from — `/var/db/veld-helper/veld-helper.log` (world-readable, so no `sudo` to read it); on an install still awaiting that move it is `<lib dir>/veld-helper.log`. **Linux has no helper log file** — the privileged helper is a systemd service, so its output is in `journalctl -u veld-helper`. The unprivileged helper has no log file. **Caddy** logs to `~/.local/lib/veld/caddy-data/caddy.log` (rolling, 0644) — in its data directory rather than beside the other logs because in privileged mode Caddy is root and that directory is root-owned, and it is the only place certificate issuance and renewal are ever reported. Linux: `journalctl --user -u veld-daemon`. `veld self doctor` prints the daemon's log location under `Installation`, read from the service definition itself; "not captured" means the install predates it — `veld self setup unprivileged` (or `privileged`) rewrites the definition
 
 ---
 
-`veld skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.
+`veld agent skills` lists every topic. This document describes the veld binary that printed it — run `veld -V` if you need the version.

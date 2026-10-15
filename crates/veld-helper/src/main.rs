@@ -76,7 +76,7 @@ struct HelperConfig {
     /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
     caddy_bin: Option<PathBuf>,
     /// `--allow-uid` as written into the service definition by
-    /// `veld setup privileged`: the one uid (besides root) allowed to drive this
+    /// `veld self setup privileged`: the one uid (besides root) allowed to drive this
     /// helper over its socket. An *override*, not the whole story — a privileged
     /// helper with no flag derives the uid instead, so that installs predating
     /// the flag are gated without anyone re-running setup. See [`Gate::resolve`].
@@ -278,7 +278,7 @@ async fn main() -> Result<()> {
 
     // The peer-uid gate. Resolved once, here, rather than read straight off
     // `config.allow_uid` in the accept loop: an existing privileged install has
-    // no `--allow-uid` in its service definition (only `veld setup privileged`
+    // no `--allow-uid` in its service definition (only `veld self setup privileged`
     // writes one) and must still end up gated. See [`Gate::resolve`].
     let privileged = is_system_socket(&config.socket_path);
     // `current_exe()` failing and the install directory being unreadable both
@@ -311,7 +311,7 @@ async fn main() -> Result<()> {
     // Startup reconcile: if a Caddy is already running (orphaned across our own
     // self-restart / helper crash), re-adopt it, reload the current config, and
     // start supervising it. Runs before the watchdog so an updated binary/config
-    // takes effect immediately rather than on the next `veld start`.
+    // takes effect immediately rather than on the next `veld orchestrator start`.
     {
         let startup_state = Arc::clone(&state);
         tokio::spawn(async move {
@@ -381,9 +381,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Self-restart when our own binary is replaced on disk (by `veld update`),
+    // Self-restart when our own binary is replaced on disk (by `veld self update`),
     // so launchd relaunches the new version as root — no sudo, no manual
-    // `veld setup privileged`. Complements the plist's WatchPaths, which does
+    // `veld self setup privileged`. Complements the plist's WatchPaths, which does
     // not reliably bounce an already-running KeepAlive daemon.
     //
     // Only for the privileged system-domain LaunchDaemon: that's the one whose
@@ -471,7 +471,7 @@ async fn main() -> Result<()> {
     // serving URLs across a helper restart is the desired behaviour, whereas a
     // durable `disablesleep` with nothing left watching its lease is the exact
     // failure this mechanism is built to avoid — including on the exit path that
-    // has no relaunch after it, which is what `veld uninstall` produces. A
+    // has no relaunch after it, which is what `veld self uninstall` produces. A
     // setting veld did not take is left alone; that is `release`'s own rule.
     state.release_sleep_on_exit().await;
 
@@ -661,7 +661,7 @@ async fn watch_own_binary() {
                             warn!(
                                 reason,
                                 "helper binary changed on disk, but restarting onto it is unsafe \
-                                 — staying alive on the old binary. Run `veld doctor` for why \
+                                 — staying alive on the old binary. Run `veld self doctor` for why \
                                  and what fixes it."
                             );
                         }
@@ -685,7 +685,7 @@ async fn watch_own_binary() {
 /// `privileged` selects whether the org signing gate applies. It is the whole
 /// point for the system helper, which relaunches as root; an unprivileged
 /// helper relaunches as its own user, so requiring a signature there would buy
-/// no privilege boundary and would refuse `veld update` for anyone running a
+/// no privilege boundary and would refuse `veld self update` for anyone running a
 /// locally built (unsigned) helper.
 pub(crate) async fn restart_blocker(privileged: bool) -> Option<String> {
     if !service_manager_owns_us().await {
@@ -791,7 +791,7 @@ fn log_gate(gate: &Gate) {
         None => warn!(
             source = gate.source().as_str(),
             "privileged helper socket is NOT uid-gated — any local process can drive it; \
-             run `veld setup privileged` to write the gate explicitly"
+             run `veld self setup privileged` to write the gate explicitly"
         ),
     }
 }
@@ -871,7 +871,7 @@ mod tests {
     }
 
     /// The refusal a gated socket writes back is a wire contract in two
-    /// directions: `veld doctor` matches its text to say "the gate refused you"
+    /// directions: `veld self doctor` matches its text to say "the gate refused you"
     /// rather than "helper down", and it must stay the shape every other reply
     /// has. Pinned to the exact bytes `origin/main` sent, since a client reading
     /// it is by definition one the helper cannot negotiate with.
@@ -881,14 +881,14 @@ mod tests {
             super::rejection_bytes(),
             "{\"ok\":false,\"error\":\"permission denied: untrusted peer uid\"}\n"
         );
-        // And the text `veld doctor` keys off is really in there.
+        // And the text `veld self doctor` keys off is really in there.
         assert!(
             super::rejection_bytes().contains(veld_core::helper_gate::REJECTED_PEER_ERROR),
             "doctor's refusal detection matches on this string"
         );
     }
 
-    /// The refusal a gated socket writes must reach `veld doctor` as the error
+    /// The refusal a gated socket writes must reach `veld self doctor` as the error
     /// it keys off — end to end, through the real client.
     ///
     /// Two halves already had tests and the seam between them had none:
@@ -924,7 +924,7 @@ mod tests {
                 "doctor matches this error's text; got {message:?}"
             ),
             // The write can still lose the race against the client's own — which
-            // is why `veld doctor` has an `Unreadable` arm and does not depend on
+            // is why `veld self doctor` has an `Unreadable` arm and does not depend on
             // this message. Anything else means the mapping changed.
             other => assert!(
                 matches!(

@@ -1,7 +1,7 @@
 use crate::output;
 use std::io::{self, BufRead, Write};
 
-/// `veld uninstall` -- remove Veld and clean up.
+/// `veld self uninstall` -- remove Veld and clean up.
 pub async fn run() -> i32 {
     let mode = super::read_setup_mode();
     // Escalate for a recorded privileged mode **or** for a root-owned helper
@@ -32,7 +32,7 @@ pub async fn run() -> i32 {
         };
         let status = std::process::Command::new("sudo")
             .arg(&exe)
-            .arg("uninstall")
+            .args(["self", "uninstall"])
             .status();
         return match status {
             Ok(s) => s.code().unwrap_or(1),

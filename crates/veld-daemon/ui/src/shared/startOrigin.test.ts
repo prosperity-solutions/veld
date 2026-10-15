@@ -45,7 +45,7 @@ describe("presetState", () => {
     // `null` is what the daemon sends when the preset exists but does not expand
     // (dangling `@ref`, removed node, over the expansion budget). Calling that
     // `redefined` claims the name means something else now, which is a different —
-    // and false — statement, and it is the one `veld status` does NOT make.
+    // and false — statement, and it is the one `veld orchestrator status` does NOT make.
     const broken = [preset("web", null)];
     expect(presetState(origin("web", ["web:local"]), broken)).toBe("unexpandable");
     expect(presetState(origin("web", []), broken)).toBe("unexpandable");
@@ -59,7 +59,7 @@ describe("presetState", () => {
 
   it("does not blame the config for a preset the listing skipped", () => {
     // `skipped` is our ignorance — the daemon caps how many presets it expands per
-    // poll. Rendering it as `unexpandable` would point the reader at `veld lint`,
+    // poll. Rendering it as `unexpandable` would point the reader at `veld orchestrator lint`,
     // and lint reports nothing, so the one actionable thing in the message is
     // wrong.
     const skipped = [preset("web", "skipped")];
@@ -70,11 +70,11 @@ describe("presetState", () => {
   });
 
   it("labels an unexpandable preset in the CLI's exact words", () => {
-    // One config state, one description. `veld status` prints
-    // "(cannot be expanded — see `veld lint`)" for this, and two surfaces wording
+    // One config state, one description. `veld orchestrator status` prints
+    // "(cannot be expanded — see `veld orchestrator lint`)" for this, and two surfaces wording
     // it differently is how a reader ends up trusting the wrong one.
     expect(startOriginLabel(origin("web", ["a:x"]), [preset("web", null)])).toBe(
-      "preset web (cannot be expanded — see `veld lint`)",
+      "preset web (cannot be expanded — see `veld orchestrator lint`)",
     );
   });
 
