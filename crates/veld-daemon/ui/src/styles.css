@@ -699,7 +699,7 @@ body[data-fullscreen="true"] .topbar.electron {
      centre. */
   --rail-pad-x: 8px;
   --slim-side: 15px;
-  --slim-mark: 18px;
+  --slim-mark: 12px;
   --slim-gap: 4px;
   flex: none;
   background: var(--panel2);
@@ -721,13 +721,13 @@ body[data-fullscreen="true"] .topbar.electron {
 /* Live resize: no transition.
  *
  * `.rail`'s `transition: width 0.15s` is for the collapse/expand toggle, where
- * 236px → 72px should animate. During a drag it re-animates on every pointer move,
+ * 236px → 66px should animate. During a drag it re-animates on every pointer move,
  * so the edge chases the cursor 150ms behind and the drag feels like it is lagging.
  * The class is only present while the pointer is down. */
 .rail.resizing {
   transition: none;
 }
-/* 72px (up from 64), derived: the collapsed row's marker is its only name, and it
+/* ~66px, derived: the collapsed row's marker is its only name, and it
    needs a gap to its neighbours — see `.wt-row.slim` for how the width is spent. */
 .rail:not(.wide) {
   width: calc(
@@ -838,8 +838,8 @@ body[data-fullscreen="true"] .topbar.electron {
  * own leading felt like the separation, so two adjacent lanes read as one list with
  * a stray label in it. Inset from the rail's padding so it reads as a divider
  * between groups rather than as the panel's own edge, and it is what separates the
- * MAIN checkout from the branches in the collapsed rail, where no header exists to
- * do it. */
+ * MAIN checkout from the branches in the collapsed rail, where the header is
+ * only a disclosure. */
 .rail-group + .rail-group {
   border-top: 1px solid var(--border);
 }
@@ -929,7 +929,7 @@ button.lane-empty {
  *
  * Shorter than a row on purpose (20px against `.wt-row`'s 28px): a count of
  * things you cannot see should not weigh as much as a thing you can. It carries
- * its own `cursor` because it renders in the collapsed rail too, at 72px, where
+ * its own `cursor` because it renders in the collapsed rail too, at ~66px, where
  * "+23" is the entire visible affordance and nothing around it says it is
  * clickable. */
 .trash-more {
@@ -953,16 +953,6 @@ button.lane-empty {
   border-color: var(--border2);
   color: var(--text);
 }
-/* The selected worktree is one of the rows behind this count. Normally the
-   section header says so (`.lane-head.holds-active`), but the collapsed rail
-   draws no headers and still caps the trash, so without this the rail would show
-   no selection anywhere — the state that accent exists to prevent. Only ever set
-   when there is no header to carry it, so the two cannot both speak. */
-.trash-more.holds-active {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
 /* --- Dropping a worktree on the trash ---------------------------------------
  *
  * The trash is the one section in the rail where a drop takes a worktree OUT of
@@ -1318,27 +1308,18 @@ button.lane-empty {
    with it the only way to unfold the section, out of sight. Only the wide rail:
    a header, and so a fold, exists nowhere else.
 
-   Split by width because the collapsed rail draws no headers at all
-   (`hasHeader` is `label !== null && props.wide`), so one floor for both left
-   19px of dead air above the trash divider in the mode with the least room for
-   it. */
-.rail.wide .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
+   The collapsed rail draws the same headers, so it shares these floors. */
+.rail .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 49px;
 }
-.rail.wide .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
+.rail .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
   min-height: 58px;
 }
-.rail.wide .rail-dock-scroll .rail-group:is(.deleting, .discovered).folded {
+.rail .rail-dock-scroll .rail-group:is(.deleting, .discovered).folded {
   min-height: 20px;
 }
-.rail.wide .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered).folded {
+.rail .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered).folded {
   min-height: 29px;
-}
-.rail:not(.wide) .rail-dock-scroll .rail-group:is(.deleting, .discovered):not(.folded) {
-  min-height: 28px;
-}
-.rail:not(.wide) .rail-dock-scroll .rail-group + .rail-group:is(.deleting, .discovered):not(.folded) {
-  min-height: 37px;
 }
 .rail-dock-scroll .rail-group.trash {
   flex: none;
@@ -1531,7 +1512,7 @@ body.pointer-dragging * {
 
    The budget, from the `--slim-*` variables on `.rail` (which also compute the
    rail's width): 56px of row after `.rail-list`'s 8px a side, all of it grid —
-   15 + 4 + 18 + 4 + 15. The side columns are wider than any glyph
+   15 + 4 + 12 + 4 + 15. The side columns are wider than any glyph
    so the left one can hold the state bar (end) and `.wt-away` (start) at once
    without overlap, and every side item hugs the marker's edge, so bar → marker
    and marker → glyph are both exactly the 4px gap. Two 12px rows sit inside the
@@ -1597,20 +1578,31 @@ body.pointer-dragging * {
 .wt-row.slim:not(:has(> :is(.wt-inbox, .wt-git))) > .wt-alert {
   grid-row: 1 / span 2;
 }
-/* The three faces at their collapsed size. Optically matched to each other the
-   same way the wide sizes are, so switching `worktree.markerStyle` does not make
-   the collapsed rail jump either. */
-.wt-row.slim > .wt-emoji {
-  font-size: 17px;
+/* The marker keeps the wide rail's size — the collapsed rail is the same list in
+   less width, not a second design — so `--slim-mark` is the 12px `.wt-pixels`
+   and the emoji and dot simply inherit their wide sizes. */
+
+/* Collapsed section headers: the wide header cut down to its disclosure and, when
+   shut, the count, centred over the marker column. Same height, same divider, same
+   fold — only the name, the ＋ and the ⋮ stay behind. */
+.rail:not(.wide) .lane-head {
+  justify-content: center;
+  gap: 3px;
+  padding: 2px 0 3px;
+  /* ~50px of content box: a count, a triangle and an activity glyph have to fit
+     or be clipped, never spill past the rail edge. */
+  min-width: 0;
+  overflow: hidden;
 }
-.wt-row.slim > .wt-dot {
-  width: 14px;
-  height: 14px;
+.rail:not(.wide) .lane-head.holds-active {
+  padding-left: 0;
 }
-.wt-row.slim > .wt-pixels {
-  width: var(--slim-mark);
-  height: var(--slim-mark);
-  border-radius: 3px;
+.rail:not(.wide) .lane-count {
+  margin-right: 0;
+}
+.rail:not(.wide) .lane-empty {
+  margin: 1px 0 2px;
+  min-height: 28px;
 }
 
 .rail-head {
@@ -2206,7 +2198,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    nothing held the slack at all and the ⋮ sat wherever the alias happened to
    end.
 
-   **Expanded rows only.** A collapsed row is a 72px centred column with no
+   **Expanded rows only.** A collapsed row is a ~66px centred column with no
    trailing cluster to form: the alert and the row-state glyph are the only two that
    render there, and they belong beside the marker (see `.wt-row.slim .wt-alert`,
    `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`) rather than pushed to an
