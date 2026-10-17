@@ -9285,7 +9285,7 @@ function actionColor(label: PendingAction): string {
 /**
  * Rail width bounds, in px.
  *
- * The minimum is well clear of the collapsed rail's 72px on purpose: the
+ * The minimum is well clear of the collapsed rail's ~66px on purpose: the
  * collapsed rail is a **mode** (it hides the alias, the branch and the inline run
  * control), not a narrow width, so dragging must never slide into it. Crossing
  * that line by drag would silently drop three columns without saying so, and the
@@ -9695,10 +9695,8 @@ function Rail(props: {
   const dockedKeys = new Set([DISCOVERED_LANE, DELETING_LANE, TRASH_LANE]);
   const scroll = groups.filter((g) => !dockedKeys.has(g.key));
   const docked = groups.filter((g) => dockedKeys.has(g.key));
-  // The dock always renders in wide mode — the trash header is the point of an
-  // always-visible trash. Collapsed, a group has no header, so an empty dock is a
-  // bare bordered strip; only show it there when it actually holds a row.
-  const dockVisible = props.wide || docked.some((g) => g.worktrees.length > 0);
+  // The dock always renders, collapsed or not — the trash header is the point of
+  // an always-visible trash, and the collapsed rail draws it too.
   // Drag state is local: it is transient pointer feedback, and lifting it would
   // re-render the pane area on every dragover.
   const [dragPath, setDragPath] = useState<string | null>(null);
@@ -10054,7 +10052,7 @@ function Rail(props: {
     return laneDropTarget(sections, clientY);
   };
   // Suppresses the rail's width transition for the duration of a resize drag. The
-  // transition exists for the collapse/expand toggle, where 236px→72px should
+  // transition exists for the collapse/expand toggle, where 236px→66px should
   // animate; during a drag it re-animates on every pointer move, so the edge
   // visibly lags behind the cursor instead of tracking it.
   const [resizing, setResizing] = useState(false);
@@ -10067,7 +10065,7 @@ function Rail(props: {
     setLaneDropAt(null);
     setOnDock(false);
   };
-  // Dropping is disabled while the rail is collapsed. A 72px row shows only a
+  // Dropping is disabled while the rail is collapsed. A collapsed row shows only a
   // marker, so there is no way to see *where* a drop would land — and a reorder
   // whose result you cannot see is a reorder you did not mean.
   const canDrag = props.wide;
@@ -10269,10 +10267,10 @@ function Rail(props: {
       ? `Menu for group ${group.label}`
       : `Menu for ${group.label}`;
     // The rail's *other* collapse. Folding is a header gesture, so it exists only
-    // where a header does: never on the main checkout's headerless section, and
-    // never in the collapsed rail, which draws no headers at all. The stored fold
-    // outlives both — widen the rail again and the section is still shut.
-    const hasHeader = group.label !== null && props.wide;
+    // where a header does: never on the main checkout's headerless section. The
+    // collapsed rail draws the same headers in miniature — disclosure and count —
+    // so a section is folded in both modes, by the one stored fold.
+    const hasHeader = group.label !== null;
     const folded = hasHeader && props.folded.has(group.key);
     // What the section draws, which is everything it holds except in an
     // unexpanded trash. `hidden` is 0 for every other section — it is what the
@@ -10435,6 +10433,7 @@ function Rail(props: {
           >
             {hasHeader && (
               <div
+                title={props.wide ? undefined : (group.label ?? undefined)}
                 className={`lane-head${orderKey !== null && canDrag ? " draggable" : ""}${folded ? " folded" : ""}${holdsActive ? " holds-active" : ""}`}
                 /* The header IS the handle — the whole bar, not a grip icon
                    beside the name. A lane's header is already the thing that
@@ -10447,8 +10446,8 @@ function Rail(props: {
                    Any section that holds a place in the rail order, and only
                    expanded: that includes the ungrouped section, which is not a
                    lane but does have a position, and excludes the pinned ones,
-                   which do not. A collapsed rail
-                   renders no headers at all — so a header with no handler is how
+                   which do not. The collapsed rail's
+                   miniature header has no handler — so a header with none is how
                    "this one does not move" is said. */
                 onPointerDown={
                   orderKey !== null && canDrag
@@ -10456,7 +10455,7 @@ function Rail(props: {
                     : undefined
                 }
                 onContextMenu={
-                  hasMenu ? (e) => props.onLaneMenu(e, group.lane) : undefined
+                  hasMenu && props.wide ? (e) => props.onLaneMenu(e, group.lane) : undefined
                 }
                 /* The whole bar folds, not only the chevron on it. A section
                    header is the biggest thing in the rail and the disclosure
@@ -10536,6 +10535,7 @@ function Rail(props: {
                     )}
                   </button>
                 </Tooltip>
+                {props.wide && (
                 <span
                   className="lane-name"
                   title={
@@ -10546,6 +10546,7 @@ function Rail(props: {
                 >
                   {group.label}
                 </span>
+                )}
                 {/* How many rows are behind the header, and only while there are
                     rows behind it. A count on an open section restated what the
                     rows immediately below it already say — which is why the header
@@ -10591,7 +10592,7 @@ function Rail(props: {
                     Always visible for the same two reasons `.lane-edit` is (see
                     its note): a hover-revealed control discovers nothing, and it
                     cannot be reached by keyboard. */}
-                {group.addable && (
+                {props.wide && group.addable && (
                   <Tooltip
                     label={
                       group.lane === ""
@@ -10623,7 +10624,7 @@ function Rail(props: {
                 )}
                 {/* The trash's own action, in the place a lane keeps its menu:
                     emptying it is the only thing the section as a whole can do. */}
-                {group.key === TRASH_LANE && (
+                {props.wide && group.key === TRASH_LANE && (
                   <Tooltip label="Delete everything in the trash">
                     <button
                       type="button"
@@ -10643,7 +10644,7 @@ function Rail(props: {
                     as the same gesture. Not on the pinned sections: the trash
                     lane carries its own batch button instead, and a removal in
                     flight has no menu at all. */}
-                {hasMenu && (
+                {props.wide && hasMenu && (
                   <Tooltip label={menuLabel}>
                     <button
                       type="button"
@@ -10670,7 +10671,7 @@ function Rail(props: {
                 and a "drop here" placeholder under one would be a second, taller
                 thing on screen than the section it belongs to. The drop still
                 lands — the section itself is the target. */}
-            {props.wide && !folded && canDropOn(group) && group.worktrees.length === 0 && (
+            {!folded && canDropOn(group) && group.worktrees.length === 0 && (
               group.addable ? (
                 /* The addable empty lane is the lane's own "＋": clicking the
                    whole placeholder files into the same lane a header "＋" would,
@@ -10689,7 +10690,9 @@ function Rail(props: {
                       : `New worktree in group ${group.lane}`
                   }
                 >
-                  {dragPath
+                  {!props.wide
+                    ? <IconPlus size={12} />
+                    : dragPath
                     ? "Drop here"
                     : // Both ways in, named. An empty lane is exactly where
                       // someone reaches for "＋", and the placeholder used to
@@ -10697,8 +10700,11 @@ function Rail(props: {
                       "Empty — drag one in or click to add one"}
                 </button>
               ) : (
-                <div className="lane-empty">
-                  {dragPath ? "Drop here" : "Empty — drag a worktree in"}
+                <div
+                  className="lane-empty"
+                  title={props.wide ? undefined : "Empty — drag a worktree in"}
+                >
+                  {!props.wide ? "–" : dragPath ? "Drop here" : "Empty — drag a worktree in"}
                 </div>
               )
             )}
@@ -10776,7 +10782,7 @@ function Rail(props: {
               // nothing that acts on it as if it were: no run control, no menu
               // of edits, and no selecting it into the workspace.
               const discoveredRow = group.key === DISCOVERED_LANE;
-              // Inline controls are wide-only — a 72px collapsed row has no space
+              // Inline controls are wide-only — a ~66px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.
@@ -11143,11 +11149,7 @@ function Rail(props: {
                 <Tooltip label={trashMoreLabel}>
                   <button
                     type="button"
-                    /* `holds-active` only where there is no header to carry it:
-                       the collapsed rail draws none, and it caps the trash just
-                       the same, so the pill is the only thing left standing for
-                       the rows it hides. */
-                    className={`trash-more${holdsActive && !hasHeader ? " holds-active" : ""}`}
+                    className="trash-more"
                     aria-label={trashMoreLabel}
                     /* No `aria-expanded`: a disclosure's controlled region has to
                        follow its trigger, and the rows this reveals are rendered
@@ -11254,8 +11256,8 @@ function Rail(props: {
         {/* Collapsed only, mirroring "New lane" above it — and for the same
             reason, inverted. Expanded, every section that can hold a worktree
             carries its own "＋" and a toolbar button would be a second way to do
-            the same thing whose destination is not visible. Collapsed, there are
-            no headers at all, so this is the only place a create can live; it
+            the same thing whose destination is not visible. Collapsed, the
+            headers are a disclosure only, so this is the only place a create can live; it
             files into the ungrouped section, which is where the old toolbar
             button always put things anyway. */}
         {!props.wide && (
@@ -11281,7 +11283,6 @@ function Rail(props: {
           refusing there made the last position the one place the gesture could
           miss. It resolves differently from the list, too — see
           `laneTargetAtPoint`. */}
-      {dockVisible && (
         <div
           className={`rail-dock${
             // Not while the carried lane is already the last one: that drop is a
@@ -11315,7 +11316,6 @@ function Rail(props: {
             </svg>
           )}
         </div>
-      )}
       {/* Only when expanded: collapsed is a mode with a fixed width, so there is
           nothing to drag. */}
       {props.wide && (
