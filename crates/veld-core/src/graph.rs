@@ -468,12 +468,14 @@ fn validate_variable_references(
             .push(&sel.variant);
     }
 
-    // Scan project-level env for unqualified refs.
+    // Scan project-level env for unqualified refs: every authored template of a
+    // value — the literal, or a source's argv / shell / path — is interpolated,
+    // so any of them can hold a `${nodes.…}` reference.
     if let Some(env_map) = &config.env {
-        // Only inline literals are interpolated, so only they can hold a
-        // `${nodes.…}` reference.
-        for v in env_map.values().flatten().filter_map(|v| v.as_literal()) {
-            check_string_for_ambiguous_refs(v, &active_variants)?;
+        for v in env_map.values().flatten() {
+            for template in v.templates() {
+                check_string_for_ambiguous_refs(&template, &active_variants)?;
+            }
         }
     }
 
@@ -492,15 +494,15 @@ fn validate_variable_references(
                 crate::config::CommandSpec::Shell(sh) => owned_strings.push(sh),
             }
         }
-        // The resolved env, so a value hoisted to node level is scanned once and
-        // an erased key is not scanned at all.
+        // The resolved env and files, so a value hoisted to node level is scanned
+        // once and an erased key is not scanned at all. Every authored template
+        // (see `ConfigValue::templates` / `FileDelivery::templates`), not just
+        // the literal: a source's `shell` string is interpolated too.
         if let Some(env_map) = &resolved.env {
-            owned_strings.extend(
-                env_map
-                    .values()
-                    .filter_map(|v| v.as_literal())
-                    .map(str::to_owned),
-            );
+            owned_strings.extend(env_map.values().flat_map(|v| v.templates()));
+        }
+        if let Some(files) = &resolved.files {
+            owned_strings.extend(files.values().flat_map(|d| d.templates()));
         }
         let strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
 
@@ -655,6 +657,56 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// The ambiguity scan reads every authored template, not just a literal: a
+    /// `shell` env source naming `${nodes.db.url}` while two `db` variants are
+    /// active is as ambiguous as the literal form, and must be refused the same
+    /// way. With one `db` variant the same source is fine.
+    #[test]
+    fn an_unqualified_node_reference_in_an_env_source_is_ambiguous() {
+        use crate::config::{ConfigValue, SecretSource};
+        let mut config = make_config();
+        let db = config.nodes.get_mut("db").unwrap();
+        let docker = db.variants["local"].clone();
+        db.variants.insert("docker".into(), docker);
+        let api = config.nodes.get_mut("api").unwrap();
+        api.variants.get_mut("local").unwrap().env = Some(HashMap::from([(
+            "URL".to_owned(),
+            Some(ConfigValue {
+                source: SecretSource::Shell("echo ${nodes.db.url}/v1".into()),
+                secret: false,
+            }),
+        )]));
+        let sel = |node: &str, variant: &str| NodeSelection {
+            node: node.into(),
+            variant: variant.into(),
+        };
+
+        let err = validate_variable_references(
+            &[sel("db", "local"), sel("db", "docker"), sel("api", "local")],
+            &config,
+        )
+        .unwrap_err();
+        match err {
+            GraphError::AmbiguousReference {
+                reference,
+                node,
+                mut variants,
+                field,
+                ..
+            } => {
+                assert_eq!(reference, "${nodes.db.url}");
+                assert_eq!(node, "db");
+                variants.sort();
+                assert_eq!(variants, ["docker", "local"]);
+                assert_eq!(field, "url");
+            }
+            other => panic!("expected AmbiguousReference, got {other:?}"),
+        }
+
+        validate_variable_references(&[sel("db", "local"), sel("api", "local")], &config)
+            .expect("one active db variant is unambiguous");
     }
 
     fn make_config() -> VeldConfig {

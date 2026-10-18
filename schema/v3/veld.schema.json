@@ -1008,7 +1008,7 @@
           "properties": {
             "env": {
               "type": "string",
-              "description": "Read from the environment veld was launched with. Missing at start is an error naming the node and the variable."
+              "description": "Read from the environment veld was launched with. The name is read as written — `${…}` is not interpolated in it. Missing at start is an error naming the node and the variable."
             },
             "secret": {
               "$ref": "#/$defs/secretFlag"
@@ -1024,7 +1024,7 @@
           "properties": {
             "file": {
               "type": "string",
-              "description": "Read the (trimmed) contents of a file. Relative to the project root."
+              "description": "Read the (trimmed) contents of a file. Relative to the project root. The path is interpolated (`${veld.root}/…`); the contents are used verbatim."
             },
             "secret": {
               "$ref": "#/$defs/secretFlag"
@@ -1040,7 +1040,7 @@
           "properties": {
             "argv": {
               "$ref": "#/$defs/argv",
-              "description": "Run a command directly and take its trimmed stdout."
+              "description": "Run a command directly and take its trimmed stdout. Each element is interpolated (`${veld.root}/tools/key.mjs`); the output is used verbatim."
             },
             "secret": {
               "$ref": "#/$defs/secretFlag"
@@ -1056,7 +1056,7 @@
           "properties": {
             "shell": {
               "type": "string",
-              "description": "Run a shell command and take its trimmed stdout."
+              "description": "Run a shell command and take its trimmed stdout. The string is interpolated; the output is used verbatim."
             },
             "secret": {
               "$ref": "#/$defs/secretFlag"

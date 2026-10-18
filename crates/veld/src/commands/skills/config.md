@@ -300,15 +300,27 @@ Precedence: `--var` → worktree scope → project scope → `default` → error
 the var and the command. Answers are keyed by the repo's **main checkout**, so
 every worktree shares one; moving a checkout orphans them.
 
-A var literal is **interpolated**, so every `${…}` in it is veld's to resolve: a
-reference in no veld namespace (`"${HOME}/.cache"`) is a
-`var-unresolvable-reference` error — write `$HOME` unbraced for the shell, or use
-`{ "env": "HOME" }`. It is interpolated against the **run-scoped** built-ins — `${veld.run}`,
-`run_id`, `name`, `project`, `root`, `worktree`, `branch`, `username`. The per-node
-ones (`port`, `url`, `url.*`, `ports.*`, `node`, `variant`) are a
-`builtin-not-in-scope` error in a var: a var is one value for the whole run, so
-compose those at the use site. A var whose value is a *fetched* source is used
-verbatim (no interpolation inside secret-store content).
+Everything **written** in a var is interpolated — the literal, a `file` source's
+path, each `argv` element, the `shell` string — so every `${…}` in it is veld's
+to resolve: a reference in no veld namespace (`"${HOME}/.cache"`,
+`{ "shell": "cat ${HOME}/.tok" }`) is a `var-unresolvable-reference` error —
+write `$HOME` unbraced for the shell (`shell` only; `argv` has no shell), or use
+`{ "env": "HOME" }`. It is interpolated against the **run-scoped** built-ins —
+`${veld.run}`, `run_id`, `name`, `project`, `root`, `worktree`, `branch`,
+`username` — so `{ "argv": ["node", "${veld.root}/tools/key.mjs"] }` runs the
+file it names. The per-node ones (`port`, `url`, `url.*`, `ports.*`, `node`,
+`variant`) are a `builtin-not-in-scope` error in a var: a var is one value for
+the whole run, so compose those at the use site. What a source **fetches** is
+used verbatim (no interpolation inside secret-store content), and an `env`
+source's *name* is read as written (`env-name-not-interpolated`). The same
+holds for a node's `env` (literal and source) and `files` *sources*, against the
+node's context, where a non-veld `${HOME}` is an `unresolvable-reference`
+error. A `files` literal is content and is written verbatim, so `${vars.x}` or
+`${veld.x}` in one is a `files-literal-not-interpolated` warning — give the
+entry a source, or deliver the text from a file with `{ "file": "path" }`. A
+shell expression (`${X:-d}`) has no unbraced form and `${` has no escape: use
+`$(…)` or a script file; a stray `${` is `unclosed-interpolation`. In a `shell`
+string a substituted value is spliced in as text — quote it, or use `argv`.
 
 A var backed by a source is resolved **only when the resolved plan reaches it** —
 the same laziness a node-level `env` source has — so a credential-helper var does

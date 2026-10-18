@@ -1482,14 +1482,32 @@ The second group is per-node, and a var is one value for the whole run, so
 the use site instead — a node's `env` can mix `${veld.port}` and `${vars.…}` in
 the same string.
 
-A var whose value is a *fetched* source (`file`, `env`, `argv`, `shell`) is used
-verbatim, exactly as a node's `env` treats one: substituting inside content that
-came out of a secret store would make the store an interpolation vector.
+**Everything you *write* in a var is interpolated; what a source *fetches* is
+not.** A literal, a `file` path, an `argv` element, a `shell` string — all of
+them are config, and `${veld.root}` in any of them is the project root by the
+time it is used, so `{ "argv": ["node", "${veld.root}/tools/key.mjs"] }` runs
+the file it names. `argv` is interpolated per element, so a value with a space
+stays one argument; in a `shell` string the value is spliced in as text, so quote
+it — `"${veld.root}"/tools/key.mjs` — or use `argv`. What the source then *produces* — the file's contents, the
+command's output, the environment variable's value — is used verbatim, exactly
+as a node's `env` treats one: substituting inside content that came out of a
+secret store would make the store an interpolation vector. The one string that
+is not a template is an `env` source's *name*: `{ "env": "NAME" }` is looked up
+as written, because the CLI forwards the values of exactly the names it finds in
+the config (`env-name-not-interpolated`, an error, catches a `${…}` in one).
 
-**A var literal is interpolated, so every `${…}` in it is Veld's to resolve.** A
-reference in no Veld namespace — `"cache": "${HOME}/.cache"` — is a
-`var-unresolvable-reference` error. Write `$HOME` without braces to leave it for
-the shell, or make the var a value source: `{ "env": "HOME" }`.
+**So every `${…}` you write in a var is Veld's to resolve.** A reference in no
+Veld namespace — `"cache": "${HOME}/.cache"`, or `{ "shell": "cat ${HOME}/.tok" }`
+— is a `var-unresolvable-reference` error. Write `$HOME` without braces to leave
+it for the shell (`shell` only — `argv` is spawned directly, nothing expands
+`$HOME` there), or make it a value source: `{ "env": "HOME" }`. A shell
+*expression* such as `${HOME:-/root}` or `${#PATH}` has no unbraced form, and
+Veld has no escape for `${`: write it as `$(…)` or move it into a script file
+the `shell` string runs. An unclosed `${` in a var, a node's `env` value or a
+`files` source is `unclosed-interpolation`, for the same reason — it would fail
+at run time, for a var after the run is persisted. A machine var overridden with `veld orchestrator vars set`
+is the exception to all of this: what you typed on this machine is used as
+typed, source or literal.
 
 ```sh
 veld orchestrator config --why nodes.api.variants.dev.env.DATABASE_URL
@@ -1664,9 +1682,31 @@ references it. `setup` steps run before the graph does, so the vars they name ar
 resolved just before them and the rest just before the first node spawns; either
 way each is resolved once.
 
-Only an **inline literal** is interpolated. A value fetched from a file, the
-environment, or a command is used verbatim — substituting `${…}` into fetched
-content would make any secret store an interpolation vector.
+What you **write** is interpolated: the literal, a `file` source's path, every
+`argv` element, the `shell` string — each resolves `${…}` against the context of
+the place it is written (a node's `env` and `files` see the node's built-ins, a
+var the run-scoped ones). What a source **fetches** is used verbatim —
+substituting `${…}` into fetched content would make any secret store an
+interpolation vector. Two more strings are not templates: an `env` source's
+*name* is read as written (`env-name-not-interpolated`), and a [`files`](#files)
+entry's literal `value` is written as-is, because a delivered file is content and
+its `${…}` belongs to whatever reads it. A `share` or gateway token is a
+different mechanism and is used verbatim either way.
+
+Because these strings are interpolated, every `${…}` in them is Veld's to
+resolve: `${HOME}` in a node's `env` (literal or source) or in a `files` source
+is an `unresolvable-reference` error, since it would fail the start and skip the
+node's `on_stop` hook. Write `$HOME` unbraced in a `shell` string, or
+`{ "env": "HOME" }`; a shell expression or a stray `${` follows the same rules as
+in a [var](#vars).
+
+A `${vars.*}` in a node's `env` (literal or source) or in a `files` source is
+fine for the node and for its probes and `on_stop` hook, which share the node's
+context. `veld orchestrator action` has no `${vars.*}` (see
+[Availability](#availability)), so an action on a node whose `env` references a
+var anywhere runs without that node's declared `env`; the rest of the action is
+unaffected. The same goes for the other names an action lacks — `${nodes.*}`,
+`${veld.run_id}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}`.
 
 A source command has a **30-second timeout**, and the message says why it matters:
 an interactive credential helper (a biometric prompt, an MFA push) has no terminal
@@ -1726,9 +1766,13 @@ element no shell ever sees (inert text — a mistake, but not an exposure).
 
 | Rule id | What it catches | Severity |
 |---|---|---|
-| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}` | **error** |
+| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}` — in a node's command, hook, probe or action, or in a value source's own command (an `env` or `files` entry fetched by `argv`/`shell`; reported once, at the entry's definition) | **error** |
 | `secret-shell-expansion` | A bare `$NAME` matching a secret. The shell expands it, so it leaks only if the expansion becomes another program's argument — Veld cannot tell, so it says so instead of guessing | warn |
-| `var-unresolvable-reference` | A `${…}` in a `vars` literal that names no Veld namespace (`${HOME}`). Var literals are interpolated, so it fails the run | **error** |
+| `var-unresolvable-reference` | A `${…}` in a `vars` value that names no Veld namespace (`${HOME}`), or a node-scoped one a var cannot see (`${nodes.*}`, `${output.*}`, `${param.*}`) — in the literal, or in a source's `file` path, `argv` or `shell`. All of them are interpolated, so it fails the run | **error** |
+| `unresolvable-reference` | A `${…}` that names no Veld namespace (`${HOME}`) in a node's `env` — the literal, or a source's `file` path, `argv` or `shell` — or in a `files` source. These are interpolated, so it fails the start and skips the node's `on_stop` hook. Write `$HOME` unbraced in a `shell` string, or `{ "env": "HOME" }` | **error** |
+| `files-literal-not-interpolated` | A `${veld.*}` or `${vars.*}` in a `files` literal `value`. A delivered file is content and is written verbatim, so the text lands in the file as written. Meant that way (the file is a template for its reader)? Keep the text in a file and deliver it with `{ "file": "path" }`. Meant substitution? Give the entry a source | warn |
+| `unclosed-interpolation` | A `${` with no closing `}` in interpolated text (a var, a node's `env` value, a `files` source). Interpolation fails on it at run time — for a var, after the run is persisted — and there is no escape for `${`: close it, or move the text into a script file | **error** |
+| `env-name-not-interpolated` | A `${…}` in an `env` source's *name* (`{ "env": "${veld.run}_TOKEN" }`). The name is read as written, so the lookup is for a variable literally called that. Name it as it is set; a source command runs in the daemon's environment, not your terminal's, so a computed name cannot be read there either — fetch a computed value from its store with a `shell` source | **error** |
 | `ambiguous-root-config` | A directory holding `veld.json` and `veld.jsonc` as two *different* files (a symlink between them is fine). Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld orchestrator stop` still works) |
 | `credential-shaped-literal` | A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
 | `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
@@ -2026,10 +2070,22 @@ file.
 }
 ```
 
-Same [value sources](#value-sources) as everything else. Paths resolve from the
-project root and parent directories are created. The file is created **with** its
-mode rather than chmod-ed afterwards, so a credential is never briefly
-world-readable, and `mode` defaults to `0600`.
+Same [value sources](#value-sources) as everything else. A source's own text
+(`file` path, `argv`, `shell`) resolves `${…}` against the node's context, like
+the node's `env`; what it fetches is written verbatim. A literal `value` is also
+written **verbatim**: a delivered file is content — a compose `.env`, a script,
+an nginx template — and its `${…}` belongs to whatever reads it. A `${veld.*}` or
+`${vars.*}` written in a literal is `files-literal-not-interpolated`, a warning,
+because it usually means substitution was expected. To put a Veld value in a
+file, give the entry a source, whose text *is* interpolated —
+`{ "argv": ["printf", "port=%s", "${veld.port}"] }`; a secret var cannot be
+substituted into a command (that would be `secret-in-command`), so give the
+`files` entry the store's own source, the same one the var has. If the text is
+meant for the file's reader, keep it out of the config: put the content in a
+file and deliver it with `{ "file": "path" }`, which is copied verbatim too. Paths
+resolve from the project root and parent directories are created. The file is created **with** its mode rather than
+chmod-ed afterwards, so a credential is never briefly world-readable, and `mode`
+defaults to `0600`.
 
 `mode` is a string, in octal, with or without the leading zero — a bare number has
 already lost its leading zero, so it is refused rather than guessed at.
@@ -3655,7 +3711,7 @@ the run rather than failing mid-start with `unknown built-in variable`.
 |---|:-:|:-:|:-:|:-:|
 | `vars` value | ✅ | ✅ | — | — |
 | project `setup` / `teardown` | ✅ | — | — | — |
-| project / node / variant `env` | ✅ | ✅ | ✅ | `long_running` only |
+| project / node / variant `env` (literal and source text), node / variant `files` (source text; a literal is content, verbatim) | ✅ | ✅ | ✅ | `long_running` only |
 | `command` node: `argv`, `shell`, `skip_if`, `on_stop` | ✅ | ✅ | ✅ | — |
 | `long_running` node: `argv`, `shell`, `on_stop` | ✅ | ✅ | ✅ | ✅ |
 | `actions[].cmd` | run, name, project, root only | — | ✅ | ✅ (plus `${param.*}`, `${output.*}`) |
