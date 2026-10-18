@@ -2082,7 +2082,7 @@ file, give the entry a source, whose text *is* interpolated —
 substituted into a command (that would be `secret-in-command`), so give the
 `files` entry the store's own source, the same one the var has. If the text is
 meant for the file's reader, keep it out of the config: put the content in a
-file and deliver it with `{ "file": "path" }`, which is copied verbatim too. Paths
+file and deliver it with `{ "file": "path" }`, whose contents are not interpolated either. Paths
 resolve from the project root and parent directories are created. The file is created **with** its mode rather than
 chmod-ed afterwards, so a credential is never briefly world-readable, and `mode`
 defaults to `0600`.

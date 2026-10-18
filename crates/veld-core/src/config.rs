@@ -4089,7 +4089,7 @@ fn check_files_literals(config: &VeldConfig, out: &mut Vec<Finding>) {
                                  does not substitute in it. If that is the point (the file is \
                                  a template for whatever reads it), keep the text out of the \
                                  config: put it in a file and deliver it with `{{ \"file\": \
-                                 \"path\" }}`, whose contents are copied verbatim too. \
+                                 \"path\" }}`, whose contents are not interpolated either. \
                                  Otherwise, {remedy}"
                             )
                         });
@@ -8047,15 +8047,36 @@ mod tests {
             ["nodes.n.env.DERIVED", "nodes.n.variants.one.files.cfg.json"],
             "{f:?}"
         );
-        assert!(
-            !f.iter().any(|x| x.rule == "secret-shell-expansion"),
-            "a source command runs in the daemon's env, not the node's: {f:?}"
-        );
         assert!(hits.iter().all(|x| x.severity == Severity::Error));
         assert!(
             hits.iter().all(|x| x.message.contains("value source")),
             "the remedy is specific to a source command: {hits:?}"
         );
+    }
+
+    /// A bare `$PW` matching a secret env key warns in the node's own command,
+    /// where the shell has the node's env; in a value source it does not, since
+    /// the source runs in the daemon's environment, where `PW` is not set.
+    #[test]
+    fn secret_shell_expansion_skips_a_value_source_command() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "shell": "use $PW",
+                    "env": {
+                        "PW":      { "value": "x", "secret": true },
+                        "DERIVED": { "shell": "use $PW" }
+                    }
+                }}}}
+            }"#,
+        );
+        let locs: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "secret-shell-expansion")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(locs, ["nodes.n.variants.one"], "{f:?}");
     }
 
     /// An `env` source's *name* is the one string in a value that is not a
@@ -8290,7 +8311,7 @@ mod tests {
             hits[0]
         );
         assert!(
-            hits[1].message.contains("${veld.port}") && hits[1].message.contains("printf"),
+            hits[1].message.contains("port=%s") && !hits[1].message.contains("var's own source"),
             "{:?}",
             hits[1]
         );
