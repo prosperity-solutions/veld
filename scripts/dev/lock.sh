@@ -39,7 +39,7 @@ LABEL=veld-lock
 TEAM=veld-lock-owners
 # Who may work while locked. Changing this list takes a merge, which the lock
 # itself prevents. Keep it in step with the members of TEAM.
-OWNERS=(peter-adam-dy)
+OWNERS=(peter-adam-dy boennemann)
 
 mode=${1:-status}
 
