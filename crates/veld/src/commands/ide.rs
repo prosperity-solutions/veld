@@ -67,6 +67,48 @@ pub enum IdeCommand {
         #[command(subcommand)]
         command: super::worktree::WorktreeCommand,
     },
+
+    /// The pane this terminal is: restart the agent running in it (`restart`).
+    Pane {
+        #[command(subcommand)]
+        command: PaneCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum PaneCommand {
+    /// Restart the coding agent this runs in, from inside it.
+    ///
+    /// For an agent whose instructions changed under it — a new outfit profile, an
+    /// edited `CLAUDE.md`, a skill installed — and that needs a fresh start to read
+    /// them. The Veld window restarts the pane a moment after this returns, with the
+    /// pane's `resume` command so the conversation carries on, and tells the agent
+    /// it was restarted. Only a pane from the project's `ide.panes` can be restarted.
+    ///
+    /// Exit status: 0 the restart is on its way, 1 failed, 3 not inside a Veld
+    /// terminal, 4 no Veld window is showing this worktree, 5 not a pane Veld can
+    /// restart, or one that cannot resume (pass `--fresh`).
+    Restart(RestartArgs),
+}
+
+#[derive(clap::Args)]
+pub struct RestartArgs {
+    /// Start a new conversation instead of resuming this one.
+    #[arg(long)]
+    pub fresh: bool,
+
+    /// What the restarted agent reads first. Defaults to a line saying it was
+    /// restarted at its own request.
+    #[arg(long, value_name = "TEXT")]
+    pub prompt: Option<String>,
+
+    /// Print `{"restarting": "resume" | "fresh"}` on stdout.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Terminal session to restart. Defaults to `$VELD_PTY_SESSION`.
+    #[arg(long, hide = true)]
+    pub session: Option<String>,
 }
 
 /// The sentence for a missing mode. Its own constant so the test can pin it — an
@@ -83,7 +125,79 @@ pub async fn run(command: IdeCommand) -> i32 {
             session,
         } => open(&target, notify, quiet, json, session).await,
         IdeCommand::Worktree { command } => super::worktree::run(command).await,
+        IdeCommand::Pane {
+            command: PaneCommand::Restart(args),
+        } => restart(args).await,
     }
+}
+
+/// `veld ide pane restart` (and `veld agent restart`) — the agent in this Veld pane
+/// asks its window to restart it.
+///
+/// Unlike the plumbing above, a person or an agent types this, so it says what
+/// happened and exits by it: 0 the window was asked, 3 not in a Veld terminal, 4 no
+/// window showing this worktree, 5 not a pane that can be restarted (or resumed).
+pub async fn restart(args: RestartArgs) -> i32 {
+    let RestartArgs {
+        fresh,
+        prompt,
+        json,
+        session,
+    } = args;
+    let Some(session) = session.or_else(|| {
+        std::env::var("VELD_PTY_SESSION")
+            .ok()
+            .filter(|s| !s.is_empty())
+    }) else {
+        eprintln!("veld: not inside a Veld terminal ($VELD_PTY_SESSION is not set)");
+        return 3;
+    };
+    match request_restart(&session, fresh, prompt.as_deref()).await {
+        Ok(()) => {
+            let how = if fresh {
+                "in a new conversation"
+            } else {
+                "in the same conversation"
+            };
+            eprintln!("Restarting this agent in a moment, {how}.");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "restarting": if fresh { "fresh" } else { "resume" } })
+                );
+            }
+            0
+        }
+        Err(refusal) => {
+            eprintln!("veld: {}", refusal.message);
+            super::worktree::exit_for(refusal.code.as_deref())
+        }
+    }
+}
+
+/// One `POST /api/pty/sessions/{id}/restart`.
+pub(crate) async fn request_restart(
+    session: &str,
+    fresh: bool,
+    prompt: Option<&str>,
+) -> Result<(), super::worktree::Refusal> {
+    if !veld_core::agent::valid_session_id(session) {
+        return Err(super::worktree::Refusal {
+            message: "that is not a Veld terminal session".to_owned(),
+            code: Some("no_session".to_owned()),
+        });
+    }
+    super::worktree::send(
+        reqwest::Client::new()
+            .post(format!(
+                "{}/api/pty/sessions/{session}/restart",
+                veld_core::instance::daemon_base()
+            ))
+            .json(&serde_json::json!({ "fresh": fresh, "prompt": prompt })),
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// What the argument names, once split from any `:line`.

@@ -38,7 +38,7 @@ use serde_json::Value;
 
 use super::settings_catalog::{
     CLAUDE_INTEGRATIONS, CURSOR_STYLES, Choice, DOCK_BADGE_STYLES, GIT_CREATE_SOURCES,
-    MARKER_STYLES, UPDATE_FREQUENCIES, WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
+    MARKER_STYLES, OUTFIT_REQUIRED, UPDATE_FREQUENCIES, WORKTREE_NEW_MODES, WORKTREE_STORAGE_MODES,
 };
 use super::{Db, DbError, now_str};
 
@@ -744,6 +744,7 @@ pub enum SettingKey {
     UiShowProjectColumn,
     UiShowNextUnread,
     GitCreateFrom,
+    OutfitRequired,
     WorktreeStorageMode,
     WorktreeStorageDir,
     FocusModeEnabled,
@@ -808,6 +809,7 @@ impl SettingKey {
         Self::WorktreeNewMode,
         Self::WorktreeReviewHandoffs,
         Self::GitCreateFrom,
+        Self::OutfitRequired,
         Self::WorktreeStorageMode,
         Self::WorktreeStorageDir,
         // ── Terminal › Appearance ────────────────────────────────────────────
@@ -952,6 +954,7 @@ impl SettingKey {
             Self::UiShowProjectColumn => "ui.showProjectColumn",
             Self::UiShowNextUnread => "ui.showNextUnread",
             Self::GitCreateFrom => "git.createFrom",
+            Self::OutfitRequired => "outfit.required",
             Self::WorktreeStorageMode => "worktree.storageMode",
             Self::WorktreeStorageDir => "worktree.storageDir",
             Self::FocusModeEnabled => "focus.enabled",
@@ -1036,6 +1039,7 @@ impl SettingKey {
             "ui.showProjectColumn" => Self::UiShowProjectColumn,
             "ui.showNextUnread" => Self::UiShowNextUnread,
             "git.createFrom" => Self::GitCreateFrom,
+            "outfit.required" => Self::OutfitRequired,
             "worktree.storageMode" => Self::WorktreeStorageMode,
             "worktree.storageDir" => Self::WorktreeStorageDir,
             "focus.enabled" => Self::FocusModeEnabled,
@@ -1479,6 +1483,8 @@ impl SettingKey {
             // directly in `create_worktree`, so a stored value neither surface
             // honours would silently change where branches come from.
             Self::GitCreateFrom => one_of(value, GIT_CREATE_SOURCES).ok_or_else(bad)?,
+            // Read by the daemon when an agent creates a worktree; same reason.
+            Self::OutfitRequired => one_of(value, OUTFIT_REQUIRED).ok_or_else(bad)?,
             // Which checkout's `veld.json` `ide.extensions`/`ide.news` declarations
             // are read from. Rejected rather than coerced, same reason as every
             // other enum here: the daemon acts on this directly (`worktree_target`
@@ -2106,6 +2112,8 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // daemon acts on this in `create_worktree`, so it is validated above like
         // `TerminalDetachGrace`, not trusted from the wire.
         (SettingKey::GitCreateFrom, Value::from("origin")),
+        // The project's `ide.outfit.required` decides until the person says otherwise.
+        (SettingKey::OutfitRequired, Value::from("project")),
         // Sibling of the repo — today's only behaviour, and the one that needs no
         // setup: a fresh install has never chosen a folder, so the default must
         // be the thing that already works.
@@ -2646,6 +2654,17 @@ impl Db {
             .flatten()
             .and_then(|v| v.as_str().and_then(GitCreateSource::parse))
             .unwrap_or_default()
+    }
+
+    /// Whether a new worktree must name an outfit profile: `project` (follow the
+    /// project's `ide.outfit.required`), `always` or `never` (`outfit.required`).
+    /// Anything not a stored valid value reads as `project`.
+    pub fn outfit_required(&self) -> String {
+        self.setting(&SettingKey::OutfitRequired)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "project".to_owned())
     }
 
     /// The configured base directory for a *new* worktree's checkout

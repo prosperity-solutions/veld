@@ -30,6 +30,20 @@ pub enum AgentCmd {
         json: bool,
     },
 
+    /// Restart the coding agent this runs in, from inside it, in the same
+    /// conversation — what `veld ide pane restart` does to this agent's pane.
+    ///
+    /// For an agent whose instructions changed under it — a new outfit profile, an
+    /// edited `CLAUDE.md`, a skill installed — and that needs a fresh start to read
+    /// them. The Veld window restarts the pane a moment after this returns, with the
+    /// pane's `resume` command so the conversation carries on, and tells the agent
+    /// it was restarted. Only a pane from the project's `ide.panes` can be restarted.
+    ///
+    /// Exit status: 0 the restart is on its way, 1 failed, 3 not inside a Veld
+    /// terminal, 4 no Veld window is showing this worktree, 5 not a pane Veld can
+    /// restart, or one that cannot resume (pass `--fresh`).
+    Restart(commands::ide::RestartArgs),
+
     /// Report a coding agent's state, from a lifecycle hook.
     ///
     /// Reads the payload on stdin for a tool that pipes it there (Claude); a tool that
@@ -109,10 +123,11 @@ pub struct AgentPromptArgs {
     pub take: std::path::PathBuf,
 }
 
-/// Synchronous on purpose: see `main` — `state` is answered before a runtime exists.
-pub fn run(command: AgentCmd) -> i32 {
+/// `state` is answered before a runtime exists (see `main`); the rest run on it.
+pub async fn run(command: AgentCmd) -> i32 {
     match command {
         AgentCmd::Skills { topic, json } => commands::skills::run(topic, json),
+        AgentCmd::Restart(args) => commands::ide::restart(args).await,
         AgentCmd::State(args) => state(args),
         AgentCmd::Settings(args) => commands::agent::settings(args.tool, args.session),
         AgentCmd::Prompt(args) => commands::agent::take_prompt(&args.take),
@@ -122,7 +137,8 @@ pub fn run(command: AgentCmd) -> i32 {
 /// This part's half of `crate::command_survives_an_update`, verb by verb so a new
 /// verb is blocked until somebody decides otherwise.
 ///
-/// All four survive. `skills` is a compile-time string with no config, database or
+/// `restart` is blocked: it asks the daemon, and a window, that an update is
+/// restarting. The other four survive. `skills` is a compile-time string with no config, database or
 /// daemon behind it; blocking it would tell a coding agent to come back later for
 /// its own instructions. `state`, `settings` and `prompt` touch neither the daemon
 /// nor the binaries — one POSTs to localhost and ignores the answer, one writes a
@@ -135,6 +151,7 @@ pub fn survives_an_update(command: &AgentCmd) -> bool {
         | AgentCmd::State(_)
         | AgentCmd::Settings(_)
         | AgentCmd::Prompt(_) => true,
+        AgentCmd::Restart(_) => false,
     }
 }
 

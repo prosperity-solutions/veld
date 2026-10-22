@@ -69,7 +69,14 @@ import {
   worktreeLabel,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
-import { IconPaperclip, IconX } from "@tabler/icons-react";
+import { IconPaperclip, IconShirt, IconX } from "@tabler/icons-react";
+import {
+  initialOutfitChoice,
+  outfitForCreate,
+  outfitOptions,
+  outfitReady,
+} from "../outfit/model";
+import { useOutfitState } from "../outfit/useOutfitState";
 import { clipboardImageIndex, clipboardImageName, isFileDrop } from "../panes/terminalPaste";
 import {
   addAttachments,
@@ -875,6 +882,8 @@ export function NewWorktreeDialog(props: {
     display_name?: string;
     emoji?: string;
     marker_color?: string;
+    /** The outfit profile to pin it to; absent follows the clone's. */
+    outfit?: string;
     /** The `ide.panes[].id` to open in the new checkout, or absent for none.
      *  Only ever sent alongside a `prompt` — see the dialog's own note. */
     agent?: string;
@@ -964,6 +973,16 @@ export function NewWorktreeDialog(props: {
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
+  /**
+   * outfit's state for the repo, read once at open. Only `ready` renders the
+   * picker; loading and a failed read are the same silence, and send nothing.
+   */
+  const { state: outfitState } = useOutfitState(props.repoRoot);
+  /** The profile picked, or `null` until the user touches it — the preselection
+   *  is derived from the state, so it cannot be stale when the state lands. */
+  const [outfitPick, setOutfitPick] = useState<string | null>(null);
+  const outfitChoice =
+    outfitPick ?? (outfitReady(outfitState) ? initialOutfitChoice(outfitState) : null);
   /**
    * What the chosen agent should start on, and the field this dialog now leads
    * with.
@@ -1309,6 +1328,8 @@ export function NewWorktreeDialog(props: {
         // assignment is the honest fallback.
         emoji: chosen.emoji || undefined,
         marker_color: chosen.color || undefined,
+        // Absent unless a profile is chosen: that key is what pins the checkout.
+        outfit: outfitForCreate(outfitState, outfitChoice),
         // See `launch`: the pane and the text travel together or not at all.
         agent: launch?.agent,
         prompt: launch?.prompt,
@@ -1453,6 +1474,34 @@ export function NewWorktreeDialog(props: {
       description={<span title={baseNote}>{baseNote}</span>}
     />
   );
+
+  /**
+   * The outfit profile picker, or nothing: only a `ready` outfit is worth a
+   * field, and it is the same field in both modes.
+   */
+  const outfitSelect = outfitReady(outfitState) ? (
+    <Select
+      label="Outfit"
+      leftSection={<IconShirt size={14} />}
+      allowDeselect={false}
+      data={outfitOptions(outfitState)}
+      value={outfitChoice}
+      onChange={(v) => v && setOutfitPick(v)}
+      renderOption={({ option }) => {
+        const o = option as (typeof option) & { description?: string };
+        return (
+          <div>
+            <Text size="sm">{o.label}</Text>
+            {o.description && (
+              <Text size="xs" c="dimmed">
+                {o.description}
+              </Text>
+            )}
+          </div>
+        );
+      }}
+    />
+  ) : null;
 
   /**
    * Everything the dialog used to ask for, as one block.
@@ -2025,6 +2074,7 @@ export function NewWorktreeDialog(props: {
                 />
                 {baseSelect}
               </SimpleGrid>
+              {outfitSelect}
               {/* **The field this dialog is now for.** A `Textarea`, not a
                   `TextInput`: prompts are sentences and often several, and a
                   one-line box that scrolls sideways makes re-reading what you
@@ -2198,6 +2248,7 @@ export function NewWorktreeDialog(props: {
                   hand a prompt to — these are the details instead.
                 </Text>
               )}
+              {outfitSelect}
               {options}
             </Stack>
           )}

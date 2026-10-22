@@ -267,14 +267,12 @@ fn report(
     let deadline = std::time::Instant::now()
         + std::time::Duration::from_millis(agent::HOOK_REQUEST_TIMEOUT_MS);
     match send_report(addr, session, tool, reported, naming.as_ref(), deadline) {
-        Some(remind) => {
+        Some((remind, context)) => {
             // Claude reads a hook's stdout as its answer: the reminder, or the stop
-            // refused. Nothing else is ever printed here.
-            if let Some(remind) = remind {
-                println!(
-                    "{}",
-                    agent::claude_naming_output(&naming_cli_word(), remind)
-                );
+            // refused, with the outfit note beside a first prompt. Nothing else is
+            // ever printed here.
+            if let Some(out) = hook_answer(&naming_cli_word(), remind, context.as_deref()) {
+                println!("{out}");
             }
             0
         }
@@ -284,8 +282,36 @@ fn report(
     }
 }
 
+/// What the hook prints: the naming nudge, with the outfit note added to a prompt's
+/// context. A refused stop carries no context — there is no prompt to put it beside.
+fn hook_answer(
+    cli: &str,
+    remind: Option<bool>,
+    context: Option<&str>,
+) -> Option<serde_json::Value> {
+    match (remind, context) {
+        (Some(false), _) => Some(agent::claude_naming_output(cli, false)),
+        (Some(true), None) => Some(agent::claude_naming_output(cli, true)),
+        (remind, Some(context)) => {
+            let text = if remind == Some(true) {
+                format!("{}\n\n{context}", agent::naming_line(cli))
+            } else {
+                context.to_owned()
+            };
+            Some(serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": text,
+                },
+            }))
+        }
+        (None, None) => None,
+    }
+}
+
 /// The exchange behind [`report`]: `None` unless the daemon answered 2xx, otherwise
-/// its naming verdict — `Some(true)` to remind, `Some(false)` to refuse the stop.
+/// its naming verdict — `Some(true)` to remind, `Some(false)` to refuse the stop — and
+/// the outfit note, when this was a first prompt in a worktree with outfit in play.
 ///
 /// A report carrying a naming turn that an older daemon refuses (422) is sent once
 /// more without it. `deadline` is one budget for both requests: the hook's own
@@ -297,7 +323,7 @@ fn send_report(
     reported: agent::State,
     naming: Option<&serde_json::Value>,
     deadline: std::time::Instant,
-) -> Option<Option<bool>> {
+) -> Option<(Option<bool>, Option<String>)> {
     let host = addr.to_string();
     let post = |naming: Option<&serde_json::Value>| {
         let request = agent_state_request(&host, session, tool, reported, naming)?;
@@ -311,11 +337,12 @@ fn send_report(
         return None;
     }
     let body: serde_json::Value = serde_json::from_slice(&sent.body).unwrap_or_default();
-    Some(match body["naming"].as_str() {
+    let remind = match body["naming"].as_str() {
         Some("remind") => Some(true),
         Some("block") => Some(false),
         _ => None,
-    })
+    };
+    Some((remind, body["context"].as_str().map(str::to_owned)))
 }
 
 /// The exact bytes of the agent-state POST, or `None` for a session id that must not
@@ -900,7 +927,7 @@ mod tests {
             Some(&turn),
             within(std::time::Duration::from_secs(2)),
         );
-        assert_eq!(verdict, Some(Some(true)));
+        assert_eq!(verdict, Some((Some(true), None)));
         assert_eq!(body_of(&rx.recv().unwrap())["naming"], turn);
         let resent = body_of(&rx.recv().unwrap());
         assert!(resent.get("naming").is_none(), "{resent}");
@@ -942,9 +969,29 @@ mod tests {
                 within(std::time::Duration::from_secs(2)),
             )
         };
-        assert_eq!(send(), Some(Some(false)));
-        assert_eq!(send(), Some(None));
+        assert_eq!(send(), Some((Some(false), None)));
+        assert_eq!(send(), Some((None, None)));
         handle.join().unwrap();
+    }
+
+    /// The outfit note goes beside the prompt, after the naming line when both come;
+    /// a refused stop never carries it.
+    #[test]
+    fn the_outfit_note_joins_a_prompts_context_and_never_a_stop() {
+        let context = |v: Option<serde_json::Value>| {
+            v.unwrap()["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let both = context(hook_answer("veld", Some(true), Some("NOTE")));
+        assert!(both.starts_with(&agent::naming_line("veld")) && both.ends_with("NOTE"));
+        assert_eq!(context(hook_answer("veld", None, Some("NOTE"))), "NOTE");
+        assert_eq!(
+            hook_answer("veld", Some(false), Some("NOTE")),
+            Some(agent::claude_naming_output("veld", false))
+        );
+        assert_eq!(hook_answer("veld", None, None), None);
     }
 
     #[test]

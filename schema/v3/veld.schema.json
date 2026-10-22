@@ -270,6 +270,29 @@
               "examples": [2]
             }
           }
+        },
+        "outfit": {
+          "description": "How new worktrees pick an outfit (https://outfit.oss.life.li) profile. Veld offers profiles only when outfit is in play on the machine: the `outfit` binary on the user's PATH, `outfit init` done in the repository, and at least one committed or local profile besides `base`. Then the create dialog shows an outfit picker, the top bar shows and switches the worktree's profile, and `veld ide worktree new` must be told `--outfit <profile>` unless `required` is false. `false` makes Veld leave outfit alone in this project.",
+          "oneOf": [
+            { "const": false },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "required": {
+                  "type": "boolean",
+                  "default": true,
+                  "description": "Whether `veld ide worktree new` must name a profile (`--outfit base` is a valid choice). When false, a create without `--outfit` gets `default`, or follows the clone's own profile when there is no `default`."
+                },
+                "default": {
+                  "type": "string",
+                  "minLength": 1,
+                  "description": "The profile the create dialog preselects, and the one a CLI create gets when `required` is false and no `--outfit` was given."
+                }
+              }
+            }
+          ],
+          "examples": [false, { "required": false, "default": "base" }]
         }
       }
     }

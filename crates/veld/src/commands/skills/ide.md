@@ -244,6 +244,9 @@ which files, how to tell it is done.
   declare is refused before anything is created (exit `5`); if the new checkout
   turns out not to declare it (a branch cut from `origin` without it), the
   human's usual agent starts instead and they are told.
+- `--outfit` names the outfit profile the new worktree wears — see the next
+  section. In a project with outfit profiles it is usually **required**; without
+  outfit it does nothing and you can leave it out.
 - `--name` is the title the rail shows, and it is **required**: a few words
   saying what the task is, in sentence case — "Fix login timeout", "API docs",
   "Cache spike" — not the branch name and not a sentence. It must fit the
@@ -256,13 +259,69 @@ missing or too-long title, or an unreadable prompt file; `3` not inside a worktr
 group; `5` no such agent pane; **`6` it may exist without everything you
 asked for** — a large checkout can take longer than the command waits, or the
 hand-off failed partway — so check the rail and **do not run it again** (the
-retry would collide with its branch). `--json` prints `{"id", "path", "branch", "alias", "name",
-"waiting", "agent"}` on stdout, where `waiting` says an agent is waiting to start
-and `agent` is the pane you named or `null` for the human's usual one.
+retry would collide with its branch); `7` an outfit profile is needed and none
+was named, or the one named is not offered here (nothing created); `8` the
+worktree was created but outfit could not put it in that profile, so no agent
+waits in it — the message says how to fix it. `--json` prints `{"id", "path",
+"branch", "alias", "name", "waiting", "agent", "outfit"}` on stdout, where
+`waiting` says an agent is waiting to start, `agent` is the pane you named or
+`null` for the human's usual one, and `outfit` is the profile it wears or `null`
+when it follows the clone's.
 
 Hand off one task per worktree, and only when the human would want it as its own
 branch. Each one is a checkout on their disk and a row in their rail until they
 deal with it.
+
+## outfit profiles (`--outfit`, `veld ide worktree outfit`)
+
+[outfit](https://outfit.oss.life.li) gives one person their own copies of a few
+tracked files — their `AGENTS.md`, their `.claude/skills` — as **profiles**,
+without changing anything for the team. A worktree wears one profile; `base` is
+the team's files. Veld takes part only where outfit is **in play**: the `outfit`
+binary installed, `outfit init` done in the repository, and at least one profile
+besides `base` (committed in `.outfit/profiles/`, or local to this clone).
+Everywhere else, none of this applies and nothing changes.
+
+```sh
+veld ide worktree outfit list                 # what this worktree wears, what a new one can
+veld ide worktree outfit list --json          # {"status", "required", "default", "current", "profiles": [...]}
+veld ide worktree new --branch fix/x --name "Fix X" --outfit lean --prompt-file /tmp/task.md
+veld ide worktree outfit use lean --restart-agent   # switch this worktree, then restart you to read it
+```
+
+- **Handing off.** Where outfit is in play, `veld ide worktree new` **must** be
+  told `--outfit <profile>` (exit `7` without one, listing each profile and what
+  it swaps). `base` is a valid choice. Pick the one the task calls for; if
+  nothing tells you, **ask the human** rather than guess — the profile decides
+  which instructions the next agent reads. The project can relax this
+  (`"ide": { "outfit": { "required": false, "default": "<profile>" } }` in
+  `veld.json`), and so can the person (`outfit.required` in Settings → Git:
+  *as the project says*, *always*, *never*); relaxed, a create without
+  `--outfit` gets the project's `default`, or follows the clone's profile.
+- **Switching where you are.** `veld ide worktree outfit use <profile>` runs
+  `outfit use <profile> --here` for the worktree you are in. You read your
+  instructions when you started, so the swapped files are not in your head yet:
+  add `--restart-agent` and Veld restarts you **in the same conversation** once
+  the command returns, with a first message saying why. outfit refuses a switch
+  that would hide uncommitted changes in a file it swaps (exit `8`, with outfit's
+  fix); commit or stash first.
+- **Editing a swapped file edits the profile**, not the team's copy. `outfit
+  status --json` lists the swapped paths; `outfit skills agents` says the rest.
+
+## Restarting yourself (`veld agent restart`)
+
+When your instructions changed under you — a new outfit profile, an edited
+`CLAUDE.md`, a skill installed — run `veld agent restart` (the same as `veld ide
+pane restart`). A moment after it returns, the Veld window restarts your pane
+with its `resume` command, so the conversation carries on, and your first message
+says you were restarted; do not restart again. `--fresh` starts a new
+conversation instead; `--prompt` sets that first message.
+
+Only a pane from the project's `ide.panes` can be restarted, and only one that
+declares `resume` can keep its conversation. Exit status: `0` the restart is on
+its way; `3` not in a Veld terminal; `4` no Veld window is showing this worktree
+(tell the human instead); `5` not such a pane, or one that cannot resume (use
+`--fresh` only if losing the conversation is fine).
 
 ## Why you may already know this
 
@@ -272,7 +331,8 @@ Veld terminal — a few lines appended to the system prompt (Claude's
 for Claude on Veld's mod (`terminal.claudeIntegration`), the same lines attached to
 the first prompt of each conversation.
 The user can turn that off (`terminal.agentContext`, *Settings → Activity*); the
-command works either way.
+command works either way. In a worktree where outfit is in play, the first prompt
+of a new conversation also carries a short note about its profiles.
 
 **If those lines name a full path to `veld`, run that path, not the bare word.**
 It means this terminal belongs to a development build of Veld, and the `veld` on

@@ -2092,6 +2092,44 @@ export function startTerminal(
   })();
 }
 
+/** How long [`restartAgentPane`] waits before it restarts anything. */
+export const RESTART_SETTLE_MS = 1500;
+
+/**
+ * Relaunch an agent pane because the agent in it asked to be — `veld agent
+ * restart`, or an outfit switch with `--restart-agent` — and hand it `prompt` as
+ * its first message.
+ *
+ * **Waits first**, so the CLI that asked can return and the agent's turn settle;
+ * restarting under it mid-reply would cut the very output that reports the
+ * restart. **No confirmation**, because the agent asked: the dialog guards a
+ * person's click, and nobody is there to answer it.
+ *
+ * The prompt rides the ordinary launch-prompt queue, so it is delivered exactly
+ * as the New worktree dialog's is: handed to the launch on a `fresh` start, typed
+ * in once the agent is reading input on `resume`. Ignored when this window has no
+ * live session under that id for that worktree — only the window that holds the
+ * tab can restart it — or when the tab is a plain shell, which has no agent.
+ */
+export function restartAgentPane(req: {
+  worktreeId: number;
+  sessionId: string;
+  mode: "resume" | "fresh";
+  prompt: string;
+  /** The pane's label, for the failure message if the prompt cannot be typed. */
+  label: string;
+}): void {
+  window.setTimeout(() => {
+    const s = sessions.get(req.sessionId);
+    if (!s || s.worktreeId !== req.worktreeId || s.spec === undefined) return;
+    // A leftover from the launch before this one would make the queue ignore the
+    // new prompt, and it described a conversation that is ending.
+    dropInitialPrompt(req.sessionId);
+    queueInitialPrompt(req.sessionId, req.prompt, req.label);
+    startTerminal(req.sessionId, req.mode, req.mode);
+  }, RESTART_SETTLE_MS);
+}
+
 /** Detach the element without ending the session. */
 export function unmountTerminal(id: string): void {
   sessions.get(id)?.container.remove();

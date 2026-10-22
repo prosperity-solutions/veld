@@ -462,15 +462,15 @@ async fn run(command: Command) {
     let exit_code = match command {
         Command::Orchestrator { command } => parts::orchestrator::run(command).await,
         Command::Ide { command } => parts::ide::run(command).await,
-        Command::Agent { command } => parts::agent::run(command),
+        Command::Agent { command } => parts::agent::run(command).await,
         Command::Network { command } => parts::network::run(command).await,
         Command::Myself { command } => parts::self_::run(command).await,
 
         // Normally answered in `main`, before any runtime exists; kept so the match
         // stays exhaustive and a future caller of `run` gets the same behaviour.
         Command::LegacyAgentState(args) => parts::agent::state(args),
-        Command::LegacyAgentSettings(args) => parts::agent::run(AgentCmd::Settings(args)),
-        Command::LegacyAgentPrompt(args) => parts::agent::run(AgentCmd::Prompt(args)),
+        Command::LegacyAgentSettings(args) => parts::agent::run(AgentCmd::Settings(args)).await,
+        Command::LegacyAgentPrompt(args) => parts::agent::run(AgentCmd::Prompt(args)).await,
         Command::LegacyOpenUrl(args) => parts::ide::open_url(args).await,
         Command::LegacyUpdate(args) => parts::self_::update(args).await,
         Command::LegacyDesktop { command } => parts::self_::desktop(command).await,

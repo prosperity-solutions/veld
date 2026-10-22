@@ -53,6 +53,7 @@ import {
   applyTerminalPrefs,
   type QueuedFile,
   queueInitialPrompt,
+  restartAgentPane,
   setBellSuppressed,
   setPaneCloseHandler,
 } from "./panes/terminalHost";
@@ -203,6 +204,7 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea, type PaneAreaHandle } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
+import { OutfitMenu } from "./components/OutfitMenu";
 import { notifyDone, notifyError, notifyRedirect, notifyTerminal, showSystemNotification } from "./shared/notify";
 import {
   JoinRequestRow,
@@ -273,6 +275,7 @@ import {
 } from "./panes/model";
 import { acquireWorktree } from "./ide/acquire";
 import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
+import { onRestartPaneRequest } from "./panes/restartRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import { CLAUDE_MOD_OFFER_ID, setClaudeModAsker, wantsClaudeModOffer } from "./ide/claudeModOffer";
 import {
@@ -4745,6 +4748,28 @@ function AppInner(props: {
     [openFileInWorktree],
   );
 
+  // An agent asked for its own pane to be relaunched (`veld agent restart`, or an
+  // outfit switch with `--restart-agent`). Only a tab this window holds counts:
+  // the daemon addresses the one window showing the worktree, but a layout may
+  // not have the tab, and `restartAgentPane` ignores a session it has not mounted.
+  useEffect(
+    () =>
+      onRestartPaneRequest((req) => {
+        const layout = layoutsRef.current[req.worktreeId];
+        const dock = layout ? dockOf(layout, req.sessionId) : null;
+        const tab =
+          layout && dock !== null
+            ? layout.docks[dock].tabs.find((t) => t.id === req.sessionId)
+            : undefined;
+        if (tab?.kind !== "terminal") return;
+        const spec = worktreesRef.current
+          .find((w) => w.id === req.worktreeId)
+          ?.ide.panes.find((p) => p.id === tab.spec);
+        restartAgentPane({ ...req, label: spec?.label ?? tab.title });
+      }),
+    [],
+  );
+
   // `veld ide open <url>` arrives on the IDE channel when no terminal of this page's
   // asked — so there is no session socket for the ordinary `open_url` frame to use.
   // Same placement rule as a file: beside the terminal it came from, else beside
@@ -8085,6 +8110,15 @@ function AppInner(props: {
                 `Carried ${files ?? "the changes"} across to ${worktreeLabel(created)}`,
               );
             }
+            // The worktree exists either way. An `outfit.error` means it follows
+            // the clone's profile instead of the one asked for — said out loud,
+            // for the same reason as the carry-over above.
+            if (created.outfit?.error) {
+              notifyError(
+                `${worktreeLabel(created)} was created, but not on the ${created.outfit.profile} outfit profile`,
+                created.outfit.error,
+              );
+            }
             // Newest first, in the section it was created into. Unplaced rows sort
             // last (`WT_ORDER`), so a new checkout used to appear at the bottom of
             // a long lane — furthest from the "＋" that was just clicked, and
@@ -9199,6 +9233,10 @@ function TopBar(props: {
               />
             </>
           )}
+          {/* The shown checkout's outfit profile; renders nothing unless outfit
+              is ready for it. Keyed on the path so the state follows the
+              worktree — see `OutfitMenu`. */}
+          <OutfitMenu key={worktree.path} path={worktree.path} />
           {/* **The database marker sits where the wrong label used to.** During
               the incident this chip read `repository unavailable` over a repo in
               perfect health, because a failed database write was folded into

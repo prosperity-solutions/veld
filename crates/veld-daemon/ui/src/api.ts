@@ -309,6 +309,46 @@ export interface CarryOverReport {
 /** {@link api.createWorktree}'s response: the worktree, plus its carry-over. */
 export interface CreatedWorktree extends Worktree {
   carry_over?: CarryOverReport;
+  /**
+   * Present when the create asked for an outfit profile. `error` set means the
+   * worktree exists but follows the clone's default profile — outfit's own
+   * sentence, fix included.
+   */
+  outfit?: { profile: string; error?: string };
+}
+
+/**
+ * Whether outfit is in play for a checkout. Only `"ready"` means the rest of
+ * this type is worth rendering; every other value is a reason to show nothing.
+ */
+export type OutfitStatus =
+  | "ready"
+  | "off"
+  | "absent"
+  | "not_set_up"
+  | "no_profiles"
+  | "broken";
+
+/** One profile outfit offers: a personal copy of a few tracked files. */
+export interface OutfitProfile {
+  name: string;
+  tier: "builtin" | "committed" | "local";
+  /** What it swaps. Empty means the team's own files. */
+  files: string[];
+}
+
+/** `POST /api/outfit/state` and `/api/outfit/use`'s answer. */
+export interface OutfitState {
+  status: OutfitStatus;
+  reason?: string;
+  fix?: string;
+  /** The clone has no profile of its own to follow, so a create must pick one. */
+  required: boolean;
+  /** The profile a new checkout starts on when none is chosen. */
+  default?: string;
+  /** `pinned`: this checkout was set to it, rather than following the clone. */
+  current?: { name: string; pinned: boolean };
+  profiles: OutfitProfile[];
 }
 
 /**
@@ -1792,6 +1832,11 @@ export const api = {
     lane?: string;
     emoji?: string;
     marker_color?: string;
+    /**
+     * The outfit profile to pin it to. **Omit the key** to follow the clone's
+     * profile — an empty string is not that, it names a profile.
+     */
+    outfit?: string;
   }) =>
     request<CreatedWorktree>("/api/worktrees", {
       method: "POST",
@@ -2158,6 +2203,25 @@ export const api = {
    */
   openWorktreeStorageDir: () =>
     request<void>("/api/open-worktree-storage-dir", { method: "POST" }),
+  /**
+   * outfit's state for a known checkout path. The daemon spawns a process to
+   * answer, so ask on demand — never on the poll.
+   */
+  outfitState: (path: string) =>
+    request<OutfitState>("/api/outfit/state", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  /**
+   * Pin a checkout to `profile`; answers with the new state. A refusal (409,
+   * `outfit_failed`) carries outfit's own sentence, fix included, as the
+   * thrown message.
+   */
+  outfitUse: (path: string, profile: string) =>
+    request<OutfitState>("/api/outfit/use", {
+      method: "POST",
+      body: JSON.stringify({ path, profile }),
+    }),
   /**
    * Mint a single-use ticket for an in-app terminal in a worktree.
    *

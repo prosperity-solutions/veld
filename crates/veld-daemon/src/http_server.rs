@@ -69,6 +69,10 @@ mod file_pane;
 #[path = "changes.rs"]
 mod changes;
 
+/// outfit profiles for new worktrees: whether they are in play, and pinning one.
+#[path = "outfit.rs"]
+mod outfit;
+
 /// Serialises the tests that point `VELD_DB_PATH` at a temp database.
 ///
 /// **Pre-existing flake, fixed here because it reddens CI at random.** Two modules

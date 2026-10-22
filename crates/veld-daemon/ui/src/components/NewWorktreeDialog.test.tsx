@@ -1,6 +1,6 @@
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { PaneSpec, Worktree } from "../api";
+import type { OutfitState, PaneSpec, Worktree } from "../api";
 import { render } from "../shared/testRender";
 import { NewWorktreeDialog } from "./dialogs";
 
@@ -19,6 +19,10 @@ import { NewWorktreeDialog } from "./dialogs";
 // resolve (empty) because Create stays disabled until they have; the marker
 // lists never do, which leaves the daemon's own assignment in charge — a state
 // the dialog already handles.
+// What outfit answers for the repo. Off by default: most people do not have it,
+// and the dialog must look the same for them as before.
+const outfit = vi.hoisted(() => ({ state: { status: "off", required: false, profiles: [] } as OutfitState }));
+
 vi.mock("../api", async (importOriginal) => {
   const real = await importOriginal<typeof import("../api")>();
   return {
@@ -30,6 +34,7 @@ vi.mock("../api", async (importOriginal) => {
           remote: [{ name: "origin/trunk", refname: "refs/remotes/origin/trunk", local_name: "trunk", has_local: false }],
           default_branch: "trunk",
         }),
+      outfitState: () => Promise.resolve(outfit.state),
       worktreeEmoji: () => new Promise(() => {}),
       worktreeColors: () => new Promise(() => {}),
     },
@@ -107,6 +112,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  outfit.state = { status: "off", required: false, profiles: [] };
 });
 
 test("this file runs in the `dom` project, with a DOM", () => {
@@ -399,5 +405,42 @@ describe("NewWorktreeDialog base branch", () => {
       from_path: "/wt/feat",
       carry_over: true,
     });
+  });
+});
+
+describe("NewWorktreeDialog outfit", () => {
+  const ready = (over: Partial<OutfitState> = {}): OutfitState => ({
+    status: "ready",
+    required: false,
+    current: { name: "team", pinned: false },
+    profiles: [
+      { name: "team", tier: "builtin", files: [] },
+      { name: "peter", tier: "local", files: ["AGENTS.md"] },
+    ],
+    ...over,
+  });
+
+  test("renders nothing, and sends nothing, unless outfit is ready", async () => {
+    const { onCreate } = open();
+    const create = screen.getByRole("button", { name: "Create worktree" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    expect(screen.queryByRole("combobox", { name: "Outfit" })).toBeNull();
+    await act(async () => {
+      fireEvent.click(create);
+    });
+    expect("outfit" in onCreate.mock.calls[0][0] && onCreate.mock.calls[0][0].outfit !== undefined).toBe(false);
+  });
+
+  test("preselects the repo default and sends it with the create", async () => {
+    outfit.state = ready({ default: "peter" });
+    const { onCreate } = open();
+    const select = await screen.findByRole("combobox", { name: "Outfit" });
+    expect((select as HTMLInputElement).value).toBe("peter");
+    const create = screen.getByRole("button", { name: "Create worktree" });
+    await waitFor(() => expect((create as HTMLButtonElement).disabled).toBe(false));
+    await act(async () => {
+      fireEvent.click(create);
+    });
+    expect(onCreate.mock.calls[0][0].outfit).toBe("peter");
   });
 });

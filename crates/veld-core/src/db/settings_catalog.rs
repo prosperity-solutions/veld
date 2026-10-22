@@ -453,6 +453,12 @@ pub(super) const GIT_CREATE_SOURCES: &[Choice] = &[
     choice("local", "Local main"),
 ];
 
+pub(super) const OUTFIT_REQUIRED: &[Choice] = &[
+    choice("project", "As the project says"),
+    choice("always", "Always"),
+    choice("never", "Never"),
+];
+
 pub(super) const WORKTREE_STORAGE_MODES: &[Choice] = &[
     choice("sibling", "Next to repository (default)"),
     choice("custom", "Custom location"),
@@ -942,6 +948,22 @@ impl SettingKey {
                 shape: ValueShape::Text,
                 choices: Choices::Static {
                     options: GIT_CREATE_SOURCES,
+                },
+                requires: None,
+            },
+            Self::OutfitRequired => Spec {
+                title: "Agents must pick an outfit",
+                help: "Only matters in a repository where outfit (outfit.oss.life.li) has \
+                       profiles to offer. As the project says: follow its veld.json \
+                       (`ide.outfit.required`, on unless the project turned it off). Always: an \
+                       agent creating a worktree (`veld ide worktree new`) must say which \
+                       profile with `--outfit`. Never: without `--outfit` the new worktree \
+                       follows your clone's own profile.",
+                group: Git,
+                section: None,
+                shape: ValueShape::Text,
+                choices: Choices::Static {
+                    options: OUTFIT_REQUIRED,
                 },
                 requires: None,
             },

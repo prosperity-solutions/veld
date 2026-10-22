@@ -23,6 +23,14 @@
 //! - `6` — the worktree may exist without everything it was asked for: no answer
 //!   arrived in time, or the hand-off failed partway. Check the rail, do not run
 //!   it again.
+//! - `7` — outfit: this project uses outfit profiles and none was named
+//!   (`--outfit`), the one named is not offered here, or outfit cannot apply one.
+//!   Nothing was created.
+//! - `8` — the worktree was created, but outfit could not put it in the profile
+//!   asked for, so no agent was left waiting in it. The message says how to fix it.
+//!
+//! `veld ide worktree outfit list|use` reads and switches the outfit profile of the
+//! worktree the caller is in.
 
 use std::io::Read as _;
 
@@ -39,10 +47,16 @@ pub enum WorktreeCommand {
     /// with the prompt as its first message; the human takes it from there.
     /// Nothing reports back to the caller.
     ///
+    /// When the project uses outfit profiles (outfit.oss.life.li), say which one
+    /// the new worktree wears with `--outfit`; `veld ide worktree outfit list`
+    /// shows them.
+    ///
     /// Exit status: 0 created, 1 refused (nothing created), 2 usage (including a
     /// missing or too-wide title), 3 not inside a
     /// worktree Veld knows, 4 no such group, 5 no such agent pane, 6 it may exist
-    /// without everything asked for — check the rail rather than retrying.
+    /// without everything asked for — check the rail rather than retrying, 7 an
+    /// outfit profile is needed or the one named is not offered (nothing created),
+    /// 8 created but its outfit could not be applied, so no agent waits in it.
     #[command(group(clap::ArgGroup::new("first").args(["prompt", "prompt_file"]).multiple(false)))]
     New {
         /// The branch to create.
@@ -78,9 +92,17 @@ pub enum WorktreeCommand {
         #[arg(long, visible_alias = "lane", value_name = "NAME")]
         group: Option<String>,
 
-        /// Print `{"id", "path", "branch", "alias", "name", "waiting", "agent"}` on
-        /// stdout. `waiting` is whether an agent pane is waiting to start; `agent` is
-        /// the pane named, or null for the human's usual one.
+        /// The outfit profile the new worktree wears (`base` is the team's files).
+        /// Required while this project offers outfit profiles, unless its veld.json
+        /// or your `outfit.required` setting relaxes that. See `veld ide worktree
+        /// outfit list`.
+        #[arg(long, value_name = "PROFILE")]
+        outfit: Option<String>,
+
+        /// Print `{"id", "path", "branch", "alias", "name", "waiting", "agent",
+        /// "outfit"}` on stdout. `waiting` is whether an agent pane is waiting to
+        /// start; `agent` is the pane named, or null for the human's usual one;
+        /// `outfit` is the profile it wears, or null when it follows the clone's.
         #[arg(long)]
         json: bool,
 
@@ -113,12 +135,72 @@ pub enum WorktreeCommand {
         session: Option<String>,
     },
 
+    /// The outfit profile of the worktree this runs in: list what is offered, or
+    /// switch to another.
+    ///
+    /// Only meaningful where outfit (outfit.oss.life.li) is installed, set up
+    /// (`outfit init`) and has a profile besides `base`.
+    Outfit {
+        #[command(subcommand)]
+        command: OutfitCommand,
+    },
+
     /// List the groups of this project's rail that `veld ide worktree new --group` can
     /// file into.
     ///
     /// Exit status: 0 listed, 1 failed, 3 not inside a worktree Veld knows.
     Groups {
         /// Print `{"project", "groups": [..]}` on stdout.
+        #[arg(long)]
+        json: bool,
+
+        /// Terminal session to resolve from when the working directory cannot be
+        /// read. Defaults to `$VELD_PTY_SESSION`.
+        #[arg(long, hide = true)]
+        session: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OutfitCommand {
+    /// Show whether outfit is in play here, the profiles a new worktree can wear
+    /// (and what each swaps), and the one this worktree wears now.
+    ///
+    /// Exit status: 0 listed (also when outfit is not in play — the output says
+    /// why), 1 failed, 3 not inside a worktree Veld knows.
+    List {
+        /// Print `{"status", "reason"?, "fix"?, "required", "default"?, "current"?:
+        /// {"name", "pinned"}, "profiles": [{"name", "tier", "files"}]}`. `status`
+        /// is `ready`, `off`, `absent`, `not_set_up`, `no_profiles` or `broken`.
+        #[arg(long)]
+        json: bool,
+
+        /// Terminal session to resolve from when the working directory cannot be
+        /// read. Defaults to `$VELD_PTY_SESSION`.
+        #[arg(long, hide = true)]
+        session: Option<String>,
+    },
+
+    /// Switch the worktree this runs in to another outfit profile (`outfit use
+    /// <profile> --here`).
+    ///
+    /// A running agent read the old profile's files when it started. With
+    /// `--restart-agent`, run from inside a Veld agent pane, Veld then restarts that
+    /// agent in the same conversation so it reads the new ones.
+    ///
+    /// Exit status: 0 switched (and, with `--restart-agent`, the restart asked
+    /// for), 1 failed, 3 not inside a worktree Veld knows, 4 no Veld window to
+    /// restart the agent in, 5 not a pane Veld can restart, 7 not a profile
+    /// offered here, 8 outfit refused the switch (the message says how to fix it).
+    Use {
+        /// The profile to wear; `base` is the team's files.
+        profile: String,
+
+        /// Then restart the agent this runs in, resuming its conversation.
+        #[arg(long)]
+        restart_agent: bool,
+
+        /// Print the new state, as `list --json` does.
         #[arg(long)]
         json: bool,
 
@@ -153,6 +235,7 @@ pub async fn run(command: WorktreeCommand) -> i32 {
             name,
             from_here,
             group,
+            outfit,
             json,
             session,
         } => {
@@ -168,7 +251,7 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                 }
             };
             let (cwd, session) = whereabouts(session);
-            let request = serde_json::json!({
+            let mut request = serde_json::json!({
                 "session_id": session,
                 "cwd": cwd,
                 "branch": branch,
@@ -178,6 +261,11 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                 "agent": agent,
                 "prompt": prompt,
             });
+            // Only when given: an older daemon refuses a field it does not know, and
+            // a create that never asked for an outfit must keep working against it.
+            if let Some(outfit) = outfit {
+                request["outfit"] = outfit.into();
+            }
             match create(&request).await {
                 Ok(body) => {
                     report(&body, json);
@@ -242,6 +330,7 @@ pub async fn run(command: WorktreeCommand) -> i32 {
                 }
             }
         }
+        WorktreeCommand::Outfit { command } => outfit(command).await,
         WorktreeCommand::Groups { json, session } => {
             let (cwd, session) = whereabouts(session);
             let mut query = vec![];
@@ -295,6 +384,122 @@ pub async fn run(command: WorktreeCommand) -> i32 {
     }
 }
 
+/// `veld ide worktree outfit list|use`.
+async fn outfit(command: OutfitCommand) -> i32 {
+    let (route, profile, restart_agent, json, session) = match command {
+        OutfitCommand::List { json, session } => ("outfit", None, false, json, session),
+        OutfitCommand::Use {
+            profile,
+            restart_agent,
+            json,
+            session,
+        } => ("outfit/use", Some(profile), restart_agent, json, session),
+    };
+    let (cwd, session) = whereabouts(session);
+    let request = serde_json::json!({ "session_id": session, "cwd": cwd, "profile": profile });
+    let state = match send(
+        reqwest::Client::new()
+            .post(format!(
+                "{}/api/ide/worktree/{route}",
+                veld_core::instance::daemon_base()
+            ))
+            .json(&request),
+        // A switch rewrites links in the checkout and is never cut short daemon-side.
+        std::time::Duration::from_secs(120),
+    )
+    .await
+    {
+        Ok(state) => state,
+        Err(refusal) => {
+            eprintln!("veld: {}", refusal.message);
+            return match refusal.code.as_deref() {
+                // A read or a switch that got no answer is just a failure here.
+                Some(NO_ANSWER) => 1,
+                code => exit_for(code),
+            };
+        }
+    };
+    if json {
+        println!("{state}");
+    } else {
+        print_outfit(&state, profile.is_some());
+    }
+    if !restart_agent {
+        return 0;
+    }
+    let Some(session) = session else {
+        eprintln!("veld: --restart-agent needs to run inside a Veld agent pane");
+        return 3;
+    };
+    let prompt = format!(
+        "Veld switched this worktree to outfit profile \"{}\" and restarted you so you read \
+         its files. Do not switch or restart again; pick up where you left off.",
+        profile.unwrap_or_default()
+    );
+    match super::ide::request_restart(&session, false, Some(&prompt)).await {
+        Ok(()) => {
+            eprintln!("Restarting this agent in a moment, in the same conversation.");
+            0
+        }
+        Err(refusal) => {
+            eprintln!("veld: switched, but {}", refusal.message);
+            exit_for(refusal.code.as_deref())
+        }
+    }
+}
+
+/// The human reading of an outfit state, on stderr except the profile names.
+fn print_outfit(state: &serde_json::Value, switched: bool) {
+    if state["status"] != "ready" {
+        let reason = state["reason"]
+            .as_str()
+            .unwrap_or("outfit is not in play here");
+        match state["fix"].as_str() {
+            Some(fix) => eprintln!("No outfit profiles to choose: {reason} (fix: `{fix}`)."),
+            None => eprintln!("No outfit profiles to choose: {reason}."),
+        }
+        return;
+    }
+    let current = state["current"]["name"].as_str().unwrap_or("base");
+    let how = if state["current"]["pinned"] == true {
+        "pinned here"
+    } else {
+        "the clone's default"
+    };
+    if switched {
+        eprintln!("This worktree now wears \"{current}\".");
+        return;
+    }
+    eprintln!("This worktree wears \"{current}\" ({how}). Profiles a new worktree can wear:");
+    for p in state["profiles"].as_array().into_iter().flatten() {
+        let name = p["name"].as_str().unwrap_or_default();
+        let files: Vec<&str> = p["files"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|f| f.as_str())
+            .collect();
+        let marks = [
+            (state["default"].as_str() == Some(name)).then_some("project default"),
+            (name == current).then_some("current"),
+        ];
+        let marks: Vec<&str> = marks.into_iter().flatten().collect();
+        let marks = if marks.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", marks.join(", "))
+        };
+        if files.is_empty() {
+            println!("{name}{marks} — the team's files");
+        } else {
+            println!("{name}{marks} — swaps {}", files.join(", "));
+        }
+    }
+    if state["required"] == true {
+        eprintln!("`veld ide worktree new` needs --outfit <profile> here.");
+    }
+}
+
 /// The prompt from `--prompt` or `--prompt-file`, `None` for neither. Blank counts
 /// as none, so `--prompt ""` from a script is a plain create rather than an error.
 fn read_prompt(
@@ -318,13 +523,15 @@ fn read_prompt(
 }
 
 /// What a refusal from the daemon means for the exit status.
-fn exit_for(code: Option<&str>) -> i32 {
+pub(crate) fn exit_for(code: Option<&str>) -> i32 {
     match code {
         Some("bad_name") => 2,
-        Some("not_in_worktree") => 3,
-        Some("unknown_group") => 4,
-        Some("no_agent" | "unknown_agent") => 5,
+        Some("not_in_worktree" | "no_session") => 3,
+        Some("unknown_group" | "no_window") => 4,
+        Some("no_agent" | "unknown_agent" | "not_a_pane" | "cannot_resume") => 5,
         Some(NO_ANSWER | "created_unrecorded") => 6,
+        Some("outfit_required" | "unknown_outfit" | "outfit_unavailable") => 7,
+        Some("outfit_failed") => 8,
         _ => 1,
     }
 }
@@ -358,14 +565,15 @@ fn report(body: &serde_json::Value, json: bool) {
             "name": name,
             "waiting": waiting,
             "agent": agent,
+            "outfit": body["outfit"]["profile"],
         });
         println!("{out}");
     }
 }
 
-struct Refusal {
-    message: String,
-    code: Option<String>,
+pub(crate) struct Refusal {
+    pub(crate) message: String,
+    pub(crate) code: Option<String>,
 }
 
 /// The [`Refusal`] code for a request that was sent and got no answer: the daemon
@@ -392,7 +600,7 @@ async fn create(request: &serde_json::Value) -> Result<serde_json::Value, Refusa
 
 /// Send one request to the daemon and read its JSON answer, or a [`Refusal`]
 /// carrying the daemon's sentence and `code`.
-async fn send(
+pub(crate) async fn send(
     request: reqwest::RequestBuilder,
     timeout: std::time::Duration,
 ) -> Result<serde_json::Value, Refusal> {
@@ -431,7 +639,9 @@ async fn send(
         Some(sentence) => sentence.to_owned(),
         // Every route here answers with a sentence; a bare 404 or 405 is a daemon
         // that predates them, which is what a CLI updated ahead of its daemon meets.
-        None if matches!(status.as_u16(), 404 | 405) => {
+        // 422 with no sentence is axum refusing a field it does not know — an older
+        // daemon meeting a newer flag (`--outfit`).
+        None if matches!(status.as_u16(), 404 | 405 | 422) => {
             "the running Veld daemon is older than this command — restart it (or run \
              `veld self doctor`) and try again"
                 .to_owned()
@@ -523,6 +733,15 @@ mod tests {
         assert_eq!(exit_for(Some("bad_name")), 2);
         assert_eq!(exit_for(Some(NO_ANSWER)), 6);
         assert_eq!(exit_for(Some("created_unrecorded")), 6);
+        assert_eq!(exit_for(Some("outfit_required")), 7);
+        assert_eq!(exit_for(Some("unknown_outfit")), 7);
+        assert_eq!(exit_for(Some("outfit_unavailable")), 7);
+        assert_eq!(exit_for(Some("outfit_failed")), 8);
+        // `veld agent restart`, through the same table.
+        assert_eq!(exit_for(Some("no_session")), 3);
+        assert_eq!(exit_for(Some("no_window")), 4);
+        assert_eq!(exit_for(Some("cannot_resume")), 5);
+        assert_eq!(exit_for(Some("not_a_pane")), 5);
         assert_eq!(exit_for(Some("anything_else")), 1);
         assert_eq!(exit_for(None), 1);
     }

@@ -922,6 +922,37 @@ enum ServerMsg {
         url: String,
         notify: bool,
     },
+    /// Restart the agent pane running in `session_id` — `veld agent restart`, asked
+    /// by that agent itself. `mode` is `resume` or `fresh`; `prompt` is what the
+    /// restarted agent is told first.
+    ///
+    /// Sent to **one** client, the one showing the worktree, like
+    /// [`Self::OpenFile`]: two windows each restarting it would be two launches.
+    RestartPane {
+        worktree_id: i64,
+        session_id: String,
+        mode: &'static str,
+        prompt: String,
+    },
+}
+
+/// Ask the window showing `worktree_id` to restart one of its agent panes. Returns
+/// whether one was there to ask — see [`push_open`], whose rules this follows.
+pub async fn push_restart(
+    worktree_id: i64,
+    session_id: String,
+    mode: &'static str,
+    prompt: String,
+) -> bool {
+    let msg = ServerMsg::RestartPane {
+        worktree_id,
+        session_id,
+        mode,
+        prompt,
+    };
+    let reg = REGISTRY.lock().await;
+    reg.showing(worktree_id)
+        .is_some_and(|client| client.tx.send(msg).is_ok())
 }
 
 /// What [`push_open`] asks a window to show.

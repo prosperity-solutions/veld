@@ -103,7 +103,11 @@ export const register: Register = (on) => {
   on('prompt.submit', async ($, e, next) => {
     if (!contextPending) return next(e)
     await setPending($, false)
-    return next({ ...e, context: [...(e.context ?? []), CONTEXT] })
+    // Where outfit has profiles to offer, Veld has a note about them for this
+    // session's first prompt — taken once, so a later conversation does not get it.
+    const outfit = await askContext($)
+    const extra = outfit ? [CONTEXT, outfit] : [CONTEXT]
+    return next({ ...e, context: [...(e.context ?? []), ...extra] })
   }).catch(passThrough)
 
   // Subagents raise no `turn.start`: this is always the session's own turn.
@@ -332,6 +336,23 @@ async function report($: EngineInterface, state: string, held = false): Promise<
 
 // Put one naming turn to the daemon and read its answer: `remind`, `block`, or nothing.
 // Bounded like a report, and nothing on any failure.
+async function askContext($: EngineInterface): Promise<string | undefined> {
+  try {
+    const res = await Promise.race([
+      $.http.fetch(`${DAEMON}/api/pty/sessions/${encodeURIComponent(session)}/context`, {
+        method: 'POST',
+        headers: { 'x-veld-request': '1' },
+      }),
+      $.clock.sleep(TIMEOUT_MS).then(() => undefined),
+    ])
+    if (!res || !res.ok) return undefined
+    const answer = JSON.parse(res.text).context
+    return typeof answer === 'string' ? answer : undefined
+  } catch {
+    return undefined
+  }
+}
+
 async function askNaming($: EngineInterface, turn: object): Promise<string | undefined> {
   try {
     const res = await Promise.race([
