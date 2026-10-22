@@ -2,33 +2,47 @@ import { useCallback, useEffect, useState } from "react";
 import { type OutfitState, api } from "../api";
 
 /**
- * outfit's state for the checkout at `path`, fetched when `path` changes and
- * never again on its own.
+ * The last answer for each checkout path, for this window's lifetime.
+ *
+ * Switching worktrees remounts the top-bar control, and starting from nothing each
+ * time made the shirt vanish and come back on every switch. A remembered answer is
+ * shown at once and replaced when the fresh one lands — outfit state changes
+ * rarely, and a stale label is corrected within the round trip.
+ */
+const answers = new Map<string, OutfitState>();
+
+/**
+ * outfit's state for the checkout at `path`: the remembered answer at once, then
+ * a fresh read when `path` changes, and never again on its own.
  *
  * The daemon spawns a process per ask, so this is on demand by design: no poll,
- * and `null` (loading, failed, or no path) is rendered as nothing. `set` takes
- * the answer a switch already returned, so a switch costs no second round trip.
+ * and `null` (not known yet, failed, or no path) is rendered as nothing. `set`
+ * takes the answer a switch already returned, so a switch costs no second round
+ * trip.
  */
 export function useOutfitState(path: string | null): {
   state: OutfitState | null;
-  /** True while the first answer for `path` is in flight; false once it landed or failed. */
+  /** True while there is no answer for `path` yet — none remembered, and the read
+   *  in flight. False once one is on screen, or the read failed. */
   loading: boolean;
   set: (state: OutfitState) => void;
   /** Read again, keeping the current answer on screen until the new one lands. */
   refresh: () => void;
 } {
-  const [state, setState] = useState<OutfitState | null>(null);
-  const [loading, setLoading] = useState(path !== null);
+  const remembered = path === null ? null : (answers.get(path) ?? null);
+  const [state, setState] = useState<OutfitState | null>(remembered);
+  const [loading, setLoading] = useState(path !== null && remembered === null);
   useEffect(() => {
-    setLoading(path !== null);
-    // Dropped at once: the previous checkout's profile must not label this one
-    // while its answer is in flight.
-    setState(null);
+    const known = path === null ? null : (answers.get(path) ?? null);
+    // Never another checkout's answer: what shows is this path's own, or nothing.
+    setState(known);
+    setLoading(path !== null && known === null);
     if (path === null) return;
     let cancelled = false;
     void api
       .outfitState(path)
       .then((s) => {
+        answers.set(path, s);
         if (!cancelled) setState(s);
       })
       // Nothing to say: no outfit is the common case, and a failed read is
@@ -41,7 +55,13 @@ export function useOutfitState(path: string | null): {
       cancelled = true;
     };
   }, [path]);
-  const set = useCallback((s: OutfitState) => setState(s), []);
+  const set = useCallback(
+    (s: OutfitState) => {
+      if (path !== null) answers.set(path, s);
+      setState(s);
+    },
+    [path],
+  );
   // Something other than this window can switch the profile — `outfit use` run by an
   // agent or in a terminal — so a caller re-reads when the answer is about to matter.
   // A failed re-read keeps what was there.
@@ -49,7 +69,10 @@ export function useOutfitState(path: string | null): {
     if (path === null) return;
     api
       .outfitState(path)
-      .then(setState)
+      .then((s) => {
+        answers.set(path, s);
+        setState(s);
+      })
       .catch(() => {});
   }, [path]);
   return { state, loading, set, refresh };

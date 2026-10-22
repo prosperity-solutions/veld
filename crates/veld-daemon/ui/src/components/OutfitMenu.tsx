@@ -21,16 +21,32 @@ import { notifyError } from "../shared/notify";
 /** How long the first answer may take before the slot shows it is resolving. */
 const SPINNER_DELAY_MS = 300;
 
+/**
+ * Whether the control was last showing a shirt. Switching away from a worktree that
+ * had one to a checkout with no remembered answer shows the spinner at once rather
+ * than after the delay — otherwise the shirt vanishes for the delay and comes back
+ * as a spinner. Somebody without outfit never has it set, so never sees a spinner.
+ */
+let lastShowedShirt = false;
+
 export function OutfitMenu(props: { path: string }) {
   const { state, loading, set, refresh } = useOutfitState(props.path);
   const [busy, setBusy] = useState(false);
   // Shown only once the answer is slow: a repository outfit never touched answers
   // in milliseconds, and a spinner that flashes there would shift the top bar for
   // everybody who does not use outfit.
-  const [slow, setSlow] = useState(false);
+  const [slow, setSlow] = useState(lastShowedShirt);
+  const ready = outfitReady(state);
+  useEffect(() => {
+    if (!loading) lastShowedShirt = ready;
+  }, [loading, ready]);
   useEffect(() => {
     if (!loading) {
       setSlow(false);
+      return;
+    }
+    if (lastShowedShirt) {
+      setSlow(true);
       return;
     }
     const timer = setTimeout(() => setSlow(true), SPINNER_DELAY_MS);
