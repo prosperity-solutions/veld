@@ -4593,7 +4593,7 @@ async fn create_worktree(
     Json(mut body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
     // The dialog sends a profile only when the picker holds one the person could
-    // see and change.
+    // see and change — a preselected default they kept included (`outfit::apply`).
     body.outfit_chosen = body.outfit.is_some();
     if let Some(profile) = body.outfit.as_deref() {
         // Only an imported repository: the probe starts a login shell and runs

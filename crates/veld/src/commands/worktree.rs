@@ -91,8 +91,7 @@ pub enum WorktreeCommand {
 
         /// The outfit profile the new worktree wears (`base` is the team's files).
         /// Required while this project offers outfit profiles, unless its veld.json
-        /// or your `outfit.required` setting relaxes that. See `veld ide worktree
-        /// outfit list`.
+        /// or your `outfit.required` setting relaxes that. `outfit ls` lists them.
         #[arg(long, value_name = "PROFILE")]
         outfit: Option<String>,
 

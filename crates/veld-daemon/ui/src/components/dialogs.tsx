@@ -974,10 +974,12 @@ export function NewWorktreeDialog(props: {
 }) {
   const [name, setName] = useState("");
   /**
-   * outfit's state for the repo, read once at open. Only `ready` renders the
-   * picker; loading and a failed read are the same silence, and send nothing.
+   * outfit's state for the repo, read fresh at open — never the remembered answer
+   * the top bar uses, since `required` and `default` decide what is sent. Only
+   * `ready` renders the picker; loading and a failed read are the same silence,
+   * and send nothing.
    */
-  const { state: outfitState, loading: outfitLoading } = useOutfitState(props.repoRoot);
+  const { state: outfitState, loading: outfitLoading } = useOutfitState(props.repoRoot, false);
   /** The profile picked, or `null` until the user touches it — the preselection
    *  is derived from the state, so it cannot be stale when the state lands. */
   const [outfitPick, setOutfitPick] = useState<string | null>(null);

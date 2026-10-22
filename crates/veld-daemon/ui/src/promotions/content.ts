@@ -489,7 +489,7 @@ export const PROMOTIONS: Promotion[] = [
     since: "2026-10-22",
     eyebrow: "Native outfit support",
     headline: "Give each worktree its own outfit profile",
-    body: "Using outfit? Pick a profile when you create a worktree, or switch it from the shirt by the project selector — agents are told, and restart to read it.",
+    body: "Using outfit? Pick a profile when you create a worktree, or switch from the shirt by the project selector. Running agents read it once restarted.",
     glyph: "terminal",
   },
 ];

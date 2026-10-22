@@ -12,6 +12,16 @@ import { type OutfitState, api } from "../api";
 const answers = new Map<string, OutfitState>();
 
 /**
+ * Bumped per path by every switch. A read that started before the latest switch is
+ * dropped when it lands, so a slow read cannot put the old profile back. Reads do
+ * not bump: two readers of one path (the top bar and the create dialog) must not
+ * cancel each other.
+ */
+const generations = new Map<string, number>();
+const generation = (path: string) => generations.get(path) ?? 0;
+const bump = (path: string) => generations.set(path, generation(path) + 1);
+
+/**
  * outfit's state for the checkout at `path`: the remembered answer at once, then
  * a fresh read when `path` changes, and never again on its own.
  *
@@ -20,7 +30,12 @@ const answers = new Map<string, OutfitState>();
  * takes the answer a switch already returned, so a switch costs no second round
  * trip.
  */
-export function useOutfitState(path: string | null): {
+export function useOutfitState(
+  path: string | null,
+  /** `false` to ignore the remembered answer and wait for a fresh one — for a
+   *  caller that acts on `required`/`default` rather than only labelling. */
+  remember = true,
+): {
   state: OutfitState | null;
   /** True while there is no answer for `path` yet — none remembered, and the read
    *  in flight. False once one is on screen, or the read failed. */
@@ -29,19 +44,21 @@ export function useOutfitState(path: string | null): {
   /** Read again, keeping the current answer on screen until the new one lands. */
   refresh: () => void;
 } {
-  const remembered = path === null ? null : (answers.get(path) ?? null);
+  const remembered = path === null || !remember ? null : (answers.get(path) ?? null);
   const [state, setState] = useState<OutfitState | null>(remembered);
   const [loading, setLoading] = useState(path !== null && remembered === null);
   useEffect(() => {
-    const known = path === null ? null : (answers.get(path) ?? null);
+    const known = path === null || !remember ? null : (answers.get(path) ?? null);
     // Never another checkout's answer: what shows is this path's own, or nothing.
     setState(known);
     setLoading(path !== null && known === null);
     if (path === null) return;
     let cancelled = false;
+    const started = generation(path);
     void api
       .outfitState(path)
       .then((s) => {
+        if (generation(path) !== started) return;
         answers.set(path, s);
         if (!cancelled) setState(s);
       })
@@ -54,10 +71,13 @@ export function useOutfitState(path: string | null): {
     return () => {
       cancelled = true;
     };
-  }, [path]);
+  }, [path, remember]);
   const set = useCallback(
     (s: OutfitState) => {
-      if (path !== null) answers.set(path, s);
+      if (path !== null) {
+        bump(path);
+        answers.set(path, s);
+      }
       setState(s);
     },
     [path],
@@ -67,9 +87,11 @@ export function useOutfitState(path: string | null): {
   // A failed re-read keeps what was there.
   const refresh = useCallback(() => {
     if (path === null) return;
+    const started = generation(path);
     api
       .outfitState(path)
       .then((s) => {
+        if (generation(path) !== started) return;
         answers.set(path, s);
         setState(s);
       })

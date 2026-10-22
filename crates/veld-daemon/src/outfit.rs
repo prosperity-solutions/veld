@@ -367,10 +367,12 @@ pub fn take_note(session: &str) -> Option<String> {
 /// the git write helpers do not kill on drop. outfit serialises it with its own
 /// lock, so a slow one only waits.
 ///
-/// `may_init` is whether a person (or an agent) *named* this profile. A profile
-/// that only arrived as a default — the project's `ide.outfit.default` on a
-/// hand-off that named none — never sets outfit up; it is refused with outfit's own
-/// fix instead. And `base` never needs it: a clone outfit has not set up already
+/// `may_init` is whether a person (or an agent) *chose* this profile: named it, or
+/// submitted the create dialog with it showing in the picker — a preselected
+/// default the person saw and kept counts, which is what makes a first-time user's
+/// first create just work. A profile that only arrived as a default nobody saw —
+/// the project's `ide.outfit.default` on a hand-off that named none — never sets
+/// outfit up; it is refused with outfit's own fix instead. And `base` never needs it: a clone outfit has not set up already
 /// wears the team's files, so there is nothing to pin.
 pub async fn apply(checkout: &Path, profile: &str, may_init: bool) -> Result<(), String> {
     let path = veld_core::user_path::cached_user_path_for(checkout).await;
