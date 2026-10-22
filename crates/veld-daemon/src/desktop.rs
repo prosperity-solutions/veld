@@ -63,6 +63,11 @@ pub fn routes() -> Router {
         // directory — instead of by a root the caller would have to know.
         .route("/api/handoffs", post(create_handoff))
         .route("/api/handoffs/groups", get(handoff_groups))
+        // outfit profiles. POSTs although two only read: each runs the user's
+        // `outfit` binary, and nothing that spawns a process is a CSRF-exempt GET.
+        // They name a checkout by path: ids are reused — see `CreateFrom::Worktree`.
+        .route("/api/outfit/state", post(outfit_state))
+        .route("/api/outfit/use", post(outfit_use))
         // What `veld ide worktree name` calls: retitle the worktree the caller is
         // in, resolved from where it runs the way a hand-off is.
         .route("/api/ide/worktree/name", post(name_caller_worktree))
@@ -2283,7 +2288,8 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     {
         return Err(
             "that checkout is sparse, so its uncommitted changes cannot be carried across \
-             — create the worktree without carrying them"
+             — create the worktree without carrying them (if an outfit profile made it \
+             sparse, `outfit use base --here` there first lets them be carried)"
                 .to_owned(),
         );
     }
@@ -2387,6 +2393,21 @@ struct CreatedWorktreeView {
     /// Present only for a spin-off that was asked to carry work across.
     #[serde(skip_serializing_if = "Option::is_none")]
     carry_over: Option<CarryOverReport>,
+    /// Present only for a create that was asked to wear an outfit profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outfit: Option<OutfitReport>,
+}
+
+/// What pinning the new checkout to its outfit profile did. Reported rather than
+/// raised, like [`CarryOverReport`]: by then the checkout exists, and a 4xx would
+/// say it does not.
+#[derive(Serialize)]
+struct OutfitReport {
+    profile: String,
+    /// outfit's own sentence and fix, when the pin did not happen. The checkout
+    /// then follows the clone's default profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 /// How many paths the new checkout has uncommitted — the number reported as
@@ -2756,8 +2777,8 @@ struct HandoffView {
 
 #[derive(Serialize)]
 struct WorktreeView {
-    // **Never name a field here `carry_over`.** `CreatedWorktreeView` flattens
-    // this struct beside its own `carry_over`, and serde emits a duplicate key
+    // **Never name a field here `carry_over` or `outfit`.** `CreatedWorktreeView`
+    // flattens this struct beside its own `carry_over` and `outfit`, and serde emits a duplicate key
     // for that collision with no compile-time complaint —
     // `the_create_response_flattens_the_worktree_and_omits_an_absent_carry_over`
     // is the only thing that would notice.
@@ -4535,6 +4556,16 @@ struct CreateWorktreeBody {
     /// Marker colour chosen in the create dialog; assigned when absent.
     #[serde(default)]
     marker_color: Option<String>,
+    /// The outfit profile to pin the new checkout to (`outfit use <p> --here`).
+    /// Absent: it follows the clone's default profile, as any `git worktree add`
+    /// does. Checked against what outfit offers by the route, before this runs.
+    #[serde(default)]
+    outfit: Option<String>,
+    /// Whether `outfit` was chosen by someone, so pinning it may run `outfit init`
+    /// where outfit was never set up (see `outfit::apply`). Never from the wire: the
+    /// route that builds the request decides.
+    #[serde(skip)]
+    outfit_chosen: bool,
 }
 
 impl CreateWorktreeBody {
@@ -4559,13 +4590,83 @@ impl CreateWorktreeBody {
 }
 
 async fn create_worktree(
-    Json(body): Json<CreateWorktreeBody>,
+    Json(mut body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    // The dialog sends a profile only when the picker holds one the person could
+    // see and change — a preselected default they kept included (`outfit::apply`).
+    body.outfit_chosen = body.outfit.is_some();
+    if let Some(profile) = body.outfit.as_deref() {
+        // Only an imported repository: the probe starts a login shell and runs
+        // outfit (and through it git) in the directory, so a path straight from the
+        // request body must not reach it — `create_checkout`'s own lookup comes later.
+        let given = body.repo_root.clone();
+        let root = crate::offload::blocking(move || {
+            open_desktop_db()?
+                .get_repo(FsPath::new(&given))
+                .map_err(db_err)?
+                .map(|repo| repo.root)
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))
+        })
+        .await?;
+        let state = super::outfit::state_for(FsPath::new(&root)).await;
+        check_outfit(&state, profile)?;
+        // **Detached**, like a hand-off: a window that reloads mid-create drops this
+        // handler's future, and between `git worktree add` and the pin that would
+        // leave a checkout silently wearing the clone's profile instead.
+        return tokio::spawn(create_checkout(body))
+            .await
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the create failed partway ({e}) — check the rail before retrying"),
+                )
+            })?
+            .map(Json);
+    }
     create_checkout(body).await.map(Json)
+}
+
+/// Refuse an outfit profile that outfit would not apply here, before anything is
+/// created: outfit not in play, or a name it does not offer. Coded, so the CLI
+/// picks its exit status without reading the sentence.
+fn check_outfit(state: &super::outfit::OutfitState, profile: &str) -> Result<(), ApiError> {
+    use super::file_pane::coded;
+    if state.status != super::outfit::Readiness::Ready {
+        let reason = state
+            .reason
+            .as_deref()
+            .unwrap_or("outfit is not in play here");
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "outfit_unavailable",
+            match state.fix.as_deref() {
+                Some(fix) => {
+                    format!("cannot use outfit profile \"{profile}\": {reason} (fix: {fix})")
+                }
+                None => format!("cannot use outfit profile \"{profile}\": {reason}"),
+            },
+        ));
+    }
+    if !state.offers(profile) {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "unknown_outfit",
+            format!(
+                "no outfit profile called \"{profile}\" here — pick one of: {}",
+                state.names()
+            ),
+        ));
+    }
+    Ok(())
 }
 
 /// Create a checkout as `POST /api/worktrees` describes it — shared with
 /// [`create_handoff`], which arrives at the same request by another route.
+///
+/// **`outfit` is applied, never checked, here.** A caller that sets it must have
+/// run [`check_outfit`] first (and, for an agent's hand-off, [`handoff_outfit`],
+/// which also enforces `required`) — otherwise an unknown profile surfaces only
+/// after `git worktree add`, as a created checkout with an `OutfitReport` error.
 ///
 /// The checkout is listed by the rail's poll as soon as git registers it, which is
 /// well before this returns. A caller that files it somewhere afterwards (as
@@ -4962,6 +5063,13 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
         }
     };
     let git_refs: Vec<&str> = git_args.iter().map(String::as_str).collect();
+    // Out of the rail until the outfit is on: the poll lists a checkout as soon as
+    // git registers it, and a terminal opened there in between would start under
+    // the clone's default profile and then have its files swapped underneath it.
+    let _hidden = body
+        .outfit
+        .is_some()
+        .then(|| HandoffInFlight::start(&body.repo_root, &body.branch));
     // Recorded as adopted before the checkout exists, because the IDE's poll can
     // reconcile between `git worktree add` and the sync below and would otherwise
     // file it as a discovery. Spelled as git will report it: git records the
@@ -5006,6 +5114,19 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
                 error,
             })
         }
+    };
+
+    // After the carry-over, so the carried files are what outfit checks before it
+    // swaps anything — it refuses to hide uncommitted changes, and says how to
+    // proceed, rather than losing them.
+    let outfit = match body.outfit.as_deref() {
+        None => None,
+        Some(profile) => Some(OutfitReport {
+            profile: profile.to_owned(),
+            error: super::outfit::apply(&checkout_path, profile, body.outfit_chosen)
+                .await
+                .err(),
+        }),
     };
 
     let worktrees = sync_repo_worktrees(&db, &repo_root).await?;
@@ -5091,6 +5212,7 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
     Ok(CreatedWorktreeView {
         worktree: view,
         carry_over,
+        outfit,
     })
 }
 
@@ -5125,6 +5247,11 @@ struct HandoffRequest {
     /// and filed like any other new worktree.
     #[serde(default)]
     prompt: Option<String>,
+    /// The outfit profile the new checkout wears. Required while outfit is in play
+    /// and the project (or the person's `outfit.required`) says so; see
+    /// [`handoff_outfit`].
+    #[serde(default)]
+    outfit: Option<String>,
 }
 
 /// `POST /api/handoffs` — create a checkout for a human to take over, and leave
@@ -5222,6 +5349,8 @@ async fn create_handoff(
         }
     }
     validate_branch(&body.branch)?;
+    let outfit = handoff_outfit(&source.path, body.outfit.as_deref()).await?;
+
     // Refused here, before anything is hidden or fetched: the create would fail
     // on it anyway, but only after `git fetch`, and in the meantime the in-flight
     // guard below would hide the checkout that already has this branch — `main`
@@ -5263,6 +5392,8 @@ async fn create_handoff(
         path: None,
         emoji: None,
         marker_color: None,
+        outfit_chosen: body.outfit.as_deref().is_some_and(|n| !n.trim().is_empty()),
+        outfit,
     };
     let agent = agent.unwrap_or_default().to_owned();
     let into_section = body.lane.as_deref().is_none_or(str::is_empty);
@@ -5324,6 +5455,31 @@ async fn record_handoff(
             return Err((status, body));
         }
     };
+    // **No agent in the wrong outfit.** The pane would start reading the clone's
+    // default profile's files — the very thing the caller chose against — and
+    // nobody would notice before it began. The checkout stays (it is a real,
+    // empty branch), the agent does not wait in it, and the caller is told why
+    // and how to finish by hand.
+    if let Some(OutfitReport {
+        profile,
+        error: Some(error),
+    }) = &created.outfit
+    {
+        let path = created.worktree.worktree.path.clone();
+        let started = if prompt.is_some() {
+            " No agent was left waiting in it."
+        } else {
+            ""
+        };
+        return Err(super::file_pane::coded(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "outfit_failed",
+            format!(
+                "created {path}, but outfit could not put it in profile \"{profile}\": \
+                 {error}.{started} Fix it there, then run `outfit use {profile} --here` in it."
+            ),
+        ));
+    }
     let Some(prompt) = prompt else {
         return Ok(created);
     };
@@ -5331,6 +5487,7 @@ async fn record_handoff(
     let worktree_id = created.worktree.worktree.id;
     let session_id = uuid::Uuid::new_v4().to_string();
     let carry_over = created.carry_over;
+    let outfit = created.outfit;
     let view = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
         let recorded = db
@@ -5360,7 +5517,146 @@ async fn record_handoff(
     Ok(CreatedWorktreeView {
         worktree: view,
         carry_over,
+        outfit,
     })
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OutfitRequest {
+    /// A checkout Veld knows, by path: the repo root for the create dialog, the
+    /// shown worktree for the top bar.
+    path: String,
+    /// For `use`: the profile to pin it to.
+    #[serde(default)]
+    profile: Option<String>,
+}
+
+/// The checkout at `path`, by its stored path — refused unless it is one Veld
+/// knows, so these routes never run outfit in an arbitrary directory.
+async fn known_checkout(path: String) -> Result<String, ApiError> {
+    crate::offload::blocking(move || {
+        let db = open_desktop_db()?;
+        let id = super::file_pane::worktree_containing(&db, FsPath::new(&path))
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "not a checkout Veld knows"))?;
+        let wt = db
+            .get_worktree(id)
+            .map_err(db_err)?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
+        Ok(wt.path)
+    })
+    .await
+}
+
+/// `POST /api/outfit/state` — where outfit stands for a checkout: whether it is in
+/// play, the profiles a new worktree can wear, and the one this checkout wears.
+async fn outfit_state(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<OutfitRequest>,
+) -> Result<Json<super::outfit::OutfitState>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let path = known_checkout(body.path).await?;
+    Ok(Json(super::outfit::state_for(FsPath::new(&path)).await))
+}
+
+/// `POST /api/outfit/use` — pin a checkout to a profile, then answer as
+/// `/api/outfit/state` does. outfit's refusal (uncommitted changes in a file it
+/// would swap, say) comes back as a 409 with outfit's own fix in the sentence.
+async fn outfit_use(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<OutfitRequest>,
+) -> Result<Json<super::outfit::OutfitState>, ApiError> {
+    super::file_pane::require_local_host(&headers)?;
+    let path = known_checkout(body.path).await?;
+    switch_outfit(path, body.profile).await.map(Json)
+}
+
+async fn switch_outfit(
+    path: String,
+    profile: Option<String>,
+) -> Result<super::outfit::OutfitState, ApiError> {
+    use super::file_pane::coded;
+    let profile = profile
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "name the profile to use"))?;
+    let checkout = FsPath::new(&path);
+    check_outfit(&super::outfit::state_for(checkout).await, &profile)?;
+    super::outfit::apply(checkout, &profile, true)
+        .await
+        .map_err(|e| coded(StatusCode::CONFLICT, "outfit_failed", e))?;
+    Ok(super::outfit::state_for(checkout).await)
+}
+
+/// The profile a hand-off's checkout wears, decided before anything is created.
+///
+/// Named: checked against what outfit offers from the calling checkout. Not named:
+/// refused while outfit is in play and a choice is required — the refusal lists the
+/// profiles and what each swaps, because the caller is usually an agent and the
+/// sentence is all it has to choose with — else the project's `default`, else none
+/// (the clone's default profile, as `git worktree add` gives it).
+///
+/// **Fails closed**: outfit installed but not answering refuses a required choice
+/// rather than reading as "outfit is absent" and skipping it.
+async fn handoff_outfit(source: &str, named: Option<&str>) -> Result<Option<String>, ApiError> {
+    let named = named.map(str::trim).filter(|n| !n.is_empty());
+    let state = super::outfit::state_for(FsPath::new(source)).await;
+    decide_handoff_outfit(&state, named)
+}
+
+/// [`handoff_outfit`]'s decision, from outfit's state. Separate so each arm is
+/// tested without outfit.
+fn decide_handoff_outfit(
+    state: &super::outfit::OutfitState,
+    named: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    use super::file_pane::coded;
+    use super::outfit::Readiness;
+    if let Some(profile) = named {
+        check_outfit(state, profile)?;
+        return Ok(Some(profile.to_owned()));
+    }
+    match state.status {
+        Readiness::Ready if state.required => {
+            let choices = state
+                .profiles
+                .iter()
+                .map(|p| {
+                    if p.files.is_empty() {
+                        format!("  {} — the team's files", p.name)
+                    } else {
+                        format!("  {} ({}) — swaps {}", p.name, p.tier, p.files.join(", "))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hint = match &state.default {
+                Some(d) => format!(" The project suggests \"{d}\"."),
+                None => String::new(),
+            };
+            Err(coded(
+                StatusCode::BAD_REQUEST,
+                "outfit_required",
+                format!(
+                    "this project uses outfit, so say which profile the new worktree wears \
+                     with --outfit <profile>.{hint} If you cannot tell which fits the task, ask \
+                     the human rather than guess.\n{choices}"
+                ),
+            ))
+        }
+        Readiness::Ready => Ok(state.default.clone()),
+        Readiness::Broken if state.required => Err(coded(
+            StatusCode::BAD_REQUEST,
+            "outfit_unavailable",
+            format!(
+                "{} — veld cannot tell which outfit profiles exist, so it will not guess \
+                 (fix: {}; or set `outfit.required` to never)",
+                state.reason.as_deref().unwrap_or("outfit did not answer"),
+                state.fix.as_deref().unwrap_or("outfit status"),
+            ),
+        )),
+        _ => Ok(None),
+    }
 }
 
 /// The worktree a hand-off request comes from: the one containing `cwd`, or —
@@ -8332,6 +8628,7 @@ mod tests {
             let view = super::super::CreatedWorktreeView {
                 worktree: super::wt_view(7, false, vec![]),
                 carry_over: None,
+                outfit: None,
             };
             let json = serde_json::to_value(&view).expect("the response must serialize");
             let obj = json.as_object().expect("an object");
@@ -8344,6 +8641,10 @@ mod tests {
                 !obj.contains_key("carry_over"),
                 "an absent carry-over must not appear as null — a client reading \
                  this object must see exactly what it always saw"
+            );
+            assert!(
+                !obj.contains_key("outfit"),
+                "an absent outfit report must not appear as null either"
             );
             assert!(
                 obj.contains_key("deleting") && obj.contains_key("presets"),
@@ -9520,5 +9821,95 @@ mod tests {
         git(&work, &["checkout", "-qb", "feature"]);
         let refusal = checked_default_branch(&db, &work).await.unwrap_err();
         assert_eq!(refusal.0, StatusCode::CONFLICT);
+    }
+}
+
+#[cfg(test)]
+mod handoff_outfit_tests {
+    use super::super::outfit::{OutfitState, Profile, Readiness};
+    use super::decide_handoff_outfit;
+
+    fn state(status: Readiness, required: bool, default: Option<&str>) -> OutfitState {
+        let profile = |name: &str, files: &[&str]| Profile {
+            name: name.to_owned(),
+            tier: if name == "base" { "builtin" } else { "local" }.to_owned(),
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+        };
+        OutfitState {
+            status,
+            reason: (status != Readiness::Ready).then(|| "why".to_owned()),
+            fix: None,
+            required,
+            default: default.map(str::to_owned),
+            current: None,
+            profiles: if status == Readiness::Ready {
+                vec![profile("base", &[]), profile("mine", &["AGENTS.md"])]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn code(result: Result<Option<String>, super::ApiError>) -> String {
+        result.unwrap_err().1.0["code"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_named_profile_is_taken_only_when_offered() {
+        let ready = state(Readiness::Ready, true, None);
+        assert_eq!(
+            decide_handoff_outfit(&ready, Some("mine")).unwrap(),
+            Some("mine".to_owned())
+        );
+        assert_eq!(
+            code(decide_handoff_outfit(&ready, Some("nope"))),
+            "unknown_outfit"
+        );
+        let absent = state(Readiness::Absent, false, None);
+        assert_eq!(
+            code(decide_handoff_outfit(&absent, Some("mine"))),
+            "outfit_unavailable"
+        );
+    }
+
+    #[test]
+    fn a_required_choice_is_refused_with_every_profile_and_what_it_swaps() {
+        let err = decide_handoff_outfit(&state(Readiness::Ready, true, Some("mine")), None)
+            .unwrap_err()
+            .1
+            .0;
+        assert_eq!(err["code"], "outfit_required");
+        let text = err["error"].as_str().unwrap();
+        assert!(text.contains("base — the team's files"), "{text}");
+        assert!(text.contains("mine (local) — swaps AGENTS.md"), "{text}");
+        assert!(text.contains("suggests \"mine\""), "{text}");
+    }
+
+    #[test]
+    fn relaxed_takes_the_default_or_follows_the_clone() {
+        let relaxed = state(Readiness::Ready, false, Some("mine"));
+        assert_eq!(
+            decide_handoff_outfit(&relaxed, None).unwrap(),
+            Some("mine".to_owned())
+        );
+        let relaxed = state(Readiness::Ready, false, None);
+        assert_eq!(decide_handoff_outfit(&relaxed, None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_broken_outfit_fails_closed_only_when_a_choice_is_required() {
+        let broken = state(Readiness::Broken, true, None);
+        assert_eq!(
+            code(decide_handoff_outfit(&broken, None)),
+            "outfit_unavailable"
+        );
+        let broken = state(Readiness::Broken, false, None);
+        assert_eq!(decide_handoff_outfit(&broken, None).unwrap(), None);
+        for quiet in [Readiness::Off, Readiness::Absent, Readiness::NoProfiles] {
+            assert_eq!(
+                decide_handoff_outfit(&state(quiet, false, None), None).unwrap(),
+                None
+            );
+        }
     }
 }

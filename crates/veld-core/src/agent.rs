@@ -1365,6 +1365,35 @@ pub fn agent_context(cli: &str) -> String {
     )
 }
 
+/// The outfit half of the agent's context, for a worktree where outfit has profiles
+/// to offer — handed over once, beside the first prompt, never in the system prompt
+/// every session pays for: most worktrees have no outfit, and this is about one.
+///
+/// `wearing` is the profile this checkout wears; `profiles` the offered names.
+#[must_use]
+pub fn outfit_context(cli: &str, wearing: &str, profiles: &str, required: bool) -> String {
+    let handoff = if required {
+        format!(
+            "When you hand work off with `{cli} ide worktree new`, you must say which profile \
+             the new worktree wears with `--outfit <profile>`; ask the human if the task does \
+             not tell you which. "
+        )
+    } else {
+        format!("`{cli} ide worktree new` takes `--outfit <profile>`. ")
+    };
+    format!(
+        "This repository uses outfit profiles (outfit.oss.life.li): personal copies of a few \
+         tracked files, such as an AGENTS.md or skills, that only this person sees. This \
+         worktree wears \"{wearing}\"; offered: {profiles} (`outfit ls` says what each \
+         swaps). An edit to a swapped file goes to the profile, not to the \
+         team's copy — `outfit status --json` lists them. {handoff}To switch this worktree to \
+         another profile, run `outfit use <profile> --here` and then `{cli} agent restart` as \
+         the last thing in your turn: Veld restarts you in this same conversation so you read \
+         the new files. The profile can change after this note; `outfit status` says what it \
+         is now."
+    )
+}
+
 /// The one line both enforcing hooks hand the agent: the wrapper's
 /// [`claude_naming_output`] and the mod's stop.
 #[must_use]

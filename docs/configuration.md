@@ -2327,6 +2327,36 @@ A useful calibration: `s` should be high enough that a normal worktree-creation
 cycle never trips it, but low enough that a `main` nobody has updated for a
 sprint reads clearly red.
 
+### `ide.outfit` — outfit profiles for new worktrees
+
+[outfit](https://outfit.oss.life.li) gives one person their own copies of a few
+tracked files (an `AGENTS.md`, `.claude/skills`) as *profiles*. Veld offers
+them only where outfit is in play **on the machine**: the `outfit` binary on the
+user's `PATH` and at least one profile besides `base` — committed under
+`.outfit/profiles/`, or local to the clone. A repository where `outfit init` was
+never run is offered them too; picking one runs it (plain: only this clone's
+`.git` changes). Then
+the New worktree dialog has an outfit picker, the top bar shows and switches the
+worktree's profile, and `veld ide worktree new` must be told `--outfit
+<profile>`. This key only tunes that; a project without it gets the defaults.
+
+```jsonc
+"ide": {
+  // Agents may create worktrees without naming a profile; they get "base".
+  "outfit": { "required": false, "default": "base" }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `required` | `true` | Whether `veld ide worktree new` must name a profile (exit 7 without one). The person's `outfit.required` setting (*as the project says* / *always* / *never*) overrides it. |
+| `default` | — | The profile the dialog preselects, and the one a CLI create gets when `required` is false. A name the person does not have (a teammate's local profile) is ignored. |
+
+`"outfit": false` makes Veld leave outfit alone in this project. Committed
+profiles are versioned: one that exists on the calling branch but not on the new
+worktree's base cannot be applied, and the create says so (exit 8, no agent
+started).
+
 ### Naming a worktree
 
 There is no config key for it. A worktree is named by the agent working in it:

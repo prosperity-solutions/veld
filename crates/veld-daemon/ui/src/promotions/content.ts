@@ -481,4 +481,15 @@ export const PROMOTIONS: Promotion[] = [
     body: "Click a path in a terminal, or let the agent open it for you. Markdown, CSVs and code show beside it — select lines to copy a reference back.",
     glyph: "panes",
   },
+  {
+    // The maintainer asked for it, as "Native outfit integration". Shown to
+    // everybody, so the body opens by naming who it is for: somebody who does not
+    // use outfit reads one line and is done.
+    id: "outfit-profiles",
+    since: "2026-10-22",
+    eyebrow: "Native outfit support",
+    headline: "Give each worktree its own outfit profile",
+    body: "Using outfit? Pick a profile when you create a worktree, or switch from the shirt by the project selector. Running agents read it once restarted.",
+    glyph: "terminal",
+  },
 ];

@@ -568,6 +568,9 @@ pub struct IdeSection {
     /// have a home rather than each squatting at the top of `ide`.
     #[serde(default = "default_staleness_sensitivity")]
     pub staleness_sensitivity: f64,
+    /// How new worktrees pick an outfit profile (`ide.outfit`). See [`OutfitPolicy`].
+    #[serde(default)]
+    pub outfit: OutfitPolicy,
     /// Top-level keys under `ide` that this version still does not interpret, in
     /// sorted order. F8 names them so an author can tell "reserved" from "typo".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1119,6 +1122,39 @@ pub fn is_local_origin(origin: &OriginPattern) -> bool {
             .is_ok_and(|ip| ip.is_loopback())
 }
 
+/// What the project says about [outfit](https://outfit.oss.life.li) profiles for
+/// new worktrees (`ide.outfit`).
+///
+/// It only *tunes* the integration. Whether outfit is in play at all is decided on
+/// the machine — the binary on the user's `PATH` and at least one profile besides
+/// `base` (picking one runs `outfit init` where it never ran) — because a profile can be local-only, and a project
+/// that has never heard of outfit must not be able to switch it off for the person
+/// who uses it. `false` is the one exception: a project that wants veld to leave
+/// outfit alone entirely.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OutfitPolicy {
+    /// `false` when the project wrote `"outfit": false`.
+    pub enabled: bool,
+    /// Whether `veld ide worktree new` must be told which profile to use. Default
+    /// `true`: an agent that branches work off should choose, not inherit
+    /// whatever the clone happens to be wearing.
+    pub required: bool,
+    /// The profile the create dialog preselects — and, only when `required` is
+    /// off, the one a CLI create without `--outfit` gets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
+impl Default for OutfitPolicy {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            required: true,
+            default: None,
+        }
+    }
+}
+
 /// Something in `ide` that was dropped, and why.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IdeProblem {
@@ -1178,6 +1214,46 @@ fn parse_staleness_sensitivity(value: &serde_json::Value, out: &mut IdeSection) 
     }
 }
 
+/// Parse `ide.outfit` — `false`, or `{ "required": bool, "default": "<profile>" }`.
+/// Lenient like the rest of `ide`: a bad field is a problem and keeps its default.
+fn parse_outfit(value: &serde_json::Value, out: &mut IdeSection) {
+    let problem = |out: &mut IdeSection, at: &str, message: &str| {
+        out.problems.push(IdeProblem {
+            location: format!("ide.outfit{at}"),
+            message: message.to_owned(),
+        });
+    };
+    let map = match value {
+        serde_json::Value::Bool(enabled) => {
+            out.outfit.enabled = *enabled;
+            return;
+        }
+        serde_json::Value::Object(map) => map,
+        _ => {
+            return problem(
+                out,
+                "",
+                "must be `false` or an object with `required` and `default`; it was ignored",
+            );
+        }
+    };
+    for (key, child) in map {
+        match (key.as_str(), child) {
+            ("required", serde_json::Value::Bool(b)) => out.outfit.required = *b,
+            ("required", _) => problem(out, ".required", "must be true or false; true is used"),
+            ("default", serde_json::Value::String(s)) if !s.trim().is_empty() => {
+                out.outfit.default = Some(s.trim().to_owned());
+            }
+            ("default", _) => problem(
+                out,
+                ".default",
+                "must be the name of a profile; it was ignored",
+            ),
+            (other, _) => out.uninterpreted.push(format!("outfit.{other}")),
+        }
+    }
+}
+
 pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
     // Rust's `Default` for `f64` is `0.0`, but the *effective* default for the
     // sensitivity knob is `1.0` (the baseline). Set it here so an absent key —
@@ -1207,6 +1283,7 @@ pub fn parse(value: Option<&serde_json::Value>) -> IdeSection {
             "extensions" => parse_extensions(child, &mut section),
             "externalOrigins" => parse_external_origins(child, &mut section),
             "git" => parse_git(child, &mut section),
+            "outfit" => parse_outfit(child, &mut section),
             // Named rather than parked as reserved: the generic "this version does
             // not render it yet" notice would promise it comes back.
             "worktreeName" => section.problems.push(IdeProblem {
@@ -3710,6 +3787,40 @@ mod tests {
         // Rust's `f64::default()` is 0.0, and a 0 would floor to 0.1 (ten times
         // too sensitive) in `staleness_sensitivity_safe`.
         assert_eq!(parsed.staleness_sensitivity, 1.0);
+    }
+
+    #[test]
+    fn outfit_policy_defaults_to_required_and_reads_false_and_an_object() {
+        // Absent: on, and the CLI must name a profile.
+        let parsed = section(json!({}));
+        assert_eq!(parsed.outfit, OutfitPolicy::default());
+        assert!(parsed.outfit.enabled && parsed.outfit.required);
+
+        let parsed = section(json!({ "outfit": false }));
+        assert!(!parsed.outfit.enabled);
+
+        let parsed = section(json!({ "outfit": { "required": false, "default": " lean " } }));
+        assert!(parsed.outfit.enabled);
+        assert!(!parsed.outfit.required);
+        assert_eq!(parsed.outfit.default.as_deref(), Some("lean"));
+        assert!(parsed.problems.is_empty(), "{:?}", parsed.problems);
+
+        // Lenient: a bad field keeps its default and says where; an unknown key is
+        // parked for lint, never an error.
+        let parsed = section(json!({ "outfit": { "required": "yes", "default": "", "x": 1 } }));
+        assert!(parsed.outfit.required);
+        assert_eq!(parsed.outfit.default, None);
+        let at: Vec<_> = parsed
+            .problems
+            .iter()
+            .map(|p| p.location.as_str())
+            .collect();
+        assert_eq!(at, ["ide.outfit.default", "ide.outfit.required"]);
+        assert_eq!(parsed.uninterpreted, ["outfit.x"]);
+
+        let parsed = section(json!({ "outfit": "lean" }));
+        assert_eq!(parsed.outfit, OutfitPolicy::default());
+        assert_eq!(parsed.problems[0].location, "ide.outfit");
     }
 
     #[test]

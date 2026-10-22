@@ -394,6 +394,12 @@ pub fn routes() -> Router {
         .route("/api/pty/sessions/{id}/open-file", post(open_file))
         .route("/api/pty/sessions/{id}/agent-state", post(agent_state))
         .route("/api/pty/sessions/{id}/naming", post(naming))
+        // The outfit note for Veld's Claude Code mod, whose first prompt is not a
+        // state report: `{"context": text | null}`, taken once.
+        .route("/api/pty/sessions/{id}/context", post(take_context))
+        // `veld agent restart`: the agent in this terminal asks its window to restart
+        // it — resumed, so the conversation survives, or fresh.
+        .route("/api/pty/sessions/{id}/restart", post(restart_agent))
         // The New worktree dialog's first message, in two halves: the files it
         // carries go up before the pane exists (`reserve`), and the window asks
         // afterwards whether the agent took the message at launch (`take`). See
@@ -458,9 +464,17 @@ pub fn clear_unbacked_shims() {
 /// the answer lives in the database, not in the browser storage the layout came
 /// from. One request per worktree rather than one per pane, and never the token:
 /// the client has no use for it.
+///
+/// Host-checked: the session ids it lists are what `POST
+/// /api/pty/sessions/{id}/restart` takes, and a GET is reachable by a page that
+/// DNS-rebinds onto the daemon's port. Worktree ids are small integers, so without
+/// the check that page could enumerate every agent pane on the machine.
 async fn list_pane_sessions(
+    headers: HeaderMap,
     Path(worktree_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
     let rows = crate::offload::blocking(move || {
         let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
         db.resumable_panes(worktree_id).map_err(|e| {
@@ -888,6 +902,7 @@ async fn end_session(id: &str, reason: &str) -> bool {
         discard_launch_prompt(path);
     }
     forget_naming(id);
+    super::outfit::take_note(id);
     let session = SESSIONS.lock().await.remove(id);
     // After the removal, not before: `agent_state` records under the registry's lock
     // and only for a registered session, so once the entry is gone nothing can
@@ -2283,6 +2298,10 @@ fn installed(bin: &str, path: &str) -> bool {
 /// A plain lookup rather than spawning anything: deciding whether to *offer* a
 /// pane must never run a config-declared command, and this is called often
 /// enough (once per pane, per menu render) that a fork would be felt.
+pub(crate) fn on_path(name: &str, path: &str) -> bool {
+    which_on_path(name, path).is_some()
+}
+
 fn which_on_path(name: &str, path: &str) -> Option<PathBuf> {
     for dir in std::env::split_paths(path) {
         let candidate = dir.join(name);
@@ -2433,6 +2452,15 @@ async fn mint_ticket(
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
     if !resumed && opts.agent_integration && opts.agent_context {
         arm_naming(&body.session_id);
+        // Only a config-declared pane can be an agent; a plain shell gets no note and
+        // costs no probe.
+        if body.pane.is_some() {
+            super::outfit::prepare_note(
+                body.session_id.clone(),
+                wt.path.clone(),
+                shims::cli_word(),
+            );
+        }
     }
     let shim_env = shims::session_env(&body.session_id, &shell, opts);
     // Derived from the environment rather than from `bash_handoff` directly, so the
@@ -3544,7 +3572,13 @@ async fn agent_state(
     if state == veld_core::agent::State::Ready {
         rearm_naming(&id);
     }
+    // A new conversation's first prompt only, the same turn the naming reminder
+    // rides: a note that was not ready by then is not delivered later, as on the mod.
+    let prompt_turn = matches!(body.naming, Some(NamingTurn::Prompt { fresh: true }));
     let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
+    // The outfit note rides the first prompt's answer, like the naming reminder: a
+    // line beside the user's message, for a worktree where outfit is in play.
+    let context = prompt_turn.then(|| super::outfit::take_note(&id)).flatten();
     let state = reported_state(state, naming);
     let held = body.held && state == veld_core::agent::State::Blocked;
     // Only a session this daemon holds: a released one has no end here to clear the
@@ -3564,7 +3598,7 @@ async fn agent_state(
     // hook to hand back to the agent; a CLI that predates it ignores it.
     Ok((
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "naming": naming })),
+        Json(serde_json::json!({ "naming": naming, "context": context })),
     ))
 }
 
@@ -3584,6 +3618,164 @@ async fn naming(
     }
     Ok(Json(
         serde_json::json!({ "naming": naming_verdict(&id, turn) }),
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestartRequest {
+    /// Start a new conversation instead of resuming this one.
+    #[serde(default)]
+    fresh: bool,
+    /// What the restarted agent is told first. Absent: a sentence saying it was
+    /// restarted at its own request, so it picks up the task rather than waiting.
+    #[serde(default)]
+    prompt: Option<String>,
+}
+
+/// What a resumed agent reads first when the caller sent no prompt of its own.
+const RESTARTED: &str = "Veld restarted this session because you asked it to \
+                         (`veld agent restart`). Do not restart again; pick up where you \
+                         left off.";
+
+/// [`RESTARTED`] for `--fresh`: a new conversation, so nothing to pick up.
+const RESTARTED_FRESH: &str = "Veld restarted this pane in a new conversation because the \
+                               previous agent here asked it to. Do not restart again.";
+
+/// `POST /api/pty/sessions/{id}/restart` — what `veld agent restart` sends from
+/// inside the agent it restarts.
+///
+/// **The window does the restart, not this handler.** A terminal belongs to the window
+/// showing it: the window is what holds the tab, starts the pane's `resume` command
+/// against the token, and types the first message in. So this asks the window showing
+/// the session's worktree, and answers whether one was there to ask — the agent is
+/// about to be ended, so the answer is the last thing it hears. The window waits a
+/// moment before it acts, which lets the command return and the agent's turn settle.
+///
+/// A resume needs the pane's token on record — a config-declared pane with a
+/// `resume` command that has launched. Anything else (a plain shell running
+/// `claude`) has no conversation Veld can reopen, and is refused rather than
+/// restarted into a blank one.
+async fn restart_agent(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<RestartRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use super::file_pane::coded;
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    // Host-checked as well as CSRF-gated, like `agent_state`: this puts text in front
+    // of a coding agent with a shell, and a page that DNS-rebinds onto the daemon's
+    // port is same-origin and can send the header. The CLI calls `127.0.0.1`.
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    // The caller's text, if any, always after the one line that stops a loop: a
+    // resumed agent told only "continue the migration" has no idea it just restarted.
+    // A fresh restart has no conversation to pick up, so it is told only why.
+    let restarted = if body.fresh {
+        RESTARTED_FRESH
+    } else {
+        RESTARTED
+    };
+    let prompt = match body
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        Some(own) => format!("{restarted}\n\n{own}"),
+        None => restarted.to_owned(),
+    };
+    if prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES || prompt.contains('\0') {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "the prompt is too long or contains a NUL byte",
+        ));
+    }
+    let worktree_id = session_worktree(&id).await.ok_or_else(|| {
+        coded(
+            StatusCode::NOT_FOUND,
+            "no_session",
+            "this is not a terminal Veld is running",
+        )
+    })?;
+    let session = id.clone();
+    let (spec, resumable) = crate::offload::blocking(move || {
+        let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
+        let row = db.pane_session(&session).map_err(|e| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("database error: {e}"),
+            )
+        })?;
+        Ok::<_, ApiError>(match row {
+            Some(row) => {
+                let resumable = db
+                    .get_worktree(worktree_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|wt| veld_core::config::root_config_in(FsPath::new(&wt.path)))
+                    .and_then(|p| veld_core::config::parse_config(&p).ok())
+                    .and_then(|cfg| {
+                        let section = cfg.ide_section();
+                        let veld_core::ide::PaneBody::Terminal(t) =
+                            &section.pane(&row.spec_id)?.body;
+                        Some(t.resume.is_some())
+                    })
+                    .unwrap_or(false);
+                (Some(row.spec_id), resumable)
+            }
+            None => (None, false),
+        })
+    })
+    .await?;
+    let Some(spec) = spec else {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "not_a_pane",
+            "this terminal is not an agent pane Veld started, so there is nothing for it to \
+             restart — only a pane from the project's `ide.panes` can be restarted",
+        ));
+    };
+    if !body.fresh && !resumable {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "cannot_resume",
+            format!(
+                "the `{spec}` pane declares no `resume` command, so a restart would lose this \
+                 conversation — pass --fresh to start a new one anyway"
+            ),
+        ));
+    }
+    let mode = if body.fresh { "fresh" } else { "resume" };
+    if !super::ide::push_restart(worktree_id, id, mode, prompt).await {
+        return Err(coded(
+            StatusCode::CONFLICT,
+            "no_window",
+            "no Veld window is showing this worktree, so nothing can restart the agent",
+        ));
+    }
+    Ok(Json(
+        serde_json::json!({ "restarting": mode, "pane": spec }),
+    ))
+}
+
+async fn take_context(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    check_csrf(&headers)
+        .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
+    if !valid_session_id(&id) {
+        return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
+    }
+    Ok(Json(
+        serde_json::json!({ "context": super::outfit::take_note(&id) }),
     ))
 }
 

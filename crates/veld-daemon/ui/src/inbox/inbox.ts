@@ -903,6 +903,16 @@ class WorktreeInbox {
   }
 
   /**
+   * Whether the agent in a session is mid-turn, or `null` when no agent hook has
+   * spoken for it (so there is nothing to wait on). Unlike `isRunning`, the shell's
+   * "a command is in flight" does not count: an agent pane is that all session.
+   */
+  agentWorking(sessionId: string): boolean | null {
+    const session = this.sessions.get(sessionId);
+    return session && session.agentSource !== null ? session.agentWorking : null;
+  }
+
+  /**
    * Forget a session entirely.
    *
    * Called when a pane is closed for good, not when it is unmounted: an unmounted pane's

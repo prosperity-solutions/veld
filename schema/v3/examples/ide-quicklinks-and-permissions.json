@@ -18,6 +18,9 @@
     "git": {
       "stalenessSensitivity": 2
     },
+    // Where outfit (outfit.oss.life.li) has profiles to offer, agents may create a
+    // worktree without naming one, and get "base". `false` would turn it off.
+    "outfit": { "required": false, "default": "base" },
     "permissions": [
       // Veld's own URLs carry the RUN NAME in the hostname, and run names change
       // with the worktree, the branch or --name — so a leading `*.` is how a

@@ -69,7 +69,14 @@ import {
   worktreeLabel,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
-import { IconPaperclip, IconX } from "@tabler/icons-react";
+import { IconPaperclip, IconShirt, IconX } from "@tabler/icons-react";
+import {
+  initialOutfitChoice,
+  outfitForCreate,
+  outfitOptions,
+  outfitReady,
+} from "../outfit/model";
+import { useOutfitState } from "../outfit/useOutfitState";
 import { clipboardImageIndex, clipboardImageName, isFileDrop } from "../panes/terminalPaste";
 import {
   addAttachments,
@@ -875,6 +882,8 @@ export function NewWorktreeDialog(props: {
     display_name?: string;
     emoji?: string;
     marker_color?: string;
+    /** The outfit profile to pin it to; absent follows the clone's. */
+    outfit?: string;
     /** The `ide.panes[].id` to open in the new checkout, or absent for none.
      *  Only ever sent alongside a `prompt` — see the dialog's own note. */
     agent?: string;
@@ -884,7 +893,7 @@ export function NewWorktreeDialog(props: {
     /** Files to paste after the prompt, as paths — see `ide/promptAttachments.ts`.
      *  Like `prompt`, an instruction to this client and never sent to the daemon. */
     attachments?: IncomingFile[];
-  }) => Promise<void>;
+  }) => Promise<void | { keepDraft: true }>;
   /** The repo whose branches the source picker lists. */
   repoRoot: string;
   /**
@@ -964,6 +973,18 @@ export function NewWorktreeDialog(props: {
   onClose: () => void;
 }) {
   const [name, setName] = useState("");
+  /**
+   * outfit's state for the repo, read fresh at open — never the remembered answer
+   * the top bar uses, since `required` and `default` decide what is sent. Only
+   * `ready` renders the picker; loading and a failed read are the same silence,
+   * and send nothing.
+   */
+  const { state: outfitState, loading: outfitLoading } = useOutfitState(props.repoRoot, false);
+  /** The profile picked, or `null` until the user touches it — the preselection
+   *  is derived from the state, so it cannot be stale when the state lands. */
+  const [outfitPick, setOutfitPick] = useState<string | null>(null);
+  const outfitChoice =
+    outfitPick ?? (outfitReady(outfitState) ? initialOutfitChoice(outfitState) : null);
   /**
    * What the chosen agent should start on, and the field this dialog now leads
    * with.
@@ -1309,16 +1330,19 @@ export function NewWorktreeDialog(props: {
         // assignment is the honest fallback.
         emoji: chosen.emoji || undefined,
         marker_color: chosen.color || undefined,
+        // Absent unless a profile is chosen: that key is what pins the checkout.
+        outfit: outfitForCreate(outfitState, outfitChoice),
         // See `launch`: the pane and the text travel together or not at all.
         agent: launch?.agent,
         prompt: launch?.prompt,
         attachments: launch?.attachments.map((a) => ({ file: a.file, path: a.path })),
       })
-      .then(() => {
+      .then((result) => {
+        // `keepDraft`: the create ran but the prompt did not (outfit failed).
         // **Cleared by a create that carried it, not by any create.** Typing a
         // prompt, changing your mind and making a plain checkout instead leaves
         // an intention you have not spent — so it is still there next time.
-        if (launch !== null) props.onPromptDraft("");
+        if (launch !== null && !result?.keepDraft) props.onPromptDraft("");
       })
       .catch((e) => {
         // The create is no longer in flight. The dialog stays open on failure,
@@ -1453,6 +1477,34 @@ export function NewWorktreeDialog(props: {
       description={<span title={baseNote}>{baseNote}</span>}
     />
   );
+
+  /**
+   * The outfit profile picker, or nothing: only a `ready` outfit is worth a
+   * field, and it is the same field in both modes.
+   */
+  const outfitSelect = outfitReady(outfitState) ? (
+    <Select
+      label="Outfit"
+      leftSection={<IconShirt size={14} />}
+      allowDeselect={false}
+      data={outfitOptions(outfitState)}
+      value={outfitChoice}
+      onChange={(v) => v && setOutfitPick(v)}
+      renderOption={({ option }) => {
+        const o = option as (typeof option) & { description?: string };
+        return (
+          <div>
+            <Text size="sm">{o.label}</Text>
+            {o.description && (
+              <Text size="xs" c="dimmed">
+                {o.description}
+              </Text>
+            )}
+          </div>
+        );
+      }}
+    />
+  ) : null;
 
   /**
    * Everything the dialog used to ask for, as one block.
@@ -2025,6 +2077,7 @@ export function NewWorktreeDialog(props: {
                 />
                 {baseSelect}
               </SimpleGrid>
+              {outfitSelect}
               {/* **The field this dialog is now for.** A `Textarea`, not a
                   `TextInput`: prompts are sentences and often several, and a
                   one-line box that scrolls sideways makes re-reading what you
@@ -2113,7 +2166,7 @@ export function NewWorktreeDialog(props: {
                   // is disabled, so the chord would otherwise reach a create
                   // the click cannot make — and land on the daemon's refusal
                   // instead of on the error already rendered next to the field.
-                  if (!ready || busy || promptHasNoAgent) return;
+                  if (!ready || busy || promptHasNoAgent || outfitLoading) return;
                   formRef.current?.requestSubmit();
                 }}
                 onPaste={pasteImage}
@@ -2198,6 +2251,7 @@ export function NewWorktreeDialog(props: {
                   hand a prompt to — these are the details instead.
                 </Text>
               )}
+              {outfitSelect}
               {options}
             </Stack>
           )}
@@ -2230,7 +2284,9 @@ export function NewWorktreeDialog(props: {
             <Button
               type="submit"
               loading={busy}
-              disabled={!ready || promptHasNoAgent}
+              // A fast submit while outfit is still answering would skip a
+              // required profile choice; once it answers (or fails) this clears.
+              disabled={!ready || promptHasNoAgent || outfitLoading}
             >
               Create worktree
             </Button>

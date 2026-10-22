@@ -1421,6 +1421,12 @@ fn context_text(cli: &Path) -> String {
     ))
 }
 
+/// How agent-facing text spells this daemon's CLI — the word [`context_text`] uses.
+pub(crate) fn cli_word() -> String {
+    let cli = veld_cli_path().unwrap_or_else(|| PathBuf::from("veld"));
+    veld_core::agent::context_cli_word(&cli, veld_core::db::Db::uses_installed_database())
+}
+
 /// The mod's naming line, naming the same CLI [`context_text`] does.
 fn naming_text(cli: &Path) -> String {
     veld_core::agent::naming_line(&veld_core::agent::context_cli_word(

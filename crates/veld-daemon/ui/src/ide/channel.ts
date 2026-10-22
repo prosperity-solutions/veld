@@ -27,6 +27,7 @@
 
 import { api } from "../api";
 import { dispatchOpenFile, dispatchOpenUrl } from "../files/openRequests";
+import { dispatchRestartPane } from "../panes/restartRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
 /** What kind of client this is, which decides whether it can be raised. */
@@ -431,6 +432,13 @@ class Channel {
       case "open_url":
         if (!this.relayInboxEvents) return;
         dispatchOpenUrl(msg);
+        return;
+      case "restart_pane":
+        // An agent asked for its own pane to be relaunched. The daemon sends it to
+        // the one window showing that worktree; same gate as `open_file`, since a
+        // detached window holds none of its tabs.
+        if (!this.relayInboxEvents) return;
+        dispatchRestartPane(msg);
         return;
       default:
         // An older client meeting a newer daemon. Ignoring is right: every

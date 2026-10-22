@@ -1618,3 +1618,46 @@ Six calls, recorded because each has an obvious alternative:
   file-only tray now would make three stores later. v1 ships *Copy reference* —
   `path:12-18` plus the excerpt — which an agent reads with no new protocol, and
   the tray waits for one design that covers all of them.
+
+### 2026-10-22 — outfit is core, by name, and the line moves for it alone
+
+`outfit` (outfit.oss.life.li) gives one person their own copies of a few tracked
+files as *profiles*. Veld now offers its profiles when a worktree is created (the
+dialog, `veld ide worktree new --outfit`), shows and switches the shown worktree's
+profile in the top bar, tells a fresh agent about them on its first prompt, and
+lets an agent switch profile and restart itself in the same conversation.
+
+By the [data-contract test](#the-data-contract-test-corollary) this would be
+customization: Veld reads a named tool's `--json` output. It is core anyway, as a
+maintainer decision, for three reasons recorded so nobody "fixes" it:
+
+- **outfit is Veld's own capability, split out.** The maintainer built it to be
+  part of Veld and kept it a separate binary so a person can use it without
+  installing the Veld suite. Integrating it is putting a piece back, not taking
+  on a provider.
+- **It passes the universal-primitive test.** A local CLI, identical whatever
+  hosts the code — no API, no auth, no provider schema. Closer to `git` than to
+  `gh`.
+- **A command-backed extension could not express the premise.** Veld offers
+  profiles only where outfit is installed and a profile besides `base` exists — *including a local-only one*, which lives in the git
+  directory of a project that may never have heard of outfit. Such a project has
+  no `veld.json` entry to declare an extension in, so the detection has to know
+  outfit's name.
+
+What the project still controls: `"ide": { "outfit": false }` switches it off,
+and `{ "required": bool, "default": "<profile>" }` tunes it. outfit is personal,
+so the person overrides `required` with the `outfit.required` setting.
+
+**Rejected:** a tool-blind "worktree variant" lister in `veld.json` with outfit as
+the first recipe. It keeps core provider-blind, but loses every local-only
+profile, which is half of the premise.
+
+Same day, after driving it: `outfit init` is **not** part of the premise. An
+engineer who never used outfit, in a team repository with committed profiles, was
+shown nothing. Veld now offers the profiles anyway, and the first pick sets outfit
+up — outfit 0.14's `use` does that itself; for an older one Veld runs plain `outfit
+init` when `use` asks for it. Plain only: `--agents` and `--team` write files other
+people share. And the `outfit list|use` subcommands Veld had added under its
+`ide worktree` part were dropped as duplicates of `outfit ls`/`outfit use`: an agent runs outfit directly, then `veld agent restart`.
+Veld keeps only what outfit cannot do — pin at create time, before the agent
+starts, and restart the agent.
