@@ -5592,8 +5592,9 @@ async fn switch_outfit(
 ///
 /// Named: checked against what outfit offers from the calling checkout. Not named:
 /// refused while outfit is in play and a choice is required — the refusal lists the
-/// profiles and what each swaps, because the caller is usually an agent and the
-/// sentence is all it has to choose with — else the project's `default`, else none
+/// profiles and the first files each swaps, because the caller is usually an agent
+/// and the sentence is what it chooses with; `outfit show` has the rest — else the
+/// project's `default`, else none
 /// (the clone's default profile, as `git worktree add` gives it).
 ///
 /// **Fails closed**: outfit installed but not answering refuses a required choice
@@ -5625,7 +5626,12 @@ fn decide_handoff_outfit(
                     if p.files.is_empty() {
                         format!("  {} — the team's files", p.name)
                     } else {
-                        format!("  {} ({}) — swaps {}", p.name, p.tier, p.files.join(", "))
+                        format!(
+                            "  {} ({}) — swaps {}",
+                            p.name,
+                            p.tier,
+                            swapped_files(&p.files)
+                        )
                     }
                 })
                 .collect::<Vec<_>>()
@@ -5640,7 +5646,8 @@ fn decide_handoff_outfit(
                 format!(
                     "this project uses outfit, so say which profile the new worktree wears \
                      with --outfit <profile>.{hint} If you cannot tell which fits the task, ask \
-                     the human rather than guess.\n{choices}"
+                     the human rather than guess.\n{choices}\n`outfit show <profile>` lists \
+                     everything a profile swaps."
                 ),
             ))
         }
@@ -5656,6 +5663,22 @@ fn decide_handoff_outfit(
             ),
         )),
         _ => Ok(None),
+    }
+}
+
+/// The first few files a profile swaps, enough for an agent to tell profiles
+/// apart — a real repo's profile can swap dozens, one line each in the refusal.
+fn swapped_files(files: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let head = files
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match files.len().saturating_sub(SHOWN) {
+        0 => head,
+        more => format!("{head} and {more} more"),
     }
 }
 
@@ -9827,7 +9850,7 @@ mod tests {
 #[cfg(test)]
 mod handoff_outfit_tests {
     use super::super::outfit::{OutfitState, Profile, Readiness};
-    use super::decide_handoff_outfit;
+    use super::{decide_handoff_outfit, swapped_files};
 
     fn state(status: Readiness, required: bool, default: Option<&str>) -> OutfitState {
         let profile = |name: &str, files: &[&str]| Profile {
@@ -9873,7 +9896,7 @@ mod handoff_outfit_tests {
     }
 
     #[test]
-    fn a_required_choice_is_refused_with_every_profile_and_what_it_swaps() {
+    fn a_required_choice_is_refused_with_every_profile_and_where_to_see_what_it_swaps() {
         let err = decide_handoff_outfit(&state(Readiness::Ready, true, Some("mine")), None)
             .unwrap_err()
             .1
@@ -9883,6 +9906,15 @@ mod handoff_outfit_tests {
         assert!(text.contains("base — the team's files"), "{text}");
         assert!(text.contains("mine (local) — swaps AGENTS.md"), "{text}");
         assert!(text.contains("suggests \"mine\""), "{text}");
+        assert!(text.contains("`outfit show <profile>`"), "{text}");
+    }
+
+    #[test]
+    fn a_profile_that_swaps_many_files_names_only_the_first_few() {
+        let files = |n: usize| (1..=n).map(|i| format!("f{i}")).collect::<Vec<_>>();
+        assert_eq!(swapped_files(&files(3)), "f1, f2, f3");
+        assert_eq!(swapped_files(&files(4)), "f1, f2, f3 and 1 more");
+        assert_eq!(swapped_files(&files(40)), "f1, f2, f3 and 37 more");
     }
 
     #[test]

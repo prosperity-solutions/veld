@@ -332,7 +332,7 @@ export type OutfitStatus =
 export interface OutfitProfile {
   name: string;
   tier: "builtin" | "committed" | "local";
-  /** What it swaps. Empty means the team's own files. */
+  /** What it swaps. Empty means the team's own files. Not shown: a name is enough to pick by. */
   files: string[];
 }
 

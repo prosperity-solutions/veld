@@ -14,7 +14,7 @@ import { ActionIcon, Menu, Text, Tooltip } from "@mantine/core";
 import { IconCheck, IconShirt } from "@tabler/icons-react";
 import { useEffect, useState } from "react";
 import { api } from "../api";
-import { isCurrent, outfitReady, outfitTone, outfitTooltip, profileSwaps } from "../outfit/model";
+import { isCurrent, outfitReady, outfitTone, outfitTooltip } from "../outfit/model";
 import { useOutfitState } from "../outfit/useOutfitState";
 import { notifyError } from "../shared/notify";
 
@@ -80,7 +80,15 @@ export function OutfitMenu(props: { path: string }) {
   };
 
   return (
-    <Menu position="bottom-start" withinPortal width={300} onOpen={refresh}>
+    <Menu
+      position="bottom-start"
+      withinPortal
+      width={300}
+      onOpen={refresh}
+      // The label is `flex: 1` without a min width, so a long name would push the
+      // check mark out instead of truncating.
+      styles={{ itemLabel: { minWidth: 0 } }}
+    >
       <Menu.Target>
         <Tooltip label={outfitTooltip(state)}>
           <ActionIcon
@@ -108,9 +116,9 @@ export function OutfitMenu(props: { path: string }) {
             onClick={() => void pick(p.name)}
             rightSection={isCurrent(state, p) ? <IconCheck size={14} /> : null}
           >
-            <Text size="sm">{p.name}</Text>
-            <Text size="xs" c="dimmed">
-              {profileSwaps(p.files)}
+            {/* The name only: what a profile swaps runs to dozens of paths in a real repo. */}
+            <Text size="sm" truncate="end" title={p.name}>
+              {p.name}
             </Text>
           </Menu.Item>
         ))}

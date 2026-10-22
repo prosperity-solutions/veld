@@ -7,7 +7,6 @@ import {
   outfitOptions,
   outfitTone,
   outfitTooltip,
-  profileSwaps,
 } from "./model";
 
 const state = (over: Partial<OutfitState> = {}): OutfitState => ({
@@ -21,20 +20,18 @@ const state = (over: Partial<OutfitState> = {}): OutfitState => ({
   ...over,
 });
 
-describe("profileSwaps", () => {
-  it("says an empty list is the team's files", () => {
-    expect(profileSwaps([])).toBe("the team's files");
-  });
-  it("lists what is swapped", () => {
-    expect(profileSwaps(["AGENTS.md", ".claude/skills"])).toBe("swaps AGENTS.md, .claude/skills");
-  });
-});
-
 describe("outfitOptions", () => {
   it("offers following the clone first, naming its profile", () => {
     const o = outfitOptions(state());
     expect(o.map((x) => x.value)).toEqual([FOLLOW_CLONE, "team", "peter"]);
     expect(o[0].label).toBe("Follow the clone's profile (team)");
+  });
+  it("names each profile and nothing else, however many files it swaps", () => {
+    const many = Array.from({ length: 40 }, (_, i) => `.agents/skills/s${i}/SKILL.md`);
+    const o = outfitOptions(
+      state({ profiles: [{ name: "pitch-roast-ship", tier: "local", files: many }] }),
+    );
+    expect(o[1]).toEqual({ value: "pitch-roast-ship", label: "pitch-roast-ship" });
   });
   it("does not name a pinned profile as the one followed", () => {
     const o = outfitOptions(state({ current: { name: "peter", pinned: true } }));

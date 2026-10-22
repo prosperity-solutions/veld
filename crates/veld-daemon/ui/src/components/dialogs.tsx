@@ -1482,27 +1482,22 @@ export function NewWorktreeDialog(props: {
    * The outfit profile picker, or nothing: only a `ready` outfit is worth a
    * field, and it is the same field in both modes.
    */
-  const outfitSelect = outfitReady(outfitState) ? (
+  const outfitData = outfitReady(outfitState) ? outfitOptions(outfitState) : null;
+  const outfitSelect = outfitData ? (
     <Select
       label="Outfit"
       leftSection={<IconShirt size={14} />}
       allowDeselect={false}
-      data={outfitOptions(outfitState)}
+      data={outfitData}
+      // The field truncates a long name; the full one is a hover away.
+      title={outfitData.find((o) => o.value === outfitChoice)?.label}
       value={outfitChoice}
       onChange={(v) => v && setOutfitPick(v)}
-      renderOption={({ option }) => {
-        const o = option as (typeof option) & { description?: string };
-        return (
-          <div>
-            <Text size="sm">{o.label}</Text>
-            {o.description && (
-              <Text size="xs" c="dimmed">
-                {o.description}
-              </Text>
-            )}
-          </div>
-        );
-      }}
+      renderOption={({ option }) => (
+        <Text size="sm" truncate="end" title={option.label} miw={0}>
+          {option.label}
+        </Text>
+      )}
     />
   ) : null;
 
