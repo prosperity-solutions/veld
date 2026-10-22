@@ -13,27 +13,20 @@ export function outfitReady(state: OutfitState | null): state is OutfitState {
   return state?.status === "ready";
 }
 
-/** What a profile swaps, in a sentence fit for a Select's secondary line. */
-export function profileSwaps(files: readonly string[]): string {
-  return files.length === 0 ? "the team's files" : `swaps ${files.join(", ")}`;
-}
-
 export interface OutfitOption {
   value: string;
   label: string;
-  /** What choosing it does; rendered under the label. */
-  description: string;
 }
 
 /**
  * The create dialog's options: the clone's own profile first — unless the repo
- * requires a choice — then one per profile.
+ * requires a choice — then one per profile, by name only. What a profile swaps
+ * is not shown: a real one swaps dozens of files, and nobody picks by path.
  */
 export function outfitOptions(state: OutfitState): OutfitOption[] {
   const profiles: OutfitOption[] = state.profiles.map((p) => ({
     value: p.name,
     label: p.name,
-    description: profileSwaps(p.files),
   }));
   if (state.required) return profiles;
   // A pinned profile is not the clone's own, so naming it would mislabel the follow.
@@ -42,7 +35,6 @@ export function outfitOptions(state: OutfitState): OutfitOption[] {
     {
       value: FOLLOW_CLONE,
       label: follow ? `Follow the clone's profile (${follow})` : "Follow the clone's profile",
-      description: "pins nothing",
     },
     ...profiles,
   ];

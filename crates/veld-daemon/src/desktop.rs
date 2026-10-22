@@ -5625,7 +5625,12 @@ fn decide_handoff_outfit(
                     if p.files.is_empty() {
                         format!("  {} — the team's files", p.name)
                     } else {
-                        format!("  {} ({}) — swaps {}", p.name, p.tier, p.files.join(", "))
+                        format!(
+                            "  {} ({}) — swaps {}",
+                            p.name,
+                            p.tier,
+                            swapped_files(&p.files)
+                        )
                     }
                 })
                 .collect::<Vec<_>>()
@@ -5656,6 +5661,22 @@ fn decide_handoff_outfit(
             ),
         )),
         _ => Ok(None),
+    }
+}
+
+/// The first few files a profile swaps, enough for an agent to tell profiles
+/// apart — a real repo's profile can swap dozens, one line each in the refusal.
+fn swapped_files(files: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let head = files
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match files.len().saturating_sub(SHOWN) {
+        0 => head,
+        more => format!("{head} and {more} more"),
     }
 }
 
@@ -9827,7 +9848,7 @@ mod tests {
 #[cfg(test)]
 mod handoff_outfit_tests {
     use super::super::outfit::{OutfitState, Profile, Readiness};
-    use super::decide_handoff_outfit;
+    use super::{decide_handoff_outfit, swapped_files};
 
     fn state(status: Readiness, required: bool, default: Option<&str>) -> OutfitState {
         let profile = |name: &str, files: &[&str]| Profile {
@@ -9883,6 +9904,13 @@ mod handoff_outfit_tests {
         assert!(text.contains("base — the team's files"), "{text}");
         assert!(text.contains("mine (local) — swaps AGENTS.md"), "{text}");
         assert!(text.contains("suggests \"mine\""), "{text}");
+    }
+
+    #[test]
+    fn a_profile_that_swaps_many_files_names_only_the_first_few() {
+        let files = |n: usize| (1..=n).map(|i| format!("f{i}")).collect::<Vec<_>>();
+        assert_eq!(swapped_files(&files(3)), "f1, f2, f3");
+        assert_eq!(swapped_files(&files(40)), "f1, f2, f3 and 37 more");
     }
 
     #[test]

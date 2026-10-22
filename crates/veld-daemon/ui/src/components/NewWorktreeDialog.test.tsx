@@ -443,4 +443,12 @@ describe("NewWorktreeDialog outfit", () => {
     });
     expect(onCreate.mock.calls[0][0].outfit).toBe("peter");
   });
+
+  test("offers profiles by name, never by the files they swap", async () => {
+    outfit.state = ready();
+    open();
+    fireEvent.click(await screen.findByRole("combobox", { name: "Outfit" }));
+    expect(await screen.findByRole("option", { name: "peter", hidden: true })).toBeTruthy();
+    expect(screen.queryByText(/AGENTS\.md/)).toBeNull();
+  });
 });
