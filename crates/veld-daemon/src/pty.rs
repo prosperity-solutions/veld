@@ -464,9 +464,17 @@ pub fn clear_unbacked_shims() {
 /// the answer lives in the database, not in the browser storage the layout came
 /// from. One request per worktree rather than one per pane, and never the token:
 /// the client has no use for it.
+///
+/// Host-checked: the session ids it lists are what `POST
+/// /api/pty/sessions/{id}/restart` takes, and a GET is reachable by a page that
+/// DNS-rebinds onto the daemon's port. Worktree ids are small integers, so without
+/// the check that page could enumerate every agent pane on the machine.
 async fn list_pane_sessions(
+    headers: HeaderMap,
     Path(worktree_id): Path<i64>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
     let rows = crate::offload::blocking(move || {
         let db = open_db().map_err(|_| err(StatusCode::INTERNAL_SERVER_ERROR, "database error"))?;
         db.resumable_panes(worktree_id).map_err(|e| {
