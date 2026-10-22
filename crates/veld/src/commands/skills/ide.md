@@ -312,9 +312,11 @@ veld ide worktree outfit use lean --restart-agent   # switch this worktree, then
 
 When your instructions changed under you — a new outfit profile, an edited
 `CLAUDE.md`, a skill installed — run `veld agent restart` (the same as `veld ide
-pane restart`). A moment after it returns, the Veld window restarts your pane
-with its `resume` command, so the conversation carries on, and your first message
-says you were restarted; do not restart again. `--fresh` starts a new
+pane restart`). **Make it the last thing you do this turn**: say in your reply
+what you will pick up afterwards, and stop. Once your turn ends, the Veld window
+restarts your pane with its `resume` command, so the conversation carries on, and
+your first message says you were restarted; do not restart again. Work you start
+after the command can be cut off by the restart. `--fresh` starts a new
 conversation instead; `--prompt` sets that first message.
 
 Only a pane from the project's `ide.panes` can be restarted, and only one that

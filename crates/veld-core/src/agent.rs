@@ -1387,8 +1387,10 @@ pub fn outfit_context(cli: &str, wearing: &str, profiles: &str, required: bool) 
          worktree wears \"{wearing}\"; offered: {profiles} (`{cli} ide worktree outfit list` \
          says what each swaps). An edit to a swapped file goes to the profile, not to the \
          team's copy — `outfit status --json` lists them. {handoff}To switch this worktree to \
-         another profile, run `{cli} ide worktree outfit use <profile> --restart-agent`: Veld \
-         restarts you in this same conversation so you read the new files."
+         another profile, run `{cli} ide worktree outfit use <profile> --restart-agent` as the \
+         last thing in your turn: Veld restarts you in this same conversation so you read the \
+         new files. The profile can change after this note; `{cli} ide worktree outfit list` \
+         says what it is now."
     )
 }
 

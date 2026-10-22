@@ -4606,6 +4606,13 @@ async fn create_worktree(
         .await?;
         let state = super::outfit::state_for(FsPath::new(&root)).await;
         check_outfit(&state, profile)?;
+        // **Detached**, like a hand-off: a window that reloads mid-create drops this
+        // handler's future, and between `git worktree add` and the pin that would
+        // leave a checkout silently wearing the clone's profile instead.
+        return tokio::spawn(create_checkout(body))
+            .await
+            .map_err(|e| db_err(format!("create task failed: {e}")))?
+            .map(Json);
     }
     create_checkout(body).await.map(Json)
 }
@@ -4646,6 +4653,11 @@ fn check_outfit(state: &super::outfit::OutfitState, profile: &str) -> Result<(),
 
 /// Create a checkout as `POST /api/worktrees` describes it — shared with
 /// [`create_handoff`], which arrives at the same request by another route.
+///
+/// **`outfit` is applied, never checked, here.** A caller that sets it must have
+/// run [`check_outfit`] first (and, for an agent's hand-off, [`handoff_outfit`],
+/// which also enforces `required`) — otherwise an unknown profile surfaces only
+/// after `git worktree add`, as a created checkout with an `OutfitReport` error.
 ///
 /// The checkout is listed by the rail's poll as soon as git registers it, which is
 /// well before this returns. A caller that files it somewhere afterwards (as

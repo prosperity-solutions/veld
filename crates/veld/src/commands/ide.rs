@@ -97,8 +97,8 @@ pub struct RestartArgs {
     #[arg(long)]
     pub fresh: bool,
 
-    /// What the restarted agent reads first. Defaults to a line saying it was
-    /// restarted at its own request.
+    /// What the restarted agent reads first, after a line saying it was restarted
+    /// at its own request and must not restart again.
     #[arg(long, value_name = "TEXT")]
     pub prompt: Option<String>,
 

@@ -434,8 +434,8 @@ async fn outfit(command: OutfitCommand) -> i32 {
         return 3;
     };
     let prompt = format!(
-        "Veld switched this worktree to outfit profile \"{}\" and restarted you so you read \
-         its files. Do not switch or restart again; pick up where you left off.",
+        "Veld switched this worktree to outfit profile \"{}\" so you read its files. Do not \
+         switch the profile again.",
         profile.unwrap_or_default()
     );
     match super::ide::request_restart(&session, false, Some(&prompt)).await {

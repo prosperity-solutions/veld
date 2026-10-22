@@ -14,6 +14,8 @@ export function useOutfitState(path: string | null): {
   /** True while the first answer for `path` is in flight; false once it landed or failed. */
   loading: boolean;
   set: (state: OutfitState) => void;
+  /** Read again, keeping the current answer on screen until the new one lands. */
+  refresh: () => void;
 } {
   const [state, setState] = useState<OutfitState | null>(null);
   const [loading, setLoading] = useState(path !== null);
@@ -40,5 +42,15 @@ export function useOutfitState(path: string | null): {
     };
   }, [path]);
   const set = useCallback((s: OutfitState) => setState(s), []);
-  return { state, loading, set };
+  // Something other than this window can switch the profile — an agent's `veld ide
+  // worktree outfit use`, `outfit use` in a terminal — so a caller re-reads when the
+  // answer is about to matter. A failed re-read keeps what was there.
+  const refresh = useCallback(() => {
+    if (path === null) return;
+    api
+      .outfitState(path)
+      .then(setState)
+      .catch(() => {});
+  }, [path]);
+  return { state, loading, set, refresh };
 }

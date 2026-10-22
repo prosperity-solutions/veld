@@ -331,6 +331,13 @@ pub async fn apply(checkout: &Path, profile: &str) -> Result<(), String> {
         .args(["use", profile, "--here", "--json"])
         .current_dir(checkout)
         .env("PATH", &path)
+        // The directory is the only input, as for Veld's own git (`git_raw_with_index`):
+        // a daemon auto-started from inside a git hook inherits these, and outfit's git
+        // would follow them into another repository.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(std::process::Stdio::null())
         .output()
         .await
@@ -385,6 +392,10 @@ async fn read(checkout: &Path, path: &str, args: &[&str]) -> Result<serde_json::
         .args(args)
         .current_dir(checkout)
         .env("PATH", path)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true)
         .output();

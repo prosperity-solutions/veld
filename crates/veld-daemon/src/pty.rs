@@ -3564,7 +3564,9 @@ async fn agent_state(
     if state == veld_core::agent::State::Ready {
         rearm_naming(&id);
     }
-    let prompt_turn = matches!(body.naming, Some(NamingTurn::Prompt { .. }));
+    // A new conversation's first prompt only, the same turn the naming reminder
+    // rides: a note that was not ready by then is not delivered later, as on the mod.
+    let prompt_turn = matches!(body.naming, Some(NamingTurn::Prompt { fresh: true }));
     let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
     // The outfit note rides the first prompt's answer, like the naming reminder: a
     // line beside the user's message, for a worktree where outfit is in play.
@@ -3658,13 +3660,17 @@ async fn restart_agent(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
-    let prompt = body
+    // The caller's text, if any, always after the one line that stops a loop: a
+    // resumed agent told only "continue the migration" has no idea it just restarted.
+    let prompt = match body
         .prompt
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
-        .unwrap_or(RESTARTED)
-        .to_owned();
+    {
+        Some(own) => format!("{RESTARTED}\n\n{own}"),
+        None => RESTARTED.to_owned(),
+    };
     if prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES || prompt.contains('\0') {
         return Err(err(
             StatusCode::BAD_REQUEST,

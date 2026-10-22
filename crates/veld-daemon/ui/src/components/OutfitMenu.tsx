@@ -18,12 +18,14 @@ import { useOutfitState } from "../outfit/useOutfitState";
 import { notifyError } from "../shared/notify";
 
 export function OutfitMenu(props: { path: string }) {
-  const { state, set } = useOutfitState(props.path);
+  const { state, set, refresh } = useOutfitState(props.path);
   const [busy, setBusy] = useState(false);
   if (!outfitReady(state)) return null;
 
   const pick = async (profile: string) => {
-    if (busy || state.current?.name === profile) return;
+    // Not skipped for the profile shown as current: that label can be stale (an agent
+    // switched since), and outfit answers a no-op `use` with "nothing changed".
+    if (busy) return;
     setBusy(true);
     try {
       set(await api.outfitUse(props.path, profile));
@@ -37,7 +39,7 @@ export function OutfitMenu(props: { path: string }) {
   };
 
   return (
-    <Menu position="bottom-start" withinPortal width={300}>
+    <Menu position="bottom-start" withinPortal width={300} onOpen={refresh}>
       <Menu.Target>
         <Button
           size="xs"
