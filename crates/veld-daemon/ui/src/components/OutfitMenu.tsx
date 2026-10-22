@@ -67,10 +67,11 @@ export function OutfitMenu(props: { path: string }) {
         <Tooltip label={outfitTooltip(state)}>
           <ActionIcon
             size="md"
-            variant="default"
-            // Green for a profile other than `base`; neutral for base.
+            // Solid green with a white glyph while a profile other than `base` is
+            // worn — the same "on" look as the focus-mode button beside it; plain
+            // for base.
+            variant={outfitTone(state) === "worn" ? "filled" : "default"}
             color={outfitTone(state) === "worn" ? "green" : undefined}
-            c={outfitTone(state) === "worn" ? "green" : "dimmed"}
             loading={busy}
             aria-label={outfitTooltip(state)}
           >
