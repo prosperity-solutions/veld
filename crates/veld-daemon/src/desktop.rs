@@ -4610,7 +4610,12 @@ async fn create_worktree(
         // leave a checkout silently wearing the clone's profile instead.
         return tokio::spawn(create_checkout(body))
             .await
-            .map_err(|e| db_err(format!("create task failed: {e}")))?
+            .map_err(|e| {
+                err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the create failed partway ({e}) — check the rail before retrying"),
+                )
+            })?
             .map(Json);
     }
     create_checkout(body).await.map(Json)

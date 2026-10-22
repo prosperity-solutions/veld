@@ -243,6 +243,10 @@ fn has_traces(checkout: &Path) -> bool {
         };
         checkout.join(gitdir)
     };
+    // A worktree profile lives in this checkout's own git dir.
+    if git_dir.join("outfit").is_dir() {
+        return true;
+    }
     let common = match std::fs::read_to_string(git_dir.join("commondir")) {
         Ok(rel) => git_dir.join(rel.trim()),
         Err(_) => git_dir,

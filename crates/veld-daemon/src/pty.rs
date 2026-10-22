@@ -3630,6 +3630,10 @@ const RESTARTED: &str = "Veld restarted this session because you asked it to \
                          (`veld agent restart`). Do not restart again; pick up where you \
                          left off.";
 
+/// [`RESTARTED`] for `--fresh`: a new conversation, so nothing to pick up.
+const RESTARTED_FRESH: &str = "Veld restarted this pane in a new conversation because the \
+                               previous agent here asked it to. Do not restart again.";
+
 /// `POST /api/pty/sessions/{id}/restart` — what `veld agent restart` sends from
 /// inside the agent it restarts.
 ///
@@ -3662,14 +3666,20 @@ async fn restart_agent(
     }
     // The caller's text, if any, always after the one line that stops a loop: a
     // resumed agent told only "continue the migration" has no idea it just restarted.
+    // A fresh restart has no conversation to pick up, so it is told only why.
+    let restarted = if body.fresh {
+        RESTARTED_FRESH
+    } else {
+        RESTARTED
+    };
     let prompt = match body
         .prompt
         .as_deref()
         .map(str::trim)
         .filter(|p| !p.is_empty())
     {
-        Some(own) => format!("{RESTARTED}\n\n{own}"),
-        None => RESTARTED.to_owned(),
+        Some(own) => format!("{restarted}\n\n{own}"),
+        None => restarted.to_owned(),
     };
     if prompt.len() > veld_core::agent::MAX_LAUNCH_PROMPT_BYTES || prompt.contains('\0') {
         return Err(err(
