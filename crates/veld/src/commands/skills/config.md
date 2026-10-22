@@ -839,8 +839,10 @@ other than the ones below is **reserved**: parsed, stored, not rendered, and
 [outfit](https://outfit.oss.life.li) gives one person their own copies of a few
 tracked files (an `AGENTS.md`, `.claude/skills`) as *profiles*. Veld offers
 them only where outfit is in play **on the machine**: the `outfit` binary on the
-user's `PATH`, `outfit init` done in the repository, and at least one profile
-besides `base` — committed under `.outfit/profiles/`, or local to the clone. Then
+user's `PATH` and at least one profile besides `base` — committed under
+`.outfit/profiles/`, or local to the clone. A repository where `outfit init` was
+never run is offered them too; picking one runs it (plain: only this clone's
+`.git` changes). Then
 the New worktree dialog has an outfit picker, the top bar shows and switches the
 worktree's profile, and `veld ide worktree new` must be told `--outfit
 <profile>`. This key only tunes that; a project without it gets the defaults.

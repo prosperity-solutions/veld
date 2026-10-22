@@ -272,21 +272,21 @@ Hand off one task per worktree, and only when the human would want it as its own
 branch. Each one is a checkout on their disk and a row in their rail until they
 deal with it.
 
-## outfit profiles (`--outfit`, `veld ide worktree outfit`)
+## outfit profiles (`--outfit`)
 
 [outfit](https://outfit.oss.life.li) gives one person their own copies of a few
 tracked files — their `AGENTS.md`, their `.claude/skills` — as **profiles**,
 without changing anything for the team. A worktree wears one profile; `base` is
 the team's files. Veld takes part only where outfit is **in play**: the `outfit`
-binary installed, `outfit init` done in the repository, and at least one profile
-besides `base` (committed in `.outfit/profiles/`, or local to this clone).
-Everywhere else, none of this applies and nothing changes.
+binary installed and at least one profile besides `base` (committed in
+`.outfit/profiles/`, or local to this clone). Everywhere else, none of this
+applies and nothing changes. For everything else about outfit, use outfit itself
+— `outfit ls`, `outfit status`, `outfit use`, and `outfit skills agents`.
 
 ```sh
-veld ide worktree outfit list                 # what this worktree wears, what a new one can
-veld ide worktree outfit list --json          # {"status", "required", "default", "current", "profiles": [...]}
+outfit ls                                     # the profiles, and what each swaps
 veld ide worktree new --branch fix/x --name "Fix X" --outfit lean --prompt-file /tmp/task.md
-veld ide worktree outfit use lean --restart-agent   # switch this worktree, then restart you to read it
+outfit use lean --here && veld agent restart  # switch this worktree, then restart you to read it
 ```
 
 - **Handing off.** Where outfit is in play, `veld ide worktree new` **must** be
@@ -297,16 +297,14 @@ veld ide worktree outfit use lean --restart-agent   # switch this worktree, then
   (`"ide": { "outfit": { "required": false, "default": "<profile>" } }` in
   `veld.json`), and so can the person (`outfit.required` in Settings → Git:
   *as the project says*, *always*, *never*); relaxed, a create without
-  `--outfit` gets the project's `default`, or follows the clone's profile.
-- **Switching where you are.** `veld ide worktree outfit use <profile>` runs
-  `outfit use <profile> --here` for the worktree you are in. You read your
-  instructions when you started, so the swapped files are not in your head yet:
-  add `--restart-agent` and Veld restarts you **in the same conversation** once
-  the command returns, with a first message saying why. outfit refuses a switch
-  that would hide uncommitted changes in a file it swaps (exit `8`, with outfit's
-  fix); commit or stash first.
+  `--outfit` gets the project's `default`, or follows the clone's profile. A
+  repository where `outfit init` was never run is set up by the first pick.
+- **Switching where you are.** `outfit use <profile> --here` switches the
+  worktree you are in (without `--here` it switches the whole clone). You read
+  your instructions when you started, so the swapped files are not in your head
+  yet: run `veld agent restart` next, as the last thing in your turn (below).
 - **Editing a swapped file edits the profile**, not the team's copy. `outfit
-  status --json` lists the swapped paths; `outfit skills agents` says the rest.
+  status --json` lists the swapped paths.
 
 ## Restarting yourself (`veld agent restart`)
 

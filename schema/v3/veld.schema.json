@@ -272,7 +272,7 @@
           }
         },
         "outfit": {
-          "description": "How new worktrees pick an outfit (https://outfit.oss.life.li) profile. Veld offers profiles only when outfit is in play on the machine: the `outfit` binary on the user's PATH, `outfit init` done in the repository, and at least one committed or local profile besides `base`. Then the create dialog shows an outfit picker, the top bar shows and switches the worktree's profile, and `veld ide worktree new` must be told `--outfit <profile>` unless `required` is false. `false` makes Veld leave outfit alone in this project.",
+          "description": "How new worktrees pick an outfit (https://outfit.oss.life.li) profile. Veld offers profiles only when outfit is in play on the machine: the `outfit` binary on the user's PATH and at least one committed or local profile besides `base`. Then the create dialog shows an outfit picker, the top bar shows and switches the worktree's profile, and `veld ide worktree new` must be told `--outfit <profile>` unless `required` is false. `false` makes Veld leave outfit alone in this project.",
           "oneOf": [
             { "type": "boolean" },
             {

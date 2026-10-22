@@ -4750,7 +4750,7 @@ function AppInner(props: {
   );
 
   // An agent asked for its own pane to be relaunched (`veld agent restart`, or an
-  // outfit switch with `--restart-agent`). Only a tab this window holds counts:
+  // outfit switch followed by `veld agent restart`). Only a tab this window holds counts:
   // the daemon addresses the one window showing the worktree, but a layout may
   // not have the tab, and `restartAgentPane` ignores a session it has not mounted.
   useEffect(
@@ -9036,6 +9036,10 @@ function TopBar(props: {
           onImport={props.onImport}
         />
       )}
+      {/* The shown checkout's outfit profile, right of the project selector;
+          renders nothing unless outfit is ready for it. Keyed on the path so the
+          state follows the worktree — see `OutfitMenu`. */}
+      {worktree && <OutfitMenu key={worktree.path} path={worktree.path} />}
       {worktree && (
         <>
           <div className="sep" />
@@ -9247,10 +9251,6 @@ function TopBar(props: {
               />
             </>
           )}
-          {/* The shown checkout's outfit profile; renders nothing unless outfit
-              is ready for it. Keyed on the path so the state follows the
-              worktree — see `OutfitMenu`. */}
-          <OutfitMenu key={worktree.path} path={worktree.path} />
           {/* **The database marker sits where the wrong label used to.** During
               the incident this chip read `repository unavailable` over a repo in
               perfect health, because a failed database write was folded into

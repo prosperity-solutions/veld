@@ -1,7 +1,7 @@
 /**
  * "Restart this agent pane": the daemon asks the one window showing a worktree to
  * relaunch a terminal tab, because the agent inside it ran `veld agent restart`,
- * `veld ide pane restart`, or `veld ide worktree outfit use X --restart-agent`.
+ * or `veld ide pane restart`.
  *
  * It arrives on the IDE control socket (`ide/channel.ts`) for the same reason
  * `open_file` does — only that channel can address "the window showing this

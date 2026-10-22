@@ -42,9 +42,9 @@ export function useOutfitState(path: string | null): {
     };
   }, [path]);
   const set = useCallback((s: OutfitState) => setState(s), []);
-  // Something other than this window can switch the profile — an agent's `veld ide
-  // worktree outfit use`, `outfit use` in a terminal — so a caller re-reads when the
-  // answer is about to matter. A failed re-read keeps what was there.
+  // Something other than this window can switch the profile — `outfit use` run by an
+  // agent or in a terminal — so a caller re-reads when the answer is about to matter.
+  // A failed re-read keeps what was there.
   const refresh = useCallback(() => {
     if (path === null) return;
     api

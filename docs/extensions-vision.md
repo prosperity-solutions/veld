@@ -1639,8 +1639,7 @@ maintainer decision, for three reasons recorded so nobody "fixes" it:
   hosts the code — no API, no auth, no provider schema. Closer to `git` than to
   `gh`.
 - **A command-backed extension could not express the premise.** Veld offers
-  profiles only where outfit is installed, `outfit init` is done and a profile
-  besides `base` exists — *including a local-only one*, which lives in the git
+  profiles only where outfit is installed and a profile besides `base` exists — *including a local-only one*, which lives in the git
   directory of a project that may never have heard of outfit. Such a project has
   no `veld.json` entry to declare an extension in, so the detection has to know
   outfit's name.
@@ -1652,3 +1651,13 @@ so the person overrides `required` with the `outfit.required` setting.
 **Rejected:** a tool-blind "worktree variant" lister in `veld.json` with outfit as
 the first recipe. It keeps core provider-blind, but loses every local-only
 profile, which is half of the premise.
+
+Same day, after driving it: `outfit init` is **not** part of the premise. An
+engineer who never used outfit, in a team repository with committed profiles, was
+shown nothing. Veld now offers the profiles anyway, and the first pick sets outfit
+up — outfit 0.14's `use` does that itself; for an older one Veld runs plain `outfit
+init` when `use` asks for it. Plain only: `--agents` and `--team` write files other
+people share. And the `outfit list|use` subcommands Veld had added under its
+`ide worktree` part were dropped as duplicates of `outfit ls`/`outfit use`: an agent runs outfit directly, then `veld agent restart`.
+Veld keeps only what outfit cannot do — pin at create time, before the agent
+starts, and restart the agent.

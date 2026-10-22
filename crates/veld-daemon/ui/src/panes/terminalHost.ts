@@ -2100,7 +2100,7 @@ const RESTART_POLL_MS = 250;
 
 /**
  * Relaunch an agent pane because the agent in it asked to be — `veld agent
- * restart`, or an outfit switch with `--restart-agent` — and hand it `prompt` as
+ * restart` — and hand it `prompt` as
  * its first message.
  *
  * **Waits first**, so the CLI that asked can return and the agent's turn settle;

@@ -325,7 +325,6 @@ export type OutfitStatus =
   | "ready"
   | "off"
   | "absent"
-  | "not_set_up"
   | "no_profiles"
   | "broken";
 

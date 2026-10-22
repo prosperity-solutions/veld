@@ -77,9 +77,17 @@ export function outfitForCreate(
   return state.profiles.some((p) => p.name === choice) ? choice : undefined;
 }
 
-/** The top bar's one-word answer to "which profile is this checkout on". */
-export function currentLabel(state: OutfitState): string {
-  return state.current?.name ?? "outfit";
+/** The top bar icon's tone: a profile other than `base` is "worn" (green). */
+export function outfitTone(state: OutfitState): "worn" | "base" {
+  const name = state.current?.name;
+  return name !== undefined && name !== "base" ? "worn" : "base";
+}
+
+/** The top bar icon's tooltip: the profile and how it is worn. */
+export function outfitTooltip(state: OutfitState | null): string {
+  if (!state?.current) return "Outfit";
+  const how = state.current.pinned ? "pinned to this worktree" : "following the clone";
+  return `Outfit: ${state.current.name} (${how})`;
 }
 
 export function isCurrent(state: OutfitState, profile: OutfitProfile): boolean {

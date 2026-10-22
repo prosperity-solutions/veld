@@ -7,8 +7,10 @@
 //! worktree, so an agent started there reads the files it was meant to.
 //!
 //! **Whether outfit is in play is decided on the machine, never by the project
-//! alone**: the binary on the user's `PATH`, `outfit init` done in the repository,
-//! and at least one profile besides `base` — committed *or local*. A local profile
+//! alone**: the binary on the user's `PATH` and at least one profile besides `base`
+//! — committed *or local*. `outfit init` is not a condition: somebody who has never
+//! used outfit in a team repository with committed profiles is offered them too, and
+//! picking one is what sets outfit up (see [`apply`]). A local profile
 //! lives in the git directory, so a project that has never heard of outfit can
 //! still have one, and the person who made it must still be offered it. The
 //! project's `ide.outfit` only tunes that (see [`veld_core::ide::OutfitPolicy`]).
@@ -65,9 +67,6 @@ pub enum Readiness {
     Off,
     /// No `outfit` on the user's `PATH`.
     Absent,
-    /// Installed, with profiles, but `outfit init` was never run here — so `outfit
-    /// use` would refuse.
-    NotSetUp,
     /// Installed, and `base` is the only profile: nothing to choose (set up or not).
     NoProfiles,
     /// Installed, and it did not answer. Not "absent": a create that requires a
@@ -303,14 +302,6 @@ fn interpret(
             Some("outfit new <name>"),
         );
     }
-    if status["dispatcher"]["installed"].as_bool() != Some(true) {
-        return OutfitState::not_ready(
-            Readiness::NotSetUp,
-            "this repository has outfit profiles, but `outfit init` was never run here, so \
-             outfit cannot switch a worktree's profile",
-            Some("outfit init"),
-        );
-    }
     let current = status["profile"]["name"].as_str().map(|name| Current {
         name: name.to_owned(),
         pinned: status["profile"]["source"].as_str() == Some("worktree"),
@@ -365,16 +356,50 @@ pub fn take_note(session: &str) -> Option<String> {
 
 /// Pin `checkout` to `profile` (`outfit use <profile> --here`).
 ///
+/// **Sets outfit up when it is not yet.** outfit 0.14 does that inside `use`; an
+/// older one refuses with the fix `outfit init`, which is then run — plain, so it
+/// touches only this clone's `.git` (its `--agents`/`--team` flags write files
+/// people share, and are never Veld's call) — and `use` tried once more. Picking a
+/// profile is the consent; merely being offered one never sets anything up.
+///
 /// **Never timed out and never killed**: `use` rewrites links, sparse patterns and
 /// config, and a kill halfway leaves the checkout half-switched — the same reason
 /// the git write helpers do not kill on drop. outfit serialises it with its own
 /// lock, so a slow one only waits.
 pub async fn apply(checkout: &Path, profile: &str) -> Result<(), String> {
     let path = veld_core::user_path::cached_user_path_for(checkout).await;
-    let out = tokio::process::Command::new(OUTFIT)
-        .args(["use", profile, "--here", "--json"])
+    let out = write(checkout, &path, &["use", profile, "--here", "--json"]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    if asks_for_init(&out.stdout) {
+        let init = write(checkout, &path, &["init", "--json"]).await?;
+        if !init.status.success() {
+            return Err(refusal(&init.stdout, &init.stderr));
+        }
+        let out = write(checkout, &path, &["use", profile, "--here", "--json"]).await?;
+        if out.status.success() {
+            return Ok(());
+        }
+        return Err(refusal(&out.stdout, &out.stderr));
+    }
+    Err(refusal(&out.stdout, &out.stderr))
+}
+
+/// Whether a refused `use` is outfit saying it is not set up here: its fix is exactly
+/// `outfit init`.
+fn asks_for_init(stdout: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(stdout)
+        .is_ok_and(|v| v["fix"].as_str().map(str::trim) == Some("outfit init"))
+}
+
+/// One outfit command that changes the checkout — see [`apply`] for why it is never
+/// cut short.
+async fn write(checkout: &Path, path: &str, args: &[&str]) -> Result<std::process::Output, String> {
+    tokio::process::Command::new(OUTFIT)
+        .args(args)
         .current_dir(checkout)
-        .env("PATH", &path)
+        .env("PATH", path)
         // The directory is the only input, as for Veld's own git (`git_raw_with_index`):
         // a daemon auto-started from inside a git hook inherits these, and outfit's git
         // would follow them into another repository.
@@ -385,11 +410,7 @@ pub async fn apply(checkout: &Path, profile: &str) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .output()
         .await
-        .map_err(|e| format!("could not run outfit: {e}"))?;
-    if out.status.success() {
-        return Ok(());
-    }
-    Err(refusal(&out.stdout, &out.stderr))
+        .map_err(|e| format!("could not run outfit: {e}"))
 }
 
 /// One sentence out of a failed outfit command, whichever of its two shapes it
@@ -509,16 +530,16 @@ mod tests {
     }
 
     #[test]
-    fn profiles_without_init_are_not_set_up_and_base_alone_is_nothing_to_choose() {
+    fn profiles_without_init_are_offered_and_base_alone_is_nothing_to_choose() {
+        // Never ran `outfit init`: still offered — picking one sets outfit up.
         let s = interpret(
             &status(false, "default"),
             &listed(),
             &policy(),
             RequiredOverride::Project,
         );
-        assert_eq!(s.status, Readiness::NotSetUp);
-        assert_eq!(s.fix.as_deref(), Some("outfit init"));
-        assert!(!s.required && s.profiles.is_empty());
+        assert_eq!(s.status, Readiness::Ready);
+        assert_eq!(s.profiles.len(), 3);
 
         let only_base = json!({ "profiles": [{ "name": "base", "tier": "builtin" }] });
         let s = interpret(
@@ -584,6 +605,19 @@ mod tests {
         let other = tmp.path().join("other");
         std::fs::create_dir_all(other.join(".outfit")).unwrap();
         assert!(has_traces(&other));
+    }
+
+    #[test]
+    fn only_outfits_own_not_set_up_refusal_triggers_an_init() {
+        let not_set_up = br#"{"error":"outfit is not installed in this repository yet (no hook dispatcher, so nothing would keep a swapped file out of a commit)","fix":"outfit init","retryable":false,"code":1}"#;
+        assert!(asks_for_init(not_set_up));
+        assert!(!asks_for_init(
+            br#"{"error":"no profile called \"x\"","fix":"outfit ls"}"#
+        ));
+        assert!(!asks_for_init(
+            br#"{"refused":["AGENTS.md"],"fixes":["outfit init"]}"#
+        ));
+        assert!(!asks_for_init(b"not json"));
     }
 
     #[test]

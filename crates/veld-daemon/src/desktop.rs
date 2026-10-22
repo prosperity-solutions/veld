@@ -65,12 +65,9 @@ pub fn routes() -> Router {
         .route("/api/handoffs/groups", get(handoff_groups))
         // outfit profiles. POSTs although two only read: each runs the user's
         // `outfit` binary, and nothing that spawns a process is a CSRF-exempt GET.
-        // The first two name a checkout by path (ids are reused — see
-        // `CreateFrom::Worktree`); the last two by where the caller is, for the CLI.
+        // They name a checkout by path: ids are reused — see `CreateFrom::Worktree`.
         .route("/api/outfit/state", post(outfit_state))
         .route("/api/outfit/use", post(outfit_use))
-        .route("/api/ide/worktree/outfit", post(caller_outfit_state))
-        .route("/api/ide/worktree/outfit/use", post(caller_outfit_use))
         // What `veld ide worktree name` calls: retitle the worktree the caller is
         // in, resolved from where it runs the way a hand-off is.
         .route("/api/ide/worktree/name", post(name_caller_worktree))
@@ -5524,17 +5521,6 @@ struct OutfitRequest {
     profile: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CallerOutfitRequest {
-    #[serde(default)]
-    session_id: Option<String>,
-    #[serde(default)]
-    cwd: Option<String>,
-    #[serde(default)]
-    profile: Option<String>,
-}
-
 /// The checkout at `path`, by its stored path — refused unless it is one Veld
 /// knows, so these routes never run outfit in an arbitrary directory.
 async fn known_checkout(path: String) -> Result<String, ApiError> {
@@ -5547,19 +5533,6 @@ async fn known_checkout(path: String) -> Result<String, ApiError> {
             .map_err(db_err)?
             .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))?;
         Ok(wt.path)
-    })
-    .await
-}
-
-/// The checkout a CLI caller is in, resolved the way a hand-off resolves it.
-async fn caller_checkout(session: Option<&str>, cwd: Option<&str>) -> Result<String, ApiError> {
-    let id = resolve_caller(session, cwd).await?;
-    crate::offload::blocking(move || {
-        open_desktop_db()?
-            .get_worktree(id)
-            .map_err(db_err)?
-            .map(|wt| wt.path)
-            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such worktree"))
     })
     .await
 }
@@ -5584,28 +5557,6 @@ async fn outfit_use(
 ) -> Result<Json<super::outfit::OutfitState>, ApiError> {
     super::file_pane::require_local_host(&headers)?;
     let path = known_checkout(body.path).await?;
-    switch_outfit(path, body.profile).await.map(Json)
-}
-
-/// `POST /api/ide/worktree/outfit` — [`outfit_state`] for the checkout the caller
-/// is in; what `veld ide worktree outfit list` prints.
-async fn caller_outfit_state(
-    headers: axum::http::HeaderMap,
-    Json(body): Json<CallerOutfitRequest>,
-) -> Result<Json<super::outfit::OutfitState>, ApiError> {
-    super::file_pane::require_local_host(&headers)?;
-    let path = caller_checkout(body.session_id.as_deref(), body.cwd.as_deref()).await?;
-    Ok(Json(super::outfit::state_for(FsPath::new(&path)).await))
-}
-
-/// `POST /api/ide/worktree/outfit/use` — [`outfit_use`] for the caller's checkout;
-/// what `veld ide worktree outfit use` sends.
-async fn caller_outfit_use(
-    headers: axum::http::HeaderMap,
-    Json(body): Json<CallerOutfitRequest>,
-) -> Result<Json<super::outfit::OutfitState>, ApiError> {
-    super::file_pane::require_local_host(&headers)?;
-    let path = caller_checkout(body.session_id.as_deref(), body.cwd.as_deref()).await?;
     switch_outfit(path, body.profile).await.map(Json)
 }
 
@@ -9943,12 +9894,7 @@ mod handoff_outfit_tests {
         );
         let broken = state(Readiness::Broken, false, None);
         assert_eq!(decide_handoff_outfit(&broken, None).unwrap(), None);
-        for quiet in [
-            Readiness::Off,
-            Readiness::Absent,
-            Readiness::NotSetUp,
-            Readiness::NoProfiles,
-        ] {
+        for quiet in [Readiness::Off, Readiness::Absent, Readiness::NoProfiles] {
             assert_eq!(
                 decide_handoff_outfit(&state(quiet, false, None), None).unwrap(),
                 None

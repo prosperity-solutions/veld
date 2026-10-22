@@ -5,6 +5,8 @@ import {
   initialOutfitChoice,
   outfitForCreate,
   outfitOptions,
+  outfitTone,
+  outfitTooltip,
   profileSwaps,
 } from "./model";
 
@@ -76,5 +78,30 @@ describe("outfitForCreate", () => {
   });
   it("never sends a profile the daemon did not list", () => {
     expect(outfitForCreate(state(), "ghost")).toBeUndefined();
+  });
+});
+
+describe("outfitTone", () => {
+  it("is worn for any profile but base", () => {
+    expect(outfitTone(state())).toBe("worn");
+  });
+  it("is base for base, or when no profile is known", () => {
+    expect(outfitTone(state({ current: { name: "base", pinned: false } }))).toBe("base");
+    expect(outfitTone(state({ current: undefined }))).toBe("base");
+  });
+});
+
+describe("outfitTooltip", () => {
+  it("says how the profile is worn", () => {
+    expect(outfitTooltip(state({ current: { name: "mine", pinned: true } }))).toBe(
+      "Outfit: mine (pinned to this worktree)",
+    );
+    expect(outfitTooltip(state({ current: { name: "base", pinned: false } }))).toBe(
+      "Outfit: base (following the clone)",
+    );
+  });
+  it("falls back to a bare label", () => {
+    expect(outfitTooltip(null)).toBe("Outfit");
+    expect(outfitTooltip(state({ current: undefined }))).toBe("Outfit");
   });
 });

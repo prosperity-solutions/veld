@@ -1126,8 +1126,8 @@ pub fn is_local_origin(origin: &OriginPattern) -> bool {
 /// new worktrees (`ide.outfit`).
 ///
 /// It only *tunes* the integration. Whether outfit is in play at all is decided on
-/// the machine — the binary on the user's `PATH`, `outfit init` done, and at least
-/// one profile besides `base` — because a profile can be local-only, and a project
+/// the machine — the binary on the user's `PATH` and at least one profile besides
+/// `base` (picking one runs `outfit init` where it never ran) — because a profile can be local-only, and a project
 /// that has never heard of outfit must not be able to switch it off for the person
 /// who uses it. `false` is the one exception: a project that wants veld to leave
 /// outfit alone entirely.

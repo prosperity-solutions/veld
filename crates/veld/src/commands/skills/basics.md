@@ -42,7 +42,7 @@ where it moved to (``that is `veld orchestrator start` now``) and exits 2. The s
 | Part | Commands |
 |---|---|
 | `orchestrator` (alias `orc`) | `start`, `stop`, `restart`, `status`, `urls`, `logs`, `runs list`/`show`/`diff`, `stats`, `presets`, `nodes`, `graph`, `config`, `vars list`/`set`/`unset`, `lint`, `init`, `actions`, `action` |
-| `ide` | `open`, `open-url`, `dashboard`, `worktree name`, `worktree new`, `worktree groups`, `worktree outfit list`/`use`, `pane restart` |
+| `ide` | `open`, `open-url`, `dashboard`, `worktree name`, `worktree new`, `worktree groups`, `pane restart` |
 | `agent` | `skills` (this document), `restart` |
 | `network` | `share`, `join`, `list`, `unshare`, `leave`, `approve`, `deny` |
 | `self` | `setup`, `doctor`, `update`, `desktop`, `settings list`/`get`/`set`/`unset`/`describe`, `backup list`/`now`/`restore`, `projects list`, `gc`, `version`, `uninstall` |
