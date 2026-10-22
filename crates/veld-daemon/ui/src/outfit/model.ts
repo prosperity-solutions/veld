@@ -49,9 +49,9 @@ export function outfitOptions(state: OutfitState): OutfitOption[] {
 }
 
 /**
- * What the picker opens on: the repo's `default`, else the clone's current
- * profile — a name that is no longer offered is skipped. With neither,
- * "follow the clone" where it is offered, else the first profile.
+ * What the picker opens on: the repo's `default` when it is offered. Otherwise,
+ * when no choice is required, "follow the clone"; when one is, the clone's
+ * current profile, else the first one.
  */
 export function initialOutfitChoice(state: OutfitState): string {
   const offered = (name: string | undefined) =>

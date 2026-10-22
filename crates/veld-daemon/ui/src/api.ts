@@ -342,9 +342,12 @@ export interface OutfitState {
   status: OutfitStatus;
   reason?: string;
   fix?: string;
-  /** The clone has no profile of its own to follow, so a create must pick one. */
+  /** Whether an agent's `veld ide worktree new` must name a profile here
+   *  (`ide.outfit.required`, overridden by the `outfit.required` setting). The
+   *  dialog drops its "follow the clone" option when it is set. */
   required: boolean;
-  /** The profile a new checkout starts on when none is chosen. */
+  /** The project's `ide.outfit.default`, when it names an offered profile: what
+   *  the dialog preselects. */
   default?: string;
   /** `pinned`: this checkout was set to it, rather than following the clone. */
   current?: { name: string; pinned: boolean };

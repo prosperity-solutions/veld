@@ -2291,9 +2291,8 @@ async fn capture_uncommitted(src: &FsPath) -> Result<CapturedWork, String> {
     {
         return Err(
             "that checkout is sparse, so its uncommitted changes cannot be carried across \
-             — create the worktree without carrying them (an outfit profile that swaps \
-             files makes a checkout sparse: switch it to `base` with `outfit use base \
-             --here` first to carry them)"
+             — create the worktree without carrying them (if an outfit profile made it \
+             sparse, `outfit use base --here` there first lets them be carried)"
                 .to_owned(),
         );
     }
@@ -2781,8 +2780,8 @@ struct HandoffView {
 
 #[derive(Serialize)]
 struct WorktreeView {
-    // **Never name a field here `carry_over`.** `CreatedWorktreeView` flattens
-    // this struct beside its own `carry_over`, and serde emits a duplicate key
+    // **Never name a field here `carry_over` or `outfit`.** `CreatedWorktreeView`
+    // flattens this struct beside its own `carry_over` and `outfit`, and serde emits a duplicate key
     // for that collision with no compile-time complaint —
     // `the_create_response_flattens_the_worktree_and_omits_an_absent_carry_over`
     // is the only thing that would notice.
@@ -8675,6 +8674,10 @@ mod tests {
                 !obj.contains_key("carry_over"),
                 "an absent carry-over must not appear as null — a client reading \
                  this object must see exactly what it always saw"
+            );
+            assert!(
+                !obj.contains_key("outfit"),
+                "an absent outfit report must not appear as null either"
             );
             assert!(
                 obj.contains_key("deleting") && obj.contains_key("presets"),

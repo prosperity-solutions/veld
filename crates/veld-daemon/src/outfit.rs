@@ -68,7 +68,7 @@ pub enum Readiness {
     /// Installed, with profiles, but `outfit init` was never run here — so `outfit
     /// use` would refuse.
     NotSetUp,
-    /// Installed and set up, and `base` is the only profile: nothing to choose.
+    /// Installed, and `base` is the only profile: nothing to choose (set up or not).
     NoProfiles,
     /// Installed, and it did not answer. Not "absent": a create that requires a
     /// profile refuses rather than quietly skipping the choice.
@@ -182,6 +182,18 @@ pub async fn probe(
             None,
         );
     }
+    // **Nothing is run in a repository outfit has never touched** — most of them.
+    // Without its traces there is nothing to offer, whatever binary called `outfit`
+    // is on the PATH; and that binary (another tool by the same name, a hung one)
+    // must not be able to fail a hand-off closed for somebody who never used outfit.
+    let dir = checkout.to_owned();
+    if !crate::offload::blocking(move || has_traces(&dir)).await {
+        return OutfitState::not_ready(
+            Readiness::NoProfiles,
+            "this repository has no outfit profiles",
+            None,
+        );
+    }
     // The directory-scoped PATH: `outfit` is the user's own install, found the way
     // their shell in this checkout would find it (AGENTS.md, daemon PATH rule).
     let path = veld_core::user_path::cached_user_path_for(checkout).await;
@@ -208,6 +220,34 @@ pub async fn probe(
         }
     };
     interpret(&status, &listed, policy, required)
+}
+
+/// Whether outfit has ever been used in the repository `checkout` belongs to: its
+/// committed profiles (`.outfit/` in the checkout) or its own directory in the git
+/// common dir (local profiles, `outfit init`'s hooks). Read from the filesystem, so
+/// it costs no process: `.git` is the common dir in a main checkout, and in a linked
+/// one a `gitdir:` file whose directory names the common dir in `commondir`.
+fn has_traces(checkout: &Path) -> bool {
+    if checkout.join(".outfit").is_dir() {
+        return true;
+    }
+    let dot_git = checkout.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else {
+        let Some(gitdir) = std::fs::read_to_string(&dot_git)
+            .ok()
+            .and_then(|s| s.strip_prefix("gitdir:").map(|p| p.trim().to_owned()))
+        else {
+            return false;
+        };
+        checkout.join(gitdir)
+    };
+    let common = match std::fs::read_to_string(git_dir.join("commondir")) {
+        Ok(rel) => git_dir.join(rel.trim()),
+        Err(_) => git_dir,
+    };
+    common.join("outfit").is_dir()
 }
 
 /// [`probe`]'s decision, from the two answers. Separate so a test can feed it
@@ -515,6 +555,31 @@ mod tests {
         );
         assert!(!s.required);
         assert_eq!(s.default.as_deref(), Some("lean"));
+    }
+
+    #[test]
+    fn traces_are_found_from_a_main_or_a_linked_checkout_and_nowhere_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let main = tmp.path().join("repo");
+        let linked = tmp.path().join("wt");
+        let common = main.join(".git");
+        let wt_dir = common.join("worktrees/wt");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::fs::write(
+            linked.join(".git"),
+            format!("gitdir: {}\n", wt_dir.display()),
+        )
+        .unwrap();
+        std::fs::write(wt_dir.join("commondir"), "../..\n").unwrap();
+        assert!(!has_traces(&main));
+        assert!(!has_traces(&linked));
+        std::fs::create_dir_all(common.join("outfit")).unwrap();
+        assert!(has_traces(&main));
+        assert!(has_traces(&linked));
+        let other = tmp.path().join("other");
+        std::fs::create_dir_all(other.join(".outfit")).unwrap();
+        assert!(has_traces(&other));
     }
 
     #[test]

@@ -2,9 +2,10 @@
  * The shown worktree's outfit profile, in the top bar.
  *
  * Absent unless the daemon says outfit is `ready` for this checkout — a person
- * without outfit never sees it. The state is read when the worktree changes and
- * again only through a switch (which answers with the new state); the 5s poll
- * does not touch it, because every read spawns a process in the daemon.
+ * without outfit never sees it. The state is read when the worktree changes, when
+ * the menu opens (something else may have switched it), and through a switch
+ * (which answers with the new state); the 5s poll does not touch it, because
+ * every read spawns a process in the daemon.
  *
  * Mounted with `key={path}` so a switch finishing after the user moved on lands
  * in an unmounted component rather than labelling the wrong worktree.

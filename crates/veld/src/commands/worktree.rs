@@ -189,9 +189,10 @@ pub enum OutfitCommand {
     /// agent in the same conversation so it reads the new ones.
     ///
     /// Exit status: 0 switched (and, with `--restart-agent`, the restart asked
-    /// for), 1 failed, 3 not inside a worktree Veld knows, 4 no Veld window to
-    /// restart the agent in, 5 not a pane Veld can restart, 7 not a profile
-    /// offered here, 8 outfit refused the switch (the message says how to fix it).
+    /// for), 1 failed, 3 not inside a worktree Veld knows (or, after switching, not
+    /// in a Veld terminal to restart), 4 no Veld window to restart the agent in, 5
+    /// not a pane Veld can restart, 7 not a profile offered here or outfit not in
+    /// play, 8 outfit refused the switch (the message says how to fix it).
     Use {
         /// The profile to wear; `base` is the team's files.
         profile: String,
@@ -430,7 +431,10 @@ async fn outfit(command: OutfitCommand) -> i32 {
         return 0;
     }
     let Some(session) = session else {
-        eprintln!("veld: --restart-agent needs to run inside a Veld agent pane");
+        eprintln!(
+            "veld: switched, but --restart-agent needs to run inside a Veld agent pane — \
+             restart the agent by hand"
+        );
         return 3;
     };
     let prompt = format!(
