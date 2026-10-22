@@ -34,6 +34,10 @@ describe("outfitOptions", () => {
     expect(o.map((x) => x.value)).toEqual([FOLLOW_CLONE, "team", "peter"]);
     expect(o[0].label).toBe("Follow the clone's profile (team)");
   });
+  it("does not name a pinned profile as the one followed", () => {
+    const o = outfitOptions(state({ current: { name: "peter", pinned: true } }));
+    expect(o[0].label).toBe("Follow the clone's profile");
+  });
   it("has no empty option when a choice is required", () => {
     const o = outfitOptions(state({ required: true }));
     expect(o.map((x) => x.value)).toEqual(["team", "peter"]);

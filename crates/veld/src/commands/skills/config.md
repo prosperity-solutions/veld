@@ -177,7 +177,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ide": { }      // quicklinks + permissions + externalOrigins + panes + news + git (stalenessSensitivity) are rendered; every other key is reserved
+  "ide": { }      // quicklinks + permissions + externalOrigins + panes + news + git (stalenessSensitivity) + outfit are rendered; every other key is reserved
 }
 ```
 
@@ -711,7 +711,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `ports` | node, variant | Named ports: `{"http": "auto", "debug": "auto"}`, or an entry's long form `{"port": …, "protocol": "http"\|"tcp", "host": "<template>"}`. `${veld.ports.<name>}`, `VELD_PORT_<NAME>`; an `http` port also gets a hostname, a route, `${veld.urls.<name>}` and `VELD_URL_<NAME>`. `${veld.port}` = primary. Protocol defaults: `http` for the primary, `tcp` for the rest. **`null` = no ports at all** (portless `long_running`); absent = one auto http port. |
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld orchestrator lint` emits a notice. |
-| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions`, `ide.externalOrigins`, `ide.panes` and `ide.news` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
+| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks`, `ide.permissions`, `ide.externalOrigins`, `ide.panes`, `ide.news`, `ide.extensions`, `ide.git` and `ide.outfit` are interpreted; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
 
 Any **other** top-level key is an error reported by `veld orchestrator lint` and `veld orchestrator start`
 (rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
@@ -833,6 +833,34 @@ other than the ones below is **reserved**: parsed, stored, not rendered, and
   ]
 }
 ```
+
+### `ide.outfit`
+
+[outfit](https://outfit.oss.life.li) gives one person their own copies of a few
+tracked files (an `AGENTS.md`, `.claude/skills`) as *profiles*. Veld offers
+them only where outfit is in play **on the machine**: the `outfit` binary on the
+user's `PATH`, `outfit init` done in the repository, and at least one profile
+besides `base` — committed under `.outfit/profiles/`, or local to the clone. Then
+the New worktree dialog has an outfit picker, the top bar shows and switches the
+worktree's profile, and `veld ide worktree new` must be told `--outfit
+<profile>`. This key only tunes that; a project without it gets the defaults.
+
+```jsonc
+"ide": {
+  // Agents may create worktrees without naming a profile; they get "base".
+  "outfit": { "required": false, "default": "base" }
+}
+```
+
+| Field | Default | Meaning |
+|---|---|---|
+| `required` | `true` | Whether `veld ide worktree new` must name a profile (exit 7 without one). The person's `outfit.required` setting (*as the project says* / *always* / *never*) overrides it. |
+| `default` | — | The profile the dialog preselects, and the one a CLI create gets when `required` is false. A name the person does not have (a teammate's local profile) is ignored. |
+
+`"outfit": false` makes Veld leave outfit alone in this project. Committed
+profiles are versioned: one that exists on the calling branch but not on the new
+worktree's base cannot be applied, and the create says so (exit 8, no agent
+started).
 
 ### `ide.externalOrigins`
 

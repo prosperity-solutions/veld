@@ -331,8 +331,9 @@ Veld terminal — a few lines appended to the system prompt (Claude's
 for Claude on Veld's mod (`terminal.claudeIntegration`), the same lines attached to
 the first prompt of each conversation.
 The user can turn that off (`terminal.agentContext`, *Settings → Activity*); the
-command works either way. In a worktree where outfit is in play, the first prompt
-of a new conversation also carries a short note about its profiles.
+command works either way. For Claude Code, in a worktree where outfit is in play,
+the first prompt of a new conversation also carries a short note about its
+profiles; Codex CLI and Pi do not get that note.
 
 **If those lines name a full path to `veld`, run that path, not the bare word.**
 It means this terminal belongs to a development build of Veld, and the `veld` on

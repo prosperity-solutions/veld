@@ -149,9 +149,10 @@ position named — which is a useful final check in its own right.
 
 - **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.) Eight keys under `ide`
+  there. (This is the rule the removed converter broke.) These keys under `ide`
   are now interpreted — `quicklinks`, `permissions`, `externalOrigins`, `panes`,
-  `extensions`, `news` and the `git` subscope (`ide.git.stalenessSensitivity`), see
+  `extensions`, `news`, the `git` subscope (`ide.git.stalenessSensitivity`) and
+  `outfit` (outfit profiles for new worktrees), see
   [configuration.md](configuration.md#ide-the-projects-own-ide-surfaces) — but they are additions
   rather than a migration: a config that has none of them is unaffected, and the
   rest of `ide` stays opaque, including the `command` exemption. Note that

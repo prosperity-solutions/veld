@@ -893,7 +893,7 @@ export function NewWorktreeDialog(props: {
     /** Files to paste after the prompt, as paths — see `ide/promptAttachments.ts`.
      *  Like `prompt`, an instruction to this client and never sent to the daemon. */
     attachments?: IncomingFile[];
-  }) => Promise<void>;
+  }) => Promise<void | { keepDraft: true }>;
   /** The repo whose branches the source picker lists. */
   repoRoot: string;
   /**
@@ -977,7 +977,7 @@ export function NewWorktreeDialog(props: {
    * outfit's state for the repo, read once at open. Only `ready` renders the
    * picker; loading and a failed read are the same silence, and send nothing.
    */
-  const { state: outfitState } = useOutfitState(props.repoRoot);
+  const { state: outfitState, loading: outfitLoading } = useOutfitState(props.repoRoot);
   /** The profile picked, or `null` until the user touches it — the preselection
    *  is derived from the state, so it cannot be stale when the state lands. */
   const [outfitPick, setOutfitPick] = useState<string | null>(null);
@@ -1335,11 +1335,12 @@ export function NewWorktreeDialog(props: {
         prompt: launch?.prompt,
         attachments: launch?.attachments.map((a) => ({ file: a.file, path: a.path })),
       })
-      .then(() => {
+      .then((result) => {
+        // `keepDraft`: the create ran but the prompt did not (outfit failed).
         // **Cleared by a create that carried it, not by any create.** Typing a
         // prompt, changing your mind and making a plain checkout instead leaves
         // an intention you have not spent — so it is still there next time.
-        if (launch !== null) props.onPromptDraft("");
+        if (launch !== null && !result?.keepDraft) props.onPromptDraft("");
       })
       .catch((e) => {
         // The create is no longer in flight. The dialog stays open on failure,
@@ -2163,7 +2164,7 @@ export function NewWorktreeDialog(props: {
                   // is disabled, so the chord would otherwise reach a create
                   // the click cannot make — and land on the daemon's refusal
                   // instead of on the error already rendered next to the field.
-                  if (!ready || busy || promptHasNoAgent) return;
+                  if (!ready || busy || promptHasNoAgent || outfitLoading) return;
                   formRef.current?.requestSubmit();
                 }}
                 onPaste={pasteImage}
@@ -2281,7 +2282,9 @@ export function NewWorktreeDialog(props: {
             <Button
               type="submit"
               loading={busy}
-              disabled={!ready || promptHasNoAgent}
+              // A fast submit while outfit is still answering would skip a
+              // required profile choice; once it answers (or fails) this clears.
+              disabled={!ready || promptHasNoAgent || outfitLoading}
             >
               Create worktree
             </Button>

@@ -410,13 +410,15 @@ async fn outfit(command: OutfitCommand) -> i32 {
     .await
     {
         Ok(state) => state,
+        // A read or a switch that got no answer is just a failure here, and `send`'s
+        // "the worktree may still be on its way" sentence is about a create.
+        Err(refusal) if refusal.code.as_deref() == Some(NO_ANSWER) => {
+            eprintln!("veld: no answer from the daemon — try again in a moment");
+            return 1;
+        }
         Err(refusal) => {
             eprintln!("veld: {}", refusal.message);
-            return match refusal.code.as_deref() {
-                // A read or a switch that got no answer is just a failure here.
-                Some(NO_ANSWER) => 1,
-                code => exit_for(code),
-            };
+            return exit_for(refusal.code.as_deref());
         }
     };
     if json {
@@ -438,8 +440,18 @@ async fn outfit(command: OutfitCommand) -> i32 {
     );
     match super::ide::request_restart(&session, false, Some(&prompt)).await {
         Ok(()) => {
-            eprintln!("Restarting this agent in a moment, in the same conversation.");
+            eprintln!(
+                "Asked the Veld window to restart this agent in a moment, in the same \
+                 conversation. If nothing happens, the window does not have this pane open — \
+                 tell the human."
+            );
             0
+        }
+        Err(refusal) if refusal.code.as_deref() == Some(NO_ANSWER) => {
+            eprintln!(
+                "veld: switched, but the daemon did not answer the restart — try `veld agent restart`"
+            );
+            1
         }
         Err(refusal) => {
             eprintln!("veld: switched, but {}", refusal.message);
@@ -578,7 +590,7 @@ pub(crate) struct Refusal {
 
 /// The [`Refusal`] code for a request that was sent and got no answer: the daemon
 /// may well be finishing it.
-const NO_ANSWER: &str = "no_answer";
+pub(crate) const NO_ANSWER: &str = "no_answer";
 
 /// One `POST /api/handoffs`.
 ///

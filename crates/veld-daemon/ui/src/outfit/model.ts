@@ -36,7 +36,8 @@ export function outfitOptions(state: OutfitState): OutfitOption[] {
     description: profileSwaps(p.files),
   }));
   if (state.required) return profiles;
-  const follow = state.current?.name;
+  // A pinned profile is not the clone's own, so naming it would mislabel the follow.
+  const follow = state.current && !state.current.pinned ? state.current.name : undefined;
   return [
     {
       value: FOLLOW_CLONE,

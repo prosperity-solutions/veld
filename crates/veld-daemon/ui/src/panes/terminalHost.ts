@@ -2094,6 +2094,9 @@ export function startTerminal(
 
 /** How long [`restartAgentPane`] waits before it restarts anything. */
 export const RESTART_SETTLE_MS = 1500;
+/** The longest [`restartAgentPane`] waits for the agent to finish its turn. */
+export const RESTART_MAX_WAIT_MS = 60_000;
+const RESTART_POLL_MS = 250;
 
 /**
  * Relaunch an agent pane because the agent in it asked to be — `veld agent
@@ -2119,15 +2122,36 @@ export function restartAgentPane(req: {
   /** The pane's label, for the failure message if the prompt cannot be typed. */
   label: string;
 }): void {
-  window.setTimeout(() => {
+  const started = Date.now();
+  const attempt = () => {
+    // The tool call has returned by now, but the agent may still be writing its
+    // reply; restarting under it would cut that off. Wait it out, within a cap.
+    // No agent-state signal for the session means nothing to wait on.
+    if (
+      inbox.agentWorking(req.sessionId) === true &&
+      Date.now() - started < RESTART_MAX_WAIT_MS
+    ) {
+      window.setTimeout(attempt, RESTART_POLL_MS);
+      return;
+    }
     const s = sessions.get(req.sessionId);
-    if (!s || s.worktreeId !== req.worktreeId || s.spec === undefined) return;
+    if (!s || s.worktreeId !== req.worktreeId || s.spec === undefined) {
+      dropRestart(req.label, "that terminal is not open in this window");
+      return;
+    }
     // A leftover from the launch before this one would make the queue ignore the
     // new prompt, and it described a conversation that is ending.
     dropInitialPrompt(req.sessionId);
     queueInitialPrompt(req.sessionId, req.prompt, req.label);
     startTerminal(req.sessionId, req.mode, req.mode);
-  }, RESTART_SETTLE_MS);
+  };
+  window.setTimeout(attempt, RESTART_SETTLE_MS);
+}
+
+/** Say out loud that an agent's restart request was not honoured here. */
+export function dropRestart(label: string, reason: string): void {
+  console.warn(`restart_pane dropped (${label}): ${reason}`);
+  notifyRedirect(`${label} asked to be restarted, but this window could not: ${reason}`);
 }
 
 /** Detach the element without ending the session. */

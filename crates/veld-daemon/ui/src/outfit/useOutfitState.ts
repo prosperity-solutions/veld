@@ -11,10 +11,14 @@ import { type OutfitState, api } from "../api";
  */
 export function useOutfitState(path: string | null): {
   state: OutfitState | null;
+  /** True while the first answer for `path` is in flight; false once it landed or failed. */
+  loading: boolean;
   set: (state: OutfitState) => void;
 } {
   const [state, setState] = useState<OutfitState | null>(null);
+  const [loading, setLoading] = useState(path !== null);
   useEffect(() => {
+    setLoading(path !== null);
     // Dropped at once: the previous checkout's profile must not label this one
     // while its answer is in flight.
     setState(null);
@@ -27,11 +31,14 @@ export function useOutfitState(path: string | null): {
       })
       // Nothing to say: no outfit is the common case, and a failed read is
       // indistinguishable from it to the person looking at the bar.
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
     return () => {
       cancelled = true;
     };
   }, [path]);
   const set = useCallback((s: OutfitState) => setState(s), []);
-  return { state, set };
+  return { state, loading, set };
 }

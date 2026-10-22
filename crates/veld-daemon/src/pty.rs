@@ -2444,7 +2444,15 @@ async fn mint_ticket(
         && veld_core::shell::supports_posix_env_handoff(&shell).await;
     if !resumed && opts.agent_integration && opts.agent_context {
         arm_naming(&body.session_id);
-        super::outfit::prepare_note(body.session_id.clone(), wt.path.clone(), shims::cli_word());
+        // Only a config-declared pane can be an agent; a plain shell gets no note and
+        // costs no probe.
+        if body.pane.is_some() {
+            super::outfit::prepare_note(
+                body.session_id.clone(),
+                wt.path.clone(),
+                shims::cli_word(),
+            );
+        }
     }
     let shim_env = shims::session_env(&body.session_id, &shell, opts);
     // Derived from the environment rather than from `bash_handoff` directly, so the
@@ -3642,6 +3650,11 @@ async fn restart_agent(
     use super::file_pane::coded;
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    // Host-checked as well as CSRF-gated, like `agent_state`: this puts text in front
+    // of a coding agent with a shell, and a page that DNS-rebinds onto the daemon's
+    // port is same-origin and can send the header. The CLI calls `127.0.0.1`.
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
@@ -3732,6 +3745,8 @@ async fn take_context(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    super::management::check_host(&headers)
+        .map_err(|status| err(status, "request host is not this machine"))?;
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }

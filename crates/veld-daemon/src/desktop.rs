@@ -4592,7 +4592,19 @@ async fn create_worktree(
     Json(body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
     if let Some(profile) = body.outfit.as_deref() {
-        let state = super::outfit::state_for(FsPath::new(&body.repo_root)).await;
+        // Only an imported repository: the probe starts a login shell and runs
+        // outfit (and through it git) in the directory, so a path straight from the
+        // request body must not reach it — `create_checkout`'s own lookup comes later.
+        let given = body.repo_root.clone();
+        let root = crate::offload::blocking(move || {
+            open_desktop_db()?
+                .get_repo(FsPath::new(&given))
+                .map_err(db_err)?
+                .map(|repo| repo.root)
+                .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))
+        })
+        .await?;
+        let state = super::outfit::state_for(FsPath::new(&root)).await;
         check_outfit(&state, profile)?;
     }
     create_checkout(body).await.map(Json)
@@ -5609,12 +5621,21 @@ async fn switch_outfit(
 /// **Fails closed**: outfit installed but not answering refuses a required choice
 /// rather than reading as "outfit is absent" and skipping it.
 async fn handoff_outfit(source: &str, named: Option<&str>) -> Result<Option<String>, ApiError> {
-    use super::file_pane::coded;
-    use super::outfit::Readiness;
     let named = named.map(str::trim).filter(|n| !n.is_empty());
     let state = super::outfit::state_for(FsPath::new(source)).await;
+    decide_handoff_outfit(&state, named)
+}
+
+/// [`handoff_outfit`]'s decision, from outfit's state. Separate so each arm is
+/// tested without outfit.
+fn decide_handoff_outfit(
+    state: &super::outfit::OutfitState,
+    named: Option<&str>,
+) -> Result<Option<String>, ApiError> {
+    use super::file_pane::coded;
+    use super::outfit::Readiness;
     if let Some(profile) = named {
-        check_outfit(&state, profile)?;
+        check_outfit(state, profile)?;
         return Ok(Some(profile.to_owned()));
     }
     match state.status {
@@ -5645,7 +5666,7 @@ async fn handoff_outfit(source: &str, named: Option<&str>) -> Result<Option<Stri
                 ),
             ))
         }
-        Readiness::Ready => Ok(state.default),
+        Readiness::Ready => Ok(state.default.clone()),
         Readiness::Broken if state.required => Err(coded(
             StatusCode::BAD_REQUEST,
             "outfit_unavailable",
@@ -9818,5 +9839,100 @@ mod tests {
         git(&work, &["checkout", "-qb", "feature"]);
         let refusal = checked_default_branch(&db, &work).await.unwrap_err();
         assert_eq!(refusal.0, StatusCode::CONFLICT);
+    }
+}
+
+#[cfg(test)]
+mod handoff_outfit_tests {
+    use super::super::outfit::{OutfitState, Profile, Readiness};
+    use super::decide_handoff_outfit;
+
+    fn state(status: Readiness, required: bool, default: Option<&str>) -> OutfitState {
+        let profile = |name: &str, files: &[&str]| Profile {
+            name: name.to_owned(),
+            tier: if name == "base" { "builtin" } else { "local" }.to_owned(),
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+        };
+        OutfitState {
+            status,
+            reason: (status != Readiness::Ready).then(|| "why".to_owned()),
+            fix: None,
+            required,
+            default: default.map(str::to_owned),
+            current: None,
+            profiles: if status == Readiness::Ready {
+                vec![profile("base", &[]), profile("mine", &["AGENTS.md"])]
+            } else {
+                Vec::new()
+            },
+        }
+    }
+
+    fn code(result: Result<Option<String>, super::ApiError>) -> String {
+        result.unwrap_err().1.0["code"].as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_named_profile_is_taken_only_when_offered() {
+        let ready = state(Readiness::Ready, true, None);
+        assert_eq!(
+            decide_handoff_outfit(&ready, Some("mine")).unwrap(),
+            Some("mine".to_owned())
+        );
+        assert_eq!(
+            code(decide_handoff_outfit(&ready, Some("nope"))),
+            "unknown_outfit"
+        );
+        let absent = state(Readiness::Absent, false, None);
+        assert_eq!(
+            code(decide_handoff_outfit(&absent, Some("mine"))),
+            "outfit_unavailable"
+        );
+    }
+
+    #[test]
+    fn a_required_choice_is_refused_with_every_profile_and_what_it_swaps() {
+        let err = decide_handoff_outfit(&state(Readiness::Ready, true, Some("mine")), None)
+            .unwrap_err()
+            .1
+            .0;
+        assert_eq!(err["code"], "outfit_required");
+        let text = err["error"].as_str().unwrap();
+        assert!(text.contains("base — the team's files"), "{text}");
+        assert!(text.contains("mine (local) — swaps AGENTS.md"), "{text}");
+        assert!(text.contains("suggests \"mine\""), "{text}");
+    }
+
+    #[test]
+    fn relaxed_takes_the_default_or_follows_the_clone() {
+        let relaxed = state(Readiness::Ready, false, Some("mine"));
+        assert_eq!(
+            decide_handoff_outfit(&relaxed, None).unwrap(),
+            Some("mine".to_owned())
+        );
+        let relaxed = state(Readiness::Ready, false, None);
+        assert_eq!(decide_handoff_outfit(&relaxed, None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_broken_outfit_fails_closed_only_when_a_choice_is_required() {
+        let broken = state(Readiness::Broken, true, None);
+        assert_eq!(
+            code(decide_handoff_outfit(&broken, None)),
+            "outfit_unavailable"
+        );
+        let broken = state(Readiness::Broken, false, None);
+        assert_eq!(decide_handoff_outfit(&broken, None).unwrap(), None);
+        for quiet in [
+            Readiness::Off,
+            Readiness::Absent,
+            Readiness::NotSetUp,
+            Readiness::NoProfiles,
+        ] {
+            assert_eq!(
+                decide_handoff_outfit(&state(quiet, false, None), None).unwrap(),
+                None
+            );
+        }
     }
 }

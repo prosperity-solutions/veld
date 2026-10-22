@@ -334,8 +334,8 @@ async function report($: EngineInterface, state: string, held = false): Promise<
   await Promise.race([send, $.clock.sleep(TIMEOUT_MS)]).catch(() => {})
 }
 
-// Put one naming turn to the daemon and read its answer: `remind`, `block`, or nothing.
-// Bounded like a report, and nothing on any failure.
+// Take the session's outfit note from the daemon: its text, or nothing — where outfit
+// has no profiles to offer, and on any failure. Bounded like a report.
 async function askContext($: EngineInterface): Promise<string | undefined> {
   try {
     const res = await Promise.race([
@@ -353,6 +353,8 @@ async function askContext($: EngineInterface): Promise<string | undefined> {
   }
 }
 
+// Put one naming turn to the daemon and read its answer: `remind`, `block`, or nothing.
+// Bounded like a report, and nothing on any failure.
 async function askNaming($: EngineInterface, turn: object): Promise<string | undefined> {
   try {
     const res = await Promise.race([

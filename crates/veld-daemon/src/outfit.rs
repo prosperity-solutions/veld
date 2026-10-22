@@ -298,7 +298,11 @@ static NOTES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<Str
 pub fn prepare_note(session: String, checkout: String, cli: String) {
     tokio::spawn(async move {
         let state = state_for(Path::new(&checkout)).await;
-        if state.status != Readiness::Ready {
+        // A terminal that ended while the probe ran has nobody left to tell, and
+        // `end_session` already cleared its entry — inserting now would leak it.
+        if state.status != Readiness::Ready
+            || super::pty::session_worktree(&session).await.is_none()
+        {
             return;
         }
         let wearing = state.current.as_ref().map_or("base", |c| c.name.as_str());
@@ -388,7 +392,13 @@ async fn read(checkout: &Path, path: &str, args: &[&str]) -> Result<serde_json::
         .await
         .map_err(|_| format!("`outfit {}` took longer than 10s", args[0]))?
         .map_err(|e| format!("could not run outfit: {e}"))?;
-    serde_json::from_slice(&out.stdout).map_err(|_| refusal(&out.stdout, &out.stderr))
+    match serde_json::from_slice::<serde_json::Value>(&out.stdout) {
+        // outfit's own failure is JSON too (`{"error", "fix", ...}`, exit 1): read as
+        // an answer, it would look like "no profiles" and quietly skip a required
+        // choice instead of failing closed.
+        Ok(v) if v.get("error").is_none() => Ok(v),
+        _ => Err(refusal(&out.stdout, &out.stderr)),
+    }
 }
 
 #[cfg(test)]

@@ -159,7 +159,10 @@ pub async fn restart(args: RestartArgs) -> i32 {
             } else {
                 "in the same conversation"
             };
-            eprintln!("Restarting this agent in a moment, {how}.");
+            eprintln!(
+                "Asked the Veld window to restart this agent in a moment, {how}. If nothing \
+                 happens, the window does not have this pane open — tell the human."
+            );
             if json {
                 println!(
                     "{}",
@@ -167,6 +170,12 @@ pub async fn restart(args: RestartArgs) -> i32 {
                 );
             }
             0
+        }
+        // No answer is just a failure here: unlike a create, nothing may still be on
+        // its way, so the "check the rail" sentence `send` gives it would mislead.
+        Err(refusal) if refusal.code.as_deref() == Some(super::worktree::NO_ANSWER) => {
+            eprintln!("veld: no answer from the daemon — try again in a moment");
+            1
         }
         Err(refusal) => {
             eprintln!("veld: {}", refusal.message);

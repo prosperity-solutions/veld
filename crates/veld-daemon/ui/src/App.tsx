@@ -53,6 +53,7 @@ import {
   applyTerminalPrefs,
   type QueuedFile,
   queueInitialPrompt,
+  dropRestart,
   restartAgentPane,
   setBellSuppressed,
   setPaneCloseHandler,
@@ -4761,7 +4762,14 @@ function AppInner(props: {
           layout && dock !== null
             ? layout.docks[dock].tabs.find((t) => t.id === req.sessionId)
             : undefined;
-        if (tab?.kind !== "terminal") return;
+        if (tab === undefined) {
+          dropRestart("An agent", "its tab is not open in this window");
+          return;
+        }
+        if (tab.kind !== "terminal") {
+          dropRestart(tab.title, "that tab is not a terminal");
+          return;
+        }
         const spec = worktreesRef.current
           .find((w) => w.id === req.worktreeId)
           ?.ide.panes.find((p) => p.id === tab.spec);
@@ -8035,7 +8043,11 @@ function AppInner(props: {
             // waiting for a pane nothing will open.
             if (agent !== undefined && prompt !== undefined) {
               const spec = created.ide.panes.find((p) => p.id === agent);
-              if (spec !== undefined && paneTakesPrompt(spec)) {
+              if (created.outfit?.error) {
+                // Not started, and the draft is kept (see the outfit toast
+                // below): nothing may run in a profile the user did not choose.
+                // Keeps the toast owner below as the single report.
+              } else if (spec !== undefined && paneTakesPrompt(spec)) {
                 pendingAgentRef.current = {
                   worktreeId: created.id,
                   spec,
@@ -8115,7 +8127,7 @@ function AppInner(props: {
             // for the same reason as the carry-over above.
             if (created.outfit?.error) {
               notifyError(
-                `${worktreeLabel(created)} was created, but not on the ${created.outfit.profile} outfit profile`,
+                `${worktreeLabel(created)} was created, but outfit could not apply the ${created.outfit.profile} profile; no agent was started`,
                 created.outfit.error,
               );
             }
@@ -8160,6 +8172,8 @@ function AppInner(props: {
             await refresh();
             setActiveWtKey(String(created.id));
             closeDialog();
+            // The prompt was never sent anywhere; keep the draft for a retry.
+            if (created.outfit?.error) return { keepDraft: true };
           }}
         />
       )}
