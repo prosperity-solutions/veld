@@ -12,19 +12,34 @@
  */
 import { ActionIcon, Menu, Text, Tooltip } from "@mantine/core";
 import { IconCheck, IconShirt } from "@tabler/icons-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "../api";
 import { isCurrent, outfitReady, outfitTone, outfitTooltip, profileSwaps } from "../outfit/model";
 import { useOutfitState } from "../outfit/useOutfitState";
 import { notifyError } from "../shared/notify";
 
+/** How long the first answer may take before the slot shows it is resolving. */
+const SPINNER_DELAY_MS = 300;
+
 export function OutfitMenu(props: { path: string }) {
   const { state, loading, set, refresh } = useOutfitState(props.path);
   const [busy, setBusy] = useState(false);
-  // The first answer still in flight: the same-size icon, resolving, so the slot
-  // is not empty. Once answered and not ready, nothing — no outfit, no control.
+  // Shown only once the answer is slow: a repository outfit never touched answers
+  // in milliseconds, and a spinner that flashes there would shift the top bar for
+  // everybody who does not use outfit.
+  const [slow, setSlow] = useState(false);
+  useEffect(() => {
+    if (!loading) {
+      setSlow(false);
+      return;
+    }
+    const timer = setTimeout(() => setSlow(true), SPINNER_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [loading]);
+  // A slow first answer: the same-size icon, resolving, so the slot is not empty.
+  // Once answered and not ready, nothing — no outfit, no control.
   if (!outfitReady(state)) {
-    if (!loading) return null;
+    if (!(loading && slow)) return null;
     return (
       <ActionIcon size="md" variant="default" loading aria-label="Outfit profile" />
     );

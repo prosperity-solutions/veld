@@ -300,7 +300,9 @@ outfit use lean --here && veld agent restart  # switch this worktree, then resta
   `--outfit` gets the project's `default`, or follows the clone's profile. A
   repository where `outfit init` was never run is set up by the first pick.
 - **Switching where you are.** `outfit use <profile> --here` switches the
-  worktree you are in (without `--here` it switches the whole clone). You read
+  worktree you are in (without `--here` it switches the whole clone). If outfit
+  answers with the fix `outfit init`, run plain `outfit init` — never with
+  `--agents` or `--team`, which write files other people share — and retry. You read
   your instructions when you started, so the swapped files are not in your head
   yet: run `veld agent restart` next, as the last thing in your turn (below).
 - **Editing a swapped file edits the profile**, not the team's copy. `outfit

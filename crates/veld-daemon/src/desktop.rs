@@ -4561,6 +4561,11 @@ struct CreateWorktreeBody {
     /// does. Checked against what outfit offers by the route, before this runs.
     #[serde(default)]
     outfit: Option<String>,
+    /// Whether `outfit` was chosen by someone, so pinning it may run `outfit init`
+    /// where outfit was never set up (see `outfit::apply`). Never from the wire: the
+    /// route that builds the request decides.
+    #[serde(skip)]
+    outfit_chosen: bool,
 }
 
 impl CreateWorktreeBody {
@@ -4585,8 +4590,11 @@ impl CreateWorktreeBody {
 }
 
 async fn create_worktree(
-    Json(body): Json<CreateWorktreeBody>,
+    Json(mut body): Json<CreateWorktreeBody>,
 ) -> Result<Json<CreatedWorktreeView>, ApiError> {
+    // The dialog sends a profile only when the picker holds one the person could
+    // see and change.
+    body.outfit_chosen = body.outfit.is_some();
     if let Some(profile) = body.outfit.as_deref() {
         // Only an imported repository: the probe starts a login shell and runs
         // outfit (and through it git) in the directory, so a path straight from the
@@ -5115,7 +5123,9 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
         None => None,
         Some(profile) => Some(OutfitReport {
             profile: profile.to_owned(),
-            error: super::outfit::apply(&checkout_path, profile).await.err(),
+            error: super::outfit::apply(&checkout_path, profile, body.outfit_chosen)
+                .await
+                .err(),
         }),
     };
 
@@ -5382,6 +5392,7 @@ async fn create_handoff(
         path: None,
         emoji: None,
         marker_color: None,
+        outfit_chosen: body.outfit.as_deref().is_some_and(|n| !n.trim().is_empty()),
         outfit,
     };
     let agent = agent.unwrap_or_default().to_owned();
@@ -5571,7 +5582,7 @@ async fn switch_outfit(
         .ok_or_else(|| err(StatusCode::BAD_REQUEST, "name the profile to use"))?;
     let checkout = FsPath::new(&path);
     check_outfit(&super::outfit::state_for(checkout).await, &profile)?;
-    super::outfit::apply(checkout, &profile)
+    super::outfit::apply(checkout, &profile, true)
         .await
         .map_err(|e| coded(StatusCode::CONFLICT, "outfit_failed", e))?;
     Ok(super::outfit::state_for(checkout).await)

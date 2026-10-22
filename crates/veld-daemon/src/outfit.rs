@@ -366,13 +366,22 @@ pub fn take_note(session: &str) -> Option<String> {
 /// config, and a kill halfway leaves the checkout half-switched — the same reason
 /// the git write helpers do not kill on drop. outfit serialises it with its own
 /// lock, so a slow one only waits.
-pub async fn apply(checkout: &Path, profile: &str) -> Result<(), String> {
+///
+/// `may_init` is whether a person (or an agent) *named* this profile. A profile
+/// that only arrived as a default — the project's `ide.outfit.default` on a
+/// hand-off that named none — never sets outfit up; it is refused with outfit's own
+/// fix instead. And `base` never needs it: a clone outfit has not set up already
+/// wears the team's files, so there is nothing to pin.
+pub async fn apply(checkout: &Path, profile: &str, may_init: bool) -> Result<(), String> {
     let path = veld_core::user_path::cached_user_path_for(checkout).await;
     let out = write(checkout, &path, &["use", profile, "--here", "--json"]).await?;
     if out.status.success() {
         return Ok(());
     }
-    if asks_for_init(&out.stdout) {
+    if asks_for_init(&out.stdout) && profile == "base" {
+        return Ok(());
+    }
+    if asks_for_init(&out.stdout) && may_init {
         let init = write(checkout, &path, &["init", "--json"]).await?;
         if !init.status.success() {
             return Err(refusal(&init.stdout, &init.stderr));
