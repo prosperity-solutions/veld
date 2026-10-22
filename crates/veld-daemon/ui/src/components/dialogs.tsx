@@ -1482,8 +1482,8 @@ export function NewWorktreeDialog(props: {
    * The outfit profile picker, or nothing: only a `ready` outfit is worth a
    * field, and it is the same field in both modes.
    */
-  const outfitData = outfitReady(outfitState) ? outfitOptions(outfitState) : [];
-  const outfitSelect = outfitReady(outfitState) ? (
+  const outfitData = outfitReady(outfitState) ? outfitOptions(outfitState) : null;
+  const outfitSelect = outfitData ? (
     <Select
       label="Outfit"
       leftSection={<IconShirt size={14} />}

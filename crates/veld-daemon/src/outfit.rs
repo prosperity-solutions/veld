@@ -87,8 +87,9 @@ pub struct Profile {
     pub name: String,
     /// `builtin` (only `base`), `committed` or `local`.
     pub tier: String,
-    /// The tracked paths it swaps, so whoever chooses — a person or an agent — can
-    /// tell two profiles apart; outfit has no description field.
+    /// The tracked paths it swaps; outfit has no description field. The IDE shows
+    /// names only — a real profile swaps dozens of paths — so only the hand-off's
+    /// refusal to an agent names any, capped.
     pub files: Vec<String>,
 }
 

@@ -285,14 +285,16 @@ applies and nothing changes. For everything else about outfit, use outfit itself
 
 ```sh
 outfit ls                                     # the profiles, and what each swaps
+outfit show lean                              # everything one profile swaps
 veld ide worktree new --branch fix/x --name "Fix X" --outfit lean --prompt-file /tmp/task.md
 outfit use lean --here && veld agent restart  # switch this worktree, then restart you to read it
 ```
 
 - **Handing off.** Where outfit is in play, `veld ide worktree new` **must** be
-  told `--outfit <profile>` (exit `7` without one, listing each profile and what
-  it swaps). `base` is a valid choice. Pick the one the task calls for; if
-  nothing tells you, **ask the human** rather than guess — the profile decides
+  told `--outfit <profile>` (exit `7` without one, listing each profile and the
+  first three files it swaps; `outfit show <profile>` has the rest). `base` is
+  a valid choice. Pick the one the task calls for; if nothing tells you, **ask
+  the human** rather than guess — the profile decides
   which instructions the next agent reads. The project can relax this
   (`"ide": { "outfit": { "required": false, "default": "<profile>" } }` in
   `veld.json`), and so can the person (`outfit.required` in Settings → Git:
