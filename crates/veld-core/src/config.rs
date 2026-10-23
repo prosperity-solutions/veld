@@ -506,6 +506,12 @@ impl ConfigValue {
         }
     }
 
+    /// Every string the author wrote that veld interpolates — the literal, or
+    /// the source's templates. See [`SecretSource::map_templates`].
+    pub fn templates(&self) -> Vec<String> {
+        self.source.templates()
+    }
+
     /// A short description of the source for diagnostics. Never includes a
     /// literal value, so it is safe to log.
     pub fn source_label(&self) -> String {
@@ -714,10 +720,21 @@ impl VarDecl {
     }
 
     /// The literal text of whatever this resolves to without an override, if it
-    /// is inline. Drives the `vars-cannot-nest` and builtin-scope checks, which
-    /// apply to a machine var's `default` exactly as they do to a plain var.
+    /// is inline.
     pub fn as_literal(&self) -> Option<&str> {
         self.config_value().and_then(ConfigValue::as_literal)
+    }
+
+    /// Every authored template of whatever this resolves to without an override
+    /// — the literal, or a source's `argv` elements / `shell` string / `file`
+    /// path (see [`SecretSource::map_templates`]). Drives the `vars-cannot-nest`,
+    /// `var-unresolvable-reference` and builtin-scope checks, which apply to a
+    /// machine var's `default` exactly as they do to a plain var, and to a
+    /// source's templates exactly as they do to a literal: both are interpolated.
+    pub fn templates(&self) -> Vec<String> {
+        self.config_value()
+            .map(ConfigValue::templates)
+            .unwrap_or_default()
     }
 }
 
@@ -865,6 +882,30 @@ pub struct FileDelivery {
 pub const DEFAULT_FILE_MODE: u32 = 0o600;
 
 impl FileDelivery {
+    /// The authored templates of a delivered file: a source's `argv` / `shell` /
+    /// path, and **not** the literal `value`.
+    ///
+    /// A delivered file is *content*, unlike an `env` literal: a compose `.env`,
+    /// a shell script or an nginx template is full of `${…}` that belongs to
+    /// whatever reads the file, so the literal is written verbatim. A source's
+    /// own text is still config and is interpolated like everywhere else. This
+    /// and [`Self::interpolates`] are the one place that says so: lint reads the
+    /// templates, [`crate::values::deliver_files`] asks `interpolates`, and both
+    /// turn on the same match.
+    pub fn templates(&self) -> Vec<String> {
+        if self.interpolates() {
+            self.value.templates()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Whether delivery interpolates this entry's authored text at all: a source,
+    /// yes; a literal, no (see [`Self::templates`]).
+    pub fn interpolates(&self) -> bool {
+        !matches!(self.value.source, SecretSource::Literal(_))
+    }
+
     /// The mode to create the file with, or an error naming the bad value.
     ///
     /// Parsed as octal whether or not it carries a leading `0`, because `"600"`
@@ -1731,6 +1772,55 @@ impl SecretSource {
             SecretSource::Argv(argv) => Some(CommandSpec::Argv(argv.clone())),
             _ => None,
         }
+    }
+
+    /// Apply `f` to every **authored template** in this source — the one place
+    /// that decides which of a source's strings are text the author wrote for
+    /// veld to interpolate. The runtime ([`SecretSource::interpolate`]) and the
+    /// lint ([`SecretSource::templates`]) both go through here, so they cannot
+    /// disagree about what `${…}` means in a source.
+    ///
+    /// Templates: the literal, each `argv` element (per element, so the element
+    /// count is fixed before any value is substituted), the `shell` string, the
+    /// legacy `command` string, and the `file` path. **Not** the `env` name: it
+    /// is a key the caller's side also reads verbatim — the CLI forwards the
+    /// values of exactly the names it finds in the serialised config
+    /// (`preflight::env_names`), so an interpolated name here would look up a
+    /// name nobody forwarded.
+    pub fn map_templates<E>(
+        &self,
+        mut f: impl FnMut(&str) -> Result<String, E>,
+    ) -> Result<SecretSource, E> {
+        Ok(match self {
+            SecretSource::Literal(v) => SecretSource::Literal(f(v)?),
+            SecretSource::Env(name) => SecretSource::Env(name.clone()),
+            SecretSource::File(path) => SecretSource::File(f(path)?),
+            SecretSource::Command(s) => SecretSource::Command(f(s)?),
+            SecretSource::Shell(s) => SecretSource::Shell(f(s)?),
+            SecretSource::Argv(argv) => {
+                SecretSource::Argv(argv.iter().map(|a| f(a)).collect::<Result<Vec<_>, E>>()?)
+            }
+        })
+    }
+
+    /// The authored templates, for lint — see [`SecretSource::map_templates`].
+    pub fn templates(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        let _ = self.map_templates::<std::convert::Infallible>(|t| {
+            out.push(t.to_owned());
+            Ok(t.to_owned())
+        });
+        out
+    }
+
+    /// Interpolate `${…}` in every authored template — see
+    /// [`SecretSource::map_templates`]. What the source then *fetches* is the
+    /// caller's to leave verbatim.
+    pub fn interpolate(
+        &self,
+        ctx: &crate::variables::VariableContext,
+    ) -> Result<SecretSource, crate::variables::VariableError> {
+        self.map_templates(|t| crate::variables::interpolate(t, ctx))
     }
 }
 
@@ -3264,6 +3354,9 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_resolved_variants(config, &mut findings);
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
+    check_unresolvable_references(config, &mut findings);
+    check_files_literals(config, &mut findings);
+    check_env_source_names(config, &mut findings);
     check_presets(config, &mut findings);
     check_node_refs(config, &mut findings);
     check_preset_keys(config, &mut findings);
@@ -3492,6 +3585,28 @@ fn env_definition_site(
     }
 }
 
+/// Where a delivered file is declared — the variant's own `files`, else the
+/// node's. The counterpart of [`env_definition_site`] (there is no project level).
+fn files_definition_site(
+    node_name: &str,
+    node: &NodeConfig,
+    variant_name: &str,
+    variant: &VariantConfig,
+    rel: &str,
+) -> String {
+    let defines =
+        |m: Option<&NullableMap<FileDelivery>>| matches!(m.and_then(|m| m.get(rel)), Some(Some(_)));
+    if defines(variant.files.as_ref()) {
+        format!("nodes.{node_name}.variants.{variant_name}.files.{rel}")
+    } else {
+        debug_assert!(
+            defines(node.files.as_ref()),
+            "a merged file comes from one of the two"
+        );
+        format!("nodes.{node_name}.files.{rel}")
+    }
+}
+
 fn node_context_strings(
     config: &VeldConfig,
     node_name: &str,
@@ -3524,11 +3639,23 @@ fn node_context_strings(
         let mut keys: Vec<&String> = merged.keys().collect();
         keys.sort();
         for key in keys {
-            if let Some(literal) = merged[key].as_literal() {
-                out.push((
-                    env_definition_site(node_name, node, variant_name, variant, key),
-                    literal.to_owned(),
-                ));
+            // Every authored template: the literal, or a source's argv / shell /
+            // path — all of them are interpolated with this node's context.
+            let site = env_definition_site(node_name, node, variant_name, variant, key);
+            for template in merged[key].templates() {
+                out.push((site.clone(), template));
+            }
+        }
+    }
+
+    // The files this variant delivers, node → variant, like `env`.
+    if let Some(files) = r.files.as_ref() {
+        let mut rels: Vec<&String> = files.keys().collect();
+        rels.sort();
+        for rel in rels {
+            let site = files_definition_site(node_name, node, variant_name, variant, rel);
+            for template in files[rel].templates() {
+                out.push((site.clone(), template));
             }
         }
     }
@@ -3819,6 +3946,308 @@ fn check_default_preset(config: &VeldConfig, out: &mut Vec<Finding>) {
     ));
 }
 
+/// The namespaces `variables::resolve_reference` knows. A `${…}` outside them
+/// is not a veld reference and fails interpolation.
+const VELD_NAMESPACES: [&str; 5] = ["veld.", "vars.", "nodes.", "output.", "param."];
+
+/// The "write it for the shell instead" remedy for a non-veld `${reference}`,
+/// which depends on what the reference is. A bare name has an unbraced form the
+/// shell reads the same way; a shell *expression* (`${X:-dflt}`, `${#X}`,
+/// `${X%%.*}`) does not — `$X:-dflt` is valid shell with another meaning — and
+/// veld has no escape for `${`, so the only remedies are to move the expression
+/// out of the interpolated string or rewrite it without braces.
+pub fn shell_remedy(reference: &str) -> String {
+    if bare_identifier(reference) {
+        format!(
+            "For a shell variable in a `shell` string write `${reference}` without the \
+             braces, so veld leaves it for the shell (an `argv` element sees no shell — \
+             spell the value out, or compute it in a `shell` source)"
+        )
+    } else {
+        format!(
+            "`${{{reference}}}` is a shell expression, and veld has no escape for `${{` — \
+             write it without braces as `$(…)` (`$(printenv X || echo default)`), or \
+             move it into a script file the `shell` string runs"
+        )
+    }
+}
+
+/// Whether `reference` is a plain shell variable name (`HOME`, `_x1`), as
+/// opposed to a shell expression (`HOME:-/root`, `#PATH`). Only a plain name has
+/// an unbraced spelling, and only a plain name can be offered as an `env`
+/// source's name or a node output's key.
+fn bare_identifier(reference: &str) -> bool {
+    let mut chars = reference.chars();
+    matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric())
+}
+
+/// The non-veld `X` of an `${X}` that a *value's* text failed to resolve, if
+/// that is what `err` is. A [`ValueError::Interpolation`] comes only from
+/// `resolve_value`, so the text was a var's, an `env` entry's or a `files`
+/// entry's — authored text that this release made interpolated in its source
+/// forms. A step or hook command fails with a bare `VariableError` instead and
+/// is not matched: those have been interpolated since v3. The engine's stop
+/// path uses this to tell an author whose run outlived the upgrade *why* the
+/// var their teardown needs stopped resolving. A var or `env` *literal* with
+/// `${HOME}` matches too, although literals were interpolated before: such a
+/// config could not have started, so on the stop path it means the config was
+/// edited after start, and the note's advice is right for it as well.
+pub fn non_veld_source_reference(err: &crate::values::ValueError) -> Option<&str> {
+    let crate::values::ValueError::Interpolation {
+        source: crate::variables::VariableError::Unresolved(reference),
+        ..
+    } = err
+    else {
+        return None;
+    };
+    let reference = reference.strip_prefix("${")?.strip_suffix('}')?;
+    (!VELD_NAMESPACES.iter().any(|ns| reference.starts_with(ns))).then_some(reference)
+}
+
+/// The byte position of the first `${` in `s` that no `}` closes, if any.
+/// Interpolation fails on it at run time ("unclosed ${"), which for a var is
+/// after the run is persisted — so lint has to say it first.
+fn unclosed_interpolation(s: &str) -> Option<usize> {
+    let mut rest = s;
+    let mut offset = 0;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            None => return Some(offset + start),
+            Some(end) => {
+                offset += start + 2 + end + 1;
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    None
+}
+
+fn unclosed_finding(location: String, site_kind: &str, position: usize) -> Finding {
+    Finding::error(
+        "unclosed-interpolation",
+        location,
+        format!(
+            "has a `${{` at byte {position} that no `}}` closes. {site_kind} is interpolated, \
+             so this fails the run with \"unclosed ${{\". Close it — or, if the text is \
+             meant for a program (an awk or jq literal, a `printf` format), veld has no \
+             escape for `${{`: move it into a script file"
+        ),
+    )
+}
+
+/// A veld reference written into a `files` **literal**, which is content and is
+/// written verbatim (see [`FileDelivery::templates`]): `"${vars.tok}"` in one
+/// ends up as those nine characters on disk, and nothing else reports it, since
+/// a literal has no templates for the other rules to read. An author who wrote
+/// `${vars.*}` or `${veld.*}` there very likely meant substitution, so say how to
+/// get it — give the entry a *source*, whose text is interpolated.
+///
+/// A **warning**, not an error: the literal is delivered exactly as it always
+/// was, and a compose file or script that legitimately carries `${vars.X}` for
+/// *its* reader must still be deliverable — the way out for that case is in the
+/// message. Only the two namespaces that read as veld's own are flagged;
+/// `${nodes.*}`, `${output.*}` and `${param.*}` are left alone, since a file
+/// that is itself a template for another tool may well use such names.
+fn check_files_literals(config: &VeldConfig, out: &mut Vec<Finding>) {
+    // Keyed by (site, reference): one finding per reference per definition site,
+    // in a stable order whatever order the maps iterate in.
+    let mut found: BTreeMap<(String, String), String> = BTreeMap::new();
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            let Some(files) = resolve_variant(config, node, variant).files else {
+                continue;
+            };
+            for (rel, delivery) in &files {
+                let Some(literal) = delivery.value.as_literal() else {
+                    continue;
+                };
+                let site = files_definition_site(node_name, node, variant_name, variant, rel);
+                for reference in interpolation_refs(literal) {
+                    if !reference.starts_with("veld.") && !reference.starts_with("vars.") {
+                        continue;
+                    }
+                    let remedy = if reference.starts_with("vars.") {
+                        "to put a var's value in the file give the entry a source, whose \
+                         text is interpolated: `{ \"argv\": [\"printf\", \"%s\", \
+                         \"${vars.x}\"] }`. A *secret* var cannot be substituted into a \
+                         command (that is `secret-in-command`): give the entry the var's own \
+                         source instead (`{ \"argv\": [\"op\", \"read\", …], \"secret\": \
+                         true }`), which is fetched once more for the file"
+                    } else {
+                        "to put a veld value in the file give the entry a source, whose \
+                         text is interpolated: `{ \"argv\": [\"printf\", \"port=%s\", \
+                         \"${veld.port}\"] }`"
+                    };
+                    found
+                        .entry((site.clone(), reference.clone()))
+                        .or_insert_with(|| {
+                            format!(
+                                "`${{{reference}}}` in a `files` literal is written to the file \
+                                 as those characters — a delivered file is content, and veld \
+                                 does not substitute in it. If that is the point (the file is \
+                                 a template for whatever reads it), keep the text out of the \
+                                 config: put it in a file and deliver it with `{{ \"file\": \
+                                 \"path\" }}`, whose contents are not interpolated either. \
+                                 Otherwise, {remedy}"
+                            )
+                        });
+                }
+            }
+        }
+    }
+    for ((site, _), message) in found {
+        out.push(Finding::warning(
+            "files-literal-not-interpolated",
+            site,
+            message,
+        ));
+    }
+}
+
+/// A `${…}` in no veld namespace, at a node site that is interpolated: the
+/// effective `env` (literal or a source's argv / shell / path) and a `files`
+/// source's text. In a source, `${HOME}` used to reach the command verbatim and
+/// be expanded by its shell; an `env` literal was interpolated before but never
+/// linted. Either way it fails the start — and, worse, the `on_stop` hook builds
+/// the same env and is *skipped* when it cannot. The counterpart of
+/// `var-unresolvable-reference` for `vars`; separate because the remedy differs
+/// (a node site has `${nodes.*}`, `${output.*}` and `${vars.*}` to offer).
+///
+/// Node `argv`/`shell` are not checked here: they have been interpolated since
+/// v3 and fail at start today, so the rule is scoped to the `env` and `files`
+/// sites, which did not.
+fn check_unresolvable_references(config: &VeldConfig, out: &mut Vec<Finding>) {
+    // Keyed by definition site, like `check_builtin_names`: a project env
+    // inherited by every variant is one finding, not one per variant — and the
+    // set's order is the output order, so the report is stable.
+    let mut templates: BTreeSet<(String, String)> = BTreeSet::new();
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            if let Some(merged) =
+                resolve_env(config.env.as_ref(), node.env.as_ref(), variant.env.as_ref())
+            {
+                for (key, value) in &merged {
+                    let site = env_definition_site(node_name, node, variant_name, variant, key);
+                    templates.extend(value.templates().into_iter().map(|t| (site.clone(), t)));
+                }
+            }
+            if let Some(files) = resolve_variant(config, node, variant).files {
+                for (rel, delivery) in &files {
+                    let site = files_definition_site(node_name, node, variant_name, variant, rel);
+                    templates.extend(delivery.templates().into_iter().map(|t| (site.clone(), t)));
+                }
+            }
+        }
+    }
+    // One finding per (site, reference), however many templates at the site
+    // repeat it — `${HOME}` twice in one `shell` string is one mistake.
+    let mut references: BTreeSet<(String, String)> = BTreeSet::new();
+    for (site, template) in templates {
+        if let Some(position) = unclosed_interpolation(&template) {
+            out.push(unclosed_finding(
+                site.clone(),
+                "A node's `env` and `files` text",
+                position,
+            ));
+        }
+        for reference in interpolation_refs(&template) {
+            if VELD_NAMESPACES.iter().any(|ns| reference.starts_with(ns)) {
+                continue;
+            }
+            references.insert((site.clone(), reference));
+        }
+    }
+    for (site, reference) in references {
+        let remedy = shell_remedy(&reference);
+        out.push(Finding::error(
+            "unresolvable-reference",
+            site.clone(),
+            format!(
+                "`${{{reference}}}` is not a veld reference, and a node's `env` value \
+                 and a `files` source are interpolated — an `env` literal and a \
+                 source's `argv`/`shell`/`file` alike — so this fails the start with \
+                 \"unresolved variable reference\", and skips the node's `on_stop` hook \
+                 at stop. {remedy}{by_name}",
+                by_name = if bare_identifier(&reference) {
+                    format!(
+                        "; to read an environment variable use `{{ \"env\": \
+                         \"{reference}\" }}`; for another node's output write \
+                         `${{nodes.<node>.{reference}}}`"
+                    )
+                } else {
+                    String::new()
+                },
+            ),
+        ));
+    }
+}
+
+/// An `{ "env": "NAME" }` source names a variable, and the name is read
+/// **verbatim** — it is the one authored string a source has that is not a
+/// template (see [`SecretSource::map_templates`]). Now that a source's `argv`,
+/// `shell` and `file` *are* interpolated, `${…}` in an `env` name is the one
+/// place an author would reasonably expect it to work and it silently does not:
+/// the lookup is for the literal text, so the run fails with "environment
+/// variable ${veld.run}_TOKEN is not set". Say so here instead.
+fn check_env_source_names(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let mut check = |loc: String, value: &ConfigValue| {
+        if let SecretSource::Env(name) = &value.source
+            && name.contains("${")
+        {
+            out.push(Finding::error(
+                "env-name-not-interpolated",
+                loc,
+                format!(
+                    "`{{ \"env\": \"{name}\" }}` names an environment variable, and the \
+                     name is read verbatim — `${{…}}` is not interpolated here, so the lookup \
+                     is for a variable literally called `{name}`. Name it as it is set. A \
+                     computed name cannot be read from the terminal at all: a source command \
+                     runs in the daemon's environment, not yours, so if the value has to be \
+                     computed, fetch it from where it lives with a `shell` source (`op read \
+                     …`) rather than from an environment variable"
+                ),
+            ));
+        }
+    };
+    for (name, decl) in config.vars.iter().flatten() {
+        if let Some(value) = decl.config_value() {
+            check(format!("vars.{name}"), value);
+        }
+    }
+    for (key, value) in config.env.iter().flatten() {
+        if let Some(value) = value {
+            check(format!("env.{key}"), value);
+        }
+    }
+    for (node_name, node) in &config.nodes {
+        for (key, value) in node.env.iter().flatten() {
+            if let Some(value) = value {
+                check(format!("nodes.{node_name}.env.{key}"), value);
+            }
+        }
+        for (rel, delivery) in node.files.iter().flatten() {
+            if let Some(delivery) = delivery {
+                check(format!("nodes.{node_name}.files.{rel}"), &delivery.value);
+            }
+        }
+        for (variant_name, variant) in &node.variants {
+            let base = format!("nodes.{node_name}.variants.{variant_name}");
+            for (key, value) in variant.env.iter().flatten() {
+                if let Some(value) = value {
+                    check(format!("{base}.env.{key}"), value);
+                }
+            }
+            for (rel, delivery) in variant.files.iter().flatten() {
+                if let Some(delivery) = delivery {
+                    check(format!("{base}.files.{rel}"), &delivery.value);
+                }
+            }
+        }
+    }
+}
+
 fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
     let declared: BTreeMap<&str, &VarDecl> = config
         .vars
@@ -3829,9 +4258,11 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
 
     // Rule 2: a var may not reference another var. One hop, always — provenance
     // stays a single lookup, and there is no ordering or cycle to reason about.
+    // Over every authored template — the literal, or a source's argv / shell /
+    // path — because every one of them is interpolated.
     for (name, value) in &declared {
-        if let Some(literal) = value.as_literal() {
-            for referenced in builtin_refs_in(literal, "vars.") {
+        for template in value.templates() {
+            for referenced in builtin_refs_in(&template, "vars.") {
                 out.push(Finding::error(
                     "vars-cannot-nest",
                     format!("vars.{name}"),
@@ -3845,35 +4276,65 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
     }
 
-    // A var literal is *interpolated* now, so every `${…}` in it is veld's to
+    // A var's authored text is *interpolated*, so every `${…}` in it is veld's to
     // resolve — and `resolve_reference` errors on any namespace it does not know.
-    // `"cache": "${HOME}/.cache"` was verbatim before this release, passed through
-    // to the child, and expanded by its shell; it now aborts the start. That has
-    // to be a lint error rather than a runtime one: the second resolution pass
-    // runs *after* the run is persisted, so the abort leaves a `starting` row with
-    // nothing behind it.
+    // `"cache": "${HOME}/.cache"` was verbatim once, passed through to the child,
+    // and expanded by its shell; it now aborts the start. The same goes for a
+    // source's `shell` string: `{ "shell": "cat ${HOME}/.tok" }` ran as written
+    // before sources were interpolated. That has to be a lint error rather than a
+    // runtime one: the second resolution pass runs *after* the run is persisted,
+    // so the abort leaves a `starting` row with nothing behind it.
     for (name, value) in &declared {
-        let Some(literal) = value.as_literal() else {
-            continue;
-        };
-        for reference in interpolation_refs(literal) {
-            // `${veld.*}` scope is `check_builtin_names`; `${vars.*}` nesting is
-            // rule 2 above. Everything else has no namespace at all.
-            if reference.starts_with("veld.") || reference.starts_with("vars.") {
-                continue;
+        // Once per reference per var, however many of its templates repeat it.
+        let mut reported: BTreeSet<String> = BTreeSet::new();
+        for template in value.templates() {
+            if let Some(position) = unclosed_interpolation(&template) {
+                out.push(unclosed_finding(
+                    format!("vars.{name}"),
+                    "A var's text",
+                    position,
+                ));
             }
-            out.push(Finding::error(
-                "var-unresolvable-reference",
-                format!("vars.{name}"),
-                format!(
-                    "`${{{reference}}}` is not a veld reference, and a var literal is \
-                     interpolated — so this fails the run with \"unresolved variable \
-                     reference\". Only `${{veld.<run-scoped>}}` resolves in a var. For a \
-                     shell variable write `${reference}` without the braces, so veld leaves \
-                     it for the shell; for a node output use the value at the use site, or \
-                     make the var a value source (`{{ \"env\": \"{reference}\" }}`)"
-                ),
-            ));
+            for reference in interpolation_refs(&template) {
+                // `${veld.*}` scope is `check_builtin_names`; `${vars.*}` nesting is
+                // rule 2 above. `${nodes.*}`, `${output.*}` and `${param.*}` are
+                // veld's but node-scoped, and a var is resolved before any node
+                // exists; the rest has no namespace at all and is the shell's.
+                if reference.starts_with("veld.") || reference.starts_with("vars.") {
+                    continue;
+                }
+                if !reported.insert(reference.clone()) {
+                    continue;
+                }
+                let interpolated = "a var's literal and its source's `argv`/`shell`/`file` \
+                                    are all interpolated — so this fails the run with \
+                                    \"unresolved variable reference\". Only \
+                                    `${veld.<run-scoped>}` resolves in a var";
+                let message = if VELD_NAMESPACES.iter().any(|ns| reference.starts_with(ns)) {
+                    format!(
+                        "`${{{reference}}}` is resolved at a node, after every var, and \
+                         {interpolated}; use the node's value at the use site instead"
+                    )
+                } else {
+                    format!(
+                        "`${{{reference}}}` is not a veld reference, and {interpolated}. {}{}",
+                        shell_remedy(&reference),
+                        if bare_identifier(&reference) {
+                            format!(
+                                "; to read an environment variable make the var a value \
+                                 source (`{{ \"env\": \"{reference}\" }}`)"
+                            )
+                        } else {
+                            String::new()
+                        },
+                    )
+                };
+                out.push(Finding::error(
+                    "var-unresolvable-reference",
+                    format!("vars.{name}"),
+                    message,
+                ));
+            }
         }
     }
 
@@ -4004,24 +4465,45 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
     };
 
+    // Every authored template of a value — the literal, or a source's argv /
+    // shell / path — is interpolated, so a `${vars.typo}` in any of them fails
+    // the spawn; `files` deliveries too, minus their literal (content).
+    let check_value = |loc: String, value: &ConfigValue, out: &mut Vec<Finding>| {
+        for template in value.templates() {
+            check_str(loc.clone(), &template, out);
+        }
+    };
+    let check_files =
+        |base: &str, files: Option<&NullableMap<FileDelivery>>, out: &mut Vec<Finding>| {
+            for (rel, delivery) in files.into_iter().flatten() {
+                if let Some(delivery) = delivery {
+                    for template in delivery.templates() {
+                        check_str(format!("{base}.files.{rel}"), &template, out);
+                    }
+                }
+            }
+        };
+
     for (key, value) in config.env.iter().flatten() {
-        if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-            check_str(format!("env.{key}"), literal, out);
+        if let Some(value) = value {
+            check_value(format!("env.{key}"), value, out);
         }
     }
     for (node_name, node) in &config.nodes {
         for (key, value) in node.env.iter().flatten() {
-            if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                check_str(format!("nodes.{node_name}.env.{key}"), literal, out);
+            if let Some(value) = value {
+                check_value(format!("nodes.{node_name}.env.{key}"), value, out);
             }
         }
+        check_files(&format!("nodes.{node_name}"), node.files.as_ref(), out);
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
             for (key, value) in variant.env.iter().flatten() {
-                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                    check_str(format!("{base}.env.{key}"), literal, out);
+                if let Some(value) = value {
+                    check_value(format!("{base}.env.{key}"), value, out);
                 }
             }
+            check_files(&base, variant.files.as_ref(), out);
             let r = resolve_variant(config, node, variant);
             for (suffix, spec) in [
                 ("", r.command.as_ref()),
@@ -4217,6 +4699,10 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
     }
 
+    // A value source is defined once and inherited by every variant, so its
+    // finding is located at the definition site and reported once, not once per
+    // variant that inherits it. Keyed by (location, secret name).
+    let mut reported_sources: BTreeSet<(String, String)> = BTreeSet::new();
     for (node_name, node) in &config.nodes {
         // A credential-shaped literal is worth flagging wherever it sits, marked
         // secret or not: marking it keeps it out of `argv`, but it is still in
@@ -4274,28 +4760,63 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
             // `${output.*}` is actually in scope, and a probe command runs on the
             // same machine with the same visibility — scanning only the variant left
             // the reachable positions unchecked.
-            let mut commands: Vec<(String, CommandSpec)> = Vec::new();
+            let mut node_commands: Vec<(String, CommandSpec)> = Vec::new();
             if let Some(c) = r.command.clone() {
-                commands.push((String::new(), c));
+                node_commands.push((String::new(), c));
             }
             if let Some(c) = r.on_stop.clone() {
-                commands.push((".on_stop".to_owned(), c));
+                node_commands.push((".on_stop".to_owned(), c));
             }
             if let Some(c) = r.skip_if.clone() {
-                commands.push((".skip_if".to_owned(), c));
+                node_commands.push((".skip_if".to_owned(), c));
             }
             if let Some(c) = r.readiness.as_ref().and_then(|p| p.cmd.spec()) {
-                commands.push((".probes.readiness".to_owned(), c));
+                node_commands.push((".probes.readiness".to_owned(), c));
             }
             if let Some(c) = r.liveness.as_ref().and_then(|p| p.cmd.spec()) {
-                commands.push((".probes.liveness".to_owned(), c));
+                node_commands.push((".probes.liveness".to_owned(), c));
             }
             for action in node.actions.iter().flatten() {
                 if let Some(c) = action.cmd.spec() {
-                    commands.push((format!(" (action {})", action.name), c));
+                    node_commands.push((format!(" (action {})", action.name), c));
                 }
             }
-            for (suffix, spec) in &commands {
+            // (location, suffix, command): a node command is located at this
+            // variant; a value source at its definition site (below).
+            let mut commands: Vec<(String, String, CommandSpec)> = node_commands
+                .into_iter()
+                .map(|(suffix, c)| (format!("{base}{suffix}"), suffix, c))
+                .collect();
+            // A value source's command is spawned by veld too, with its templates
+            // interpolated — so `${vars.db_pw}` in an `env` or `files` source's
+            // argv is in the process table exactly like one in the node's own
+            // command. (A `vars` source cannot get here: `vars-cannot-nest` leaves
+            // it only the `veld.*` built-ins.)
+            if let Some(merged) =
+                resolve_env(config.env.as_ref(), node.env.as_ref(), variant.env.as_ref())
+            {
+                let mut keys: Vec<&String> = merged.keys().collect();
+                keys.sort();
+                for key in keys {
+                    if let Some(c) = merged[key].source.command() {
+                        let site = env_definition_site(node_name, node, variant_name, variant, key);
+                        commands.push((site, format!(".env.{key}"), c));
+                    }
+                }
+            }
+            if let Some(files) = r.files.as_ref() {
+                let mut rels: Vec<&String> = files.keys().collect();
+                rels.sort();
+                for rel in rels {
+                    if let Some(c) = files[rel].value.source.command() {
+                        let site =
+                            files_definition_site(node_name, node, variant_name, variant, rel);
+                        commands.push((site, format!(".files.{rel}"), c));
+                    }
+                }
+            }
+            for (location, suffix, spec) in &commands {
+                let in_source = suffix.starts_with(".env.") || suffix.starts_with(".files.");
                 let parts: Vec<String> = match spec {
                     CommandSpec::Argv(a) => a.clone(),
                     CommandSpec::Shell(sh) => vec![sh.clone()],
@@ -4348,20 +4869,27 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                     // A bare `$NAME` is a **warning**, on its own rule — see
                     // `shell_expansion` below. It is not an error, because veld
                     // does not substitute it and often nothing leaks; it is not
-                    // silence either, because often something does.
-                    let shell_expanded: Vec<String> = env_refs_detailed(part)
-                        .into_iter()
-                        // `${NAME}` is veld's to resolve, and it matches no
-                        // namespace, so interpolation fails and the value never
-                        // reaches a command at all. Nothing to warn about.
-                        .filter(|(_, braced)| !braced)
-                        .map(|(name, _)| name)
-                        .filter(|name| secrets.contains(name))
-                        .collect();
+                    // silence either, because often something does. Not for a
+                    // value source: its command runs in the daemon's environment,
+                    // where the node's secret `env` keys are not set, so `$NAME`
+                    // there expands to nothing of ours.
+                    let shell_expanded: Vec<String> = if in_source {
+                        Vec::new()
+                    } else {
+                        env_refs_detailed(part)
+                            .into_iter()
+                            // `${NAME}` is veld's to resolve, and it matches no
+                            // namespace, so interpolation fails and the value never
+                            // reaches a command at all. Nothing to warn about.
+                            .filter(|(_, braced)| !braced)
+                            .map(|(name, _)| name)
+                            .filter(|name| secrets.contains(name))
+                            .collect()
+                    };
                     for name in shell_expanded {
                         out.push(Finding::warning(
                             "secret-shell-expansion",
-                            format!("{base}{suffix}"),
+                            location.clone(),
                             format!(
                                 "`${name}` is expanded by a **shell**, not by veld, so veld \
                                  cannot tell where the value ends up. It is safe where the \
@@ -4382,55 +4910,67 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                         // already known sensitive and does not belong in `secrets`
                         // (which describes *this* variant).
                         if secrets.contains(&name) || name.starts_with("nodes.") {
-                            out.push(Finding::error(
-                                "secret-in-command",
-                                format!("{base}{suffix}"),
-                                {
-                                    // The remedy differs by form, so name the right
-                                    // one rather than telling a `vars` author about
-                                    // an environment variable that does not exist.
-                                    let remedy = if let Some(var) = name.strip_prefix("vars.") {
-                                        format!(
-                                            "put it in `env` as \
+                            if in_source
+                                && !reported_sources.insert((location.clone(), name.clone()))
+                            {
+                                continue;
+                            }
+                            out.push(Finding::error("secret-in-command", location.clone(), {
+                                // The remedy differs by form, so name the right
+                                // one rather than telling a `vars` author about
+                                // an environment variable that does not exist.
+                                let remedy = if in_source {
+                                    "a value source's command runs before the node, with \
+                                         no environment of its own to carry the secret — have \
+                                         the source fetch it from the store directly (`op \
+                                         read …`), or drop the reference and hand the secret \
+                                         to the *node* through `env` (a `files` literal is \
+                                         written verbatim, so a file needs the store's \
+                                         source too)"
+                                        .to_owned()
+                                } else if let Some(var) = name.strip_prefix("vars.") {
+                                    format!(
+                                        "put it in `env` as \
                                              `{{ \"SOME_NAME\": \"${{vars.{var}}}\" }}` and \
                                              have the program read SOME_NAME from its \
-                                             environment, or deliver it with `files`"
-                                        )
-                                    } else if let Some(out) = name.strip_prefix("output.") {
-                                        format!(
-                                            "pass it through `env` (veld exports a node's \
+                                             environment; for a file, give a `files` entry \
+                                             the var's own source (a `files` literal is \
+                                             written verbatim)"
+                                    )
+                                } else if let Some(out) = name.strip_prefix("output.") {
+                                    format!(
+                                        "pass it through `env` (veld exports a node's \
                                              outputs to its own process) rather than \
                                              interpolating ${{output.{out}}} into the \
                                              command line"
-                                        )
-                                    } else if let Some(rest) = name.strip_prefix("nodes.") {
-                                        // Another node's output: veld does not export it
-                                        // here, so the author has to route it explicitly.
-                                        format!(
-                                            "put it in this variant's `env` as \
+                                    )
+                                } else if let Some(rest) = name.strip_prefix("nodes.") {
+                                    // Another node's output: veld does not export it
+                                    // here, so the author has to route it explicitly.
+                                    format!(
+                                        "put it in this variant's `env` as \
                                              `{{ \"SOME_NAME\": \"${{nodes.{rest}}}\" }}` and \
                                              have the program read SOME_NAME from its \
-                                             environment, or deliver it with `files` — \
-                                             veld does not export another node's outputs \
-                                             into this process automatically"
-                                        )
-                                    } else {
-                                        format!(
-                                            "veld already passes it to the process as the \
+                                             environment — veld does not export another \
+                                             node's outputs into this process automatically, \
+                                             and a `files` literal is written verbatim"
+                                    )
+                                } else {
+                                    format!(
+                                        "veld already passes it to the process as the \
                                              environment variable {name}, so have the program \
                                              read it from the environment instead of taking \
                                              it as an argument"
-                                        )
-                                    };
-                                    format!(
-                                        "{name} is declared secret, so it must not be \
+                                    )
+                                };
+                                format!(
+                                    "{name} is declared secret, so it must not be \
                                          interpolated into a command — an argv element and a \
                                          shell string both appear in the process table, where \
                                          any user on the machine can read them, and in CI logs \
                                          that echo the command. Instead: {remedy}"
-                                    )
-                                },
-                            ));
+                                )
+                            }));
                         }
                     }
                 }
@@ -4447,7 +4987,7 @@ fn interpolation_refs(s: &str) -> Vec<String> {
     while let Some(start) = rest.find("${") {
         let after = &rest[start + 2..];
         match after.find('}') {
-            // An unclosed `${` is interpolation's problem to report.
+            // An unclosed `${` is `unclosed-interpolation`'s to report.
             None => break,
             Some(end) => {
                 out.push(after[..end].to_owned());
@@ -5441,8 +5981,8 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     // as a bad hostname or a container named `foo-${veld.run}` — into a refusal.
     let vars_site = [BuiltinSite::project(BuiltinScopeKind::Vars)];
     for (name, value) in config.vars.iter().flatten() {
-        if let Some(literal) = value.as_literal() {
-            check(&format!("vars.{name}"), literal, &vars_site, out);
+        for template in value.templates() {
+            check(&format!("vars.{name}"), &template, &vars_site, out);
         }
     }
 
@@ -5468,10 +6008,13 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     // runs. `resolve_env` is the one owner of that merge (AGENTS.md, *One owner
     // for resolution*).
     //
-    // Each effective (definition site, literal) is collected once with the list of
-    // variants that actually see it, so a project-level value inherited by twenty
-    // nodes is one finding — and one that knows whether *all* of them lack the
-    // built-in (error) or only some (warning).
+    // Each effective (definition site, template) is collected once with the list
+    // of variants that actually see it, so a project-level value inherited by
+    // twenty nodes is one finding — and one that knows whether *all* of them lack
+    // the built-in (error) or only some (warning). Every authored template of a
+    // value is interpolated — the literal, or a source's argv / shell / path —
+    // so every one of them is checked; what a source *fetches* is verbatim and
+    // has nothing to check.
     let mut env_sites: BTreeMap<(String, String), Vec<BuiltinSite>> = BTreeMap::new();
     for (node_name, node) in &config.nodes {
         for (variant_name, variant) in &node.variants {
@@ -5481,23 +6024,42 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
                 continue;
             };
             for (key, value) in &merged {
-                // Only an inline literal is interpolated — a fetched value is
-                // used verbatim.
-                let Some(literal) = value.as_literal() else {
-                    continue;
-                };
-                env_sites
-                    .entry((
-                        env_definition_site(node_name, node, variant_name, variant, key),
-                        literal.to_owned(),
-                    ))
-                    .or_default()
-                    .push(site_for(config, node_name, node, variant_name, variant));
+                let site = env_definition_site(node_name, node, variant_name, variant, key);
+                for template in value.templates() {
+                    env_sites
+                        .entry((site.clone(), template))
+                        .or_default()
+                        .push(site_for(config, node_name, node, variant_name, variant));
+                }
             }
         }
     }
-    for ((loc, literal), sites) in &env_sites {
-        check(loc, literal, sites, out);
+    for ((loc, template), sites) in &env_sites {
+        check(loc, template, sites, out);
+    }
+
+    // `files`, on the merged (node → variant) map and deduplicated by definition
+    // site for the same reason as `env`: a node-level file inherited by every
+    // variant is one finding, not one per variant.
+    let mut file_sites: BTreeMap<(String, String), Vec<BuiltinSite>> = BTreeMap::new();
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            let Some(files) = resolve_variant(config, node, variant).files else {
+                continue;
+            };
+            for (rel, delivery) in &files {
+                let site = files_definition_site(node_name, node, variant_name, variant, rel);
+                for template in delivery.templates() {
+                    file_sites
+                        .entry((site.clone(), template))
+                        .or_default()
+                        .push(site_for(config, node_name, node, variant_name, variant));
+                }
+            }
+        }
+    }
+    for ((loc, template), sites) in &file_sites {
+        check(loc, template, sites, out);
     }
 
     // The **resolved** command surfaces, for the same reason `env` above uses the
@@ -7358,6 +7920,405 @@ mod tests {
             .unwrap()
             .message;
         assert!(msg.contains("$HOME"), "{msg}");
+    }
+
+    /// Issue #441: a var's *source* is authored text too. `${veld.root}` in an
+    /// `argv` passed lint and reached the command verbatim; now the same rules
+    /// that read a literal read every template of a source — `builtin-not-in-
+    /// scope`, `var-unresolvable-reference`, `vars-cannot-nest` — and a `file`
+    /// source's path is a template like any other.
+    #[test]
+    fn var_sources_are_linted_like_var_literals() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": {
+                    "fine":     { "argv": ["node", "${veld.root}/agent.mts", "${veld.run}"] },
+                    "path":     { "file": "${veld.root}/.tok" },
+                    "port_src": { "argv": ["curl", "localhost:${veld.port}"] },
+                    "url_src":  { "shell": "curl ${veld.url}/token" },
+                    "home":     { "shell": "cat ${HOME}/.tok" },
+                    "shelly":   { "argv": ["sh", "-c", "cat $HOME/.tok"] },
+                    "nested":   { "argv": ["printf", "${vars.fine}"] }
+                },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let locs = |rule: &str| -> Vec<&str> {
+            f.iter()
+                .filter(|x| x.rule == rule)
+                .map(|x| x.location.as_str())
+                .collect()
+        };
+        assert_eq!(
+            locs("builtin-not-in-scope"),
+            ["vars.port_src", "vars.url_src"],
+            "{f:?}"
+        );
+        assert_eq!(
+            locs("var-unresolvable-reference"),
+            ["vars.home"],
+            "`$HOME` unbraced is the shell's, `${{HOME}}` is now veld's and fails: {f:?}"
+        );
+        assert_eq!(locs("vars-cannot-nest"), ["vars.nested"], "{f:?}");
+        assert!(
+            f.iter()
+                .all(|x| !x.location.starts_with("vars.fine")
+                    && !x.location.starts_with("vars.path")),
+            "run-scoped builtins in a source are fine: {f:?}"
+        );
+        // The remedy has to name the source forms, or the author reads "literal"
+        // and assumes their `shell` is exempt.
+        let msg = &f
+            .iter()
+            .find(|x| x.rule == "var-unresolvable-reference")
+            .unwrap()
+            .message;
+        assert!(msg.contains("shell"), "{msg}");
+        assert!(msg.contains("$HOME"), "{msg}");
+    }
+
+    /// A node's `env` and `files` sources are authored text too, so a `${veld.*}`
+    /// in one is checked at the node's own site: `${veld.url}` on a `command`
+    /// node is as wrong in an env source as in its `argv`.
+    #[test]
+    fn env_and_files_source_builtins_are_checked_at_the_node() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"],
+                    "env": {
+                        "FINE":  { "shell": "printf ${veld.run}" },
+                        "BAD":   { "argv": ["curl", "${veld.url}/token"] }
+                    },
+                    "files": {
+                        "cfg.json": { "shell": "render ${veld.url}" },
+                        "ok.txt":   { "argv": ["printf", "${veld.root}"] }
+                    }
+                }}}}
+            }"#,
+        );
+        let scope: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "builtin-not-in-scope")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(
+            scope,
+            [
+                "nodes.n.variants.one.env.BAD",
+                "nodes.n.variants.one.files.cfg.json"
+            ],
+            "{f:?}"
+        );
+    }
+
+    /// A secret var reaching an `env` or `files` *source command* is the same
+    /// leak as reaching the node's `argv`: the source runs as a process, and its
+    /// argv is in the process table. The remedy differs — the source has no
+    /// environment of its own to carry the secret — and the message has to say so.
+    #[test]
+    fn a_secret_var_in_an_env_or_files_source_command_is_secret_in_command() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "tok": { "value": "hunter2", "secret": true } },
+                "nodes": { "n": {
+                    "env":   { "DERIVED": { "argv": ["derive", "${vars.tok}"] } },
+                    "variants": {
+                        "one": {
+                            "type": "command", "argv": ["true"],
+                            "files": { "cfg.json": { "shell": "render --token ${vars.tok}" } }
+                        },
+                        "two": { "type": "command", "argv": ["true"] }
+                    }
+                }}
+            }"#,
+        );
+        let hits: Vec<&Finding> = f.iter().filter(|x| x.rule == "secret-in-command").collect();
+        let locs: Vec<&str> = hits.iter().map(|x| x.location.as_str()).collect();
+        // The node-level `env` source is inherited by both variants: one finding,
+        // at its definition site; the variant's own `files` source at the variant.
+        assert_eq!(
+            locs,
+            ["nodes.n.env.DERIVED", "nodes.n.variants.one.files.cfg.json"],
+            "{f:?}"
+        );
+        assert!(hits.iter().all(|x| x.severity == Severity::Error));
+        assert!(
+            hits.iter().all(|x| x.message.contains("value source")),
+            "the remedy is specific to a source command: {hits:?}"
+        );
+    }
+
+    /// A bare `$PW` matching a secret env key warns in the node's own command,
+    /// where the shell has the node's env; in a value source it does not, since
+    /// the source runs in the daemon's environment, where `PW` is not set.
+    #[test]
+    fn secret_shell_expansion_skips_a_value_source_command() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "shell": "use $PW",
+                    "env": {
+                        "PW":      { "value": "x", "secret": true },
+                        "DERIVED": { "shell": "use $PW" }
+                    }
+                }}}}
+            }"#,
+        );
+        let locs: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "secret-shell-expansion")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(locs, ["nodes.n.variants.one"], "{f:?}");
+    }
+
+    /// An `env` source's *name* is the one string in a value that is not a
+    /// template: the CLI forwards the values of exactly the names it finds, so an
+    /// interpolated name would look up a variable nobody forwarded. Writing
+    /// `${…}` in one is refused at lint — and the advice must not point at the
+    /// terminal's environment, which a source command does not run in.
+    #[test]
+    fn an_interpolated_env_source_name_is_a_lint_error() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": {
+                    "tok":  { "env": "${veld.run}_TOKEN" },
+                    "fine": { "env": "PLAIN_TOKEN" }
+                },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"],
+                    "env": { "KEY": { "env": "KEY_${veld.branch}" } }
+                }}}}
+            }"#,
+        );
+        let hits: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "env-name-not-interpolated")
+            .collect();
+        let locs: Vec<&str> = hits.iter().map(|x| x.location.as_str()).collect();
+        assert_eq!(locs, ["nodes.n.variants.one.env.KEY", "vars.tok"], "{f:?}");
+        assert!(hits.iter().all(|x| x.severity == Severity::Error));
+        assert!(
+            hits[1].message.contains("daemon's environment")
+                && !hits[1].message.contains("printenv"),
+            "the advice must not send the author to `printenv`, which a source \
+             command cannot see the terminal's environment through: {:?}",
+            hits[1]
+        );
+    }
+
+    /// A non-veld `${…}` in a node `env` value — literal or source — or in a
+    /// `files` source is `unresolvable-reference`: a `${HOME}` that a source's
+    /// shell used to expand now fails the start, and an `env` literal's never
+    /// was linted. Reported once per definition site (a project env shared
+    /// by two variants is one finding), and a `files` literal is content, so it
+    /// is not checked.
+    #[test]
+    fn a_non_veld_reference_at_a_node_site_is_unresolvable_reference() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "env": { "CACHE": "${HOME}/.cache" },
+                "nodes": { "n": {
+                    "env": { "TOK": { "shell": "cat ${HOME}/.tok" } },
+                    "variants": {
+                        "one": {
+                            "type": "command", "argv": ["true"],
+                            "env": {
+                                "KEY": { "argv": ["cat", "${XDG_CONFIG_HOME}/key"] },
+                                "FINE": { "shell": "echo $HOME ${veld.run} ${vars.ok}" }
+                            },
+                            "files": {
+                                "a.env": { "value": "PORT=${PORT}" },
+                                "b.pem": { "file": "${CERT_DIR}/b.pem" }
+                            }
+                        },
+                        "two": { "type": "command", "argv": ["true"] }
+                    }
+                }},
+                "vars": { "ok": "x" }
+            }"#,
+        );
+        let hits: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "unresolvable-reference")
+            .collect();
+        let locs: Vec<&str> = hits.iter().map(|x| x.location.as_str()).collect();
+        assert_eq!(
+            locs,
+            [
+                "env.CACHE",
+                "nodes.n.env.TOK",
+                "nodes.n.variants.one.env.KEY",
+                "nodes.n.variants.one.files.b.pem",
+            ],
+            "{f:?}"
+        );
+        assert!(hits.iter().all(|x| x.severity == Severity::Error));
+        assert!(
+            hits[1].message.contains("${HOME}")
+                && hits[1].message.contains("on_stop")
+                && hits[1].message.contains("write `$HOME` without the braces"),
+            "{:?}",
+            hits[1]
+        );
+        assert!(
+            !f.iter().any(|x| x.rule == "files-literal-not-interpolated"),
+            "`${{PORT}}` in a files literal is content, not a veld reference: {f:?}"
+        );
+    }
+
+    /// The unbraced remedy is only right for a bare name. `${X:-dflt}` has no
+    /// unbraced form (`$X:-dflt` means something else), so the message must say
+    /// there is no escape instead of printing a wrong fix.
+    #[test]
+    fn a_shell_expression_gets_the_no_escape_remedy() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "a": { "shell": "echo ${HOME:-/root}" } },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"],
+                    "env": { "B": { "shell": "echo ${#PATH}" } }
+                }}}}
+            }"#,
+        );
+        let var = f
+            .iter()
+            .find(|x| x.rule == "var-unresolvable-reference")
+            .expect("var rule");
+        let node = f
+            .iter()
+            .find(|x| x.rule == "unresolvable-reference")
+            .expect("node rule");
+        for hit in [var, node] {
+            assert!(
+                hit.message.contains("no escape") && !hit.message.contains("without the braces"),
+                "{hit:?}"
+            );
+        }
+    }
+
+    /// A node-scoped reference in a var is veld's, just out of a var's reach: the
+    /// finding says so, and does not hand out shell advice for it.
+    #[test]
+    fn a_node_scoped_reference_in_a_var_is_not_called_a_shell_variable() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "port": "${nodes.db.port}", "out": { "shell": "echo ${output.url}" } },
+                "nodes": { "db": { "default_variant": "local", "variants": {
+                    "local": { "type": "command", "shell": "true" }
+                }}}
+            }"#,
+        );
+        let hits: Vec<_> = f
+            .iter()
+            .filter(|x| x.rule == "var-unresolvable-reference")
+            .collect();
+        assert_eq!(hits.len(), 2, "{f:?}");
+        for hit in hits {
+            assert!(hit.message.contains("resolved at a node"), "{hit:?}");
+            assert!(!hit.message.contains("not a veld reference"), "{hit:?}");
+            assert!(!hit.message.contains("without the braces"), "{hit:?}");
+            assert!(!hit.message.contains("shell expression"), "{hit:?}");
+        }
+    }
+
+    /// An unclosed `${` used to be a run-time failure only — for a var, one that
+    /// lands after the run is persisted. Lint reports it at every interpolated
+    /// site, with the byte position; a `files` literal is content and is not one.
+    #[test]
+    fn an_unclosed_interpolation_is_a_lint_error() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "a": { "shell": "ls ${veld.root}/x | sed 's/${/X/'" } },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"],
+                    "env": { "B": "ok ${" },
+                    "files": { "c.txt": { "value": "a literal ${ is content" } }
+                }}}}
+            }"#,
+        );
+        let hits: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "unclosed-interpolation")
+            .collect();
+        let locs: Vec<&str> = hits.iter().map(|x| x.location.as_str()).collect();
+        assert_eq!(locs, ["nodes.n.variants.one.env.B", "vars.a"], "{f:?}");
+        assert!(hits[1].message.contains("byte 27"), "{:?}", hits[1]);
+    }
+
+    /// `${vars.tok}` in a `files` literal is nine characters on disk and nothing
+    /// else would say so, since a literal has no templates. A warning: the file
+    /// is delivered as it always was, and a template for another tool may mean
+    /// it — the message offers `{ "file": … }` for that case. The var remedy says
+    /// how to get a var into a file; a non-var reference gets the source remedy.
+    /// Reported once per site, whichever variant inherits it; `${nodes.*}` and
+    /// the like are not flagged at all.
+    #[test]
+    fn a_veld_reference_in_a_files_literal_is_a_warning() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "tok": { "shell": "echo t", "secret": true } },
+                "nodes": { "n": {
+                    "files": { ".tok": { "value": "${vars.tok}" } },
+                    "variants": {
+                        "one": {
+                            "type": "command", "argv": ["true"],
+                            "files": {
+                                "port.conf": { "value": "port=${veld.port}\nhome=${HOME}" },
+                                "tpl.yml":   { "value": "url: ${nodes.db.url} ${output.x} ${param.y}" }
+                            }
+                        },
+                        "two": { "type": "command", "argv": ["true"] }
+                    }
+                }}
+            }"#,
+        );
+        let hits: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "files-literal-not-interpolated")
+            .collect();
+        let locs: Vec<&str> = hits.iter().map(|x| x.location.as_str()).collect();
+        assert_eq!(
+            locs,
+            ["nodes.n.files..tok", "nodes.n.variants.one.files.port.conf"],
+            "{f:?}"
+        );
+        assert!(
+            hits.iter().all(|x| x.severity == Severity::Warning),
+            "{hits:?}"
+        );
+        assert!(
+            hits.iter()
+                .all(|x| x.message.contains("{ \"file\": \"path\" }")),
+            "every hit offers the verbatim way out: {hits:?}"
+        );
+        assert!(
+            hits[0].message.contains("var's own source"),
+            "{:?}",
+            hits[0]
+        );
+        assert!(
+            hits[1].message.contains("port=%s") && !hits[1].message.contains("var's own source"),
+            "{:?}",
+            hits[1]
+        );
+        assert!(
+            !f.iter().any(|x| x.rule == "unresolvable-reference"),
+            "`${{HOME}}` in a files literal is content: {f:?}"
+        );
     }
 
     /// F5: a real built-in written where it is not populated is its own error.
