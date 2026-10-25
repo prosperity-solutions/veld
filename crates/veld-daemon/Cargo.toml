@@ -36,7 +36,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # — already a dev-dependency of every crate here, and already in
 # THIRD-PARTY-LICENSES.md, so promoting it adds no new third-party licence.
 tempfile = "3"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake"] }
 
 [dev-dependencies]
-tokio-tungstenite = { version = "0.28", default-features = false }
 tower = { version = "0.5", features = ["util"] }

@@ -12,6 +12,7 @@ import {
   type RepoList,
   type RunInfo,
   type RunRef,
+  type RunStartRequest,
   type SharesList,
   type SettingsDoc,
   type StatsResponse,
@@ -2443,9 +2444,44 @@ function AppInner(props: {
   // Run actions for ANY worktree, not just the selected one — the rail rows
   // (■ only; start via their menu), the context menu and the palette all drive these.
   //
-  // `name` overrides the default target, which is how "start another run" asks for
-  // a fresh environment rather than for whatever ▶ would have started.
-  const startWorktree = (w: Worktree, name?: string) => {
+  const dispatchStart = (w: Worktree, start: RunStartRequest) => {
+    const target = start.run_name;
+    if (!target) {
+      notifyError(`Start ${worktreeLabel(w)}`, "The pending start has no run name. Check the run state before proceeding.");
+      return;
+    }
+    const previous = worktree && w.id === worktree.id ? selectedRunName : null;
+    if (previous !== null) setSelectedRunName(target);
+    void act(
+      w,
+      target,
+      "start",
+      () => api.startRun(w.id, start),
+      // An unavailable receipt does not prove the start failed. Keep its tuple
+      // in retry storage while restoring this window's previous selection.
+      () => {
+        if (previous !== null && selectedRunRef.current === target) {
+          setSelectedRunName(previous);
+        }
+      },
+    );
+  };
+
+  const recoverPendingStart = (w: Worktree): boolean => {
+    try {
+      const pinned = api.pendingRunStart(w.id);
+      if (!pinned) return false;
+      dispatchStart(w, pinned);
+    } catch (error) {
+      notifyError(`Start ${worktreeLabel(w)}`, error);
+    }
+    // A damaged receipt also blocks fresh dispatch until the run state is checked.
+    return true;
+  };
+
+  // Resolve an explicit "another run" name only after pending intent recovery.
+  const startWorktree = (w: Worktree, getName?: () => string) => {
+    if (recoverPendingStart(w)) return;
     const sel = resolveStartSelection(w);
     if (!sel) {
       // Defence in depth: every start surface gates on `canStartWorktree`,
@@ -2462,7 +2498,7 @@ function AppInner(props: {
     // default (the worktree alias) is what minted a *third* environment when an
     // agent already had one live, and it also meant this window could not mark
     // the action against the run it was about.
-    const target = name ?? startNameFor(w);
+    const target = getName?.() ?? startNameFor(w);
     void (async () => {
       // Ask before starting, not after failing. A daemon-spawned `veld orchestrator start`
       // has no terminal, so its own pre-flight can only refuse — this is the
@@ -2480,9 +2516,9 @@ function AppInner(props: {
           setDialog({
             kind: "config-vars",
             project: w.path,
-            // Carries `name` through, so retrying a "start another run" still
+            // Carries `getName` through, so retrying a "start another run" still
             // starts *another* one rather than the default.
-            retry: () => startWorktree(w, name),
+            retry: () => startWorktree(w, getName),
           });
           return;
         }
@@ -2492,35 +2528,7 @@ function AppInner(props: {
         // real problem. Refusing to start because a *check* broke would be a
         // worse failure than the one it was looking for.
       }
-      /**
-       * Bind this window to what it just started.
-       *
-       * Written at the moment of the action, not repaired afterwards by an effect:
-       * the intent ("I started this, I am looking at it") exists only here, and a
-       * poll-time rule like "select the newest run" would also hijack the selection
-       * when the *other* thing in this directory — a coding agent — starts one.
-       *
-       * Only for the selected worktree: starting a rail row from its menu deliberately does not move
-       * the selection, and another worktree's choice is stored under its own key.
-       */
-      const previous = worktree && w.id === worktree.id ? selectedRunName : null;
-      if (previous !== null) setSelectedRunName(target);
-      void act(
-        w,
-        target,
-        "start",
-        () => api.startRun(w.id, { ...body, run_name: target }),
-        // The start never happened, so leave the window bound to what it was
-        // looking at rather than to a name nothing created — but only if the user has
-        // not picked something else in the meantime. A failure can arrive seconds
-        // later, and restoring unconditionally would then yank a selection they made
-        // deliberately.
-        () => {
-          if (previous !== null && selectedRunRef.current === target) {
-            setSelectedRunName(previous);
-          }
-        },
-      );
+      dispatchStart(w, { ...body, run_name: target });
     })();
   };
   // `w.path` is the run's project root — every worktree with a veld.json is
@@ -2549,6 +2557,7 @@ function AppInner(props: {
    * needs to ask the question fresh for an arbitrary worktree instead.
    */
   const startOrOpenPicker = (w: Worktree) => {
+    if (recoverPendingStart(w)) return;
     if (resolveStoredSelection(w)) {
       startWorktree(w);
       return;
@@ -3024,7 +3033,7 @@ function AppInner(props: {
                   key: "start-another",
                   title: `Start another run (${anotherNameFor(w)})`,
                   disabled: !canStartAnother(w),
-                  onClick: () => startWorktree(w, anotherNameFor(w)),
+                  onClick: () => startWorktree(w, () => anotherNameFor(w)),
                 },
               ]
             : []),
@@ -6332,7 +6341,7 @@ function AppInner(props: {
           group: "Run",
           label: `Start another run in ${worktreeLabel(w)} (${anotherNameFor(w)})`,
           alt: ["second", "parallel", "new environment"],
-          run: () => startWorktree(w, anotherNameFor(w)),
+          run: () => startWorktree(w, () => anotherNameFor(w)),
         });
       }
       for (const [name, url] of urls) {
@@ -7684,7 +7693,7 @@ function AppInner(props: {
               startLabel={startSelectionLabel(effectiveStart, worktree)}
               canStartAnother={canStartAnother(worktree)}
               onStartAnother={() =>
-                startWorktree(worktree, anotherNameFor(worktree))
+                startWorktree(worktree, () => anotherNameFor(worktree))
               }
               onSelect={setSelectedRunName}
               // Disabled when the selector has nothing to offer: fewer than two

@@ -1,3 +1,4 @@
+mod agent_runtime;
 mod backup;
 mod broadcaster;
 mod dbhealth;
@@ -6,6 +7,7 @@ mod gc;
 mod http_server;
 mod monitor;
 mod offload;
+mod remote;
 mod share;
 mod stats;
 
@@ -28,6 +30,7 @@ struct Args {
     pty_holder: bool,
     /// True for `--engine-worker`: carry out one engine action and exit.
     engine_worker: bool,
+    remote_agent: Option<String>,
     /// Set for `--log-sink`: be the log sink of one detached node's pipeline.
     log_sink: Option<LogSink>,
 }
@@ -49,6 +52,7 @@ fn parse_args() -> Args {
     let mut socket_path: Option<PathBuf> = None;
     let mut pty_holder = false;
     let mut engine_worker = false;
+    let mut remote_agent = None;
     let mut log_sink: Option<LogSink> = None;
 
     while let Some(arg) = args.next() {
@@ -77,6 +81,9 @@ fn parse_args() -> Args {
             // one engine action (start, stop, …) in a process that outlives the
             // daemon, with the action on stdin. See `engine_worker`.
             "--engine-worker" => engine_worker = true,
+            "--remote-agent" => {
+                remote_agent = Some(args.next().expect("--remote-agent requires a session ID"))
+            }
             // Not a user-facing mode either: the stdout-side of every detached
             // node's pipeline, `sh -c '{ cmd; } 2>&1 | veld-daemon --log-sink …'`
             // (built by `veld_core::process::log_sink_argv`). It reads stdin and
@@ -122,6 +129,7 @@ fn parse_args() -> Args {
         socket_path,
         pty_holder,
         engine_worker,
+        remote_agent,
         log_sink,
     }
 }
@@ -240,6 +248,9 @@ fn main() -> Result<()> {
 }
 
 async fn run(args: Args) -> Result<()> {
+    if let Some(session_id) = args.remote_agent {
+        return agent_runtime::launch(&session_id).await;
+    }
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     if args.pty_holder || args.engine_worker {
@@ -512,9 +523,8 @@ async fn run(args: Args) -> Result<()> {
     });
 
     let http_manager = std::sync::Arc::clone(&share_manager);
-    let http_handle = tokio::spawn(async move {
-        http_server::run_http_server(http_manager).await;
-    });
+    let mut http_handle =
+        tokio::spawn(async move { http_server::run_http_server(http_manager).await });
 
     let accept_broadcaster = broadcaster.clone();
     let accept_handle = tokio::spawn(async move {
@@ -522,8 +532,15 @@ async fn run(args: Args) -> Result<()> {
     });
 
     // Wait for shutdown signal.
-    shutdown_signal().await;
-    info!("shutdown signal received, cleaning up");
+    let server_error = tokio::select! {
+        _ = shutdown_signal() => None,
+        result = &mut http_handle => Some(match result {
+            Ok(Err(error)) => error,
+            Ok(Ok(())) => anyhow::anyhow!("daemon API stopped unexpectedly"),
+            Err(error) => error.into(),
+        }),
+    };
+    info!("daemon shutting down, cleaning up");
 
     // Deregister the dev-instance management route (best-effort — a stale
     // route only 502s until the next dev daemon re-registers it).
@@ -578,7 +595,10 @@ async fn run(args: Args) -> Result<()> {
     let _ = tokio::fs::remove_file(&args.socket_path).await;
 
     info!("veld-daemon stopped");
-    Ok(())
+    match server_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 // ---------------------------------------------------------------------------

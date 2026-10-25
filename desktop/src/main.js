@@ -15,9 +15,12 @@ const {
   dialog,
   ipcMain,
   nativeImage,
+  session,
+  safeStorage,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
+const { createRemoteWindows } = require("./remoteWindows");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 const { menuBarIconFrom, serialize } = require("./trayVisibility");
 const { dockBadgeStyleFrom, registerDockBadgeIpc } = require("./dockBadge");
@@ -98,6 +101,15 @@ const TRAFFIC_LIGHT_SIZE = 14;
 
 /** @type {Tray | null} */
 let tray = null;
+let remoteWindows = null;
+
+async function openRemoteConnections() {
+  try {
+    await remoteWindows?.openChooser();
+  } catch {
+    dialog.showErrorBox("Remote Connections", "The connection chooser could not open. Restart Veld and try again.");
+  }
+}
 /**
  * Rebuilds the tray's menu; the updater calls it when the skew notice changes.
  *
@@ -654,6 +666,8 @@ function buildAppMenu() {
     {
       label: "File",
       submenu: [
+        { label: "Remote Connections…", click: () => void openRemoteConnections() },
+        { type: "separator" },
         // A main-process accelerator, so it works with a native browser pane
         // focused. A focused `WebContentsView` swallows every keystroke — which
         // is why the palette's ⌘K has to be forwarded back to the page from
@@ -777,6 +791,8 @@ app.whenReady().then(async () => {
   // Ahead of the IPC registrations and `restoreWindows` so a refused launch
   // leaves no handlers, no tray and no restored layout behind it.
   if (await quitIfUpdating()) return;
+  remoteWindows = createRemoteWindows({ app, BrowserWindow, session, ipcMain, safeStorage, dialog });
+  remoteWindows.register();
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
   registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender), {
@@ -869,6 +885,7 @@ app.whenReady().then(async () => {
  * the layouts, with their shells, to the grace.
  */
 app.on("before-quit", () => setQuitting(true));
+app.on("will-quit", () => remoteWindows?.dispose());
 
 /**
  * …and a `before-quit` is not always a quit — `quitAndInstall` can return

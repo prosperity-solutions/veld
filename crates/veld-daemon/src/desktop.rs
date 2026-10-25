@@ -6571,7 +6571,7 @@ fn lane_err(e: veld_core::db::DbError) -> ApiError {
 // Runs
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct StartBody {
     #[serde(default)]
     preset: Option<String>,
@@ -6588,14 +6588,23 @@ struct StartBody {
     run_name: Option<String>,
 }
 
-/// Start a veld run in a worktree by spawning `veld orchestrator start` with the worktree
-/// as cwd (the CLI resolves the root config from there) — the same fire-and-forget
-/// pattern as the management stop/restart endpoints. Returns 202; the UI
-/// observes progress via `/api/environments`.
+/// Start through engine preflight and a worker, returning a receipt with 202.
+/// Replays recover the reservation before consulting mutable worktree state.
 async fn start_worktree_run(
+    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Json(body): Json<StartBody>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<(StatusCode, Json<veld_engine::api::Submitted>), ApiError> {
+    let submission =
+        super::engine::UiSubmission::new(&headers, &format!("/api/worktrees/{id}/start"), &body)
+            .map_err(|(code, message)| err(code, message))?;
+    if let Some(id) = submission
+        .replay()
+        .await
+        .map_err(|(code, message)| err(code, message))?
+    {
+        return Ok(super::engine::submitted(id));
+    }
     let db = open_desktop_db()?;
     let wt = db
         .get_worktree(id)
@@ -6660,9 +6669,10 @@ async fn start_worktree_run(
         body.selections.clone(),
         body.preset.clone(),
         Some(run_name),
+        submission,
     )
     .await
-    .map(|_| StatusCode::ACCEPTED)
+    .map(super::engine::submitted)
     .map_err(|(code, message)| err(code, message))
 }
 

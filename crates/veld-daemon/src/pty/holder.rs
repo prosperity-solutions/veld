@@ -195,7 +195,15 @@ pub async fn run(cfg: HolderConfig) -> anyhow::Result<()> {
     // The socket is the daemon's only way in, so a failure past this point must
     // still remove it — otherwise the next daemon boot finds a door with nobody
     // behind it and has to time out to learn that.
-    let result = serve(&cfg, listener).await;
+    let control_path = wire::input_control_socket(&cfg.socket);
+    let result = match bind(&control_path) {
+        Ok(control) => {
+            let result = serve(&cfg, listener, control).await;
+            let _ = std::fs::remove_file(&control_path);
+            result
+        }
+        Err(error) => Err(error),
+    };
     let _ = std::fs::remove_file(&cfg.socket);
     result
 }
@@ -279,7 +287,11 @@ struct Conn {
     out: mpsc::Sender<(u8, Vec<u8>)>,
 }
 
-async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()> {
+async fn serve(
+    cfg: &HolderConfig,
+    listener: UnixListener,
+    control: UnixListener,
+) -> anyhow::Result<()> {
     let size = PtySize {
         cols: clamp_dimension(Some(cfg.cols), 80),
         rows: clamp_dimension(Some(cfg.rows), 24),
@@ -311,6 +323,8 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
         pid,
         "terminal holder started"
     );
+
+    let input = super::input::Service::start(write_fd, control);
 
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Cmd>(CMD_CHANNEL);
     tokio::spawn(acceptor(listener, cmd_tx.clone()));
@@ -530,7 +544,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // writing to it, and its whole contract is that it works
                     // without being anybody's writer.
                     if pending.as_ref().is_some_and(|c| c.generation == seq)
-                        && matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
+                        && matches!(frame.kind, wire::INPUT | wire::INPUT_EPOCH | wire::RESIZE | wire::REDRAW)
                     {
                         info!(session = %cfg.session_id, "a second daemon took the session over");
                         conn = pending.take();
@@ -556,9 +570,13 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     // stream — the rule the whole session model rests on.
                     else if conn.as_ref().is_some_and(|c| c.generation == seq) {
                         match frame.kind {
-                            wire::INPUT => {
-                                if pty_write(&write_fd, &frame.payload).await.is_err() {
-                                    debug!("terminal input write failed (pid {pid})");
+                            wire::INPUT => input.gate.legacy(seq, frame.payload).await,
+                            wire::INPUT_EPOCH => {
+                                if let Some(bytes) = frame.payload.get(..8) {
+                                    let browser = u64::from_be_bytes(bytes.try_into().expect("epoch prefix"));
+                                    input.gate.queue(wire::InputEpoch { connection: seq, browser }, frame.payload[8..].to_vec()).await;
+                                } else {
+                                    warn!("ignoring malformed epoch-tagged input");
                                 }
                             }
                             wire::RESIZE => match wire::decode_size(&frame.payload) {
@@ -645,7 +663,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         // `a_peer_whose_only_frame_is_a_redraw_takes_the_session_over_at_once`
                         // so the insurance cannot be quietly removed; this entry is kept in
                         // step with it.
-                        && !matches!(frame.kind, wire::INPUT | wire::RESIZE | wire::REDRAW)
+                        && !matches!(frame.kind, wire::INPUT | wire::INPUT_EPOCH | wire::RESIZE | wire::REDRAW)
                     {
                         warn!(
                             "dropping a probationary connection: unsupported frame {:#x}",
@@ -998,6 +1016,8 @@ async fn attach(
         // This build acts on REDRAW; an older holder that cannot would drop the
         // connection if asked, so the daemon gates on this flag.
         supports_redraw: true,
+        supports_input_epoch: true,
+        connection_generation: generation,
         // Measured from *this* holder's clock, not the daemon's: the daemon that
         // is connecting may never have seen this session before.
         detached_secs: disconnected_since
@@ -1383,7 +1403,7 @@ async fn pty_read(fd: &AsyncFd<File>, buf: &mut [u8]) -> std::io::Result<usize> 
 
 /// Write all of `data` to the PTY, waiting for writability between partial
 /// writes.
-async fn pty_write(fd: &AsyncFd<File>, data: &[u8]) -> std::io::Result<()> {
+pub(super) async fn pty_write(fd: &AsyncFd<File>, data: &[u8]) -> std::io::Result<()> {
     let mut rest = data;
     while !rest.is_empty() {
         let mut guard = fd.writable().await?;

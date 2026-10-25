@@ -6,6 +6,7 @@ pub const VERSION: &str = env!("VELD_VERSION");
 pub mod agent;
 pub mod config;
 pub use uuid;
+pub mod agent_runtime;
 pub mod console;
 pub mod db;
 pub mod desktop_pref;
@@ -30,6 +31,8 @@ pub mod process;
 pub mod project_id;
 #[doc(hidden)]
 pub mod release_version;
+pub mod remote;
+pub mod runner;
 pub mod sensitive;
 pub mod setup;
 pub mod share;

@@ -38,6 +38,7 @@ CANONICAL="$REPO_ROOT/website/favicon.svg"
 # docs/branding.md — and with the reverse scan at the bottom, which is what
 # catches a *new* surface that never registered itself here.
 SURFACES=(
+  "desktop/src/remoteChooser.html"
   "website/index.html"
   "crates/veld-gateway/src/pages.rs"
   "crates/veld-daemon/assets/management-ui.html"

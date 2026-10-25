@@ -314,7 +314,7 @@ Locked:              128 kB
             let stat =
                 std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("/proc/self/stat");
             let secs = parse_stat_cpu_seconds(&stat, clock_ticks()).expect("own cpu time");
-            assert!(secs >= 0.0 && secs < 86_400.0, "implausible: {secs}");
+            assert!((0.0..86_400.0).contains(&secs), "implausible: {secs}");
         }
 
         #[test]

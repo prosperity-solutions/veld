@@ -27,7 +27,10 @@
 //!   stream; the displaced socket is told why and closed.
 //! - **Ending a session is explicit.** Closing a tab sends
 //!   `DELETE /api/pty/sessions/{id}`. Everything else (a reload, a crash, a
-//!   closed laptop) leaves it detached, and [`DETACH_GRACE`] is what
+//!   closed laptop) leaves it detached. Remote jobs remain retained while the
+//!   daemon runs, including after revoke. Their persisted 24-hour orphan deadline
+//!   applies only while the holder has no daemon. For local terminals,
+//!   [`DETACH_GRACE`] is what
 //!   eventually collects it — otherwise every abandoned tab would leak a shell
 //!   for the daemon's lifetime. **Detached is not the same as abandoned**,
 //!   though, and the grace waits for the second: a session some connected
@@ -94,6 +97,12 @@ pub(super) mod shims;
 #[path = "pty/wire.rs"]
 mod wire;
 
+#[path = "pty/input.rs"]
+mod input;
+
+#[path = "revocation.rs"]
+pub(crate) mod revocation;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -115,6 +124,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 use veld_core::agent::valid_session_id;
+use veld_core::db::RemoteTerminal;
 
 use super::management::{check_csrf, open_db};
 use wire::HolderConfig;
@@ -264,6 +274,10 @@ fn detach_grace_hint() -> Duration {
 
 /// How often the reaper looks for sessions past [`DETACH_GRACE`].
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Remote jobs are retained while this daemon runs, regardless of browser state.
+/// Only a holder without a daemon uses this persisted outage cleanup deadline.
+const REMOTE_ORPHAN_GRACE: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Replayed to the client on attach, so a reload comes back to the screen it
 /// left rather than a blank one. Raw PTY bytes including escape sequences —
@@ -618,6 +632,236 @@ fn err(code: StatusCode, msg: impl Into<String>) -> ApiError {
     (code, Json(serde_json::json!({ "error": msg.into() })))
 }
 
+/// Trusted only on the loopback hop from authenticated remote ingress. The
+/// ingress strips caller-supplied copies and injects its authenticated UUID on
+/// HTTP requests and ticket-bearing WebSocket upgrades alike.
+/// Both `/api/pty/tickets` and `/api/ide/tickets` bind the ticket to this value.
+/// `/api/pty/attach` and `/api/ide/channel` require the same value upstream.
+/// Ingress must bind each ticket to its principal and discard the mapping on
+/// consumption, expiry or revoke. Revoke closes streams without deleting PTYs.
+pub(super) fn remote_client(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    const HEADER: &str = "x-veld-remote-client";
+    let mut values = headers.get_all(HEADER).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "duplicate remote client header",
+        ));
+    }
+    let id = value
+        .to_str()
+        .ok()
+        .and_then(|v| uuid::Uuid::parse_str(v).ok())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, "invalid remote client header"))?;
+    Ok(Some(id.to_string()))
+}
+
+fn remote_db_error(error: veld_core::db::DbError) -> ApiError {
+    warn!("remote session ownership: database error: {error}");
+    crate::dbhealth::note_error(&error);
+    err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+}
+
+/// A remote browser may operate only its own terminals. Local callers retain
+/// explicit close access, but cannot attach to a remote terminal without scope.
+async fn check_remote_session(headers: &HeaderMap, id: &str) -> Result<(), ApiError> {
+    let Some(client_id) = remote_client(headers)? else {
+        return Ok(());
+    };
+    let id = id.to_owned();
+    crate::offload::blocking(move || {
+        let db = open_db().map_err(|status| err(status, "database error"))?;
+        match db
+            .terminal_owner_matches(&id, Some(&client_id))
+            .map_err(remote_db_error)?
+        {
+            Some(true) => Ok(()),
+            _ => Err(err(
+                StatusCode::FORBIDDEN,
+                "terminal belongs to another client",
+            )),
+        }
+    })
+    .await
+}
+
+/// Close admission immediately and wait for every owned holder's final input
+/// writer to acknowledge revocation. Retained jobs and output stay alive.
+/// The caller revokes durable authentication and closes proxy watchers first.
+/// An error means the caller must not report successful input revocation.
+pub(crate) async fn revoke_remote_client(client_id: &str) -> anyhow::Result<()> {
+    let owner = client_id.to_owned();
+    revoke_remote_client_using(
+        client_id,
+        crate::offload::blocking(move || veld_core::db::Db::open()?.remote_terminal_ids(&owner)),
+    )
+    .await
+}
+
+async fn revoke_remote_client_using(
+    client_id: &str,
+    receipts: impl std::future::Future<Output = Result<Vec<String>, veld_core::db::DbError>>,
+) -> anyhow::Result<()> {
+    let authority = revocation::client(client_id);
+    authority.revoke();
+    let _registrations = authority.operations.write().await;
+    TICKETS
+        .lock()
+        .expect("ticket store poisoned")
+        .retain(|_, ticket| {
+            ticket
+                .remote
+                .as_ref()
+                .is_none_or(|scope| scope.client_id != client_id)
+        });
+    super::ide::revoke_remote_tickets(client_id);
+    let persisted = receipts.await;
+    // Even a database failure must not prevent fencing holders already in memory.
+    let sessions: Vec<_> = SESSIONS
+        .lock()
+        .await
+        .values()
+        .filter(|session| {
+            session
+                .remote
+                .as_ref()
+                .is_some_and(|scope| scope.client_id == client_id)
+        })
+        .cloned()
+        .collect();
+    let mut ids: std::collections::HashSet<_> =
+        sessions.iter().map(|session| session.id.clone()).collect();
+    for session in &sessions {
+        let epoch = session.attach_seq.fetch_add(1, Ordering::AcqRel) + 1;
+        session.attach_epoch.send_replace(epoch);
+    }
+    let mut failures = Vec::new();
+    match persisted {
+        Ok(persisted) => ids.extend(persisted),
+        Err(error) => failures.push(format!("cannot enumerate durable terminals: {error}")),
+    }
+    for id in ids {
+        let held = sessions.iter().any(|session| session.id == id);
+        if let Err(error) = reset_holder_input(&id, wire::InputEpoch::REVOKED, held).await {
+            failures.push(format!("terminal {id}: {error}"));
+        }
+    }
+    anyhow::ensure!(failures.is_empty(), "{}", failures.join("; "));
+    Ok(())
+}
+
+pub(super) async fn authorize_remote(
+    client_id: Option<&str>,
+) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, ApiError> {
+    match client_id {
+        Some(id) => revocation::client(id)
+            .authorize()
+            .await
+            .map(Some)
+            .ok_or_else(|| err(StatusCode::FORBIDDEN, "remote client is revoked")),
+        None => Ok(None),
+    }
+}
+
+pub(super) async fn wait_for_revocation(receiver: &mut Option<watch::Receiver<bool>>) {
+    let Some(receiver) = receiver else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    loop {
+        if *receiver.borrow_and_update() {
+            return;
+        }
+        if receiver.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn reset_holder_input(id: &str, epoch: wire::InputEpoch, held: bool) -> anyhow::Result<()> {
+    let socket = socket_for(id);
+    let control = wire::input_control_socket(&socket);
+    if !held && !socket.exists() && !control.exists() {
+        return Ok(());
+    }
+    let reset = async {
+        let mut stream = UnixStream::connect(&control).await?;
+        wire::write_frame(&mut stream, wire::RESET_INPUT, &epoch.encode()).await?;
+        let reply = wire::read_frame(&mut stream)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("holder closed before acknowledging input reset"))?;
+        anyhow::ensure!(
+            reply.kind == wire::INPUT_RESET
+                && wire::InputEpoch::decode(&reply.payload) == Some(epoch),
+            "holder did not acknowledge input reset"
+        );
+        Ok::<_, anyhow::Error>(())
+    };
+    match tokio::time::timeout(HOLDER_START_TIMEOUT, reset).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) if !held && !socket.exists() && !control.exists() => Ok(()),
+        Ok(Err(error)) => Err(error),
+        Err(error) => Err(error.into()),
+    }
+}
+
+async fn begin_attachment(session: &Session) -> anyhow::Result<u64> {
+    let owner = session
+        .remote
+        .as_ref()
+        .map(|scope| scope.client_id.as_str());
+    let _authorization = authorize_remote(owner)
+        .await
+        .map_err(|_| anyhow::anyhow!("remote client is revoked"))?;
+    let _reset = session.input_reset.lock().await;
+    let epoch = session.attach_seq.fetch_add(1, Ordering::AcqRel) + 1;
+    session.attach_epoch.send_replace(epoch);
+    if session.input_epoch_supported && session.exited().is_none() {
+        reset_holder_input(
+            &session.id,
+            wire::InputEpoch {
+                connection: session.holder_generation,
+                browser: epoch,
+            },
+            true,
+        )
+        .await?;
+    } else {
+        anyhow::ensure!(
+            session.remote.is_none() || session.input_epoch_supported,
+            "holder cannot fence remote input"
+        );
+    }
+    Ok(epoch)
+}
+
+async fn queue_input(session: &Session, epoch: u64, bytes: Vec<u8>) -> bool {
+    let mut current = session.attach_epoch.subscribe();
+    let mut revoked = session
+        .remote_authority
+        .as_ref()
+        .map(|client| client.subscribe());
+    if *current.borrow_and_update() != epoch || revoked.as_ref().is_some_and(|rx| *rx.borrow()) {
+        return false;
+    }
+    let (kind, payload) = if session.input_epoch_supported {
+        let mut tagged = epoch.to_be_bytes().to_vec();
+        tagged.extend(bytes);
+        (wire::INPUT_EPOCH, tagged)
+    } else {
+        (wire::INPUT, bytes)
+    };
+    tokio::select! {
+        biased;
+        _ = current.changed() => false,
+        _ = wait_for_revocation(&mut revoked) => false,
+        result = session.to_holder.send((kind, payload)) => result.is_ok(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Scrollback
 // ---------------------------------------------------------------------------
@@ -673,6 +917,11 @@ struct Session {
     /// Which worktree this belongs to. Checked on reattach so a session cannot
     /// be adopted from another worktree's pane.
     worktree_id: i64,
+    remote: Option<RemoteTerminal>,
+    remote_authority: Option<Arc<revocation::Client>>,
+    input_epoch_supported: bool,
+    holder_generation: u64,
+    input_reset: tokio::sync::Mutex<()>,
     label: String,
     /// Frames towards the holder: keystrokes and resizes.
     to_holder: mpsc::Sender<(u8, Vec<u8>)>,
@@ -1013,12 +1262,16 @@ async fn session_busy(session: Arc<Session>) -> Option<bool> {
 /// the composition — and the composition has one behaviour of its own, the clock
 /// restart below, which `the_reaper_keeps_a_session_a_client_has_a_pane_for`
 /// pins end to end.
+// Remote disconnect and revoke remove viewers, not jobs. Ownership restored by
+// adoption excludes remote sessions from both passes; explicit close/trash still
+// calls `end_session`. The holder alone applies the persisted outage deadline.
 async fn reap_detached(grace: Duration) {
     let now = Instant::now();
     let candidates: Vec<String> = {
         let sessions = SESSIONS.lock().await;
         sessions
             .values()
+            .filter(|s| s.remote.is_none())
             .filter(|s| {
                 let detached = *s.detached_since.lock().expect("detach clock poisoned");
                 is_reapable(detached, now, grace)
@@ -1106,7 +1359,7 @@ async fn reap_detached(grace: Duration) {
             .filter(|id| {
                 sessions.get(*id).is_some_and(|s| {
                     let detached = *s.detached_since.lock().expect("detach clock poisoned");
-                    is_reapable(detached, later, grace)
+                    s.remote.is_none() && is_reapable(detached, later, grace)
                 })
             })
             .cloned()
@@ -1487,6 +1740,7 @@ async fn pump_to_holder(
     mut rx: mpsc::Receiver<(u8, Vec<u8>)>,
     mut closing: watch::Receiver<bool>,
     mut exit: watch::Receiver<Option<u32>>,
+    epoch: watch::Receiver<u64>,
 ) {
     // Seeded from the current values, not defaults: `subscribe()` marks what is
     // already there as seen, so a `DELETE` that lands between registration and
@@ -1521,6 +1775,10 @@ async fn pump_to_holder(
 
             frame = rx.recv() => match frame {
                 Some((kind, payload)) => {
+                    if kind == wire::INPUT_EPOCH {
+                        let queued = payload.get(..8).map(|bytes| u64::from_be_bytes(bytes.try_into().expect("epoch prefix")));
+                        if queued != Some(*epoch.borrow()) { continue; }
+                    }
                     if wire::write_frame(&mut writer, kind, &payload).await.is_err() {
                         return;
                     }
@@ -1537,6 +1795,9 @@ async fn pump_to_holder(
 
 /// A redeemable right to attach one socket to one session.
 struct Ticket {
+    remote: Option<RemoteTerminal>,
+    /// True only for the ticket that inserted a remote creation receipt.
+    allow_spawn: bool,
     /// Client-chosen session name: an existing session to take over, or the
     /// name a new one will be registered under.
     session_id: String,
@@ -2331,6 +2592,9 @@ async fn mint_ticket(
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
 
+    let client_id = remote_client(&headers)?;
+    let _authorization = authorize_remote(client_id.as_deref()).await?;
+
     if !valid_session_id(&body.session_id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
@@ -2351,6 +2615,33 @@ async fn mint_ticket(
     })
     .await?;
     let wt = wt.ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    let lookup_db = db.clone();
+    let lookup_id = body.session_id.clone();
+    let lookup_client = client_id.clone();
+    let (remote, owner_matches) = crate::offload::blocking(move || {
+        Ok::<_, veld_core::db::DbError>((
+            lookup_db.remote_terminal(&lookup_id)?,
+            lookup_db.terminal_owner_matches(&lookup_id, lookup_client.as_deref())?,
+        ))
+    })
+    .await
+    .map_err(remote_db_error)?;
+    if owner_matches == Some(false) {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "terminal belongs to another client",
+        ));
+    }
+    if let Some(scope) = &remote
+        && (Some(scope.client_id.as_str()) != client_id.as_deref()
+            || scope.worktree_id != body.worktree_id)
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "terminal belongs to another client",
+        ));
+    }
+
     // A live session is claimed by the worktree it was started in. Without
     // this check a pane could name another worktree's session and adopt a
     // shell running somewhere the user isn't looking.
@@ -2383,6 +2674,53 @@ async fn mint_ticket(
             Some(_) => true,
             None => false,
         };
+
+    // Never let the first remote claim capture a local shell or its transcript.
+    if client_id.is_some()
+        && remote.is_none()
+        && (resumed
+            || socket_for(&body.session_id).exists()
+            || db
+                .pane_session(&body.session_id)
+                .map_err(remote_db_error)?
+                .is_some())
+    {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "terminal belongs to another client",
+        ));
+    }
+    // Bind ownership before resolving commands or staging the first prompt.
+    // A concurrent mint from another scope must not replace those staged files.
+    let owner_db = db.clone();
+    let owner_id = body.session_id.clone();
+    let owner_client = client_id.clone();
+    let owned = crate::offload::blocking(move || {
+        owner_db.reserve_terminal_owner(&owner_id, owner_client.as_deref())
+    })
+    .await
+    .map_err(remote_db_error)?;
+    if !owned {
+        return Err(err(
+            StatusCode::FORBIDDEN,
+            "terminal belongs to another client",
+        ));
+    }
+    let attach_only = remote.is_some();
+    if attach_only
+        && !resumed
+        && !socket_for(&body.session_id).exists()
+        && !STARTING
+            .lock()
+            .expect("starting set poisoned")
+            .contains(&body.session_id)
+    {
+        return Err(err(
+            StatusCode::GONE,
+            "terminal is gone; create a new terminal id",
+        ));
+    }
+    let resumed = resumed || attach_only;
 
     // No NEW shells in a checkout that is in the trash. It is still a real directory
     // for the whole retention period, so nothing stops a URL or a direct API call
@@ -2505,7 +2843,32 @@ async fn mint_ticket(
         ));
     }
 
-    let mut pane = match (&body.pane, registered) {
+    let approved_agent = db.agent_launch(&body.session_id).map_err(remote_db_error)?;
+    if approved_agent.is_some() {
+        let owner = client_id
+            .as_deref()
+            .ok_or_else(|| err(StatusCode::FORBIDDEN, "paired agent client required"))?;
+        crate::agent_runtime::session_selection(body.worktree_id, &body.session_id, owner)
+            .await
+            .map_err(|cause| {
+                warn!(error = %cause, "remote agent selection could not be verified");
+                err(
+                    StatusCode::CONFLICT,
+                    "remote agent selection could not be verified",
+                )
+            })?;
+        if body.pane.is_some()
+            || body.mode.is_some()
+            || body.session_token.is_some()
+            || body.prompt.is_some()
+        {
+            return Err(err(
+                StatusCode::BAD_REQUEST,
+                "an approved remote agent cannot change its launch command",
+            ));
+        }
+    }
+    let mut pane = match (&body.pane, registered || attach_only) {
         (Some(spec_id), false) => Some(
             resolve_pane(
                 &db,
@@ -2523,6 +2886,31 @@ async fn mint_ticket(
         ),
         _ => None,
     };
+    if approved_agent.is_some() && !registered && !attach_only {
+        let binary = std::env::current_exe().map_err(|_| {
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "runner binary unavailable",
+            )
+        })?;
+        let database = veld_core::db::Db::default_path().map_err(remote_db_error)?;
+        let argv = vec![
+            "env".to_owned(),
+            format!("VELD_DB_PATH={}", database.display()),
+            binary.to_string_lossy().into_owned(),
+            "--remote-agent".to_owned(),
+            body.session_id.clone(),
+        ];
+        pane = Some(PaneLaunch {
+            spec_id: "remote-agent".to_owned(),
+            label: "Remote agent".to_owned(),
+            argv: login_shell_command(&shell, &shell_flags, &argv),
+            direct_argv: None,
+            env: Vec::new(),
+            token: body.session_id.clone(),
+            record_token: false,
+        });
+    }
     let prompt_at_launch = match (body.prompt.as_deref(), pane.as_mut()) {
         (Some(prompt), Some(launch)) => {
             let tool = launch
@@ -2570,6 +2958,31 @@ async fn mint_ticket(
         .lock()
         .expect("upload reservations poisoned")
         .remove(&body.session_id);
+    let (remote, allow_spawn) = if let Some(client_id) = client_id {
+        let requested = RemoteTerminal {
+            client_id,
+            worktree_id: body.worktree_id,
+            retention_secs: REMOTE_ORPHAN_GRACE.as_secs(),
+        };
+        let reserve_db = db.clone();
+        let reserve_id = body.session_id.clone();
+        let requested_scope = requested.clone();
+        let (stored, created) = crate::offload::blocking(move || {
+            reserve_db.reserve_remote_terminal(&reserve_id, &requested_scope)
+        })
+        .await
+        .map_err(remote_db_error)?
+        .ok_or_else(|| err(StatusCode::FORBIDDEN, "terminal belongs to another client"))?;
+        if stored.client_id != requested.client_id || stored.worktree_id != requested.worktree_id {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "terminal belongs to another client",
+            ));
+        }
+        (Some(stored), created)
+    } else {
+        (None, true)
+    };
     let ticket = uuid::Uuid::new_v4().simple().to_string();
     let now = Instant::now();
     {
@@ -2581,6 +2994,8 @@ async fn mint_ticket(
         store.insert(
             ticket.clone(),
             Ticket {
+                remote,
+                allow_spawn,
                 session_id: body.session_id,
                 worktree_id: body.worktree_id,
                 cwd,
@@ -2831,6 +3246,7 @@ async fn take_launch_prompt(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     window_origin(&headers, "launch prompt claim")?;
     let Some(path) = LAUNCH_PROMPTS
         .lock()
@@ -2930,6 +3346,37 @@ async fn reserve_uploads(
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
     window_origin(&headers, "upload reservation")?;
+    if let Some(client_id) = remote_client(&headers)? {
+        let local = SESSIONS
+            .lock()
+            .await
+            .get(&id)
+            .is_some_and(|s| s.remote.is_none());
+        if local || released_worktree(&id).is_some() {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "terminal belongs to another client",
+            ));
+        }
+        let lookup_id = id.clone();
+        let has_holder = socket_for(&id).exists();
+        let claimed = crate::offload::blocking(move || {
+            let db = veld_core::db::Db::open()?;
+            if has_holder && db.terminal_owner_matches(&lookup_id, Some(&client_id))? != Some(true)
+            {
+                return Ok(false);
+            }
+            db.reserve_terminal_owner(&lookup_id, Some(&client_id))
+        })
+        .await
+        .map_err(remote_db_error)?;
+        if !claimed {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "terminal belongs to another client",
+            ));
+        }
+    }
     let now = Instant::now();
     let mut held = UPLOAD_RESERVATIONS
         .lock()
@@ -2947,8 +3394,17 @@ async fn reserve_uploads(
 
 /// Consume a ticket. Returns `None` if it is unknown, already used, or
 /// expired — all indistinguishable to the caller on purpose.
-fn redeem(ticket: &str) -> Option<Ticket> {
+fn redeem(ticket: &str, client_id: Option<&str>) -> Option<Ticket> {
     let mut store = TICKETS.lock().expect("ticket store poisoned");
+    if store
+        .get(ticket)?
+        .remote
+        .as_ref()
+        .map(|scope| scope.client_id.as_str())
+        != client_id
+    {
+        return None;
+    }
     let t = store.remove(ticket)?;
     if t.expires_at <= Instant::now() {
         return None;
@@ -2971,10 +3427,14 @@ fn redeem(ticket: &str) -> Option<Ticket> {
 /// speak the query) reports `false`, never an error: the caller is deciding
 /// whether to *ask* before closing, and an unknown answer must not block a
 /// close.
-async fn session_busy_status(Path(id): Path<String>) -> Result<Json<serde_json::Value>, ApiError> {
+async fn session_busy_status(
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     let session = SESSIONS.lock().await.get(&id).cloned();
     let Some(session) = session else {
         return Ok(Json(serde_json::json!({ "busy": false })));
@@ -2995,6 +3455,7 @@ async fn close_session(headers: HeaderMap, Path(id): Path<String>) -> Result<Sta
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     // 204 either way: closing an already-gone session is the client and daemon
     // agreeing, not an error, and the UI has nothing useful to do with a 404.
     end_session(&id, "closed by the client").await;
@@ -3066,6 +3527,7 @@ async fn open_url(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     if body.url.len() > MAX_URL_LEN {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "url is too long"));
     }
@@ -3212,6 +3674,7 @@ async fn open_file(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     if body.path.len() > MAX_PATH_LEN {
         return Err(err(StatusCode::PAYLOAD_TOO_LARGE, "path is too long"));
     }
@@ -3546,6 +4009,7 @@ async fn agent_state(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     let Some(tool) = veld_core::agent::AgentTool::parse(&body.tool) else {
         return Err(err(StatusCode::BAD_REQUEST, "unknown agent tool"));
     };
@@ -3616,6 +4080,7 @@ async fn naming(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     Ok(Json(
         serde_json::json!({ "naming": naming_verdict(&id, turn) }),
     ))
@@ -3672,6 +4137,7 @@ async fn restart_agent(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     // The caller's text, if any, always after the one line that stops a loop: a
     // resumed agent told only "continue the migration" has no idea it just restarted.
     // A fresh restart has no conversation to pick up, so it is told only why.
@@ -3774,6 +4240,7 @@ async fn take_context(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     Ok(Json(
         serde_json::json!({ "context": super::outfit::take_note(&id) }),
     ))
@@ -4203,6 +4670,7 @@ async fn paste_file(
     if !valid_session_id(&id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
+    check_remote_session(&headers, &id).await?;
     if body.is_empty() {
         return Err(err(StatusCode::BAD_REQUEST, "empty file"));
     }
@@ -4583,7 +5051,15 @@ async fn attach(
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
 
-    let Some(ticket) = redeem(&q.ticket) else {
+    let client_id = match remote_client(&headers) {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let _authorization = match authorize_remote(client_id.as_deref()).await {
+        Ok(permit) => permit,
+        Err(error) => return error.into_response(),
+    };
+    let Some(ticket) = redeem(&q.ticket, client_id.as_deref()) else {
         return (StatusCode::FORBIDDEN, "invalid or expired ticket").into_response();
     };
 
@@ -4605,6 +5081,16 @@ async fn attach(
     // is the record. Non-browser clients and the tests below do see the status.
     let (session, resumed) = match obtain_session(&ticket, size).await {
         Ok(s) => s,
+        Err(SessionError::Gone) => {
+            return (
+                StatusCode::GONE,
+                "terminal is gone; create a new terminal id",
+            )
+                .into_response();
+        }
+        Err(SessionError::WrongOwner) => {
+            return (StatusCode::FORBIDDEN, "terminal belongs to another client").into_response();
+        }
         Err(SessionError::AtCapacity) => {
             let cap = session_cap();
             warn!("refusing terminal: {cap} sessions already live");
@@ -4655,6 +5141,14 @@ async fn attach(
                 .into_response();
         }
     };
+
+    if ticket.remote.is_some() && !session.input_epoch_supported {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "this holder cannot fence remote input",
+        )
+            .into_response();
+    }
 
     if ticket.agent_handoff && !resumed {
         finish_agent_handoff(ticket.worktree_id, ticket.session_id.clone());
@@ -4726,6 +5220,8 @@ fn finish_agent_handoff(worktree_id: i64, session_id: String) {
 }
 
 enum SessionError {
+    Gone,
+    WrongOwner,
     AtCapacity,
     Spawn(anyhow::Error),
     /// The holder at this session's socket could not be reached, or is not this
@@ -4781,8 +5277,8 @@ impl Drop for StartGuard {
     }
 }
 
-/// The live session for a ticket, starting a holder if the named session is
-/// gone.
+/// The live session for a ticket. A missing holder starts only when the ticket
+/// grants creation; remote reconnect tickets never grant creation.
 ///
 /// The registry lock is released across the holder start — holding it across a
 /// `fork`/`exec` and a poll-connect would serialise every other pane's attach
@@ -4793,6 +5289,9 @@ async fn obtain_session(
     size: PtySize,
 ) -> Result<(Arc<Session>, bool), SessionError> {
     if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
+        if existing.worktree_id != ticket.worktree_id || existing.remote != ticket.remote {
+            return Err(SessionError::WrongOwner);
+        }
         return Ok((existing.clone(), true));
     }
 
@@ -4810,6 +5309,11 @@ async fn obtain_session(
             loop {
                 tokio::time::sleep(HOLDER_CONNECT_INTERVAL).await;
                 if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
+                    if existing.worktree_id != ticket.worktree_id
+                        || existing.remote != ticket.remote
+                    {
+                        return Err(SessionError::WrongOwner);
+                    }
                     return Ok((existing.clone(), true));
                 }
                 if Instant::now() >= deadline {
@@ -4821,9 +5325,15 @@ async fn obtain_session(
     // Re-check: the spawn we were waiting behind may have finished between the
     // read above and this claim.
     if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
+        if existing.worktree_id != ticket.worktree_id || existing.remote != ticket.remote {
+            return Err(SessionError::WrongOwner);
+        }
         return Ok((existing.clone(), true));
     }
 
+    if !ticket.allow_spawn && !socket_for(&ticket.session_id).exists() {
+        return Err(SessionError::Gone);
+    }
     let slot = SessionSlot::claim().ok_or(SessionError::AtCapacity)?;
     let cfg = HolderConfig {
         session_id: ticket.session_id.clone(),
@@ -4856,10 +5366,14 @@ async fn obtain_session(
         // The holder's own self-destruct grace, used when the *daemon* is gone and
         // nothing is left to reap it. Read at spawn, so a holder keeps the value
         // that was configured when its shell started: changing the setting affects
-        // the daemon-side reaper immediately but cannot reach into holders already
-        // running, and reaching into them would mean a protocol message whose only
+        // the local daemon-side reaper immediately. Remote sessions never expire
+        // while the daemon holds them: their persisted deadline applies only to a
+        // holder orphaned by a daemon outage. It cannot reach holders already running, and reaching into them would mean a protocol message whose only
         // job is to move a timer nobody is waiting on.
-        orphan_grace_secs: detach_grace_hint().as_secs(),
+        orphan_grace_secs: ticket.remote.as_ref().map_or_else(
+            || detach_grace_hint().as_secs(),
+            |scope| scope.retention_secs,
+        ),
         // The shell this session was minted against, with its flags. Read at spawn,
         // like every other value here: changing `terminal.shell` applies to
         // terminals opened afterwards, and cannot reach into a shell that is
@@ -4886,6 +5400,7 @@ async fn obtain_session(
         // The retry below deliberately does not cover this case — a fresh session
         // is the common one, and it would spend `HOLDER_START_TIMEOUT` doing
         // nothing before every single spawn.
+        Err(e) if is_unanswered(&e) && !ticket.allow_spawn => return Err(SessionError::Gone),
         Err(e) if is_unanswered(&e) => (
             start_holder(&cfg).await.map_err(SessionError::Spawn)?,
             false,
@@ -4914,6 +5429,9 @@ async fn obtain_session(
 
     let mut sessions = SESSIONS.lock().await;
     if let Some(existing) = sessions.get(&ticket.session_id) {
+        if existing.worktree_id != ticket.worktree_id || existing.remote != ticket.remote {
+            return Err(SessionError::WrongOwner);
+        }
         let existing = existing.clone();
         if adopted {
             // Never `discard_holder` an adopted one. That writes `HANGUP`, which a
@@ -4932,7 +5450,7 @@ async fn obtain_session(
         discard_holder(attached, "another attach won the race").await;
         return Ok((existing, true));
     }
-    let session = register(&mut sessions, attached, slot);
+    let session = register(&mut sessions, attached, slot, ticket.remote.clone());
     // **Released before the database write below.** `record_pane_launch` opens
     // SQLite synchronously, and `Db::open` sets a 10s busy timeout — so one
     // contended writer (the stats sampler, a concurrent `veld` CLI) would hold
@@ -5006,6 +5524,7 @@ fn register(
     sessions: &mut HashMap<String, Arc<Session>>,
     attached: Attached,
     slot: SessionSlot,
+    remote: Option<RemoteTerminal>,
 ) -> Arc<Session> {
     let Attached {
         hello,
@@ -5031,9 +5550,17 @@ fn register(
     let mut mirror = Scrollback::new();
     mirror.push(&scrollback);
 
+    let remote_authority = remote
+        .as_ref()
+        .map(|scope| revocation::client(&scope.client_id));
     let session = Arc::new(Session {
         id: hello.session_id.clone(),
         worktree_id: hello.worktree_id,
+        remote,
+        remote_authority,
+        input_epoch_supported: hello.supports_input_epoch,
+        holder_generation: hello.connection_generation,
+        input_reset: tokio::sync::Mutex::new(()),
         label: hello.label.clone(),
         to_holder,
         output,
@@ -5082,6 +5609,7 @@ fn register(
         holder_rx,
         session.closing.subscribe(),
         session.exit.subscribe(),
+        session.attach_epoch.subscribe(),
     ));
     // Draining the holder is the session's job, not the socket's: output
     // produced while nothing is attached still has to land in the mirror, or a
@@ -5113,11 +5641,17 @@ pub async fn adopt_existing_sessions() {
         return;
     }
 
-    let adopted = futures_util::future::join_all(
-        candidates
-            .into_iter()
-            .map(|path| async move { adopt_one(&path).await }),
-    )
+    let db = match crate::offload::blocking(veld_core::db::Db::open).await {
+        Ok(db) => db,
+        Err(error) => {
+            warn!("not adopting terminals without their retention policies: {error}");
+            return;
+        }
+    };
+    let adopted = futures_util::future::join_all(candidates.into_iter().map(|path| {
+        let db = db.clone();
+        async move { adopt_one(&path, &db).await }
+    }))
     .await
     .into_iter()
     .filter(|ok| *ok)
@@ -5128,7 +5662,7 @@ pub async fn adopt_existing_sessions() {
 }
 
 /// Adopt one holder, or clean up after it. `true` if it became a session.
-async fn adopt_one(path: &FsPath) -> bool {
+async fn adopt_one(path: &FsPath, db: &veld_core::db::Db) -> bool {
     // The slot is claimed *before* connecting, not after. Connecting first meant
     // an over-cap holder got a connection that was immediately dropped, and a
     // dropped connection restarts its orphan clock — so a daemon restarting more
@@ -5180,6 +5714,34 @@ async fn adopt_one(path: &FsPath) -> bool {
         return false;
     }
 
+    let lookup_id = id.clone();
+    let lookup_db = db.clone();
+    let remote = match crate::offload::blocking(move || {
+        let remote = lookup_db.remote_terminal(&lookup_id)?;
+        let client_id = remote.as_ref().map(|scope| scope.client_id.as_str());
+        let matched = lookup_db.reserve_terminal_owner(&lookup_id, client_id)?;
+        Ok::<_, veld_core::db::DbError>((remote, matched))
+    })
+    .await
+    {
+        Ok((remote, true)) => remote,
+        Ok((_, false)) => {
+            warn!(session = %id, "not adopting terminal with conflicting ownership");
+            return false;
+        }
+        Err(error) => {
+            warn!(session = %id, "not adopting terminal without its retention policy: {error}");
+            return false;
+        }
+    };
+    if remote
+        .as_ref()
+        .is_some_and(|scope| scope.worktree_id != attached.hello.worktree_id)
+    {
+        warn!(session = %id, "not adopting terminal with mismatched remote worktree");
+        return false;
+    }
+
     let mut sessions = SESSIONS.lock().await;
     if sessions.contains_key(&id) {
         // Adoption runs before the router serves traffic, so this is a
@@ -5195,7 +5757,7 @@ async fn adopt_one(path: &FsPath) -> bool {
         discard_holder(attached, "session id is already registered").await;
         return false;
     }
-    let session = register(&mut sessions, attached, slot);
+    let session = register(&mut sessions, attached, slot, remote);
     info!(
         session = %session.id,
         worktree = %session.label,
@@ -5660,8 +6222,14 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
     // Subscribe first, so a takeover that lands between the claim and the
     // subscription is still observed.
     let mut epoch_rx = session.attach_epoch.subscribe();
-    let epoch = session.attach_seq.fetch_add(1, Ordering::AcqRel) + 1;
-    session.attach_epoch.send_replace(epoch);
+    let epoch = match begin_attachment(&session).await {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            warn!(session = %session.id, "terminal input attach refused: {error}");
+            let _ = ws_tx.close().await;
+            return;
+        }
+    };
     *session
         .detached_since
         .lock()
@@ -5769,6 +6337,10 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         return;
     }
 
+    let mut revoked = session
+        .remote_authority
+        .as_ref()
+        .map(|client| client.subscribe());
     loop {
         // Deliberately NOT `biased`: with output first in a biased select, a
         // shell producing continuously (a build, a `yes`) keeps that branch
@@ -5776,6 +6348,7 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
         // never polled. Random polling costs at most a reordered final chunk —
         // the exit branch drains what is pending before reporting.
         tokio::select! {
+            _ = wait_for_revocation(&mut revoked) => break,
             chunk = output.recv() => match chunk {
                 Ok(bytes) => {
                     // One WebSocket message for however much is already queued,
@@ -6005,7 +6578,12 @@ async fn pump_input(
     epoch: u64,
 ) {
     while let Some(Ok(msg)) = ws_rx.next().await {
-        if *session.attach_epoch.borrow() != epoch {
+        if *session.attach_epoch.borrow() != epoch
+            || session
+                .remote_authority
+                .as_ref()
+                .is_some_and(|client| client.is_revoked())
+        {
             return;
         }
         match msg {
@@ -6013,12 +6591,7 @@ async fn pump_input(
                 // Awaiting the queue is the backpressure that used to come from
                 // waiting on the PTY's writability: a shell that stops reading
                 // must slow this socket down, not buffer without bound.
-                if session
-                    .to_holder
-                    .send((wire::INPUT, data.to_vec()))
-                    .await
-                    .is_err()
-                {
+                if !queue_input(&session, epoch, data.to_vec()).await {
                     return;
                 }
             }
@@ -7225,6 +7798,8 @@ mod tests {
         TICKETS.lock().unwrap().insert(
             key.clone(),
             Ticket {
+                remote: None,
+                allow_spawn: true,
                 session_id: id.to_owned(),
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
@@ -7248,17 +7823,77 @@ mod tests {
     }
 
     #[test]
+    fn remote_header_is_a_single_uuid() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(remote_client(&headers).unwrap(), None);
+        headers.insert("x-veld-remote-client", "invalid".parse().unwrap());
+        assert!(remote_client(&headers).is_err());
+        let id = uuid::Uuid::new_v4();
+        headers.insert(
+            "x-veld-remote-client",
+            id.simple().to_string().parse().unwrap(),
+        );
+        assert_eq!(remote_client(&headers).unwrap(), Some(id.to_string()));
+        headers.append("x-veld-remote-client", id.to_string().parse().unwrap());
+        assert!(remote_client(&headers).is_err());
+    }
+
+    #[test]
+    fn remote_ticket_requires_the_same_authenticated_client() {
+        let key = planted("remote-ticket", TICKET_TTL);
+        TICKETS.lock().unwrap().get_mut(&key).unwrap().remote = Some(RemoteTerminal {
+            client_id: "client-a".into(),
+            worktree_id: 1,
+            retention_secs: 1800,
+        });
+        assert!(redeem(&key, None).is_none());
+        assert!(redeem(&key, Some("client-b")).is_none());
+        assert!(redeem(&key, Some("client-a")).is_some());
+        assert!(redeem(&key, Some("client-a")).is_none());
+        let local = planted("local-ticket", TICKET_TTL);
+        assert!(redeem(&local, Some("client-a")).is_none());
+        assert!(redeem(&local, None).is_some());
+    }
+
+    #[tokio::test]
+    async fn remote_attach_without_a_holder_never_starts_a_replacement() {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let key = planted(&id, TICKET_TTL);
+        let mut ticket = redeem(&key, None).unwrap();
+        ticket.remote = Some(RemoteTerminal {
+            client_id: "client-a".into(),
+            worktree_id: 1,
+            retention_secs: 1800,
+        });
+        ticket.allow_spawn = false;
+        let size = PtySize {
+            cols: 80,
+            rows: 24,
+            pixel_width: 0,
+            pixel_height: 0,
+        };
+        assert!(matches!(
+            obtain_session(&ticket, size).await,
+            Err(SessionError::Gone)
+        ));
+        assert!(!socket_for(&id).exists());
+        assert!(!SESSIONS.lock().await.contains_key(&id));
+    }
+
+    #[test]
     fn tickets_are_single_use_and_expiring() {
         let good = planted("s1", TICKET_TTL);
-        assert!(redeem(&good).is_some());
+        assert!(redeem(&good, None).is_some());
         // Replaying the same ticket must not open a second shell.
-        assert!(redeem(&good).is_none());
+        assert!(redeem(&good, None).is_none());
 
         // `planted` with a negative TTL isn't expressible, so plant directly.
         let stale = uuid::Uuid::new_v4().simple().to_string();
         TICKETS.lock().unwrap().insert(
             stale.clone(),
             Ticket {
+                remote: None,
+                allow_spawn: true,
                 session_id: "s2".to_owned(),
                 worktree_id: 1,
                 cwd: std::env::temp_dir(),
@@ -7278,7 +7913,7 @@ mod tests {
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
-        assert!(redeem(&stale).is_none());
+        assert!(redeem(&stale, None).is_none());
     }
 
     #[test]
@@ -7655,6 +8290,8 @@ mod tests {
             TICKETS.lock().unwrap().insert(
                 key.clone(),
                 Ticket {
+                    remote: None,
+                    allow_spawn: true,
                     session_id: session.to_owned(),
                     worktree_id,
                     cwd: cwd.to_path_buf(),
@@ -7688,6 +8325,8 @@ mod tests {
             TICKETS.lock().unwrap().insert(
                 key.clone(),
                 Ticket {
+                    remote: None,
+                    allow_spawn: true,
                     session_id: session.to_owned(),
                     worktree_id: 1,
                     cwd: cwd.to_path_buf(),
@@ -8272,6 +8911,8 @@ mod tests {
             TICKETS.lock().unwrap().insert(
                 stale.clone(),
                 Ticket {
+                    remote: None,
+                    allow_spawn: true,
                     session_id: stale_session.clone(),
                     worktree_id: 1,
                     cwd: std::env::temp_dir(),
@@ -8465,6 +9106,184 @@ mod tests {
             .await
             .expect("handshake");
             ws
+        }
+
+        #[tokio::test]
+        async fn revoke_cancels_blocked_input_before_the_retained_job_resumes() {
+            const CHUNK_BYTES: usize = 256 * 1024;
+            const FLOOD_FRAMES: usize = HOLDER_INPUT_CHANNEL * 4;
+            const STALE: &[u8] = b"REVOKED-COMMAND-MUST-NOT-ARRIVE";
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let owner = uuid::Uuid::new_v4().to_string();
+            let ticket = plant_pane_ticket(&sid, dir.path(), vec![
+                "/bin/sh".into(), "-c".into(),
+                "stty raw -echo; : > input-blocked; while [ ! -e release ]; do sleep 0.01; done; : > resumed; cat > received".into(),
+            ]);
+            let scope = RemoteTerminal {
+                client_id: owner.clone(),
+                worktree_id: 1,
+                retention_secs: REMOTE_ORPHAN_GRACE.as_secs(),
+            };
+            TICKETS.lock().unwrap().get_mut(&ticket).unwrap().remote = Some(scope.clone());
+            let addr = serve().await;
+            let mut request =
+                attach_request(addr, &format!("ticket={ticket}"), Some(&good_origin()));
+            request
+                .headers_mut()
+                .insert("x-veld-remote-client", owner.parse().unwrap());
+            let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            read_control(&mut ws, "ready").await;
+            let session = SESSIONS.lock().await[&sid].clone();
+            // A failed assertion must still let the child drain input, so the
+            // holder's blocking child waiter cannot hang the test runtime.
+            struct ReleaseOnDrop(PathBuf, watch::Sender<bool>);
+            impl Drop for ReleaseOnDrop {
+                fn drop(&mut self) {
+                    if let Err(error) = std::fs::write(&self.0, b"release") {
+                        eprintln!("test host release failed: {error}");
+                    }
+                    self.1.send_replace(true);
+                }
+            }
+            let _cleanup = ReleaseOnDrop(dir.path().join("release"), session.closing.clone());
+            // Startup output may already be replayed before Ready. A file barrier
+            // confirms raw mode without relying on a frame read_control discards.
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while !dir.path().join("input-blocked").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "host did not enter raw input mode"
+                );
+                tokio::task::yield_now().await;
+            }
+            let epoch = *session.attach_epoch.borrow();
+            let flooded = session.clone();
+            let flood = tokio::spawn(async move {
+                let mut bytes = vec![b'x'; CHUNK_BYTES];
+                bytes.extend_from_slice(STALE);
+                for _ in 0..FLOOD_FRAMES {
+                    if !queue_input(&flooded, epoch, bytes.clone()).await {
+                        return false;
+                    }
+                }
+                true
+            });
+            // Observe actual backpressure rather than assuming a sleep filled
+            // the transport. The stopped reader cannot consume even the first
+            // large frame's marker, which is beyond the kernel input buffer.
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while session.to_holder.capacity() != 0 {
+                assert!(!flood.is_finished(), "input did not reach backpressure");
+                assert!(Instant::now() < deadline, "input queue never filled");
+                tokio::task::yield_now().await;
+            }
+            assert!(!flood.is_finished());
+            let db = veld_core::db::Db::open_at(&dir.path().join("veld.db")).unwrap();
+            db.reserve_remote_terminal(&sid, &scope).unwrap().unwrap();
+            let lookup_owner = owner.clone();
+            tokio::time::timeout(
+                STEP_TIMEOUT,
+                revoke_remote_client_using(
+                    &owner,
+                    async move { db.remote_terminal_ids(&lookup_owner) },
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(
+                !tokio::time::timeout(STEP_TIMEOUT, flood)
+                    .await
+                    .unwrap()
+                    .unwrap(),
+                "blocked sender was not cancelled"
+            );
+            assert!(
+                SESSIONS.lock().await.contains_key(&sid),
+                "revoke killed the retained job"
+            );
+            assert!(session.exited().is_none());
+            assert!(authorize_remote(Some(&owner)).await.is_err());
+            assert!(begin_attachment(&session).await.is_err());
+            // Simulate an old transport delivering a queued frame after the
+            // acknowledgement, bypassing the daemon's earlier rejection gates.
+            let mut stale = epoch.to_be_bytes().to_vec();
+            stale.extend_from_slice(STALE);
+            session
+                .to_holder
+                .send((wire::INPUT_EPOCH, stale))
+                .await
+                .unwrap();
+            std::fs::write(dir.path().join("release"), b"release").unwrap();
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while !dir.path().join("resumed").exists() || !dir.path().join("received").exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "retained host job did not resume reading"
+                );
+                tokio::task::yield_now().await;
+            }
+            // This reply is ordered after the stale frame on the data channel.
+            assert_eq!(session_busy(session.clone()).await, Some(true));
+            end_session(&sid, "test explicit close").await;
+            await_holder_gone(&sid).await;
+            let received = std::fs::read(dir.path().join("received")).unwrap();
+            assert!(
+                !received.windows(STALE.len()).any(|window| window == STALE),
+                "revoked queued input reached the resumed host job"
+            );
+        }
+
+        #[tokio::test]
+        async fn remote_disconnect_and_adoption_never_start_detach_reaping() {
+            const LOCAL_GRACE: Duration = Duration::from_secs(7 * 24 * 3600);
+            const ELAPSED: Duration = Duration::from_secs(14 * 24 * 3600);
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+            let owner = uuid::Uuid::new_v4().to_string();
+            let ticket = plant_ticket(&sid, dir.path());
+            TICKETS.lock().unwrap().get_mut(&ticket).unwrap().remote = Some(RemoteTerminal {
+                client_id: owner.clone(),
+                worktree_id: 1,
+                retention_secs: REMOTE_ORPHAN_GRACE.as_secs(),
+            });
+            let mut request =
+                attach_request(addr, &format!("ticket={ticket}"), Some(&good_origin()));
+            request
+                .headers_mut()
+                .insert("x-veld-remote-client", owner.parse().unwrap());
+            let (mut ws, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+            read_control(&mut ws, "ready").await;
+            let session = SESSIONS.lock().await[&sid].clone();
+            drop(ws);
+            let deadline = Instant::now() + STEP_TIMEOUT;
+            while session.detached_since.lock().unwrap().is_none() {
+                assert!(Instant::now() < deadline, "socket never detached");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            *session.detached_since.lock().unwrap() = Some(Instant::now() - ELAPSED);
+            reap_detached(LOCAL_GRACE).await;
+            assert!(
+                SESSIONS.lock().await.contains_key(&sid),
+                "disconnect killed a retained job"
+            );
+            let scope = session.remote.clone().unwrap();
+            let db_path = dir.path().join("veld.db");
+            let db = veld_core::db::Db::open_at(&db_path).unwrap();
+            db.reserve_remote_terminal(&sid, &scope).unwrap().unwrap();
+            drop(db);
+            SESSIONS.lock().await.remove(&sid);
+            let db = veld_core::db::Db::open_at(&db_path).unwrap();
+            assert!(adopt_one(&socket_for(&sid), &db).await);
+            let adopted = SESSIONS.lock().await[&sid].clone();
+            assert_eq!(adopted.remote.as_ref(), Some(&scope));
+            *adopted.detached_since.lock().unwrap() = Some(Instant::now() - ELAPSED);
+            reap_detached(LOCAL_GRACE).await;
+            assert!(SESSIONS.lock().await.contains_key(&sid));
+            end_session(&sid, "explicit remote close").await;
+            assert!(!SESSIONS.lock().await.contains_key(&sid));
         }
 
         #[tokio::test]

@@ -86,6 +86,7 @@ import {
   useState,
 } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
+import { RemoteAgentCard } from "./RemoteAgent";
 import { ChangedFilesModal } from "../files/ChangedFiles";
 import { FilePane } from "../files/FilePane";
 import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
@@ -1199,6 +1200,7 @@ export function PaneArea(props: {
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
+          onAgent={(tab) => onLayout(addTab(layout, 0, tab))}
           onPane={(spec, adopt) =>
             onLayout(addTab(layout, 0, configPaneTab(spec, adopt)))
           }
@@ -2012,6 +2014,7 @@ function DockView(props: {
             onTerminal={() =>
               convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
             }
+            onAgent={(tab) => convertOrAdd(active, tab)}
             onPane={(spec, adopt) => convertOrAdd(active, configPaneTab(spec, adopt))}
             onBrowser={(tab) => convertOrAdd(active, tab)}
             onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
@@ -2140,6 +2143,7 @@ function PaneChooser(props: {
   /** `browser.searchUrl`, only to say whether a blank pane can search. */
   searchUrl: string;
   onTerminal: () => void;
+  onAgent: (tab: PaneTab) => void;
   /** `adopt` is a session the user picked out of the pane's `sessions` list. */
   onPane: (spec: PaneSpec, adopt?: string) => void;
   onBrowser: (tab: PaneTab) => void;
@@ -2218,6 +2222,8 @@ function PaneChooser(props: {
                   <IconTerminal2 size={16} /> Work in a terminal
                 </h3>
                 <div className="chooser-cards">
+                  {new URLSearchParams(window.location.search).get("remote") === "1" &&
+                    <RemoteAgentCard worktreeId={props.worktreeId} onLaunch={props.onAgent} />}
                   {/* An unavailable pane is shown disabled with the reason rather than
                       omitted — a repo that declares a Claude pane should not look like it
                       forgot to. */}

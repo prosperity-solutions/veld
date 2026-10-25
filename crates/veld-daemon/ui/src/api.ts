@@ -1,9 +1,9 @@
 // Typed client for the daemon's management + desktop APIs (same origin).
 
-// The one import this module has, and a type-only one: the settings catalog's wire
-// shape lives beside the code that renders from it, and erasing at compile time
-// means api.ts still has no runtime dependency on anything.
+import { createEngineMutationClient, type RunStartRequest } from "./engineMutation";
 import type { SettingsCatalog } from "./shared/catalog";
+
+export type { RunStartRequest } from "./engineMutation";
 
 export type RunStatus =
   | "starting"
@@ -1662,6 +1662,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+const engineMutation = createEngineMutationClient(errorMessage);
+
+// Existing UI callbacks return void; the helper validates and acknowledges receipts.
+async function runMutation(path: string, body?: string): Promise<void> {
+  await engineMutation(path, body);
+}
+
+export interface EngineOperation {
+  action_id: string;
+  status: "pending" | "running" | "succeeded" | "failed" | "cancelled" | "lost";
+  outcome: { result: string; [key: string]: unknown } | null;
+  created_at: string;
+  ended_at: string | null;
+}
+
 /**
  * A backup artifact as the daemon lists it (`veld_core::db::backup::Artifact`).
  */
@@ -2115,25 +2130,22 @@ export const api = {
    */
   startRun: (
     worktreeId: number,
-    start: { preset?: string; selections?: string[]; run_name?: string },
+    start: RunStartRequest,
   ) =>
-    request<void>(`/api/worktrees/${worktreeId}/start`, {
-      method: "POST",
-      body: JSON.stringify(start),
-    }),
+    runMutation(`/api/worktrees/${worktreeId}/start`, JSON.stringify(start)),
+  /** Recover this tuple before computing a new run name or doing preflight. */
+  pendingRunStart: (worktreeId: number) => engineMutation.pendingStart(worktreeId),
   stopRun: (run: RunRef) =>
-    request<void>(`/api/environments/${runPath(run)}/stop?${runScope(run)}`, {
-      method: "POST",
-    }),
+    runMutation(`/api/environments/${runPath(run)}/stop?${runScope(run)}`),
   restartRun: (run: RunRef) =>
-    request<void>(`/api/environments/${runPath(run)}/restart?${runScope(run)}`, {
-      method: "POST",
-    }),
+    runMutation(`/api/environments/${runPath(run)}/restart?${runScope(run)}`),
   runAction: (run: RunRef, action: string, node?: string) =>
-    request<void>(`/api/environments/${runPath(run)}/action?${runScope(run)}`, {
-      method: "POST",
-      body: JSON.stringify(node ? { action, node } : { action }),
-    }),
+    runMutation(
+      `/api/environments/${runPath(run)}/action?${runScope(run)}`,
+      JSON.stringify(node ? { action, node } : { action }),
+    ),
+  engineOperation: (id: string) =>
+    request<EngineOperation>(`/api/engine/actions/${encodeURIComponent(id)}`),
   /**
    * Evaluate a worktree's `status` extensions and return what they printed.
    *
