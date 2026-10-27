@@ -5860,18 +5860,23 @@ async fn name_caller_worktree(
 }
 
 /// Who chose the name a create stores: an agent for a hand-off, the user when
-/// they typed it, nobody when the dialog borrowed it — and no answer without one.
+/// they typed it, nobody when the dialog borrowed it or there is none — and no
+/// answer when no name is written.
 fn created_namer(
     display_name: Option<&str>,
     name_chosen: bool,
     by_agent: bool,
 ) -> Option<WorktreeNamer> {
-    display_name.filter(|n| !n.is_empty())?;
-    if by_agent {
-        Some(WorktreeNamer::Agent)
+    let name = display_name?;
+    Some(if name.is_empty() {
+        WorktreeNamer::Nobody
+    } else if by_agent {
+        WorktreeNamer::Agent
+    } else if name_chosen {
+        WorktreeNamer::User
     } else {
-        name_chosen.then_some(WorktreeNamer::User)
-    }
+        WorktreeNamer::Nobody
+    })
 }
 
 /// Who chose the name a rename in the window stores: the human, and no agent
@@ -8415,9 +8420,12 @@ mod tests {
     fn a_name_somebody_chose_is_marked_and_a_borrowed_one_is_not() {
         use veld_core::db::WorktreeNamer::{Agent, Nobody, User};
         assert_eq!(created_namer(Some("Fix login"), true, false), Some(User));
-        assert_eq!(created_namer(Some("Please fix login"), false, false), None);
+        assert_eq!(
+            created_namer(Some("Please fix login"), false, false),
+            Some(Nobody)
+        );
         assert_eq!(created_namer(Some("Fix login"), false, true), Some(Agent));
-        assert_eq!(created_namer(Some(""), true, true), None);
+        assert_eq!(created_namer(Some(""), true, true), Some(Nobody));
         assert_eq!(created_namer(None, true, false), None);
         assert_eq!(renamed_namer(Some("Mine")), Some(User));
         assert_eq!(renamed_namer(Some("")), Some(Nobody));

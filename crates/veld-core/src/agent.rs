@@ -1353,7 +1353,8 @@ pub fn agent_context(cli: &str) -> String {
          checkout, or a worktree already named by the human or another conversation), leave \
          it and go on. You may rename it once more, early on, when what you learn (what a PR, \
          issue or link is actually about) shows the first name was off. After that, never \
-         rename it, and do not rename it in a resumed conversation. To show the human a file (markdown, CSV, code) or a web page next to this \
+         rename it, and do not rename it in a resumed conversation; if the human asks you to, \
+         tell them to rename it in the Veld window instead of retrying. To show the human a file (markdown, CSV, code) or a web page next to this \
          terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
          not for every file you touch. Veld can also hand work to the human as a new \

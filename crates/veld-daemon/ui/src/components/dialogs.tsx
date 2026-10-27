@@ -1611,8 +1611,8 @@ export function NewWorktreeDialog(props: {
           autoNamed
             ? prompt.trim() === ""
               ? "Optional. Left empty, the checkout is numbered for you."
-              : "Optional. Left empty, it is taken from your prompt."
-            : undefined
+              : "Optional. Left empty, it is taken from your prompt until the agent names it."
+            : "Kept as you typed it — no agent renames it."
         }
         value={name}
         onChange={(e) => setName(e.currentTarget.value)}

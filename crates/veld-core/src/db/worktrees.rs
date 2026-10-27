@@ -142,6 +142,19 @@ pub enum WorktreeNamer {
 }
 
 impl WorktreeNamer {
+    /// Who a stored [`WorktreeRecord::named_by`] says chose the name. Anything
+    /// this version does not know reads as [`Self::User`], the strictest: no
+    /// agent replaces it.
+    #[must_use]
+    pub fn of(named_by: &str) -> Self {
+        match named_by {
+            "" => Self::Nobody,
+            "agent" => Self::Agent,
+            s if s.starts_with(AGENT_SESSION_PREFIX) => Self::Agent,
+            _ => Self::User,
+        }
+    }
+
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -248,7 +261,9 @@ pub struct WorktreePatch<'a> {
     /// A lane of this worktree's repo, or `Some("")` to ungroup. Changing it
     /// clears the manual position.
     pub lane: Option<&'a str>,
-    /// Who chose the name — set beside `display_name` by whoever knows.
+    /// Who chose the name. **Set exactly when `display_name` is** — a label
+    /// written without saying who chose it would read as borrowed, and the next
+    /// agent would replace it (`patch_worktree` asserts the pairing in debug).
     pub named_by: Option<WorktreeNamer>,
 }
 
@@ -812,6 +827,11 @@ impl Db {
             lane,
             named_by,
         } = patch;
+        debug_assert_eq!(
+            display_name.is_some(),
+            named_by.is_some(),
+            "a display_name write must say who chose it"
+        );
         // Both marker channels are validated before either is written, for the
         // same both-or-neither reason the alias is: a patch carrying a good glyph
         // and a bad colour must not half-apply.
@@ -1005,12 +1025,10 @@ impl Db {
         let correcting =
             session.is_some_and(|s| named_by.strip_prefix(AGENT_SESSION_PREFIX) == Some(s));
         if !first && !correcting {
-            let by = if named_by.starts_with(WorktreeNamer::Agent.as_str()) {
-                WorktreeNamer::Agent
-            } else {
-                WorktreeNamer::User
-            };
-            return Ok(AgentNaming::AlreadyNamed { name: previous, by });
+            return Ok(AgentNaming::AlreadyNamed {
+                name: previous,
+                by: WorktreeNamer::of(&named_by),
+            });
         }
         let named_by = match session {
             Some(s) if first => format!("{AGENT_SESSION_PREFIX}{s}"),
@@ -2689,6 +2707,7 @@ mod tests {
             id,
             WorktreePatch {
                 display_name: Some("Please fix the thing"),
+                named_by: Some(WorktreeNamer::Nobody),
                 ..Default::default()
             },
         )
@@ -2853,6 +2872,7 @@ mod tests {
                 id,
                 WorktreePatch {
                     display_name: Some("Hello test"),
+                    named_by: Some(WorktreeNamer::User),
                     ..Default::default()
                 }
             )
@@ -2871,6 +2891,7 @@ mod tests {
                 main_id,
                 WorktreePatch {
                     display_name: Some("Hello test"),
+                    named_by: Some(WorktreeNamer::User),
                     ..Default::default()
                 }
             )
@@ -2908,6 +2929,7 @@ mod tests {
                 id,
                 WorktreePatch {
                     display_name: Some(""),
+                    named_by: Some(WorktreeNamer::Nobody),
                     ..Default::default()
                 }
             )
@@ -2946,6 +2968,7 @@ mod tests {
             a.id,
             WorktreePatch {
                 display_name: Some("Omega"),
+                named_by: Some(WorktreeNamer::User),
                 ..Default::default()
             },
         )
@@ -2954,6 +2977,7 @@ mod tests {
             z.id,
             WorktreePatch {
                 display_name: Some("Alpha"),
+                named_by: Some(WorktreeNamer::User),
                 ..Default::default()
             },
         )
@@ -2974,6 +2998,7 @@ mod tests {
                 id,
                 WorktreePatch {
                     display_name: Some(""),
+                    named_by: Some(WorktreeNamer::Nobody),
                     ..Default::default()
                 },
             )
@@ -2998,6 +3023,7 @@ mod tests {
             a.id,
             WorktreePatch {
                 display_name: Some("Ärger"),
+                named_by: Some(WorktreeNamer::User),
                 ..Default::default()
             },
         )

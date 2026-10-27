@@ -2136,7 +2136,8 @@ fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
         UPDATE worktrees SET named_by = 'user'
          WHERE display_name != ''
            AND display_name != 'Workspace'
-           AND display_name NOT GLOB 'Workspace [1-9]*';
+           AND NOT (display_name GLOB 'Workspace [1-9]*'
+                    AND substr(display_name, 11) NOT GLOB '*[^0-9]*');
         "#,
     )
 }
@@ -2987,7 +2988,8 @@ mod tests {
                   VALUES ('/r', '/r/a', 'a', 'a', 0, 'x', 'Fix login'),
                          ('/r', '/r/b', 'b', 'b', 0, 'x', ''),
                          ('/r', '/r/c', 'c', 'c', 0, 'x', 'Workspace 3'),
-                         ('/r', '/r/d', 'd', 'd', 0, 'x', 'Workspace');
+                         ('/r', '/r/d', 'd', 'd', 0, 'x', 'Workspace'),
+                         ('/r', '/r/e', 'e', 'e', 0, 'x', 'Workspace 3D viewer');
                 "#,
             )
             .unwrap();
@@ -2999,6 +3001,7 @@ mod tests {
         assert_eq!(named_by("/r/b"), "");
         assert_eq!(named_by("/r/c"), "");
         assert_eq!(named_by("/r/d"), "");
+        assert_eq!(named_by("/r/e"), "user");
     }
 
     /// v14 against a real v13 database holding a node row from before per-port

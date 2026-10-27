@@ -182,8 +182,10 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
   project's main checkout and on a worktree already named — by the human (in the
   window, or typed in the create dialog), by a hand-off, or by an agent in another
   terminal. Only the conversation that named it may correct it, once — not a
-  later one in the same terminal (a new `claude` launch, or `/clear`). On exit
-  `9`, keep the name and go on with the task; the human renames in the window.
+  later one in the same terminal (a new agent launch, or in Claude a `/clear`). On exit
+  `9`, keep the name and go on with the task, and do not retry. If the human
+  asks you to rename it, tell them to do it in the Veld window (the worktree's
+  rename dialog) — the command will refuse you.
   A name the create dialog borrowed from its prompt is not a chosen one: the
   first agent replaces it.
 - **In Claude Code this is enforced once**, when *Notice when a coding agent is
