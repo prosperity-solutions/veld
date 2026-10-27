@@ -951,14 +951,31 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// A new agent conversation started in terminal `session`: a name an earlier
+    /// conversation there chose becomes final, so this one cannot spend that
+    /// conversation's correction on a different task. Returns whether one did.
+    pub fn finalize_agent_name(&self, id: i64, session: &str) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees SET named_by = ?1 WHERE id = ?2 AND named_by = ?3",
+            params![
+                WorktreeNamer::Agent.as_str(),
+                id,
+                format!("{AGENT_SESSION_PREFIX}{session}")
+            ],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Set the label of worktree `id` for a coding agent (`veld ide worktree
     /// name`), unless it is the main checkout or somebody already chose its name.
     ///
     /// An agent's first name is stored as `agent:<session>`: the terminal that
     /// chose it may correct it **once**, early on, as the agent context allows,
-    /// and the correction is stored as plain `agent` — final. Every other terminal
-    /// is refused, and so is every agent once the user chose the name; the human
-    /// renames in the window.
+    /// and the correction is stored as plain `agent` — final. So is the first name
+    /// once a new conversation starts in that terminal
+    /// ([`Self::finalize_agent_name`]). Every other terminal is refused, and so is
+    /// every agent once the user chose the name; the human renames in the window.
     ///
     /// The check and the write share one IMMEDIATE transaction, so two agent tabs
     /// naming a fresh worktree at once cannot both win: the second sees the first
@@ -2701,6 +2718,10 @@ mod tests {
             AgentNaming::AlreadyNamed { .. }
         ));
 
+        // Another terminal's launch leaves the claim where it is.
+        assert!(!db.finalize_agent_name(id, "s2").unwrap());
+        assert_eq!(named_by(id), "agent:s1");
+
         // The terminal that named it corrects it once, and that is final.
         assert!(matches!(
             db.name_worktree_as_agent(id, "Fix login", Some("s1"))
@@ -2721,6 +2742,31 @@ mod tests {
             db.name_worktree_as_agent(-1, "x", None).unwrap(),
             AgentNaming::Missing
         );
+
+        // A new conversation in the naming terminal ends the first one's claim.
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoAN", "main", true),
+                wt("/tmp/repoAN-a", "a", false),
+                wt("/tmp/repoAN-b", "b", false),
+            ],
+        )
+        .unwrap();
+        let b = db
+            .get_worktree_by_path("/tmp/repoAN-b")
+            .unwrap()
+            .unwrap()
+            .id;
+        db.name_worktree_as_agent(b, "Task one", Some("s9"))
+            .unwrap();
+        assert!(db.finalize_agent_name(b, "s9").unwrap());
+        assert_eq!(named_by(b), "agent");
+        assert!(matches!(
+            db.name_worktree_as_agent(b, "Task two", Some("s9"))
+                .unwrap(),
+            AgentNaming::AlreadyNamed { .. }
+        ));
     }
 
     #[test]

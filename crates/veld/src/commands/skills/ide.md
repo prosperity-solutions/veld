@@ -181,7 +181,8 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
 - **A name somebody chose is kept.** The command refuses, with exit `9`, on the
   project's main checkout and on a worktree already named — by the human (in the
   window, or typed in the create dialog), by a hand-off, or by an agent in another
-  terminal. Only the terminal whose agent named it may correct it, once. On exit
+  terminal. Only the conversation that named it may correct it, once — not a
+  later one in the same terminal (a new `claude` launch, or `/clear`). On exit
   `9`, keep the name and go on with the task; the human renames in the window.
   A name the create dialog borrowed from its prompt is not a chosen one: the
   first agent replaces it.

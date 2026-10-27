@@ -3476,27 +3476,65 @@ fn naming_pending(session: &str) -> bool {
         .is_some_and(|state| *state != Naming::Settled)
 }
 
-/// Whether the worktree `session` runs in still wants a name from an agent: not
-/// the main checkout, and nobody has chosen its name yet. A second tab in a named
-/// worktree is not nudged to retitle it after whatever it was asked; `veld ide
-/// worktree name` would refuse it anyway.
-async fn worktree_wants_naming(session: &str) -> bool {
-    let Some(id) = session_worktree(session).await else {
-        return false;
-    };
-    let wt =
-        crate::offload::blocking(move || open_db().ok()?.get_worktree(id).ok().flatten()).await;
-    wt.is_some_and(|wt| !wt.is_main && wt.named_by.is_empty())
+/// Whether worktree `wt` still wants a name from an agent: not the main checkout,
+/// and nobody has chosen its name yet. A second tab in a named worktree is not
+/// nudged to retitle it after whatever it was asked; `veld ide worktree name`
+/// would refuse it anyway.
+fn wants_naming(wt: &veld_core::db::WorktreeRecord) -> bool {
+    !wt.is_main && wt.named_by.is_empty()
+}
+
+/// [`wants_naming`] for the worktree `session` runs in, `None` when that cannot
+/// be read — which leaves the nudge as it was rather than switching it off.
+async fn worktree_wants_naming(session: &str) -> Option<bool> {
+    let id = session_worktree(session).await?;
+    let wt = crate::offload::blocking(move || match open_db() {
+        Ok(db) => db
+            .get_worktree(id)
+            .map_err(|e| warn!("naming nudge: {e}"))
+            .ok(),
+        Err(_) => None,
+    })
+    .await?;
+    Some(wt.as_ref().is_some_and(wants_naming))
 }
 
 /// [`naming_verdict`], once the session's worktree is known to still want a name;
 /// a session whose worktree does not is settled instead.
+///
+/// A fresh conversation's first prompt in a terminal that is not waiting to be
+/// nudged — a `/clear` after the first conversation — also makes that earlier
+/// conversation's name final, as a new launch does ([`finalize_agent_name`]).
 async fn naming_turn(session: &str, turn: NamingTurn) -> Option<NamingVerdict> {
-    if naming_pending(session) && !worktree_wants_naming(session).await {
+    if matches!(turn, NamingTurn::Prompt { fresh: true })
+        && !naming_pending(session)
+        && let Some(worktree_id) = session_worktree(session).await
+    {
+        finalize_agent_name(session, worktree_id).await;
+    }
+    if naming_pending(session) && worktree_wants_naming(session).await == Some(false) {
         settle_session_naming(session);
         return None;
     }
     naming_verdict(session, turn)
+}
+
+/// An agent launched in terminal `session`: a name an earlier conversation there
+/// chose is final now, so this conversation cannot spend that one's correction
+/// on its own task. Accepted cost of the launch report not being awaited: a first
+/// conversation whose name lands before its own report loses its correction.
+async fn finalize_agent_name(session: &str, worktree_id: i64) {
+    let session = session.to_owned();
+    crate::offload::blocking(move || {
+        let done = open_db().map_err(|s| s.to_string()).and_then(|db| {
+            db.finalize_agent_name(worktree_id, &session)
+                .map_err(|e| e.to_string())
+        });
+        if let Err(e) = done {
+            warn!("naming: could not finalize the worktree name: {e}");
+        }
+    })
+    .await;
 }
 
 fn forget_naming(session: &str) {
@@ -3603,6 +3641,7 @@ async fn agent_state(
     debug!(session = %id, worktree = worktree_id, tool = tool.as_str(), state = state.as_str(), "agent state");
     if state == veld_core::agent::State::Ready {
         rearm_naming(&id);
+        finalize_agent_name(&id, worktree_id).await;
     }
     // A new conversation's first prompt only, the same turn the naming reminder
     // rides: a note that was not ready by then is not delivered later, as on the mod.
@@ -6298,6 +6337,26 @@ mod tests {
     /// refused once; a second stop, a continued one, a later prompt, a resumed
     /// conversation, a session that already named its worktree and a session never
     /// armed all get nothing.
+    #[test]
+    fn only_an_unnamed_linked_worktree_wants_naming() {
+        let wt = |is_main, named_by: &str| veld_core::db::WorktreeRecord {
+            is_main,
+            named_by: named_by.to_owned(),
+            ..serde_json::from_value(serde_json::json!({
+                "id": 1, "repo_root": "/r", "path": "/r/a", "branch": "a", "alias": "a",
+                "display_name": "", "emoji": "", "marker_color": "", "is_main": false,
+                "created_at": "", "lane": "", "trashed_at": "", "trash_error": "",
+                "adopted": true, "named_by": ""
+            }))
+            .unwrap()
+        };
+        assert!(wants_naming(&wt(false, "")));
+        assert!(!wants_naming(&wt(true, "")));
+        assert!(!wants_naming(&wt(false, "user")));
+        assert!(!wants_naming(&wt(false, "agent")));
+        assert!(!wants_naming(&wt(false, "agent:s1")));
+    }
+
     #[test]
     fn the_naming_nudge_reminds_once_and_blocks_once() {
         use NamingTurn::{Prompt, Stop};

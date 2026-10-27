@@ -2123,14 +2123,20 @@ fn migrate_v20_drop_feedback(conn: &Connection) -> rusqlite::Result<()> {
 /// so a second agent tab in the same checkout cannot retitle it after whatever it
 /// was asked. Without this column a borrowed name and a chosen one look the same.
 ///
-/// **The backfill marks every existing label `'user'`.** Nothing recorded who set
-/// it, and nearly all of them were set on purpose — by the human or by an agent's
-/// first naming. `'user'` is the stricter of the two: no agent may replace it.
+/// **The backfill marks every existing label `'user'`** but the create dialog's
+/// numbered default (`Workspace`, `Workspace 2`, …), which nobody chose and the
+/// next agent should replace. Nothing recorded who set the rest; nearly all were
+/// set on purpose — by the human or by an agent's first naming — and `'user'` is
+/// the stricter of the two: no agent may replace it. A prompt-borrowed label is
+/// caught by this too, and costs a clear in the rename dialog to hand back.
 fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
         r#"
         ALTER TABLE worktrees ADD COLUMN named_by TEXT NOT NULL DEFAULT '';
-        UPDATE worktrees SET named_by = 'user' WHERE display_name != '';
+        UPDATE worktrees SET named_by = 'user'
+         WHERE display_name != ''
+           AND display_name != 'Workspace'
+           AND display_name NOT GLOB 'Workspace [1-9]*';
         "#,
     )
 }
@@ -2979,7 +2985,9 @@ mod tests {
                 INSERT INTO repos (root, name, created_at) VALUES ('/r', 'r', 'x');
                 INSERT INTO worktrees (repo_root, path, branch, alias, is_main, created_at, display_name)
                   VALUES ('/r', '/r/a', 'a', 'a', 0, 'x', 'Fix login'),
-                         ('/r', '/r/b', 'b', 'b', 0, 'x', '');
+                         ('/r', '/r/b', 'b', 'b', 0, 'x', ''),
+                         ('/r', '/r/c', 'c', 'c', 0, 'x', 'Workspace 3'),
+                         ('/r', '/r/d', 'd', 'd', 0, 'x', 'Workspace');
                 "#,
             )
             .unwrap();
@@ -2989,6 +2997,8 @@ mod tests {
         let named_by = |p| db.get_worktree_by_path(p).unwrap().unwrap().named_by;
         assert_eq!(named_by("/r/a"), "user");
         assert_eq!(named_by("/r/b"), "");
+        assert_eq!(named_by("/r/c"), "");
+        assert_eq!(named_by("/r/d"), "");
     }
 
     /// v14 against a real v13 database holding a node row from before per-port

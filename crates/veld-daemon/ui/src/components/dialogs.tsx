@@ -3407,7 +3407,7 @@ export function RenameWorktreeDialog(props: {
         <Stack gap="sm">
           <TextInput
             label="Name"
-            description="What the rail shows. Clear it to show the alias instead."
+            description="What the rail shows. No agent renames it after you do; clear it to show the alias and let the next agent name it."
             placeholder={props.currentAlias}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}

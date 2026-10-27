@@ -5177,13 +5177,7 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
         display_name,
         emoji: body.emoji.as_deref(),
         marker_color: body.marker_color.as_deref(),
-        named_by: display_name.filter(|n| !n.is_empty()).and_then(|_| {
-            if body.named_by_agent {
-                Some(WorktreeNamer::Agent)
-            } else {
-                body.name_chosen.then_some(WorktreeNamer::User)
-            }
-        }),
+        named_by: created_namer(display_name, body.name_chosen, body.named_by_agent),
         ..Default::default()
     };
     if !named.is_empty() {
@@ -5854,11 +5848,42 @@ async fn name_caller_worktree(
     })
     .await;
     // The terminal that asked has done what the naming nudge is for — a refusal
-    // too: the name it would set is not one it may set.
-    if let Some(session) = session.as_deref() {
+    // too: the name it would set is not one it may set. A failure has not.
+    let settled = match &named {
+        Ok(_) => true,
+        Err((status, _)) => *status == StatusCode::CONFLICT,
+    };
+    if let Some(session) = session.as_deref().filter(|_| settled) {
         super::pty::settle_naming(session, id).await;
     }
     named
+}
+
+/// Who chose the name a create stores: an agent for a hand-off, the user when
+/// they typed it, nobody when the dialog borrowed it — and no answer without one.
+fn created_namer(
+    display_name: Option<&str>,
+    name_chosen: bool,
+    by_agent: bool,
+) -> Option<WorktreeNamer> {
+    display_name.filter(|n| !n.is_empty())?;
+    if by_agent {
+        Some(WorktreeNamer::Agent)
+    } else {
+        name_chosen.then_some(WorktreeNamer::User)
+    }
+}
+
+/// Who chose the name a rename in the window stores: the human, and no agent
+/// replaces it. Clearing it hands naming back.
+fn renamed_namer(display_name: Option<&str>) -> Option<WorktreeNamer> {
+    display_name.map(|n| {
+        if n.is_empty() {
+            WorktreeNamer::Nobody
+        } else {
+            WorktreeNamer::User
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -6169,15 +6194,7 @@ async fn patch_worktree(
                 emoji: body.emoji.as_deref(),
                 marker_color: body.marker_color.as_deref(),
                 lane: body.lane.as_deref(),
-                // A rename here is the human's: no agent replaces it. Clearing it
-                // hands naming back.
-                named_by: display_name.map(|n| {
-                    if n.is_empty() {
-                        WorktreeNamer::Nobody
-                    } else {
-                        WorktreeNamer::User
-                    }
-                }),
+                named_by: renamed_namer(display_name),
             },
         )
         .map_err(write_err)?;
@@ -8392,6 +8409,19 @@ mod tests {
         assert!(validate_alias("..").is_err());
         assert!(validate_alias("a/b").is_err());
         assert!(validate_alias("").is_err());
+    }
+
+    #[test]
+    fn a_name_somebody_chose_is_marked_and_a_borrowed_one_is_not() {
+        use veld_core::db::WorktreeNamer::{Agent, Nobody, User};
+        assert_eq!(created_namer(Some("Fix login"), true, false), Some(User));
+        assert_eq!(created_namer(Some("Please fix login"), false, false), None);
+        assert_eq!(created_namer(Some("Fix login"), false, true), Some(Agent));
+        assert_eq!(created_namer(Some(""), true, true), None);
+        assert_eq!(created_namer(None, true, false), None);
+        assert_eq!(renamed_namer(Some("Mine")), Some(User));
+        assert_eq!(renamed_namer(Some("")), Some(Nobody));
+        assert_eq!(renamed_namer(None), None);
     }
 
     #[test]
