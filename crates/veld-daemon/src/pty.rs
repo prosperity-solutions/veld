@@ -3390,7 +3390,7 @@ enum NamingTurn {
     /// The mod's `/clear`: a new conversation in the same Claude process, which
     /// raises no launch report. Ends the last conversation's claim on its name
     /// ([`finalize_agent_name`]) and is never nudged; the nudge state is left as
-    /// it is, so the new conversation's own first prompt and stop still count.
+    /// it is.
     Clear,
 }
 
@@ -6484,8 +6484,7 @@ mod tests {
         assert!(turns.contains(&NamingTurn::Clear));
     }
 
-    /// The mod's `/clear` report leaves the nudge where it was: the new
-    /// conversation is still reminded on its first prompt and blocked once.
+    /// A `clear` turn leaves the nudge where it was, whatever state it is in.
     #[test]
     fn a_clear_turn_does_not_advance_the_nudge() {
         use NamingTurn::{Clear, Prompt, Stop};
