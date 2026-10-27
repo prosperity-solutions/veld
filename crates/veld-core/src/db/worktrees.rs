@@ -125,6 +125,48 @@ pub struct WorktreeRecord {
     /// checkout always is, and so is every checkout of a repo at the moment it is
     /// imported: those are the ones the user brought with them. See v17.
     pub adopted: bool,
+    /// Who chose [`Self::display_name`]: `""` nobody — a name the create dialog
+    /// borrowed from a prompt, or none — else `"user"`, `"agent"`, or
+    /// `"agent:<session>"` while the terminal that chose it may still correct it
+    /// once. A chosen name is one [`Db::name_worktree_as_agent`] keeps. See v21.
+    pub named_by: String,
+}
+
+/// Who chose a worktree's name — the values of [`WorktreeRecord::named_by`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeNamer {
+    /// Nobody: the label was borrowed (from a create prompt) or cleared.
+    Nobody,
+    User,
+    Agent,
+}
+
+impl WorktreeNamer {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Nobody => "",
+            Self::User => "user",
+            Self::Agent => "agent",
+        }
+    }
+}
+
+/// `named_by` for a name an agent chose that its terminal may still correct once:
+/// this prefix, then the terminal session id. See [`Db::name_worktree_as_agent`].
+const AGENT_SESSION_PREFIX: &str = "agent:";
+
+/// What [`Db::name_worktree_as_agent`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentNaming {
+    /// Renamed; `previous` is the label it replaced (`""` for none).
+    Named { path: String, previous: String },
+    /// The main checkout: its name is the repository's, not a task's.
+    MainCheckout,
+    /// Somebody already chose its name, `name`; `by` says who.
+    AlreadyNamed { name: String, by: WorktreeNamer },
+    /// No such worktree.
+    Missing,
 }
 
 /// A user-defined rail lane — a named group of worktrees within one repo.
@@ -206,6 +248,8 @@ pub struct WorktreePatch<'a> {
     /// A lane of this worktree's repo, or `Some("")` to ungroup. Changing it
     /// clears the manual position.
     pub lane: Option<&'a str>,
+    /// Who chose the name — set beside `display_name` by whoever knows.
+    pub named_by: Option<WorktreeNamer>,
 }
 
 impl WorktreePatch<'_> {
@@ -221,12 +265,14 @@ impl WorktreePatch<'_> {
             emoji,
             marker_color,
             lane,
+            named_by,
         } = self;
         alias.is_none()
             && display_name.is_none()
             && emoji.is_none()
             && marker_color.is_none()
             && lane.is_none()
+            && named_by.is_none()
     }
 }
 
@@ -245,7 +291,8 @@ pub struct DiscoveredWorktree {
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
-     marker_color, lane, sort_position, trashed_at, trash_error, display_name, adopted";
+     marker_color, lane, sort_position, trashed_at, trash_error, display_name, adopted, \
+     named_by";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -264,6 +311,7 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         trash_error: row.get(12)?,
         display_name: row.get(13)?,
         adopted: row.get::<_, i64>(14)? != 0,
+        named_by: row.get(15)?,
     })
 }
 
@@ -762,6 +810,7 @@ impl Db {
             emoji,
             marker_color,
             lane,
+            named_by,
         } = patch;
         // Both marker channels are validated before either is written, for the
         // same both-or-neither reason the alias is: a patch carrying a good glyph
@@ -882,15 +931,80 @@ impl Db {
                     marker_color = COALESCE(?3, marker_color),
                     lane = COALESCE(?4, lane),
                     display_name = COALESCE(?6, display_name),
+                    named_by = COALESCE(?7, named_by),
                     sort_position = CASE
                         WHEN ?4 IS NOT NULL AND ?4 != lane THEN NULL
                         ELSE sort_position
                     END
               WHERE id = ?5",
-            params![alias, emoji, marker_color, lane, id, display_name],
+            params![
+                alias,
+                emoji,
+                marker_color,
+                lane,
+                id,
+                display_name,
+                named_by.map(WorktreeNamer::as_str)
+            ],
         )?;
         tx.commit()?;
         Ok(n > 0)
+    }
+
+    /// Set the label of worktree `id` for a coding agent (`veld ide worktree
+    /// name`), unless it is the main checkout or somebody already chose its name.
+    ///
+    /// An agent's first name is stored as `agent:<session>`: the terminal that
+    /// chose it may correct it **once**, early on, as the agent context allows,
+    /// and the correction is stored as plain `agent` — final. Every other terminal
+    /// is refused, and so is every agent once the user chose the name; the human
+    /// renames in the window.
+    ///
+    /// The check and the write share one IMMEDIATE transaction, so two agent tabs
+    /// naming a fresh worktree at once cannot both win: the second sees the first
+    /// one's name.
+    pub fn name_worktree_as_agent(
+        &self,
+        id: i64,
+        name: &str,
+        session: Option<&str>,
+    ) -> Result<AgentNaming, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let row: Option<(String, bool, String, String)> = tx
+            .query_row(
+                "SELECT path, is_main, display_name, named_by FROM worktrees WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get::<_, i64>(1)? != 0, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((path, is_main, previous, named_by)) = row else {
+            return Ok(AgentNaming::Missing);
+        };
+        if is_main {
+            return Ok(AgentNaming::MainCheckout);
+        }
+        let first = named_by.is_empty();
+        let correcting =
+            session.is_some_and(|s| named_by.strip_prefix(AGENT_SESSION_PREFIX) == Some(s));
+        if !first && !correcting {
+            let by = if named_by.starts_with(WorktreeNamer::Agent.as_str()) {
+                WorktreeNamer::Agent
+            } else {
+                WorktreeNamer::User
+            };
+            return Ok(AgentNaming::AlreadyNamed { name: previous, by });
+        }
+        let named_by = match session {
+            Some(s) if first => format!("{AGENT_SESSION_PREFIX}{s}"),
+            _ => WorktreeNamer::Agent.as_str().to_owned(),
+        };
+        tx.execute(
+            "UPDATE worktrees SET display_name = ?1, named_by = ?2 WHERE id = ?3",
+            params![name, named_by, id],
+        )?;
+        tx.commit()?;
+        Ok(AgentNaming::Named { path, previous })
     }
 
     /// Delete a worktree row (DB only — `git worktree remove` is the caller's
@@ -2523,6 +2637,146 @@ mod tests {
             .unwrap()
         );
         assert!(!db.patch_worktree(4242, WorktreePatch::default()).unwrap());
+    }
+
+    #[test]
+    fn an_agent_names_a_worktree_once_and_never_the_main_checkout() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAN");
+        db.upsert_repo(root, "repo-an").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoAN", "main", true),
+                wt("/tmp/repoAN-a", "a", false),
+            ],
+        )
+        .unwrap();
+        let main = db.get_worktree_by_path("/tmp/repoAN").unwrap().unwrap().id;
+        let id = db
+            .get_worktree_by_path("/tmp/repoAN-a")
+            .unwrap()
+            .unwrap()
+            .id;
+        let named_by = |id| db.get_worktree(id).unwrap().unwrap().named_by;
+
+        assert_eq!(
+            db.name_worktree_as_agent(main, "Anything", Some("s1"))
+                .unwrap(),
+            AgentNaming::MainCheckout
+        );
+        assert_eq!(db.get_worktree(main).unwrap().unwrap().display_name, "");
+
+        // A borrowed name is not a chosen one: the first agent replaces it.
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                display_name: Some("Please fix the thing"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(named_by(id), "");
+        assert_eq!(
+            db.name_worktree_as_agent(id, "Fix the thing", Some("s1"))
+                .unwrap(),
+            AgentNaming::Named {
+                path: "/tmp/repoAN-a".into(),
+                previous: "Please fix the thing".into()
+            }
+        );
+        assert_eq!(named_by(id), "agent:s1");
+
+        // Another terminal — a new tab — is refused and changes nothing.
+        assert_eq!(
+            db.name_worktree_as_agent(id, "Unrelated", Some("s2"))
+                .unwrap(),
+            AgentNaming::AlreadyNamed {
+                name: "Fix the thing".into(),
+                by: WorktreeNamer::Agent
+            }
+        );
+        assert!(matches!(
+            db.name_worktree_as_agent(id, "Unrelated", None).unwrap(),
+            AgentNaming::AlreadyNamed { .. }
+        ));
+
+        // The terminal that named it corrects it once, and that is final.
+        assert!(matches!(
+            db.name_worktree_as_agent(id, "Fix login", Some("s1"))
+                .unwrap(),
+            AgentNaming::Named { .. }
+        ));
+        assert_eq!(named_by(id), "agent");
+        assert!(matches!(
+            db.name_worktree_as_agent(id, "Again", Some("s1")).unwrap(),
+            AgentNaming::AlreadyNamed { .. }
+        ));
+        assert_eq!(
+            db.get_worktree(id).unwrap().unwrap().display_name,
+            "Fix login"
+        );
+
+        assert_eq!(
+            db.name_worktree_as_agent(-1, "x", None).unwrap(),
+            AgentNaming::Missing
+        );
+    }
+
+    #[test]
+    fn a_name_the_user_chose_is_never_replaced_by_an_agent() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoUN");
+        db.upsert_repo(root, "repo-un").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/repoUN", "main", true),
+                wt("/tmp/repoUN-a", "a", false),
+            ],
+        )
+        .unwrap();
+        let id = db
+            .get_worktree_by_path("/tmp/repoUN-a")
+            .unwrap()
+            .unwrap()
+            .id;
+        db.name_worktree_as_agent(id, "Agent name", Some("s1"))
+            .unwrap();
+
+        // The user's rename also takes the correction away from that terminal.
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                display_name: Some("Mine"),
+                named_by: Some(WorktreeNamer::User),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            db.name_worktree_as_agent(id, "Agent again", Some("s1"))
+                .unwrap(),
+            AgentNaming::AlreadyNamed {
+                name: "Mine".into(),
+                by: WorktreeNamer::User
+            }
+        );
+
+        // Clearing the name hands naming back.
+        db.patch_worktree(
+            id,
+            WorktreePatch {
+                display_name: Some(""),
+                named_by: Some(WorktreeNamer::Nobody),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            db.name_worktree_as_agent(id, "Fresh", Some("s3")).unwrap(),
+            AgentNaming::Named { .. }
+        ));
     }
 
     #[test]

@@ -3467,6 +3467,38 @@ fn settle_session_naming(session: &str) {
     }
 }
 
+/// Whether `session` is still waiting to be nudged — armed or reminded.
+fn naming_pending(session: &str) -> bool {
+    NAMING
+        .lock()
+        .expect("naming poisoned")
+        .get(session)
+        .is_some_and(|state| *state != Naming::Settled)
+}
+
+/// Whether the worktree `session` runs in still wants a name from an agent: not
+/// the main checkout, and nobody has chosen its name yet. A second tab in a named
+/// worktree is not nudged to retitle it after whatever it was asked; `veld ide
+/// worktree name` would refuse it anyway.
+async fn worktree_wants_naming(session: &str) -> bool {
+    let Some(id) = session_worktree(session).await else {
+        return false;
+    };
+    let wt =
+        crate::offload::blocking(move || open_db().ok()?.get_worktree(id).ok().flatten()).await;
+    wt.is_some_and(|wt| !wt.is_main && wt.named_by.is_empty())
+}
+
+/// [`naming_verdict`], once the session's worktree is known to still want a name;
+/// a session whose worktree does not is settled instead.
+async fn naming_turn(session: &str, turn: NamingTurn) -> Option<NamingVerdict> {
+    if naming_pending(session) && !worktree_wants_naming(session).await {
+        settle_session_naming(session);
+        return None;
+    }
+    naming_verdict(session, turn)
+}
+
 fn forget_naming(session: &str) {
     NAMING.lock().expect("naming poisoned").remove(session);
 }
@@ -3575,7 +3607,10 @@ async fn agent_state(
     // A new conversation's first prompt only, the same turn the naming reminder
     // rides: a note that was not ready by then is not delivered later, as on the mod.
     let prompt_turn = matches!(body.naming, Some(NamingTurn::Prompt { fresh: true }));
-    let naming = body.naming.and_then(|turn| naming_verdict(&id, turn));
+    let naming = match body.naming {
+        Some(turn) => naming_turn(&id, turn).await,
+        None => None,
+    };
     // The outfit note rides the first prompt's answer, like the naming reminder: a
     // line beside the user's message, for a worktree where outfit is in play.
     let context = prompt_turn.then(|| super::outfit::take_note(&id)).flatten();
@@ -3617,7 +3652,7 @@ async fn naming(
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
     Ok(Json(
-        serde_json::json!({ "naming": naming_verdict(&id, turn) }),
+        serde_json::json!({ "naming": naming_turn(&id, turn).await }),
     ))
 }
 

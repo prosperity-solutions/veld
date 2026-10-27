@@ -49,9 +49,9 @@ pub use settings_catalog::{
 };
 pub use var_overrides::{OverrideScope, VarOverride};
 pub use worktrees::{
-    DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord, UNGROUPED_LANE,
-    WORKTREE_COLORS, WORKTREE_EMOJI, WorktreePatch, WorktreeRecord, default_alias,
-    is_reserved_lane, is_worktree_color, is_worktree_emoji,
+    AgentNaming, DiscoveredWorktree, LaneRecord, MAX_LANE_NAME_LEN, MAX_ORDER_LEN, RepoRecord,
+    UNGROUPED_LANE, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeNamer, WorktreePatch, WorktreeRecord,
+    default_alias, is_reserved_lane, is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -1243,6 +1243,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "drop-feedback",
         apply: migrate_v20_drop_feedback,
     },
+    Migration {
+        version: 21,
+        name: "worktree-named-by",
+        apply: migrate_v21_worktree_named_by,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2110,6 +2115,26 @@ fn migrate_v20_drop_feedback(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v21: who chose a worktree's `display_name` — `''` nobody (the create dialog
+/// borrowed it from a prompt, or there is none), `'user'`, or `'agent'`
+/// (`'agent:<session>'` while the terminal that chose it may still correct it).
+///
+/// A name somebody chose is kept: `veld ide worktree name` refuses to replace it,
+/// so a second agent tab in the same checkout cannot retitle it after whatever it
+/// was asked. Without this column a borrowed name and a chosen one look the same.
+///
+/// **The backfill marks every existing label `'user'`.** Nothing recorded who set
+/// it, and nearly all of them were set on purpose — by the human or by an agent's
+/// first naming. `'user'` is the stricter of the two: no agent may replace it.
+fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE worktrees ADD COLUMN named_by TEXT NOT NULL DEFAULT '';
+        UPDATE worktrees SET named_by = 'user' WHERE display_name != '';
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2916,7 +2941,7 @@ mod tests {
 
         for _ in 0..2 {
             let db = Db::open_at(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 20);
+            assert_eq!(db.schema_version().unwrap(), 21);
         }
         let conn = Connection::open(&path).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -2934,6 +2959,36 @@ mod tests {
             0
         );
         assert_eq!(count("SELECT COUNT(*) FROM log_lines"), 1);
+    }
+
+    /// v21 against a real v20 database: a worktree that already wears a label is
+    /// treated as named by the user, one without stays open to an agent's first name.
+    #[test]
+    fn v20_v21_upgrade_keeps_existing_labels() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            for m in MIGRATIONS.iter().take_while(|m| m.version <= 20) {
+                (m.apply)(&conn).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 20).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO repos (root, name, created_at) VALUES ('/r', 'r', 'x');
+                INSERT INTO worktrees (repo_root, path, branch, alias, is_main, created_at, display_name)
+                  VALUES ('/r', '/r/a', 'a', 'a', 0, 'x', 'Fix login'),
+                         ('/r', '/r/b', 'b', 'b', 0, 'x', '');
+                "#,
+            )
+            .unwrap();
+        }
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 21);
+        let named_by = |p| db.get_worktree_by_path(p).unwrap().unwrap().named_by;
+        assert_eq!(named_by("/r/a"), "user");
+        assert_eq!(named_by("/r/b"), "");
     }
 
     /// v14 against a real v13 database holding a node row from before per-port

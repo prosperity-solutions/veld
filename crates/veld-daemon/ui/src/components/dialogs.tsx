@@ -880,6 +880,7 @@ export function NewWorktreeDialog(props: {
     source: CreateWorktreeSource;
     alias?: string;
     display_name?: string;
+    name_chosen?: boolean;
     emoji?: string;
     marker_color?: string;
     /** The outfit profile to pin it to; absent follows the clone's. */
@@ -1325,6 +1326,9 @@ export function NewWorktreeDialog(props: {
         // "the name is what you typed" is one rule, and a dialog that silently
         // stops storing it once you type something already slug-shaped is two.
         display_name: displayName,
+        // A typed name is the user's, and no agent renames it; a borrowed one is
+        // there until the agent names the checkout after its task.
+        name_chosen: !autoNamed,
         // Always sent when a list resolved, so the checkout wears what the dialog
         // showed. Empty only while the fetch is in flight, where the daemon's own
         // assignment is the honest fallback.

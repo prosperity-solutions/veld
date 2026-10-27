@@ -2362,7 +2362,9 @@ started).
 There is no config key for it. A worktree is named by the agent working in it:
 Veld tells every agent in a Veld terminal to run `veld ide worktree name "<a few
 words>"` once it knows what the task is, which sets the label the rail shows —
-never the alias or the branch. `ide.worktreeName`, the command that used to do
+never the alias or the branch. It refuses on the main checkout and on a worktree
+whose name somebody already chose — the human, a hand-off, or an agent in another
+terminal — so a second agent tab does not retitle the worktree. `ide.worktreeName`, the command that used to do
 this from the create prompt, is no longer read; `veld orchestrator lint` names it so it can be
 deleted.
 
