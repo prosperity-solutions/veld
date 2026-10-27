@@ -116,7 +116,7 @@ pub enum WorktreeCommand {
     ///
     /// Refused on the main checkout, and on a worktree whose name somebody already
     /// chose — the human, or an agent in another conversation. The conversation
-    /// that named it may correct its own name once.
+    /// that named it from a Veld terminal may correct its own name once.
     ///
     /// Exit status: 0 named, 1 failed, 2 not a usable title, 3 not inside a
     /// worktree Veld knows, 9 the name is kept (main checkout or already named).

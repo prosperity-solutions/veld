@@ -3387,6 +3387,11 @@ enum NamingTurn {
         #[serde(default)]
         continued: bool,
     },
+    /// The mod's `/clear`: a new conversation in the same Claude process, which
+    /// raises no launch report. Ends the last conversation's claim on its name
+    /// ([`finalize_agent_name`]) and is never nudged; the nudge state is left as
+    /// it is, so the new conversation's own first prompt and stop still count.
+    Clear,
 }
 
 /// What the hook should hand back to the agent.
@@ -3502,15 +3507,19 @@ async fn worktree_wants_naming(session: &str) -> Option<bool> {
 /// [`naming_verdict`], once the session's worktree is known to still want a name;
 /// a session whose worktree does not is settled instead.
 ///
-/// A fresh conversation's first prompt in a terminal that is not waiting to be
-/// nudged — a `/clear` after the first conversation — also makes that earlier
-/// conversation's name final, as a new launch does ([`finalize_agent_name`]).
+/// A new conversation in a terminal that is not waiting to be nudged — a fresh
+/// first prompt after `/clear` on the wrapper's hooks, or the mod's own
+/// [`NamingTurn::Clear`] — also makes the earlier conversation's name final, as a
+/// new launch does ([`finalize_agent_name`]).
 async fn naming_turn(session: &str, turn: NamingTurn) -> Option<NamingVerdict> {
-    if matches!(turn, NamingTurn::Prompt { fresh: true })
-        && !naming_pending(session)
+    let clear = turn == NamingTurn::Clear;
+    if (clear || (turn == NamingTurn::Prompt { fresh: true } && !naming_pending(session)))
         && let Some(worktree_id) = session_worktree(session).await
     {
         finalize_agent_name(session, worktree_id).await;
+    }
+    if clear {
+        return None;
     }
     if naming_pending(session) && worktree_wants_naming(session).await == Some(false) {
         settle_session_naming(session);
@@ -6333,10 +6342,8 @@ mod tests {
 
     use super::*;
 
-    /// A fresh conversation is reminded on its first prompt and has its first stop
-    /// refused once; a second stop, a continued one, a later prompt, a resumed
-    /// conversation, a session that already named its worktree and a session never
-    /// armed all get nothing.
+    /// Only a linked worktree nobody has named is nudged: not the main checkout,
+    /// and not one the human, a hand-off or an agent already named.
     #[test]
     fn only_an_unnamed_linked_worktree_wants_naming() {
         let wt = |is_main, named_by: &str| veld_core::db::WorktreeRecord {
@@ -6357,6 +6364,10 @@ mod tests {
         assert!(!wants_naming(&wt(false, "agent:s1")));
     }
 
+    /// A fresh conversation is reminded on its first prompt and has its first stop
+    /// refused once; a second stop, a continued one, a later prompt, a resumed
+    /// conversation, a session that already named its worktree and a session never
+    /// armed all get nothing.
     #[test]
     fn the_naming_nudge_reminds_once_and_blocks_once() {
         use NamingTurn::{Prompt, Stop};
@@ -6470,6 +6481,26 @@ mod tests {
             .collect();
         assert!(turns.iter().any(|t| matches!(t, NamingTurn::Prompt { .. })));
         assert!(turns.iter().any(|t| matches!(t, NamingTurn::Stop { .. })));
+        assert!(turns.contains(&NamingTurn::Clear));
+    }
+
+    /// The mod's `/clear` report leaves the nudge where it was: the new
+    /// conversation is still reminded on its first prompt and blocked once.
+    #[test]
+    fn a_clear_turn_does_not_advance_the_nudge() {
+        use NamingTurn::{Clear, Prompt, Stop};
+        arm_naming("nudge-clear");
+        assert_eq!(naming_verdict("nudge-clear", Clear), None);
+        assert_eq!(
+            naming_verdict("nudge-clear", Prompt { fresh: true }),
+            Some(NamingVerdict::Remind)
+        );
+        assert_eq!(naming_verdict("nudge-clear", Clear), None);
+        assert_eq!(
+            naming_verdict("nudge-clear", Stop { continued: false }),
+            Some(NamingVerdict::Block)
+        );
+        forget_naming("nudge-clear");
     }
 
     /// The name route settles only the terminal whose own worktree it renamed: not one

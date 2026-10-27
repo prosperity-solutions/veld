@@ -269,8 +269,8 @@ export const register: Register = (on) => {
     if (e.reason === 'clear') {
       await setPending($, context)
       // A new conversation in this terminal: the name the last one chose is final
-      // now. Said as a fresh prompt, which Veld also never nudges once settled.
-      if (hooks && context) await askNaming($, { turn: 'prompt', fresh: true })
+      // now. Its own turn kind, so the nudge for the new conversation is untouched.
+      if (hooks && context) await askNaming($, { turn: 'clear' })
     } else if (hooks && e.reason !== 'resume') {
       await report($, 'done')
     }
