@@ -114,8 +114,12 @@ pub enum WorktreeCommand {
     /// cannot be read, the one this terminal runs in). Changes the label only —
     /// never the branch, the directory, or the run's hostname.
     ///
+    /// Refused on the main checkout, and on a worktree whose name somebody already
+    /// chose — the human, or an agent in another conversation. The conversation
+    /// that named it from a Veld terminal may correct its own name once.
+    ///
     /// Exit status: 0 named, 1 failed, 2 not a usable title, 3 not inside a
-    /// worktree Veld knows.
+    /// worktree Veld knows, 9 the name is kept (main checkout or already named).
     Name {
         /// A few words saying what the work is, at most 18 columns so it fits the
         /// sidebar (e.g. "Fix login timeout").
@@ -351,6 +355,7 @@ pub(crate) fn exit_for(code: Option<&str>) -> i32 {
         Some(NO_ANSWER | "created_unrecorded") => 6,
         Some("outfit_required" | "unknown_outfit" | "outfit_unavailable") => 7,
         Some("outfit_failed") => 8,
+        Some("main_checkout" | "already_named") => 9,
         _ => 1,
     }
 }
@@ -551,6 +556,8 @@ mod tests {
         assert_eq!(exit_for(Some("unknown_group")), 4);
         assert_eq!(exit_for(Some("bad_name")), 2);
         assert_eq!(exit_for(Some(NO_ANSWER)), 6);
+        assert_eq!(exit_for(Some("main_checkout")), 9);
+        assert_eq!(exit_for(Some("already_named")), 9);
         assert_eq!(exit_for(Some("created_unrecorded")), 6);
         assert_eq!(exit_for(Some("outfit_required")), 7);
         assert_eq!(exit_for(Some("unknown_outfit")), 7);

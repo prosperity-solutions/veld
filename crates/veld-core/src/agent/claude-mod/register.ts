@@ -268,6 +268,9 @@ export const register: Register = (on) => {
     const result = await next(e)
     if (e.reason === 'clear') {
       await setPending($, context)
+      // A new conversation in this terminal: the name the last one chose is final
+      // now. Its own turn kind, so the nudge for the new conversation is untouched.
+      if (hooks && context) await askNaming($, { turn: 'clear' })
     } else if (hooks && e.reason !== 'resume') {
       await report($, 'done')
     }

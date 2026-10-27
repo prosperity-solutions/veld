@@ -479,6 +479,13 @@ export interface Worktree {
    */
   adopted?: boolean;
   /**
+   * Who chose `display_name`: `""` nobody (borrowed from a create prompt, or
+   * none), `"user"`, `"agent"`, or `"agent:<session>"`. A chosen name is one
+   * `veld ide worktree name` refuses to replace. Optional for the reason
+   * `display_name` is.
+   */
+  named_by?: string;
+  /**
    * The agent pane a hand-off is waiting to start here — `veld ide worktree new
    * --prompt` — or absent when there is none. `session_id` is the tab id the pane
    * runs under; `pane` the declared agent, or `""` for this project's usual one.
@@ -1826,6 +1833,11 @@ export const api = {
     alias?: string;
     /** What the rail shows. Omit (or send `""`) to render the alias. */
     display_name?: string;
+    /**
+     * Whether the user typed `display_name` rather than the dialog borrowing it
+     * from the prompt. A typed name is kept: no agent renames the worktree.
+     */
+    name_chosen?: boolean;
     /**
      * The lane to file it under — sent with the create, not patched after, so a
      * "＋" in a lane header cannot produce a worktree that shows up in the wrong

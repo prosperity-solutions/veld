@@ -19,8 +19,8 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 use veld_core::db::{
-    ConfigSource, Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeRecord,
-    default_alias,
+    AgentNaming, ConfigSource, Db, DiscoveredWorktree, GitCreateSource, RepoRecord, WorktreeNamer,
+    WorktreeRecord, default_alias,
 };
 use veld_core::user_path::cached_user_path;
 
@@ -4534,6 +4534,15 @@ struct CreateWorktreeBody {
     /// field get.
     #[serde(default)]
     display_name: Option<String>,
+    /// Whether somebody chose `display_name` rather than the dialog borrowing it
+    /// from a prompt. A chosen name is one `veld ide worktree name` keeps; a
+    /// borrowed one the agent's first name replaces.
+    #[serde(default)]
+    name_chosen: bool,
+    /// Set by a route that knows an agent chose the name (a hand-off), never from
+    /// the wire.
+    #[serde(skip)]
+    named_by_agent: bool,
     /// The rail lane to file the new checkout under, or absent/`""` for
     /// ungrouped.
     ///
@@ -5168,6 +5177,7 @@ async fn create_checkout(body: CreateWorktreeBody) -> Result<CreatedWorktreeView
         display_name,
         emoji: body.emoji.as_deref(),
         marker_color: body.marker_color.as_deref(),
+        named_by: created_namer(display_name, body.name_chosen, body.named_by_agent),
         ..Default::default()
     };
     if !named.is_empty() {
@@ -5388,6 +5398,8 @@ async fn create_handoff(
         }),
         alias: None,
         display_name: Some(body.name.trim().to_owned()),
+        name_chosen: false,
+        named_by_agent: true,
         lane: body.lane.clone(),
         path: None,
         emoji: None,
@@ -5789,42 +5801,94 @@ async fn name_caller_worktree(
         )
     })?;
     let id = resolve_caller(body.session_id.as_deref(), body.cwd.as_deref()).await?;
-    let renamed = id;
+    // The session is the agent's claim to its one correction, so it counts only
+    // from a terminal in the worktree being named.
+    let session = match body.session_id.as_deref() {
+        Some(s) if super::pty::session_worktree(s).await == Some(id) => Some(s.to_owned()),
+        _ => None,
+    };
+    let from = session.clone();
     let named = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
-        let before = db
-            .get_worktree(id)
-            .map_err(db_err)?
-            .ok_or_else(|| coded(StatusCode::NOT_FOUND, "not_in_worktree", "no such worktree"))?;
-        let existed = db
-            .patch_worktree(
-                id,
-                veld_core::db::WorktreePatch {
-                    display_name: Some(name.as_str()),
-                    ..Default::default()
-                },
-            )
-            .map_err(write_err)?;
-        if !existed {
-            return Err(coded(
+        match db
+            .name_worktree_as_agent(id, &name, from.as_deref())
+            .map_err(write_err)?
+        {
+            AgentNaming::Named { path, previous } => Ok(Json(serde_json::json!({
+                "id": id,
+                "path": path,
+                "name": name,
+                "previous": previous,
+            }))),
+            AgentNaming::MainCheckout => Err(coded(
+                StatusCode::CONFLICT,
+                "main_checkout",
+                "this is the project's main checkout, and it keeps its name — leave it as it \
+                 is",
+            )),
+            AgentNaming::AlreadyNamed { name, by } => Err(coded(
+                StatusCode::CONFLICT,
+                "already_named",
+                format!(
+                    "this worktree is already named \"{name}\"{} — keep that name; only the \
+                     human renames it now, in the window",
+                    if by == WorktreeNamer::User {
+                        " by the human"
+                    } else {
+                        ""
+                    }
+                ),
+            )),
+            AgentNaming::Missing => Err(coded(
                 StatusCode::NOT_FOUND,
                 "not_in_worktree",
                 "no such worktree",
-            ));
+            )),
         }
-        Ok(Json(serde_json::json!({
-            "id": id,
-            "path": before.path,
-            "name": name,
-            "previous": before.display_name,
-        })))
     })
-    .await?;
-    // The terminal that asked has done what the naming nudge is for.
-    if let Some(session) = body.session_id.as_deref() {
-        super::pty::settle_naming(session, renamed).await;
+    .await;
+    // The terminal that asked has done what the naming nudge is for — a refusal
+    // too: the name it would set is not one it may set. A failure has not.
+    let settled = match &named {
+        Ok(_) => true,
+        Err((status, _)) => *status == StatusCode::CONFLICT,
+    };
+    if let Some(session) = session.as_deref().filter(|_| settled) {
+        super::pty::settle_naming(session, id).await;
     }
-    Ok(named)
+    named
+}
+
+/// Who chose the name a create stores: an agent for a hand-off, the user when
+/// they typed it, nobody when the dialog borrowed it or there is none — and no
+/// answer when no name is written.
+fn created_namer(
+    display_name: Option<&str>,
+    name_chosen: bool,
+    by_agent: bool,
+) -> Option<WorktreeNamer> {
+    let name = display_name?;
+    Some(if name.is_empty() {
+        WorktreeNamer::Nobody
+    } else if by_agent {
+        WorktreeNamer::Agent
+    } else if name_chosen {
+        WorktreeNamer::User
+    } else {
+        WorktreeNamer::Nobody
+    })
+}
+
+/// Who chose the name a rename in the window stores: the human, and no agent
+/// replaces it. Clearing it hands naming back.
+fn renamed_namer(display_name: Option<&str>) -> Option<WorktreeNamer> {
+    display_name.map(|n| {
+        if n.is_empty() {
+            WorktreeNamer::Nobody
+        } else {
+            WorktreeNamer::User
+        }
+    })
 }
 
 #[derive(Deserialize)]
@@ -6135,6 +6199,7 @@ async fn patch_worktree(
                 emoji: body.emoji.as_deref(),
                 marker_color: body.marker_color.as_deref(),
                 lane: body.lane.as_deref(),
+                named_by: renamed_namer(display_name),
             },
         )
         .map_err(write_err)?;
@@ -6770,6 +6835,7 @@ mod tests {
             trashed_at: String::new(),
             trash_error: String::new(),
             adopted: true,
+            named_by: String::new(),
         }
     }
 
@@ -8348,6 +8414,22 @@ mod tests {
         assert!(validate_alias("..").is_err());
         assert!(validate_alias("a/b").is_err());
         assert!(validate_alias("").is_err());
+    }
+
+    #[test]
+    fn a_name_somebody_chose_is_marked_and_a_borrowed_one_is_not() {
+        use veld_core::db::WorktreeNamer::{Agent, Nobody, User};
+        assert_eq!(created_namer(Some("Fix login"), true, false), Some(User));
+        assert_eq!(
+            created_namer(Some("Please fix login"), false, false),
+            Some(Nobody)
+        );
+        assert_eq!(created_namer(Some("Fix login"), false, true), Some(Agent));
+        assert_eq!(created_namer(Some(""), true, true), Some(Nobody));
+        assert_eq!(created_namer(None, true, false), None);
+        assert_eq!(renamed_namer(Some("Mine")), Some(User));
+        assert_eq!(renamed_namer(Some("")), Some(Nobody));
+        assert_eq!(renamed_namer(None), None);
     }
 
     #[test]

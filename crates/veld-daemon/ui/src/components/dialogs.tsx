@@ -880,6 +880,7 @@ export function NewWorktreeDialog(props: {
     source: CreateWorktreeSource;
     alias?: string;
     display_name?: string;
+    name_chosen?: boolean;
     emoji?: string;
     marker_color?: string;
     /** The outfit profile to pin it to; absent follows the clone's. */
@@ -1325,6 +1326,9 @@ export function NewWorktreeDialog(props: {
         // "the name is what you typed" is one rule, and a dialog that silently
         // stops storing it once you type something already slug-shaped is two.
         display_name: displayName,
+        // A typed name is the user's, and no agent renames it; a borrowed one is
+        // there until the agent names the checkout after its task.
+        name_chosen: !autoNamed,
         // Always sent when a list resolved, so the checkout wears what the dialog
         // showed. Empty only while the fetch is in flight, where the daemon's own
         // assignment is the honest fallback.
@@ -1607,8 +1611,8 @@ export function NewWorktreeDialog(props: {
           autoNamed
             ? prompt.trim() === ""
               ? "Optional. Left empty, the checkout is numbered for you."
-              : "Optional. Left empty, it is taken from your prompt."
-            : undefined
+              : "Optional. Left empty, it is taken from your prompt until the agent names it."
+            : "Kept as you typed it — no agent renames it."
         }
         value={name}
         onChange={(e) => setName(e.currentTarget.value)}
@@ -3403,7 +3407,7 @@ export function RenameWorktreeDialog(props: {
         <Stack gap="sm">
           <TextInput
             label="Name"
-            description="What the rail shows. Clear it to show the alias instead."
+            description="What the rail shows. No agent renames it after you do; clear it to show the alias and let the next agent name it."
             placeholder={props.currentAlias}
             value={name}
             onChange={(e) => setName(e.currentTarget.value)}

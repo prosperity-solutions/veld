@@ -177,20 +177,31 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
   a sentence. A blank or longer title is refused with exit `2`.
 - **Rename it at most once more, and only early**: when what you learn next —
   what a PR, issue or link is actually about — shows the first name was off.
-  After that, leave it alone unless the human asks; they may have renamed it
-  themselves, and a title that keeps changing is no landmark.
+  After that, leave it alone; a title that keeps changing is no landmark.
+- **A name somebody chose is kept.** The command refuses, with exit `9`, on the
+  project's main checkout and on a worktree already named — by the human (in the
+  window, or typed in the create dialog), by a hand-off, or by an agent in another
+  terminal. Only the conversation that named it may correct it, once — not a
+  later one in the same terminal (a new agent launch, or in Claude a `/clear`). On exit
+  `9`, keep the name and go on with the task, and do not retry. If the human
+  asks you to rename it, tell them to do it in the Veld window (the worktree's
+  rename dialog) — the command will refuse you.
+  A name the create dialog borrowed from its prompt is not a chosen one: the
+  first agent replaces it.
 - **In Claude Code this is enforced once**, when *Notice when a coding agent is
   waiting for you* is on as well. Veld adds a reminder to the first
   prompt of a new conversation, and refuses that turn's stop once if the worktree
   is still unnamed (except on Veld's Claude mod where Claude Code's built-in
   policy mod is seated, typical on a Team plan: there a stop cannot be refused). Naming it first means you never see either.
   A `/clear` in the same terminal is not nudged again; a new `claude` launch is.
+  Nothing is nudged in the main checkout or in a worktree already named.
 - It retitles the worktree containing your working directory (or, when that
   cannot be read, the one your terminal runs in). Only the label changes — never
   the branch, the directory, or the run's hostname.
 
 Exit status: `0` named; `1` failed (the daemon is not running, or refused);
-`2` not a usable title; `3` not inside a worktree Veld knows.
+`2` not a usable title; `3` not inside a worktree Veld knows; `9` the name is
+kept (the main checkout, or already named).
 
 ## Handing a task to the human in a new worktree (`veld ide worktree new`)
 

@@ -1349,10 +1349,12 @@ pub fn agent_context(cli: &str) -> String {
          before you write your first reply, run `{cli} ide worktree name \"<2-4 words>\"` (at \
          most 18 columns, e.g. \"Fix login timeout\"). Do it even when the first message is \
          trivial or not yet a task — name the worktree after what was asked. The human tells \
-         their worktrees apart by this name. You may rename it once more, early on, when what \
-         you learn (what a PR, issue or link is actually about) shows the first name was off. \
-         After that, never rename it unless the human asks, and do not rename it in a resumed \
-         conversation. To show the human a file (markdown, CSV, code) or a web page next to this \
+         their worktrees apart by this name. If the command says the name is kept (the main \
+         checkout, or a worktree already named by the human or another conversation), leave \
+         it and go on. You may rename it once more, early on, when what you learn (what a PR, \
+         issue or link is actually about) shows the first name was off. After that, never \
+         rename it, and do not rename it in a resumed conversation; if the human asks you to, \
+         tell them to rename it in the Veld window instead of retrying. To show the human a file (markdown, CSV, code) or a web page next to this \
          terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
          not for every file you touch. Veld can also hand work to the human as a new \
@@ -1401,7 +1403,7 @@ pub fn naming_line(cli: &str) -> String {
     format!(
         "Veld: name this worktree now, before anything else — run `{cli} ide worktree name \
          \"<2-4 words>\"` (at most 18 columns) saying what was asked. Rename it again only if \
-         what you learn next shows the name was off, and never after that unless asked."
+         what you learn next shows the name was off, and never after that."
     )
 }
 
