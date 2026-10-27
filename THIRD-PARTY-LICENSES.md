@@ -660,7 +660,7 @@ Used by [deranged 0.5.8](https://github.com/jhpratt/deranged).
 
 ## Apache License 2.0
 
-Used by [cmov 0.5.4](https://github.com/RustCrypto/utils), [ctutils 0.4.2](https://github.com/RustCrypto/utils), [flagset 0.4.7](https://github.com/enarx/flagset), [identity-hash 0.1.0](https://github.com/offsetting/identity-hash), [iri-string 0.7.10](https://github.com/lo48576/iri-string), [lru-slab 0.1.2](https://github.com/Ralith/lru-slab), [petname 2.0.2](https://github.com/allenap/rust-petname), [serdect 0.4.3](https://github.com/RustCrypto/formats), [tinyvec 1.10.0](https://github.com/Lokathor/tinyvec), [utf8_iter 1.0.4](https://github.com/hsivonen/utf8_iter), [zeroize 1.9.0](https://github.com/RustCrypto/utils), [zeroize_derive 1.5.0](https://github.com/RustCrypto/utils).
+Used by [cmov 0.5.4](https://github.com/RustCrypto/utils), [ctutils 0.4.6](https://github.com/RustCrypto/utils), [flagset 0.4.7](https://github.com/enarx/flagset), [identity-hash 0.1.0](https://github.com/offsetting/identity-hash), [iri-string 0.7.10](https://github.com/lo48576/iri-string), [lru-slab 0.1.2](https://github.com/Ralith/lru-slab), [petname 2.0.2](https://github.com/allenap/rust-petname), [serdect 0.4.3](https://github.com/RustCrypto/formats), [tinyvec 1.10.0](https://github.com/Lokathor/tinyvec), [utf8_iter 1.0.4](https://github.com/hsivonen/utf8_iter), [zeroize 1.9.0](https://github.com/RustCrypto/utils), [zeroize_derive 1.5.0](https://github.com/RustCrypto/utils).
 
 ```
 
