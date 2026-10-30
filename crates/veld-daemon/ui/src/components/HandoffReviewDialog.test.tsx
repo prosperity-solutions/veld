@@ -89,17 +89,17 @@ describe("HandoffReviewDialog", () => {
     expect((menu as HTMLButtonElement).disabled).toBe(true);
   });
 
-  test("the footer runs destructive, then Not now, then Start", () => {
+  test("the footer runs Start, then Not now, then the destructive action", () => {
     open({ others: [{ id: "codex", label: "Codex" }] });
     const names = screen
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent)
       .filter((n) => n !== null && /trash|Not now|Start/.test(n));
     expect(names).toEqual([
-      "Move to trash",
-      "Not now",
       "Start Claude",
       "Start with another agent",
+      "Not now",
+      "Move to trash",
     ]);
   });
 
