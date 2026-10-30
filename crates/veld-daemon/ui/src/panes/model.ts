@@ -1733,6 +1733,32 @@ export function handoffAgent<P extends Parameters<typeof paneTakesPrompt>[0] & {
 }
 
 /**
+ * The agents a hand-off's review offers in Start's menu: every other pane of
+ * the checkout that can take a prompt, in the project's order. Not
+ * [`handoffAgent`]'s pick, which is Start itself.
+ */
+export function handoffAlternatives<
+  P extends Parameters<typeof paneTakesPrompt>[0] & { id: string },
+>(panes: readonly P[], chosen: { id: string }): P[] {
+  return panes.filter((p) => p.id !== chosen.id && paneTakesPrompt(p));
+}
+
+/**
+ * The agent a reviewed hand-off starts, and whether to remember it as this
+ * project's usual one. A pick from Start's menu is the user choosing an agent,
+ * the same choice the New worktree dialog remembers. Start itself is not: its
+ * agent may be the hand-off's own choice rather than the user's.
+ */
+export function handoffReviewStart<S extends { id: string }>(
+  face: S,
+  others: readonly S[],
+  other: string | undefined,
+): { spec: S; remember: boolean } {
+  const picked = others.find((p) => p.id === other);
+  return picked ? { spec: picked, remember: true } : { spec: face, remember: false };
+}
+
+/**
  * The tab for a handed-off worktree's agent pane, under the session id the
  * daemon recorded for it.
  *

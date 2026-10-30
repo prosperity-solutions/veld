@@ -245,7 +245,9 @@ import {
   closeTab,
   configPaneTab,
   handoffAgent,
+  handoffAlternatives,
   handoffPaneTab,
+  handoffReviewStart,
   defaultLayout,
   diagTab,
   dockOf,
@@ -255,6 +257,7 @@ import {
   findBrowserTab,
   findFileTab,
   focusDock,
+  findTab,
   hasTab,
   openBrowserTab,
   openFileTab,
@@ -1007,6 +1010,10 @@ type DialogState =
       worktree: string;
       sessionId: string;
       spec: PaneSpec;
+      /** The checkout's other agent panes, which the review offers instead. */
+      others: PaneSpec[];
+      /** Where a pick from `others` is remembered (`rememberLastAgent`). */
+      repoRoot: string;
       prompt: string;
       substitutedFor?: string;
     }
@@ -4130,7 +4137,7 @@ function AppInner(props: {
           // way there is nothing to start, and a later show will look again.
         }
         if (cancelled) return;
-        const spec =
+        const resolved =
           prompt === null
             ? null
             : handoffAgent(
@@ -4138,7 +4145,7 @@ function AppInner(props: {
                 handed.handoff.pane,
                 recallLastAgent(window.localStorage, handed.repo_root),
               );
-        if (prompt !== null && spec === null) {
+        if (prompt !== null && resolved === null) {
           // Given up on only when the checkout declares no agent pane at all —
           // then nothing could ever start it, and keeping it would repeat this
           // toast on every show. One that is merely unavailable right now (a
@@ -4157,13 +4164,21 @@ function AppInner(props: {
             ),
           );
           if (!declaresAgent) void api.deleteWorktreeHandoff(id).catch(() => {});
-        } else if (prompt !== null && spec !== null) {
-          const wanted = handed.handoff.pane;
-          const substituted = wanted !== "" && spec.id !== wanted;
+        } else if (prompt !== null && resolved !== null) {
           const sessionId = handed.handoff.session_id;
           // Already in the layout means it was already approved here — a reload
-          // between Start and the agent spawning — so it is not asked again.
-          const approved = hasTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
+          // between Start and the agent spawning — so it is not asked again, and
+          // the agent is the one that tab names: the review's menu can have
+          // picked another than the one resolved above.
+          const approvedTab = findTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
+          const approved = approvedTab !== null;
+          const spec =
+            handed.ide.panes.find((p) => approvedTab !== null && p.id === approvedTab.spec) ??
+            resolved;
+          const wanted = handed.handoff.pane;
+          // Against `resolved`, not `spec`: an approved tab naming another agent
+          // was picked from the review's menu, not substituted for a missing one.
+          const substituted = wanted !== "" && resolved.id !== wanted && spec === resolved;
           if (!approved && worktreeReviewHandoffs(settingsRef.current ?? {})) {
             // Held for review instead of started. Never over another dialog:
             // the next open of this worktree asks again.
@@ -4173,6 +4188,8 @@ function AppInner(props: {
               worktree: worktreeLabel(handed),
               sessionId,
               spec,
+              others: handoffAlternatives(handed.ide.panes, spec),
+              repoRoot: handed.repo_root,
               prompt,
               substitutedFor: substituted ? wanted : undefined,
             };
@@ -8311,16 +8328,19 @@ function AppInner(props: {
           key={dialog.sessionId}
           worktree={dialog.worktree}
           agent={dialog.spec.label}
+          others={dialog.others}
           substitutedFor={dialog.substitutedFor}
           prompt={dialog.prompt}
           onClose={closeDialog}
-          onStart={(prompt, always) => {
+          onStart={(prompt, always, other) => {
             if (always) {
               saveSettingsRef
                 .current({ "worktree.reviewHandoffs": false })
                 .catch((e) => notifyError("Could not save the setting", e));
             }
-            const { worktreeId, spec, sessionId } = dialog;
+            const { worktreeId, sessionId } = dialog;
+            const { spec, remember } = handoffReviewStart(dialog.spec, dialog.others, other);
+            if (remember) rememberLastAgent(window.localStorage, dialog.repoRoot, spec.id);
             const start = () => startHandoffRef.current(worktreeId, spec, sessionId, prompt);
             closeDialog();
             // An edit is stored first, so a window that reloads before the agent

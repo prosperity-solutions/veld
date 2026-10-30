@@ -41,6 +41,8 @@ import {
   takePendingAdopt,
   paneTakesPrompt,
   handoffAgent,
+  handoffAlternatives,
+  handoffReviewStart,
   handoffPaneTab,
   type PromptStep,
   promptStep,
@@ -2524,6 +2526,44 @@ describe("handoffAgent", () => {
   it("never picks a pane that cannot take a prompt, by name or by memory", () => {
     expect(handoffAgent(panes, "shell", "shell")?.id).toBe("claude");
     expect(handoffAgent([pane("claude", { available: false })], "claude", "")).toBeNull();
+  });
+});
+
+describe("handoffAlternatives", () => {
+  const pane = (id: string, over: { agent?: boolean; available?: boolean } = {}) => ({
+    id,
+    kind: "terminal",
+    available: over.available ?? true,
+    agent: over.agent,
+    can_resume: true,
+  });
+
+  it("offers every other agent that can start, in the project's order", () => {
+    const panes = [
+      pane("shell", { agent: false }),
+      pane("opus"),
+      pane("fable"),
+      pane("codex", { available: false }),
+      pane("sonnet"),
+    ];
+    expect(handoffAlternatives(panes, { id: "fable" }).map((p) => p.id)).toEqual(["opus", "sonnet"]);
+  });
+});
+
+describe("handoffReviewStart", () => {
+  const face = { id: "fable" };
+  const others = [{ id: "opus" }, { id: "sonnet" }];
+
+  it("starts the menu's pick and remembers it", () => {
+    expect(handoffReviewStart(face, others, "sonnet")).toEqual({ spec: others[1], remember: true });
+  });
+
+  it("starts Start's own agent without remembering it", () => {
+    expect(handoffReviewStart(face, others, undefined)).toEqual({ spec: face, remember: false });
+  });
+
+  it("falls back to Start's agent for an id the menu did not offer", () => {
+    expect(handoffReviewStart(face, others, "codex")).toEqual({ spec: face, remember: false });
   });
 });
 
