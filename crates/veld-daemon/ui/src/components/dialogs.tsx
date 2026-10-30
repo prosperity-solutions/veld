@@ -20,6 +20,7 @@ import {
   FileButton,
   Group,
   Loader,
+  Menu,
   Modal as MantineModal,
   Radio,
   ScrollArea,
@@ -69,7 +70,7 @@ import {
   worktreeLabel,
 } from "../shared/worktreeName";
 import { randomMarker } from "../shared/markerPick";
-import { IconPaperclip, IconShirt, IconX } from "@tabler/icons-react";
+import { IconChevronDown, IconPaperclip, IconShirt, IconX } from "@tabler/icons-react";
 import {
   initialOutfitChoice,
   outfitForCreate,
@@ -3169,21 +3170,30 @@ export function UpdateMainDirtyDialog(props: {
  * `worktree.reviewHandoffs` is on.
  *
  * The prompt is editable, because the most likely reason to stop here is that it
- * is nearly right. **Not now** leaves the hand-off waiting (clicking the row
- * again asks again); **Discard** moves the worktree to the trash with its prompt,
- * so restoring it brings the review back. The checkbox turns
- * the review off for every later hand-off — the "I trust my agents" answer —
- * and is applied only together with **Start**, so ticking it cannot by itself
- * do anything to this one.
+ * is nearly right. **Start** is a split button: its face starts the agent the
+ * hand-off resolved to, and its menu offers the checkout's other agent panes —
+ * the other models — for when the prompt is right but the agent is not.
+ * **Not now** leaves the hand-off waiting (clicking the row again asks again);
+ * **Move to trash** moves the worktree to the trash with its prompt, so
+ * restoring it brings the review back. The checkbox turns the review off for
+ * every later hand-off — the "I trust my agents" answer — and is applied only
+ * together with a start, so ticking it cannot by itself do anything to this one.
+ *
+ * The footer reads right to left by weight: Start and Not now together on the
+ * right, the destructive action alone on the left, away from where the pointer
+ * goes to say yes.
  */
 export function HandoffReviewDialog(props: {
   worktree: string;
   /** The label of the agent pane that will start. */
   agent: string;
+  /** The checkout's other agent panes, offered in Start's menu. */
+  others?: readonly { id: string; label: string }[];
   /** Set when the hand-off asked for a pane this checkout cannot start. */
   substitutedFor?: string;
   prompt: string;
-  onStart: (prompt: string, always: boolean) => void;
+  /** `other` is the id of a pane picked from Start's menu, unset for Start itself. */
+  onStart: (prompt: string, always: boolean, other?: string) => void;
   onDiscard: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -3191,12 +3201,13 @@ export function HandoffReviewDialog(props: {
   const [always, setAlways] = useState(false);
   const discard = useSubmit(props.onDiscard);
   const empty = text.trim() === "";
+  const others = props.others ?? [];
   return (
     <Modal title={`Start ${props.agent} in ${props.worktree}?`} onClose={props.onClose} size="lg">
       <Stack gap="sm">
         <Text size="sm" c="dimmed">
           An agent handed this worktree to you with the prompt below. Starting sends it
-          to {props.agent} as written here — edit it first if it is not quite right.
+          as written here — edit it first if it is not quite right.
         </Text>
         {props.substitutedFor !== undefined && (
           <Alert color="yellow" variant="light" p="xs">
@@ -3222,14 +3233,6 @@ export function HandoffReviewDialog(props: {
           description="Turns this review off for every later hand-off. You can turn it back on in Settings › Git."
         />
         <Group justify="space-between">
-          <Group gap="xs">
-            <Button disabled={empty} onClick={() => props.onStart(text, always)}>
-              Start {props.agent}
-            </Button>
-            <Button variant="default" onClick={props.onClose}>
-              Not now
-            </Button>
-          </Group>
           <Tooltip
             label="Moves the worktree to the trash, prompt included — restore it to get the prompt back."
             multiline
@@ -3247,6 +3250,43 @@ export function HandoffReviewDialog(props: {
               Move to trash
             </Button>
           </Tooltip>
+          <Group gap="xs">
+            <Button variant="default" onClick={props.onClose}>
+              Not now
+            </Button>
+            {/* The two halves join only as direct children of the group — its
+                CSS squares the inner corners by :first-child/:last-child.
+                Menu.Target adds no element; a Box or Tooltip wrapper would
+                round them again. */}
+            <Button.Group>
+              <Button disabled={empty} onClick={() => props.onStart(text, always)}>
+                Start {props.agent}
+              </Button>
+              {others.length > 0 && (
+                <Menu position="bottom-end" withinPortal>
+                  <Menu.Target>
+                    <Button
+                      disabled={empty}
+                      px={8}
+                      aria-label="Start with another agent"
+                      // The seam between the two halves; a filled button's own
+                      // border is its fill colour, so the group alone shows none.
+                      style={{ borderInlineStart: "1px solid var(--mantine-color-body)" }}
+                    >
+                      <IconChevronDown size={16} />
+                    </Button>
+                  </Menu.Target>
+                  <Menu.Dropdown>
+                    {others.map((o) => (
+                      <Menu.Item key={o.id} onClick={() => props.onStart(text, always, o.id)}>
+                        Start {o.label}
+                      </Menu.Item>
+                    ))}
+                  </Menu.Dropdown>
+                </Menu>
+              )}
+            </Button.Group>
+          </Group>
         </Group>
         <ErrorText error={discard.error} />
       </Stack>

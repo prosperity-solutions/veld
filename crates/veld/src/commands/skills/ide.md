@@ -240,8 +240,9 @@ which files, how to tell it is done.
   long or structured one belongs in a file; the limit is 64 KiB. Without a prompt
   you get a plain worktree, filed with the user's other new worktrees, and no
   agent.
-- By default the human sees your prompt before anything runs, and can edit,
-  start, or move it to the trash; if they have turned that review off
+- By default the human sees your prompt before anything runs, and can edit it,
+  start it — in the agent you named or in another agent pane of the project —
+  or move it to the trash; if they have turned that review off
   (`worktree.reviewHandoffs`), it is sent **as you wrote it** the moment they
   open the worktree. Write it for both: an instruction a person can judge at a
   glance, and one that is safe to run unread.
@@ -254,7 +255,9 @@ which files, how to tell it is done.
   human's usual agent for this project starts. An agent this project does not
   declare is refused before anything is created (exit `5`); if the new checkout
   turns out not to declare it (a branch cut from `origin` without it), the
-  human's usual agent starts instead and they are told.
+  human's usual agent starts instead and they are told. It is the default, not a
+  guarantee: the review can start the prompt in another agent, so keep the
+  prompt free of one agent's slash commands unless it only makes sense there.
 - `--outfit` names the outfit profile the new worktree wears — see the next
   section. In a project with outfit profiles it is usually **required**; without
   outfit it does nothing and you can leave it out.

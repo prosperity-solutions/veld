@@ -168,8 +168,9 @@ requests at runtime — branding rule.
   reload or crash between the two leaves it for the next window, and the tab
   already in the layout is the same tab, not a second one. With
   `worktree.reviewHandoffs` on (the default) the seed effect opens a
-  `handoff-review` dialog instead of seeding, and **Start** seeds through the
-  same `startHandoff`, after storing an edited prompt (`PUT …/handoff`) so a
+  `handoff-review` dialog instead of seeding, and **Start** (or another agent
+  pane from its split-button menu, remembered through `rememberLastAgent` as
+  the project's usual agent) seeds through the same `startHandoff`, after storing an edited prompt (`PUT …/handoff`) so a
   reload before the spawn sends the edit; a tab already in the layout under that
   session id means it was approved before a reload, so it is not asked again.
   The review never opens over another dialog — reopening the worktree asks, and

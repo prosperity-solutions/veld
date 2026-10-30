@@ -62,6 +62,47 @@ describe("HandoffReviewDialog", () => {
     expect(p.onStart).not.toHaveBeenCalled();
   });
 
+  test("Start's menu starts another agent with the same prompt", async () => {
+    const p = open({ others: [{ id: "codex", label: "Codex" }] });
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "Fix it" } });
+    fireEvent.click(screen.getByRole("button", { name: "Start with another agent" }));
+    fireEvent.click(await screen.findByRole("menuitem", { name: "Start Codex" }));
+    expect(p.onStart).toHaveBeenCalledWith("Fix it", false, "codex");
+  });
+
+  test("Start and its menu are one button group, not two buttons", () => {
+    open({ others: [{ id: "codex", label: "Codex" }] });
+    const start = screen.getByRole("button", { name: "Start Claude" });
+    const menu = screen.getByRole("button", { name: "Start with another agent" });
+    expect(menu.parentElement).toBe(start.parentElement);
+  });
+
+  test("no menu when the checkout has no other agent", () => {
+    open();
+    expect(screen.queryByRole("button", { name: "Start with another agent" })).toBeNull();
+  });
+
+  test("an emptied prompt cannot be started from the menu either", () => {
+    open({ others: [{ id: "codex", label: "Codex" }] });
+    fireEvent.change(screen.getByLabelText("Prompt"), { target: { value: "" } });
+    const menu = screen.getByRole("button", { name: "Start with another agent" });
+    expect((menu as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  test("the footer runs destructive, then Not now, then Start", () => {
+    open({ others: [{ id: "codex", label: "Codex" }] });
+    const names = screen
+      .getAllByRole("button")
+      .map((b) => b.getAttribute("aria-label") ?? b.textContent)
+      .filter((n) => n !== null && /trash|Not now|Start/.test(n));
+    expect(names).toEqual([
+      "Move to trash",
+      "Not now",
+      "Start Claude",
+      "Start with another agent",
+    ]);
+  });
+
   test("says when another agent stands in for the one asked for", () => {
     open({ substitutedFor: "codex" });
     expect(screen.getAllByText(/asked for the "codex" pane/).length).toBe(1);
