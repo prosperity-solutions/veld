@@ -557,6 +557,9 @@ export function BrowserPane(props: {
   const [suggesting, setSuggesting] = useState(false);
 
   const external = state.url || tab.url || "";
+  const externalLabel = new URLSearchParams(window.location.search).get("remote") === "1"
+    ? "Open preview window"
+    : "Open in system browser";
   const canStop = state.loading && !iframeBackend;
 
   const opening = covered && !failure && !nested && !chooser;
@@ -2483,12 +2486,12 @@ export function BrowserPane(props: {
           </ActionIcon>
         </Tooltip>
 
-        <Tooltip {...TIP} label="Open in your system browser">
+        <Tooltip {...TIP} label={externalLabel}>
           <ActionIcon
             size="sm"
             variant="subtle"
             color="gray"
-            aria-label="Open in the system browser"
+            aria-label={externalLabel}
             disabled={external === ""}
             onClick={() => window.open(external, "_blank", "noreferrer")}
           >
@@ -2947,7 +2950,7 @@ export function BrowserPane(props: {
                   className="btn big"
                   onClick={() => window.open(external, "_blank", "noreferrer")}
                 >
-                  <IconExternalLink size={15} /> Open in system browser
+                  <IconExternalLink size={15} /> {externalLabel}
                 </button>
               )}
               {/* The escape hatch stays, because the guard cannot be certain: a dev
@@ -2980,7 +2983,7 @@ export function BrowserPane(props: {
                   className="btn big"
                   onClick={() => window.open(external, "_blank", "noreferrer")}
                 >
-                  <IconExternalLink size={15} /> Open in system browser
+                  <IconExternalLink size={15} /> {externalLabel}
                 </button>
               )}
             </div>

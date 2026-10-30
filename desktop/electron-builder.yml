@@ -23,6 +23,7 @@ directories:
 # business inside the bundle. Production `dependencies` are added implicitly.
 files:
   - src/**/*.js
+  - src/remoteChooser.html
   - "!src/**/*.test.js"
   - assets/**
   - package.json

@@ -18,6 +18,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 
 ## Features
 
+- **Paired remote runners (trial)** — connect a Desktop window to a headless Veld host over Tailscale, with explicit pairing, retained jobs, and host account/model selection. See the [trial guide](docs/remote-runner.md) for setup and current limits.
 - **No port numbers** — work with stable HTTPS URLs instead of `localhost:3847`
 - **Dependency graph** — resolves node dependencies, parallelizes startup, reverse-order teardown
 - **TLS by default** — Caddy's internal CA handles TLS termination, auto-trusted during setup

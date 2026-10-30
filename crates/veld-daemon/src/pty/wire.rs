@@ -114,11 +114,53 @@ pub const QUERY_BUSY: u8 = 0x84;
 /// same reason [`QUERY_BUSY`] is gated: an older holder drops the connection on
 /// a daemon-numbered frame it does not know ([`Frame::is_ignorable`]).
 pub const REDRAW: u8 = 0x85;
+/// Input carrying its browser epoch as a big-endian u64 before the bytes.
+/// Send only when `Hello::supports_input_epoch` is true.
+pub const INPUT_EPOCH: u8 = 0x86;
+/// Reset input over the holder's independent control socket; payload is InputEpoch.
+pub const RESET_INPUT: u8 = 0x87;
+/// Acknowledges cancellation at the final PTY writer, without ending the job.
+pub const INPUT_RESET: u8 = 0x06;
+
+/// Connection and browser generations ordered together. Revoke permanently
+/// fences the holder; a later browser attach cannot undo a revoked authority.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct InputEpoch {
+    pub connection: u64,
+    pub browser: u64,
+}
+
+impl InputEpoch {
+    pub const REVOKED: Self = Self {
+        connection: u64::MAX,
+        browser: u64::MAX,
+    };
+    pub fn encode(self) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&self.connection.to_be_bytes());
+        bytes[8..].copy_from_slice(&self.browser.to_be_bytes());
+        bytes
+    }
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != 16 {
+            return None;
+        }
+        Some(Self {
+            connection: u64::from_be_bytes(bytes.get(..8)?.try_into().ok()?),
+            browser: u64::from_be_bytes(bytes.get(8..16)?.try_into().ok()?),
+        })
+    }
+}
+
+/// A separate socket keeps a reset reachable while the data socket is full.
+pub fn input_control_socket(socket: &std::path::Path) -> PathBuf {
+    socket.with_extension("input")
+}
 
 /// Cap on one frame's payload, matching the WebSocket frame cap the daemon
 /// applies on the other side of the bridge. The largest legitimate frame is a
 /// full scrollback snapshot, which is a quarter of this.
-pub const MAX_PAYLOAD: usize = 1024 * 1024;
+pub const MAX_PAYLOAD: usize = 1024 * 1024 + 8;
 
 /// A decoded frame. The payload is raw bytes; interpreting it is the caller's
 /// job, keyed on `kind`.
@@ -189,6 +231,12 @@ pub struct Hello {
     /// it did before this existed.
     #[serde(default)]
     pub supports_redraw: bool,
+    /// Supports epoch-tagged input and an independent acknowledged reset socket.
+    #[serde(default)]
+    pub supports_input_epoch: bool,
+    /// This daemon connection's generation, used to reject displaced input.
+    #[serde(default)]
+    pub connection_generation: u64,
     /// `Some(code)` if the shell has already exited.
     pub exited: Option<u32>,
     /// Seconds since a daemon was last connected, or `None` if one is attached

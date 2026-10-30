@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  api,
   errorMessage,
   normalizeShare,
   normalizeShares,
@@ -9,6 +10,75 @@ import {
   type ShareInfo,
   type SharesList,
 } from "./api";
+
+describe("run mutation receipts", () => {
+  it("exposes an ambiguous start before selection changes can create a new run", async () => {
+    const saved = new Map<string, string>();
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockRejectedValueOnce(new TypeError("connection lost"))
+      .mockResolvedValueOnce(new Response('{"action_id":"original-start"}', { status: 202 }));
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => saved.get(key) ?? null,
+      setItem: (key: string, value: string) => { saved.set(key, value); },
+      removeItem: (key: string) => { saved.delete(key); },
+    });
+    try {
+      const original = { preset: "dev", run_name: "dev" };
+      await expect(api.startRun(42, original)).rejects.toThrow("outcome is unknown");
+      const pinned = api.pendingRunStart(42);
+      expect(pinned).toEqual(original);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(api.pendingRunStart(43)).toBeNull();
+      // Even a stale caller proposing the next name must recover the original.
+      await api.startRun(42, { preset: "changed", run_name: "dev-2" });
+      expect(JSON.parse(fetch.mock.calls[1][1]?.body as string)).toEqual(original);
+      expect(new Headers(fetch.mock.calls[1][1]?.headers).get("Idempotency-Key"))
+        .toBe(new Headers(fetch.mock.calls[0][1]?.headers).get("Idempotency-Key"));
+      expect(api.pendingRunStart(42)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keys all UI run mutations while preserving void callbacks", async () => {
+    const pending = new Map<string, string>();
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async () =>
+      new Response('{"action_id":"operation-one"}', { status: 202 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => pending.get(key) ?? null,
+      setItem: (key: string, value: string) => { pending.set(key, value); },
+      removeItem: (key: string) => { pending.delete(key); },
+    });
+    try {
+      const run = runRef("/repo", { name: "dev" });
+      expect(await api.startRun(42, { preset: "dev", run_name: "dev" })).toBeUndefined();
+      expect(await api.stopRun(run)).toBeUndefined();
+      expect(await api.restartRun(run)).toBeUndefined();
+      expect(await api.runAction(run, "build", "web")).toBeUndefined();
+      const keys = fetch.mock.calls.map(([, init]) => {
+        const headers = new Headers(init?.headers);
+        expect(init?.method).toBe("POST");
+        expect(headers.get("X-Veld-Request")).toBe("1");
+        expect(headers.has("X-Veld-Remote-Client")).toBe(false);
+        expect(headers.get("Idempotency-Key")).toMatch(/^[0-9a-f-]{36}$/);
+        return headers.get("Idempotency-Key");
+      });
+      expect(new Set(keys).size).toBe(4);
+      expect(fetch.mock.calls.map(([path]) => path)).toEqual([
+        "/api/worktrees/42/start",
+        "/api/environments/dev/stop?project_root=%2Frepo",
+        "/api/environments/dev/restart?project_root=%2Frepo",
+        "/api/environments/dev/action?project_root=%2Frepo",
+      ]);
+      expect(pending.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
 
 describe("run addressing", () => {
   // The client half of the fix: a run name alone is not an address, so every

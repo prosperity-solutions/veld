@@ -47,6 +47,13 @@ pub(crate) struct Cli {
 /// part that owns what it acts on — see `docs/ship.md` → *Adding a command*.
 #[derive(Subcommand)]
 enum Command {
+    /// Headless Veld instances: installation, pairing and client access.
+    Runner {
+        #[arg(long, global = true, default_value = "remote")]
+        name: String,
+        #[command(subcommand)]
+        command: parts::runner::RunnerCmd,
+    },
     /// The run graph: start, stop and watch environments; read their config.
     #[command(visible_alias = "orc")]
     Orchestrator {
@@ -464,6 +471,7 @@ async fn run(command: Command) {
         Command::Ide { command } => parts::ide::run(command).await,
         Command::Agent { command } => parts::agent::run(command).await,
         Command::Network { command } => parts::network::run(command).await,
+        Command::Runner { name, command } => parts::runner::run(name, command).await,
         Command::Myself { command } => parts::self_::run(command).await,
 
         // Normally answered in `main`, before any runtime exists; kept so the match
@@ -563,6 +571,7 @@ async fn run(command: Command) {
 /// - The legacy names answer exactly as their new spellings do.
 fn command_survives_an_update(command: &Command) -> bool {
     match command {
+        Command::Runner { .. } => false,
         Command::Orchestrator { command } => parts::orchestrator::survives_an_update(command),
         Command::Myself { command } => parts::self_::survives_an_update(command),
         Command::Agent { command } => parts::agent::survives_an_update(command),

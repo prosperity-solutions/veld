@@ -26,7 +26,10 @@ use axum::routing::{get, post};
 use serde::Deserialize;
 use tracing::{info, warn};
 use veld_core::db::Db;
-use veld_core::db::engine_actions::{STATUS_FAILED, STATUS_LOST, STATUS_RUNNING};
+use veld_core::db::engine_actions::{
+    EngineActionKey, EngineActionReservation, EngineActionRow, STATUS_FAILED, STATUS_LOST,
+    STATUS_RUNNING,
+};
 use veld_engine::api::{
     ActionOutcome, ActionRequest, ActionSecrets, EngineEvent, FailureKind, PreflightRequest,
     ResolveActionRequest, SaveVarAnswers, SubmitAction, Submitted,
@@ -68,6 +71,120 @@ pub(crate) async fn spawn_action(
     request: ActionRequest,
     secrets: ActionSecrets,
 ) -> Result<String, ApiError> {
+    spawn_action_with_key(request, secrets, None).await
+}
+
+/// Submit once per authenticated client/key and public request. Secrets are
+/// delivered only on the first spawn and never participate in retry comparison.
+/// A reserved action without a worker remains pending until the supervisor marks
+/// it lost; a retry must never guess whether the original worker executed.
+pub(crate) async fn spawn_action_with_key(
+    request: ActionRequest,
+    secrets: ActionSecrets,
+    key: Option<EngineActionKey>,
+) -> Result<String, ApiError> {
+    spawn_action_bound(request, secrets, key, None).await
+}
+
+/// The public UI intent, before presets and worktree aliases are resolved.
+/// Only route handlers with public, typed payloads may construct this binding.
+pub(crate) struct UiSubmission {
+    key: Option<EngineActionKey>,
+    binding: serde_json::Value,
+}
+
+impl UiSubmission {
+    pub(crate) fn new(
+        headers: &HeaderMap,
+        route: &str,
+        payload: impl serde::Serialize,
+    ) -> Result<Self, ApiError> {
+        let payload = serde_json::to_value(payload)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Self {
+            key: action_key(headers)?,
+            binding: serde_json::json!({ "route": route, "payload": payload }),
+        })
+    }
+
+    /// Replay before consulting mutable config, registry entries, or live runs.
+    pub(crate) async fn replay(&self) -> Result<Option<String>, ApiError> {
+        match self.key {
+            Some(key) => existing_submission(&key.action_id(), "", Some(&self.binding)).await,
+            None => Ok(None),
+        }
+    }
+}
+
+async fn existing_submission(
+    id: &str,
+    request_json: &str,
+    binding: Option<&serde_json::Value>,
+) -> Result<Option<String>, ApiError> {
+    let Some(existing) = stored_action(id).await? else {
+        return Ok(None);
+    };
+    let same = match binding {
+        Some(binding) => {
+            let stored: serde_json::Value = serde_json::from_str(&existing.request_json)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            stored.get("ui_submission") == Some(binding)
+        }
+        None => existing.request_json == request_json,
+    };
+    if same {
+        Ok(Some(existing.id))
+    } else {
+        Err(key_conflict())
+    }
+}
+
+pub(crate) async fn spawn_ui_action(
+    project_root: &Path,
+    kind: veld_engine::api::ActionKind,
+    submission: UiSubmission,
+) -> Result<String, ApiError> {
+    spawn_action_bound(
+        ActionRequest {
+            project_root: project_root.to_owned(),
+            kind,
+            debug: false,
+        },
+        ActionSecrets::default(),
+        submission.key,
+        Some(submission.binding),
+    )
+    .await
+}
+
+/// A successful submit always returns a receipt, including legacy UI routes.
+pub(crate) fn submitted(id: String) -> (StatusCode, Json<Submitted>) {
+    (StatusCode::ACCEPTED, Json(Submitted { action_id: id }))
+}
+
+async fn spawn_action_bound(
+    request: ActionRequest,
+    secrets: ActionSecrets,
+    key: Option<EngineActionKey>,
+    binding: Option<serde_json::Value>,
+) -> Result<String, ApiError> {
+    let id = key.map_or_else(|| uuid::Uuid::new_v4().to_string(), |key| key.action_id());
+    let request_json = if let Some(binding) = &binding {
+        let mut stored = serde_json::to_value(&request)
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        stored["ui_submission"] = binding.clone();
+        serde_json::to_string(&stored)
+    } else {
+        serde_json::to_string(&request)
+    }
+    .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    // Recover an existing submission even during an update, without resolving
+    // a shell PATH or requiring the worker's transient secrets again.
+    if key.is_some()
+        && let Some(existing) = existing_submission(&id, &request_json, binding.as_ref()).await?
+    {
+        return Ok(existing);
+    }
     if veld_core::update_lock::current().is_some() {
         warn!(
             kind = request.kind.label(),
@@ -78,7 +195,6 @@ pub(crate) async fn spawn_action(
             "a Veld update is in progress — try again when it finishes",
         ));
     }
-    let id = uuid::Uuid::new_v4().to_string();
     let project_root = request.project_root.clone();
     // Resolved **before** the row exists: a cold directory resolves a login
     // shell inline (seconds, on a slow rc file), and the supervisor's lock grace
@@ -90,18 +206,35 @@ pub(crate) async fn spawn_action(
     // it declares in veld.json, which is the same whoever started the run.
     let path_env = veld_core::user_path::cached_user_path_for(&project_root).await;
 
-    let request_json = serde_json::to_string(&request)
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    {
+    let reservation = {
         let id = id.clone();
         let root = project_root.to_string_lossy().into_owned();
         let run = request.kind.run().unwrap_or_default().to_owned();
         let kind = request.kind.label();
+        let request_json = request_json.clone();
         crate::offload::blocking(move || {
-            Db::open().and_then(|db| db.insert_engine_action(&id, &root, &run, kind, &request_json))
+            let db = Db::open()?;
+            match key {
+                Some(key) => db.reserve_engine_action(key, &root, &run, kind, &request_json),
+                None => {
+                    db.insert_engine_action(&id, &root, &run, kind, &request_json)?;
+                    Ok(EngineActionReservation::Reserved)
+                }
+            }
         })
         .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+    };
+    match reservation {
+        EngineActionReservation::Existing => return Ok(id),
+        EngineActionReservation::Conflict => {
+            // Concurrent preflights can resolve the same UI intent differently
+            // after a config edit. Only the reservation winner gets to execute.
+            return existing_submission(&id, &request_json, binding.as_ref())
+                .await?
+                .ok_or_else(key_conflict);
+        }
+        EngineActionReservation::Reserved => {}
     }
 
     let input = WorkerInput {
@@ -128,6 +261,20 @@ pub(crate) async fn spawn_action(
             ))
         }
     }
+}
+
+fn key_conflict() -> ApiError {
+    err(
+        StatusCode::CONFLICT,
+        "this Idempotency-Key already belongs to a different engine request",
+    )
+}
+
+async fn stored_action(id: &str) -> Result<Option<EngineActionRow>, ApiError> {
+    let id = id.to_owned();
+    crate::offload::blocking(move || Db::open().and_then(|db| db.engine_action(&id)))
+        .await
+        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
 #[cfg(not(test))]
@@ -166,9 +313,16 @@ async fn spawn_worker(
 /// Tests never spawn a worker: the action stays `running` with no lock, which is
 /// exactly the state the sweep's tests need.
 #[cfg(test)]
-async fn spawn_worker(_: &Path, _: &str, _: &WorkerInput) -> std::io::Result<u32> {
+async fn spawn_worker(_: &Path, _: &str, input: &WorkerInput) -> std::io::Result<u32> {
+    SPAWNED_ACTIONS
+        .lock()
+        .unwrap()
+        .push(input.action_id.clone());
     Ok(0)
 }
+
+#[cfg(test)]
+static SPAWNED_ACTIONS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// Write a final event and status for an action the worker did not finish.
 async fn record_end(id: &str, status: &'static str, outcome: &ActionOutcome) {
@@ -244,6 +398,7 @@ pub(crate) async fn start_unattended(
     selections: Vec<String>,
     preset: Option<String>,
     name: Option<String>,
+    submission: UiSubmission,
 ) -> Result<String, ApiError> {
     use veld_engine::api::{PreflightPlan, PreflightResponse};
     let req = PreflightRequest {
@@ -282,7 +437,7 @@ pub(crate) async fn start_unattended(
             ),
         ));
     }
-    spawn_daemon_action(project_root, ready.action).await
+    spawn_ui_action(project_root, ready.action, submission).await
 }
 
 /// How long an in-flight action keeps the monitor's recovery and GC's stale
@@ -366,8 +521,9 @@ async fn sweep_lost_with(grace_secs: i64) {
             &row.id,
             STATUS_LOST,
             &ActionOutcome::Failed {
-                message: "The engine worker stopped before it finished. Check `veld orchestrator status` \
-                          and run the command again."
+                message: "The engine worker is unavailable. The action may not have started or may \
+                          have stopped before reporting its outcome. Check `veld orchestrator status` \
+                          before submitting a new action. Retrying the same key does not restart it."
                     .to_owned(),
                 kind: FailureKind::WorkerLost,
                 failed_node: None,
@@ -402,6 +558,7 @@ pub(crate) fn routes() -> Router {
     Router::new()
         .route("/api/engine/preflight", post(preflight))
         .route("/api/engine/actions", post(submit))
+        .route("/api/engine/actions/{id}", get(operation))
         .route("/api/engine/actions/{id}/events", get(events))
         .route("/api/engine/actions/{id}/cancel", post(cancel))
         .route("/api/engine/var-answers", post(save_var_answers))
@@ -457,8 +614,32 @@ async fn submit(headers: HeaderMap, Json(mut body): Json<SubmitAction>) -> Respo
         return code.into_response();
     }
     let r = async {
+        let key = action_key(&headers)?;
+        if let Some(key) = key
+            && let Some(existing) = stored_action(&key.action_id()).await?
+        {
+            let stored: serde_json::Value = serde_json::from_str(&existing.request_json)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            if stored.get("ui_submission").is_some() {
+                return Err(key_conflict());
+            }
+            let original: ActionRequest = serde_json::from_str(&existing.request_json)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            // An exact replay still works after the project/config disappears.
+            // Alternate path spellings must resolve to the original project.
+            if body.request.project_root != original.project_root {
+                body.request.project_root =
+                    project_root_of(&body.request.project_root).map_err(|_| key_conflict())?;
+            }
+            if body.request != original {
+                return Err(key_conflict());
+            }
+            return Ok(Submitted {
+                action_id: existing.id,
+            });
+        }
         body.request.project_root = project_root_of(&body.request.project_root)?;
-        let action_id = spawn_action(body.request, body.secrets).await?;
+        let action_id = spawn_action_with_key(body.request, body.secrets, key).await?;
         Ok(Submitted { action_id })
     }
     .await;
@@ -466,6 +647,95 @@ async fn submit(headers: HeaderMap, Json(mut body): Json<SubmitAction>) -> Respo
         Ok(s) => (StatusCode::ACCEPTED, Json(s)).into_response(),
         Err(e) => into_response::<()>(Err(e)),
     }
+}
+
+fn uuid_header(headers: &HeaderMap, name: &'static str) -> Result<Option<uuid::Uuid>, ApiError> {
+    let mut values = headers.get_all(name).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("duplicate {name} header"),
+        ));
+    }
+    let value = value
+        .to_str()
+        .ok()
+        .and_then(|value| uuid::Uuid::parse_str(value).ok())
+        .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("{name} must be a UUID")))?;
+    Ok(Some(value))
+}
+
+/// Parse retry headers after ingress replaces the remote identity with its
+/// authenticated client UUID. With neither header, keep the local behavior.
+pub(crate) fn action_key(headers: &HeaderMap) -> Result<Option<EngineActionKey>, ApiError> {
+    match (
+        uuid_header(headers, "x-veld-remote-client")?,
+        uuid_header(headers, "idempotency-key")?,
+    ) {
+        (None, None) => Ok(None),
+        // The nil namespace belongs only to local submissions. Ingress supplies
+        // a paired client's generated UUID for every remote request.
+        (None, Some(idempotency_key)) => Ok(Some(EngineActionKey {
+            client_id: uuid::Uuid::nil(),
+            idempotency_key,
+        })),
+        (Some(client_id), Some(idempotency_key)) => Ok(Some(EngineActionKey {
+            client_id,
+            idempotency_key,
+        })),
+        _ => Err(err(
+            StatusCode::BAD_REQUEST,
+            "remote engine actions require both X-Veld-Remote-Client and Idempotency-Key",
+        )),
+    }
+}
+
+fn check_action_scope(headers: &HeaderMap, id: &str) -> Result<(), ApiError> {
+    let client_id = uuid_header(headers, "x-veld-remote-client")?;
+    let allowed = match client_id {
+        Some(client_id) => EngineActionKey::belongs_to(id, client_id),
+        None => !id.starts_with("remote-") || EngineActionKey::belongs_to(id, uuid::Uuid::nil()),
+    };
+    if allowed {
+        Ok(())
+    } else {
+        Err(err(StatusCode::NOT_FOUND, "no such action"))
+    }
+}
+
+/// Public recovery receipt. A reservation without a worker PID is pending,
+/// never proof that execution started. No request, secrets, or process data leave
+/// this route. Retention follows the existing seven-day finished-action pruning.
+async fn operation(headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Response {
+    let r = async {
+        check_action_scope(&headers, &id)?;
+        let row = stored_action(&id)
+            .await?
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "no such action"))?;
+        let outcome = row
+            .outcome_json
+            .as_deref()
+            .map(serde_json::from_str::<ActionOutcome>)
+            .transpose()
+            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        let status = if row.status == STATUS_RUNNING && row.worker_pid.is_none() {
+            "pending"
+        } else {
+            &row.status
+        };
+        Ok(serde_json::json!({
+            "action_id": row.id,
+            "status": status,
+            "outcome": outcome,
+            "created_at": row.created_at,
+            "ended_at": row.ended_at,
+        }))
+    }
+    .await;
+    into_response(r)
 }
 
 #[derive(Deserialize)]
@@ -478,14 +748,17 @@ struct EventsQuery {
 ///
 /// Resumable: a face whose connection dropped (a daemon restart mid-start) asks
 /// again with `?after=<last seq>` and gets exactly what it missed.
-async fn events(UrlPath(id): UrlPath<String>, Query(q): Query<EventsQuery>) -> Response {
-    let exists = {
-        let id = id.clone();
-        crate::offload::blocking(move || Db::open().and_then(|db| db.engine_action(&id)))
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+async fn events(
+    headers: HeaderMap,
+    UrlPath(id): UrlPath<String>,
+    Query(q): Query<EventsQuery>,
+) -> Response {
+    if let Err(e) = check_action_scope(&headers, &id) {
+        return into_response::<()>(Err(e));
+    }
+    let exists = match stored_action(&id).await {
+        Ok(row) => row.is_some(),
+        Err(e) => return into_response::<()>(Err(e)),
     };
     if !exists {
         return (StatusCode::NOT_FOUND, "no such action").into_response();
@@ -558,12 +831,12 @@ async fn cancel(headers: HeaderMap, UrlPath(id): UrlPath<String>) -> Response {
     if let Err(code) = check_csrf(&headers) {
         return code.into_response();
     }
-    let row = {
-        let id = id.clone();
-        crate::offload::blocking(move || Db::open().and_then(|db| db.engine_action(&id)))
-            .await
-            .ok()
-            .flatten()
+    if let Err(e) = check_action_scope(&headers, &id) {
+        return into_response::<()>(Err(e));
+    }
+    let row = match stored_action(&id).await {
+        Ok(row) => row,
+        Err(e) => return into_response::<()>(Err(e)),
     };
     let Some(row) = row else {
         return (
@@ -683,6 +956,464 @@ mod tests {
     use super::*;
     use veld_engine::api::ActionKind;
 
+    struct ActionTestEnv {
+        dir: tempfile::TempDir,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl ActionTestEnv {
+        // The caller holds lock_db_env for this fixture's whole lifetime.
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::write(dir.path().join("veld.json"), "{}").unwrap();
+            let previous = [
+                ("VELD_DB_PATH", dir.path().join("t.db")),
+                ("VELD_ENGINE_DIR", dir.path().join("engine")),
+            ]
+            .into_iter()
+            .map(|(name, value)| {
+                let previous = std::env::var_os(name);
+                // SAFETY: the caller holds the crate-wide process-state guard.
+                unsafe { std::env::set_var(name, value) };
+                (name, previous)
+            })
+            .collect();
+            Self { dir, previous }
+        }
+    }
+
+    impl Drop for ActionTestEnv {
+        fn drop(&mut self) {
+            for (name, value) in &self.previous {
+                // SAFETY: the caller still holds the process-state guard.
+                unsafe {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+
+    fn retry_key() -> EngineActionKey {
+        EngineActionKey {
+            client_id: uuid::Uuid::new_v4(),
+            idempotency_key: uuid::Uuid::new_v4(),
+        }
+    }
+
+    fn submission(
+        project_root: &Path,
+        key: Option<EngineActionKey>,
+        run: &str,
+        secret: &str,
+    ) -> axum::http::Request<Body> {
+        let body = SubmitAction {
+            request: ActionRequest {
+                project_root: project_root.to_owned(),
+                kind: ActionKind::Stop { run: run.into() },
+                debug: false,
+            },
+            secrets: ActionSecrets {
+                env: [("SYNTHETIC_TOKEN".into(), secret.into())].into(),
+                ..Default::default()
+            },
+        };
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/engine/actions")
+            .header("host", "127.0.0.1")
+            .header("x-veld-request", "1")
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request
+                .header("x-veld-remote-client", key.client_id.to_string())
+                .header("idempotency-key", key.idempotency_key.to_string());
+        }
+        request
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap()
+    }
+
+    async fn lookup(id: &str, client: uuid::Uuid) -> (StatusCode, serde_json::Value) {
+        let (status, body) = call(
+            axum::http::Request::builder()
+                .uri(format!("/api/engine/actions/{id}"))
+                .header("host", "127.0.0.1")
+                .header("x-veld-remote-client", client.to_string())
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
+    fn spawn_count(id: &str) -> usize {
+        SPAWNED_ACTIONS
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|seen| *seen == id)
+            .count()
+    }
+
+    #[test]
+    fn remote_submissions_require_both_single_uuid_headers() {
+        assert!(action_key(&HeaderMap::new()).unwrap().is_none());
+        let key = retry_key();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-veld-remote-client",
+            key.client_id.to_string().parse().unwrap(),
+        );
+        assert_eq!(action_key(&headers).unwrap_err().0, StatusCode::BAD_REQUEST);
+        headers.insert("idempotency-key", "invalid".parse().unwrap());
+        assert_eq!(action_key(&headers).unwrap_err().0, StatusCode::BAD_REQUEST);
+        headers.insert(
+            "idempotency-key",
+            key.idempotency_key.to_string().parse().unwrap(),
+        );
+        assert_eq!(
+            action_key(&headers).unwrap().unwrap().action_id(),
+            key.action_id()
+        );
+        headers.append(
+            "idempotency-key",
+            key.idempotency_key.to_string().parse().unwrap(),
+        );
+        assert_eq!(action_key(&headers).unwrap_err().0, StatusCode::BAD_REQUEST);
+        headers.remove("x-veld-remote-client");
+        headers.insert(
+            "idempotency-key",
+            key.idempotency_key.to_string().parse().unwrap(),
+        );
+        let local = action_key(&headers).unwrap().unwrap();
+        assert_eq!(local.client_id, uuid::Uuid::nil());
+        assert_eq!(local.idempotency_key, key.idempotency_key);
+        headers.insert("x-veld-remote-client", "invalid".parse().unwrap());
+        assert_eq!(action_key(&headers).unwrap_err().0, StatusCode::BAD_REQUEST);
+        headers.insert(
+            "x-veld-remote-client",
+            key.client_id.to_string().parse().unwrap(),
+        );
+        headers.append(
+            "x-veld-remote-client",
+            key.client_id.to_string().parse().unwrap(),
+        );
+        assert_eq!(action_key(&headers).unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    fn ui_request(
+        method: &str,
+        uri: &str,
+        key: Option<EngineActionKey>,
+        body: serde_json::Value,
+    ) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("host", "127.0.0.1")
+            .header("x-veld-request", "1")
+            .header("content-type", "application/json");
+        if let Some(key) = key {
+            request = request.header("idempotency-key", key.idempotency_key.to_string());
+            if !key.client_id.is_nil() {
+                request = request.header("x-veld-remote-client", key.client_id.to_string());
+            }
+        }
+        request.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn ui_routes_replay_before_reading_worktrees_registry_or_config() {
+        let _guard = crate::http_server::lock_db_env();
+        let env = ActionTestEnv::new();
+        let start = serde_json::json!({ "preset": "dev", "selections": [], "run_name": "dev" });
+        let action = serde_json::json!({ "action": "build", "node": null });
+        for (route, uri, payload, body, kind) in [
+            (
+                "/api/worktrees/42/start",
+                "/api/worktrees/42/start",
+                start.clone(),
+                start,
+                ActionKind::Start {
+                    run: "dev".into(),
+                    selections: vec!["web:local".into()],
+                    origin_preset: Some("dev".into()),
+                    oneshot: None,
+                    all_logs: false,
+                },
+            ),
+            (
+                "/api/environments/dev/stop",
+                "/api/environments/dev/stop?project_root=/untracked",
+                serde_json::json!({ "project_root": "/untracked" }),
+                serde_json::Value::Null,
+                ActionKind::Stop { run: "dev".into() },
+            ),
+            (
+                "/api/environments/dev/restart",
+                "/api/environments/dev/restart?project_root=/untracked",
+                serde_json::json!({ "project_root": "/untracked" }),
+                serde_json::Value::Null,
+                ActionKind::Restart { run: "dev".into() },
+            ),
+            (
+                "/api/environments/dev/action",
+                "/api/environments/dev/action?project_root=/untracked",
+                serde_json::json!({ "project_root": "/untracked", "body": action }),
+                action,
+                ActionKind::Action {
+                    run: "dev".into(),
+                    action: "build".into(),
+                    node: None,
+                },
+            ),
+        ] {
+            for local in [false, true] {
+                let mut key = retry_key();
+                if local {
+                    key.client_id = uuid::Uuid::nil();
+                }
+                let request = ui_request("POST", uri, Some(key), body.clone());
+                let submission = UiSubmission::new(request.headers(), route, &payload).unwrap();
+                let id = spawn_ui_action(env.dir.path(), kind.clone(), submission)
+                    .await
+                    .unwrap();
+                for _ in 0..2 {
+                    let (status, receipt) =
+                        call(ui_request("POST", uri, Some(key), body.clone())).await;
+                    assert_eq!(status, StatusCode::ACCEPTED, "{uri}: {receipt}");
+                    assert_eq!(
+                        serde_json::from_str::<Submitted>(&receipt)
+                            .unwrap()
+                            .action_id,
+                        id
+                    );
+                }
+                assert_eq!(spawn_count(&id), 1);
+                let conflicting = UiSubmission::new(
+                    request.headers(),
+                    route,
+                    serde_json::json!({ "changed": true }),
+                )
+                .unwrap();
+                assert_eq!(
+                    conflicting.replay().await.unwrap_err().0,
+                    StatusCode::CONFLICT
+                );
+            }
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn concurrent_ui_intents_keep_the_reservation_winners_resolved_request() {
+        let _guard = crate::http_server::lock_db_env();
+        let env = ActionTestEnv::new();
+        let key = retry_key();
+        let request = ui_request(
+            "POST",
+            "/api/worktrees/42/start",
+            Some(key),
+            serde_json::json!({}),
+        );
+        let first = UiSubmission::new(
+            request.headers(),
+            "/api/worktrees/42/start",
+            serde_json::json!({ "preset": "dev" }),
+        )
+        .unwrap();
+        let second = UiSubmission::new(
+            request.headers(),
+            "/api/worktrees/42/start",
+            serde_json::json!({ "preset": "dev" }),
+        )
+        .unwrap();
+        let (one, two) = tokio::join!(
+            spawn_ui_action(
+                env.dir.path(),
+                ActionKind::Stop {
+                    run: "resolved-before-edit".into()
+                },
+                first
+            ),
+            spawn_ui_action(
+                env.dir.path(),
+                ActionKind::Stop {
+                    run: "resolved-after-edit".into()
+                },
+                second
+            ),
+        );
+        assert_eq!(one.unwrap(), two.unwrap());
+        assert_eq!(spawn_count(&key.action_id()), 1);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn keyed_operation_events_and_cancel_require_the_owning_identity() {
+        let _guard = crate::http_server::lock_db_env();
+        let _env = ActionTestEnv::new();
+        let key = retry_key();
+        let id = key.action_id();
+        let db = Db::open().unwrap();
+        db.insert_engine_action(&id, "/p", "dev", "start", &start())
+            .unwrap();
+        db.finish_engine_action_with_event(
+            &id,
+            STATUS_LOST,
+            r#"{"result":"unknown"}"#,
+            r#"{"type":"finished","outcome":{"result":"unknown"}}"#,
+        )
+        .unwrap();
+        for (method, suffix) in [("GET", ""), ("GET", "/events"), ("POST", "/cancel")] {
+            let uri = format!("/api/engine/actions/{id}{suffix}");
+            for principal in [None, Some(retry_key())] {
+                assert_eq!(
+                    call(ui_request(method, &uri, principal, serde_json::Value::Null))
+                        .await
+                        .0,
+                    StatusCode::NOT_FOUND
+                );
+            }
+            let expected = if method == "POST" {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::OK
+            };
+            assert_eq!(
+                call(ui_request(method, &uri, Some(key), serde_json::Value::Null))
+                    .await
+                    .0,
+                expected
+            );
+        }
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn remote_retries_spawn_once_ignore_secrets_and_expose_public_outcomes() {
+        let _guard = crate::http_server::lock_db_env();
+        let env = ActionTestEnv::new();
+        let root = env.dir.path();
+        let key = retry_key();
+        let id = key.action_id();
+        let (first, second) = tokio::join!(
+            call(submission(root, Some(key), "dev", "synthetic-first")),
+            call(submission(root, Some(key), "dev", "synthetic-second")),
+        );
+        for (status, body) in [first, second] {
+            assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+            assert_eq!(
+                serde_json::from_str::<Submitted>(&body).unwrap().action_id,
+                id
+            );
+        }
+        assert_eq!(spawn_count(&id), 1);
+        assert_eq!(
+            call(submission(root, Some(key), "other", "synthetic-third"))
+                .await
+                .0,
+            StatusCode::CONFLICT
+        );
+        assert_eq!(spawn_count(&id), 1);
+        let (status, receipt) = lookup(&id, key.client_id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(receipt["status"], "pending");
+        assert!(receipt["outcome"].is_null());
+        assert!(receipt.get("request").is_none());
+        assert!(receipt.get("worker_pid").is_none());
+        assert_eq!(
+            lookup(&id, uuid::Uuid::new_v4()).await.0,
+            StatusCode::NOT_FOUND
+        );
+
+        let db = Db::open().unwrap();
+        let row = db.engine_action(&id).unwrap().unwrap();
+        assert!(!row.request_json.contains("synthetic-"));
+        assert!(!row.request_json.contains("SYNTHETIC_TOKEN"));
+        db.set_engine_action_pid(&id, 123).unwrap();
+        assert_eq!(lookup(&id, key.client_id).await.1["status"], "running");
+        let outcome = ActionOutcome::Stopped {
+            stopped: vec!["dev".into()],
+            already: false,
+        };
+        db.finish_engine_action(
+            &id,
+            veld_core::db::engine_actions::STATUS_SUCCEEDED,
+            &serde_json::to_string(&outcome).unwrap(),
+        )
+        .unwrap();
+        let (_, receipt) = lookup(&id, key.client_id).await;
+        assert_eq!(receipt["status"], "succeeded");
+        assert_eq!(receipt["outcome"]["result"], "stopped");
+        assert!(receipt["ended_at"].is_string());
+        assert_eq!(
+            call(submission(root, Some(key), "dev", "synthetic-fourth"))
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(spawn_count(&id), 1);
+
+        let (_, first) = call(submission(root, None, "local", "synthetic-local")).await;
+        let (_, second) = call(submission(root, None, "local", "synthetic-local")).await;
+        let first: Submitted = serde_json::from_str(&first).unwrap();
+        let second: Submitted = serde_json::from_str(&second).unwrap();
+        assert_ne!(first.action_id, second.action_id);
+        assert_eq!(spawn_count(&first.action_id), 1);
+        assert_eq!(spawn_count(&second.action_id), 1);
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn a_reservation_abandoned_before_spawn_is_never_restarted() {
+        let _guard = crate::http_server::lock_db_env();
+        let env = ActionTestEnv::new();
+        let root = project_root_of(env.dir.path()).unwrap();
+        let key = retry_key();
+        let id = key.action_id();
+        let request = ActionRequest {
+            project_root: root.clone(),
+            kind: ActionKind::Stop { run: "dev".into() },
+            debug: false,
+        };
+        let db = Db::open().unwrap();
+        db.reserve_engine_action(
+            key,
+            root.to_str().unwrap(),
+            "dev",
+            "stop",
+            &serde_json::to_string(&request).unwrap(),
+        )
+        .unwrap();
+        drop(db);
+        assert_eq!(
+            call(submission(&root, Some(key), "dev", "synthetic-secret"))
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(lookup(&id, key.client_id).await.1["status"], "pending");
+        assert_eq!(spawn_count(&id), 0);
+        std::fs::remove_file(root.join("veld.json")).unwrap();
+        sweep_lost_with(0).await;
+        let (status, receipt) = lookup(&id, key.client_id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(receipt["status"], "lost");
+        assert_eq!(receipt["outcome"]["kind"], "worker_lost");
+        assert_eq!(
+            call(submission(&root, Some(key), "dev", "synthetic-secret"))
+                .await
+                .0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(spawn_count(&id), 0);
+    }
+
     /// A stored request of `kind`, as `spawn_action` writes it.
     fn stored(kind: ActionKind) -> String {
         serde_json::to_string(&ActionRequest {
@@ -750,8 +1481,10 @@ mod tests {
 
     async fn call(req: axum::http::Request<axum::body::Body>) -> (StatusCode, String) {
         use tower::ServiceExt;
-        // Both engine routers, merged as the daemon serves them.
-        let app = routes().merge(super::super::engine_query::routes());
+        let app = routes()
+            .merge(super::super::engine_query::routes())
+            .merge(super::super::management::routes())
+            .merge(super::super::desktop::routes());
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
@@ -766,6 +1499,7 @@ mod tests {
     async fn every_engine_route_refuses_a_foreign_host() {
         for (method, uri) in [
             ("POST", "/api/engine/actions"),
+            ("GET", "/api/engine/actions/x"),
             ("POST", "/api/engine/preflight"),
             ("POST", "/api/engine/resolve-action"),
             ("POST", "/api/engine/var-answers"),
