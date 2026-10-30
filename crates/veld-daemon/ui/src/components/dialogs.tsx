@@ -3178,10 +3178,6 @@ export function UpdateMainDirtyDialog(props: {
  * restoring it brings the review back. The checkbox turns the review off for
  * every later hand-off — the "I trust my agents" answer — and is applied only
  * together with a start, so ticking it cannot by itself do anything to this one.
- *
- * The footer reads right to left by weight: Start and Not now together on the
- * right, the destructive action alone on the left, away from where the pointer
- * goes to say yes.
  */
 export function HandoffReviewDialog(props: {
   worktree: string;
@@ -3233,27 +3229,7 @@ export function HandoffReviewDialog(props: {
           description="Turns this review off for every later hand-off. You can turn it back on in Settings › Git."
         />
         <Group justify="space-between">
-          <Tooltip
-            label="Moves the worktree to the trash, prompt included — restore it to get the prompt back."
-            multiline
-            w={240}
-          >
-            <Button
-              color="red"
-              variant="subtle"
-              loading={discard.busy}
-              onClick={(e) => {
-                e.preventDefault();
-                void discard.submit(e);
-              }}
-            >
-              Move to trash
-            </Button>
-          </Tooltip>
           <Group gap="xs">
-            <Button variant="default" onClick={props.onClose}>
-              Not now
-            </Button>
             {/* The two halves join only as direct children of the group — its
                 CSS squares the inner corners by :first-child/:last-child.
                 Menu.Target adds no element; a Box or Tooltip wrapper would
@@ -3286,7 +3262,27 @@ export function HandoffReviewDialog(props: {
                 </Menu>
               )}
             </Button.Group>
+            <Button variant="default" onClick={props.onClose}>
+              Not now
+            </Button>
           </Group>
+          <Tooltip
+            label="Moves the worktree to the trash, prompt included — restore it to get the prompt back."
+            multiline
+            w={240}
+          >
+            <Button
+              color="red"
+              variant="subtle"
+              loading={discard.busy}
+              onClick={(e) => {
+                e.preventDefault();
+                void discard.submit(e);
+              }}
+            >
+              Move to trash
+            </Button>
+          </Tooltip>
         </Group>
         <ErrorText error={discard.error} />
       </Stack>
