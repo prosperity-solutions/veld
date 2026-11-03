@@ -231,7 +231,11 @@ background, with your prompt as its first message — nobody has to open it firs
 When the human opens the worktree they find that agent already working, and from
 then on it is theirs. If they turned that off (`worktree.autostartHandoffs`), the
 worktree is marked as not started instead, and the agent starts the first time
-they open it. **Nothing comes back to you** — no status, no result.
+they open it. It also waits for them when the agent pane's command in the new
+worktree differs from the one in the project's main checkout — committing a pane of your own
+does not get it run unwatched — when the agent you named cannot start there, or
+when the agent never opens an input to take the prompt. `--json`'s `starting`
+says which way it went. **Nothing comes back to you** — no status, no result.
 Write the prompt for an agent that has none of your context: what to do, why,
 which files, how to tell it is done.
 

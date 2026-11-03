@@ -5398,6 +5398,8 @@ async fn create_handoff(
     }
 
     let source_path = source.path.clone();
+    // The project's main checkout, not the caller's: an agent can edit its own.
+    let caller_path = source.repo_root.clone();
     let create = CreateWorktreeBody {
         repo_root: source.repo_root.clone(),
         branch: body.branch.clone(),
@@ -5430,7 +5432,7 @@ async fn create_handoff(
     // collides with. Spawned, the create finishes whoever is still listening.
     tokio::spawn(async move {
         let _hidden = hidden;
-        record_handoff(create, prompt, agent, into_section).await
+        record_handoff(create, prompt, agent, into_section, caller_path).await
     })
     .await
     .map_err(|e| {
@@ -5448,21 +5450,47 @@ async fn create_handoff(
 /// The agent pane the daemon starts for a hand-off by itself
 /// (`worktree.autostartHandoffs`): the one `--agent` named, else the checkout's
 /// first agent pane — [`check_handoff_agent`]'s predicate, `handoffAgent`'s order.
+/// `None` leaves the start to a window.
 ///
 /// **Not the user's usual agent**, which the window would pick: that preference
 /// lives in each window's storage, and the daemon has none to read. A project
 /// that declares one agent — the common case — starts the same one either way;
 /// one with several starts its first unless the handing-off agent named one.
+///
+/// A named agent the new checkout cannot start now is `None`, never another one:
+/// the window substitutes and says so, and nobody would see a substitution here.
 fn handoff_autostart_pane(panes: &[PaneView], wanted: &str) -> Option<String> {
     let agents: Vec<&PaneView> = panes
         .iter()
         .filter(|p| p.kind == "terminal" && p.available && p.agent.unwrap_or(p.can_resume))
         .collect();
-    agents
-        .iter()
-        .find(|p| !wanted.is_empty() && p.id == wanted)
-        .or_else(|| agents.first())
-        .map(|p| p.id.clone())
+    if !wanted.is_empty() {
+        return agents.iter().find(|p| p.id == wanted).map(|p| p.id.clone());
+    }
+    agents.first().map(|p| p.id.clone())
+}
+
+/// Whether the pane `id` is declared **identically** in the project's main
+/// checkout and in the new one.
+///
+/// The daemon runs the new checkout's command with nobody watching, and the new
+/// checkout can be the calling agent's own commit (`--from-here`): an agent could
+/// otherwise commit a pane whose `argv` is anything it likes and have it run
+/// unattended. The main checkout, not the caller's, is the reference — the
+/// calling agent can edit the checkout it works in. A pane the main checkout
+/// declares the same way is one the human already runs; any difference — or a
+/// config either side cannot read — leaves the start to a window, where opening
+/// the worktree is the gate.
+fn same_pane_in(caller: &FsPath, new: &FsPath, id: &str) -> bool {
+    let pane = |root: &FsPath| {
+        let path = veld_core::config::root_config_in(root)?;
+        let config = veld_core::config::parse_config(&path).ok()?;
+        config.ide_section().pane(id).cloned()
+    };
+    match (pane(caller), pane(new)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The rest of [`create_handoff`]: create the checkout, then record its pending
@@ -5472,6 +5500,7 @@ async fn record_handoff(
     prompt: Option<String>,
     agent: String,
     into_section: bool,
+    caller_path: String,
 ) -> Result<CreatedWorktreeView, ApiError> {
     let (root, branch) = (create.repo_root.clone(), create.branch.clone());
     let created = match create_checkout(create).await {
@@ -5560,9 +5589,19 @@ async fn record_handoff(
         let autostart = db
             .worktree_autostart_handoffs()
             .then(|| handoff_autostart_pane(&view.ide.panes, &agent))
-            .flatten();
-        if let Some(handoff) = view.handoff.as_mut() {
-            handoff.started = autostart.is_some();
+            .flatten()
+            .filter(|pane| {
+                same_pane_in(
+                    FsPath::new(&caller_path),
+                    FsPath::new(&view.worktree.path),
+                    pane,
+                )
+            });
+        // What the caller is told: that the daemon took the start on, and which
+        // agent it is running.
+        if let (Some(handoff), Some(pane)) = (view.handoff.as_mut(), autostart.as_ref()) {
+            handoff.started = true;
+            handoff.pane = pane.clone();
         }
         Ok::<_, ApiError>((view, autostart))
     })
@@ -6069,7 +6108,9 @@ impl Drop for HandoffInFlight {
 ///
 /// `started` says the daemon already launched it (`worktree.autostartHandoffs`):
 /// the window then attaches to the running session and neither reviews nor types
-/// the prompt.
+/// the prompt. `409 starting` while the daemon is still handing it the prompt.
+/// `relaunch` says a daemon-started agent died before anyone opened it, so the
+/// prompt has run once in this checkout already.
 ///
 /// Reading does not retire it; spawning the session does (`pty::finish_agent_handoff`),
 /// so a window that reads it and then reloads leaves it for the next one. A
@@ -6093,26 +6134,45 @@ async fn get_handoff(
         crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
             .await?
             .ok_or_else(gone)?;
+    use veld_core::db::HandoffLaunch;
+    // The daemon is handing the agent its prompt right now. Nothing to start and
+    // nothing to attach to yet: a window typing into the agent mid-paste would
+    // submit its keystrokes with the prompt. The window asks again shortly.
+    if handoff.launch == HandoffLaunch::Launching {
+        return Err(super::file_pane::coded(
+            StatusCode::CONFLICT,
+            "starting",
+            "the agent is being started — try again in a moment",
+        ));
+    }
+    let live = super::pty::session_worktree(&handoff.session_id).await == Some(id);
     // Started by the daemon, and the agent is gone without a window ever showing
-    // it — the worktree sat in the trash past its grace, or the daemon's start
-    // failed in a way it could not give back. It goes back to waiting, so this
-    // window starts it the old way, prompt and all, instead of attaching to nothing.
-    if handoff.started
-        && !super::pty::autostart_in_progress(&handoff.session_id)
-        && super::pty::session_worktree(&handoff.session_id).await != Some(id)
-    {
+    // it — it exited or crashed, or the worktree sat in the trash past its grace.
+    // It goes back to waiting, and `relaunch` tells the window this prompt already
+    // ran once in this checkout, so it is shown for review rather than treated as
+    // approved by a tab that attached to the dead agent.
+    let mut relaunch = false;
+    if handoff.launch == HandoffLaunch::Running && !live {
         let session = handoff.session_id.clone();
         crate::offload::blocking(move || {
             open_desktop_db()?
-                .unmark_handoff_started(id, &session)
+                .set_handoff_launch(
+                    id,
+                    &session,
+                    HandoffLaunch::Running,
+                    HandoffLaunch::Waiting,
+                    None,
+                )
                 .map_err(write_err)
         })
         .await?;
-        handoff.started = false;
+        handoff.launch = HandoffLaunch::Waiting;
+        relaunch = true;
     }
-    // A hand-off the daemon started itself is meant to be live: the window
-    // attaches to it, and that attach retires the row.
-    if !handoff.started && super::pty::session_worktree(&handoff.session_id).await == Some(id) {
+    // Waiting yet live: launched by a window that lost the retirement. A running
+    // daemon-started one is meant to be live — the window attaches to it, and that
+    // attach retires the row.
+    if handoff.launch == HandoffLaunch::Waiting && live {
         let session = handoff.session_id.clone();
         crate::offload::blocking(move || {
             open_desktop_db()?
@@ -6126,7 +6186,8 @@ async fn get_handoff(
         "session_id": handoff.session_id,
         "pane": handoff.pane,
         "prompt": handoff.prompt,
-        "started": handoff.started,
+        "started": handoff.launch == HandoffLaunch::Running,
+        "relaunch": relaunch,
     })))
 }
 

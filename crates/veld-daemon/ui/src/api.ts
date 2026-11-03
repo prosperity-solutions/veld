@@ -386,11 +386,21 @@ export type CreateWorktreeSource =
    */
   | { kind: "worktree"; from_path: string; carry_over?: boolean };
 
+/**
+ * `GET /api/worktrees/{id}/handoff`. `starting` while the daemon is still handing
+ * the agent its prompt; `relaunch` when an agent the daemon started died before
+ * anyone opened it, so this prompt already ran once in the checkout.
+ */
+export type HandoffRead =
+  | { starting: true }
+  | (WorktreeHandoff & { starting: false; prompt: string; relaunch?: boolean });
+
 /** A pending agent pane, as a worktree row carries it. See [`Worktree.handoff`]. */
 export interface WorktreeHandoff {
   session_id: string;
   pane: string;
-  /** The daemon already started this agent (`worktree.autostartHandoffs`): the
+  /** The daemon took the start on (`worktree.autostartHandoffs`): on a rail row,
+   *  starting or running, so no hourglass; from `GET …/handoff`, running — the
    *  window attaches to `session_id` and neither reviews nor types the prompt. */
   started: boolean;
 }
@@ -489,11 +499,12 @@ export interface Worktree {
    */
   named_by?: string;
   /**
-   * The agent pane a hand-off is waiting to start here — `veld ide worktree new
-   * --prompt` — or absent when there is none. `session_id` is the tab id the pane
-   * runs under; `pane` the declared agent, or `""` for this project's usual one.
-   * The prompt is read separately ([`api.worktreeHandoff`]) by the window that
-   * starts it, so a rail poll does not carry it.
+   * The agent pane a hand-off left here — `veld ide worktree new --prompt` — or
+   * absent when there is none: waiting for a window to start it, or (`started`)
+   * started by the daemon and waiting for a window to attach. `session_id` is the
+   * tab id the pane runs under; `pane` the declared agent, or `""` for this
+   * project's usual one. The prompt is read separately ([`api.worktreeHandoff`])
+   * by the window that starts it, so a rail poll does not carry it.
    */
   handoff?: WorktreeHandoff;
   /**
@@ -2324,8 +2335,14 @@ export const api = {
    * not use it up — spawning the session does — so a window that reloads before
    * starting the pane leaves it for the next.
    */
-  worktreeHandoff: (worktreeId: number) =>
-    request<WorktreeHandoff & { prompt: string }>(`/api/worktrees/${worktreeId}/handoff`),
+  worktreeHandoff: async (worktreeId: number): Promise<HandoffRead> => {
+    const res = await fetch(`/api/worktrees/${worktreeId}/handoff`);
+    // The daemon is handing the agent its prompt right now
+    // (`worktree.autostartHandoffs`): nothing to start or attach to yet.
+    if (res.status === 409) return { starting: true };
+    if (!res.ok) throw new Error(await errorMessage(res));
+    return { starting: false, ...((await res.json()) as WorktreeHandoff & { prompt: string; relaunch?: boolean }) };
+  },
   /** Store the prompt as its reviewer left it, before the agent starts. */
   updateWorktreeHandoff: (worktreeId: number, sessionId: string, prompt: string) =>
     request<void>(`/api/worktrees/${worktreeId}/handoff`, {

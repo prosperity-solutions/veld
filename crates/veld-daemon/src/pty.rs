@@ -96,7 +96,9 @@ mod wire;
 
 #[path = "pty/autostart.rs"]
 mod autostart;
-pub(crate) use autostart::{autostart_handoff, in_progress as autostart_in_progress};
+pub(crate) use autostart::{
+    autostart_handoff, give_back_interrupted as give_back_interrupted_handoffs,
+};
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
@@ -2610,6 +2612,9 @@ async fn prepare_ticket(body: TicketRequest) -> Result<Prepared, ApiError> {
     ) {
         HandoffStep::None => false,
         HandoffStep::RetireOnSpawn => true,
+        // The daemon is still handing this agent its prompt (`autostart`): the row
+        // is its to give back if that fails, so an attach must not retire it yet.
+        HandoffStep::RetireNow if autostart::in_progress(&body.session_id) => false,
         HandoffStep::RetireNow => {
             if let Err(e) = db.finish_handoff(body.worktree_id, &body.session_id) {
                 warn!(

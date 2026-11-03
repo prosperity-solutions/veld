@@ -3,12 +3,14 @@
 //! `veld ide worktree new --prompt` used to leave the agent pane for the first
 //! window that showed the worktree, so nothing ran until the human clicked the
 //! row. With `worktree.autostartHandoffs` on (the default) the daemon starts it
-//! itself, the moment the hand-off is recorded:
+//! itself, the moment the hand-off is recorded. The row's [`HandoffLaunch`] says
+//! where that stands:
 //!
-//! 1. The hand-off row is marked `started` **before** anything spawns. A window
-//!    that shows the worktree from then on attaches to the session the row names
-//!    instead of reviewing or typing the prompt, and the detach reaper leaves that
-//!    session alone however long nobody opens it (`Db::started_handoff_sessions`).
+//! 1. **`Launching`**, written before anything spawns. While it holds, no window
+//!    starts or attaches to the agent — `GET /api/worktrees/{id}/handoff` answers
+//!    "starting", so nobody types into an agent that is being handed its prompt —
+//!    and an attach does not retire the row. The detach reaper leaves the session
+//!    alone (`Db::started_handoff_sessions`).
 //! 2. The session is spawned through [`super::prepare_ticket`] and
 //!    [`super::obtain_session`] — the same checks, environment and launch-prompt
 //!    routing a window's ticket gets. It runs in its holder like any detached
@@ -18,15 +20,18 @@
 //!    [`deliver`] is `promptDelivery.ts`'s sequence without a browser — the same
 //!    gate (DECSET 2004), the same settle, a bracketed paste, then `\r` once the
 //!    paste has been echoed.
-//!
-//! The first window that shows the worktree seeds a tab under the session id and
-//! attaches; that attach finds the session live and retires the row
-//! (`HandoffStep::RetireNow`), and from then on it is an ordinary pane.
+//! 4. **`Running`**: the first window that shows the worktree seeds a tab under
+//!    the session id and attaches; that attach retires the row
+//!    (`HandoffStep::RetireNow`), and from then on it is an ordinary pane.
 //!
 //! **If the prompt cannot be delivered** — the agent never opens an input, or it
-//! exits — the session is hung up and the row goes back to waiting, so the next
+//! exits — the session is hung up and the row goes back to `Waiting`, so the next
 //! window to show the worktree starts it the old way and the human sees the
 //! prompt. An agent that silently never got its task is the outcome this avoids.
+//! **Once the agent has the prompt it is never hung up**: a launch that took the
+//! prompt (its staged file is gone) counts as delivered without waiting for the
+//! gate. A daemon that stops mid-start leaves `Launching` behind, and the next
+//! boot gives it back the same way ([`give_back_interrupted`]).
 
 use std::collections::HashSet;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -35,6 +40,7 @@ use std::time::{Duration, Instant};
 use portable_pty::PtySize;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
+use veld_core::db::HandoffLaunch;
 
 use super::{PaneMode, Prepared, Session, TicketRequest, wire};
 
@@ -52,6 +58,12 @@ const ECHO_QUIET: Duration = Duration::from_millis(250);
 /// And the `\r` goes anyway after this long — `PROMPT_ECHO_CAP_MS`.
 const ECHO_CAP: Duration = Duration::from_millis(5_000);
 
+/// Terminal slots a background start always leaves for the human. Hand-offs the
+/// reaper may not collect could otherwise fill `terminal.maxSessions`, and the
+/// person would then be refused their own next terminal; past this the hand-off
+/// waits for a window, which spends a slot only when somebody looks.
+const RESERVED_SLOTS: usize = 4;
+
 /// The size the headless session starts at. The first window to attach resizes it
 /// to its own, as every attach does.
 const SIZE: PtySize = PtySize {
@@ -61,10 +73,8 @@ const SIZE: PtySize = PtySize {
     pixel_height: 0,
 };
 
-/// Hand-off sessions this daemon is starting right now, from the mark until the
-/// prompt is in. While one is here its session can be not-yet-live and still
-/// `started`, which is what `GET /api/worktrees/{id}/handoff` must not mistake for
-/// a launched agent that has since died.
+/// Hand-off sessions this daemon is starting right now, from `Launching` until the
+/// prompt is in or the start is given back.
 static IN_PROGRESS: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
 
 /// Whether the daemon is still starting this hand-off session.
@@ -112,15 +122,55 @@ pub(crate) async fn autostart_handoff(
     }
 }
 
+/// At boot, after the holders are adopted: every hand-off a previous daemon left
+/// `Launching` lost its delivery with that daemon. Hang up whatever agent runs
+/// under it — nobody can say whether it got its prompt — and leave it `Waiting`
+/// for the next window, which starts it afresh.
+pub(crate) async fn give_back_interrupted() {
+    let interrupted = crate::offload::blocking(|| {
+        veld_core::db::Db::open().and_then(|db| db.reset_launching_handoffs())
+    })
+    .await;
+    match interrupted {
+        Ok(rows) => {
+            for (worktree_id, session_id) in rows {
+                super::end_session(
+                    &session_id,
+                    "the daemon stopped while starting this hand-off",
+                )
+                .await;
+                info!(
+                    session = %session_id,
+                    worktree = worktree_id,
+                    "gave an interrupted hand-off back to the windows"
+                );
+            }
+        }
+        Err(e) => warn!("could not read interrupted hand-offs: {e}"),
+    }
+}
+
 async fn run(worktree_id: i64, session_id: &str, pane: &str, prompt: &str) -> Result<(), String> {
-    // Marked first: see the module note. `false` means the row is gone or names
-    // another session — a window got there first, or the hand-off was replaced.
-    let marked = set_started(worktree_id, session_id, Some(pane)).await?;
+    let live = super::LIVE_SESSIONS.load(std::sync::atomic::Ordering::Acquire);
+    if live + RESERVED_SLOTS >= super::session_cap() {
+        return Err(format!(
+            "{live} terminals are open, and the last {RESERVED_SLOTS} slots are kept for you"
+        ));
+    }
+    // `false` means the row is gone or no longer waiting — a window got there
+    // first, or the hand-off was replaced.
+    let marked = set_launch(
+        worktree_id,
+        session_id,
+        HandoffLaunch::Waiting,
+        HandoffLaunch::Launching,
+        Some(pane),
+    )
+    .await?;
     if !marked {
         return Err("the hand-off changed before it could start".to_owned());
     }
-    let started = spawn(worktree_id, session_id, pane, prompt).await;
-    let (session, at_launch) = match started {
+    let (session, at_launch) = match spawn(worktree_id, session_id, pane, prompt).await {
         Ok(started) => started,
         Err(why) => {
             give_back(worktree_id, session_id, false).await;
@@ -131,6 +181,14 @@ async fn run(worktree_id: i64, session_id: &str, pane: &str, prompt: &str) -> Re
         give_back(worktree_id, session_id, true).await;
         return Err(why);
     }
+    set_launch(
+        worktree_id,
+        session_id,
+        HandoffLaunch::Launching,
+        HandoffLaunch::Running,
+        None,
+    )
+    .await?;
     Ok(())
 }
 
@@ -156,54 +214,69 @@ async fn spawn(
     })
     .await
     .map_err(|(status, body)| format!("{status}: {}", body.0))?;
-    if resumed {
-        // Something already runs under the hand-off's id — a window that started
-        // it in the instant before the mark. That pane is the agent; leave it.
-        return Err("a session already runs under the hand-off's id".to_owned());
+    let (session, adopted) = if resumed {
+        (None, true)
+    } else {
+        let (session, adopted) =
+            super::obtain_session(&ticket, SIZE)
+                .await
+                .map_err(|e| match e {
+                    super::SessionError::AtCapacity => {
+                        "too many terminal sessions are open".to_owned()
+                    }
+                    super::SessionError::Spawn(e) | super::SessionError::Unreachable(e) => {
+                        e.to_string()
+                    }
+                    super::SessionError::Starting => {
+                        "another start of this session never finished".to_owned()
+                    }
+                })?;
+        (Some(session), adopted)
+    };
+    match session {
+        Some(session) if !adopted => Ok((session, prompt_at_launch)),
+        // Something already runs under the hand-off's id that this call did not
+        // start. It is not ours to type into.
+        _ => Err("a session already runs under the hand-off's id".to_owned()),
     }
-    let (session, _) = super::obtain_session(&ticket, SIZE)
-        .await
-        .map_err(|e| match e {
-            super::SessionError::AtCapacity => "too many terminal sessions are open".to_owned(),
-            super::SessionError::Spawn(e) | super::SessionError::Unreachable(e) => e.to_string(),
-            super::SessionError::Starting => {
-                "another start of this session never finished".to_owned()
-            }
-        })?;
-    Ok((session, prompt_at_launch))
 }
 
-/// Put the hand-off back in the windows' hands: hang up the session if one was
-/// spawned, and clear `started` so the next window to show the worktree starts it
-/// with the prompt. Only while the row is still ours — a window that attached in
-/// the meantime retired it, and that pane is the user's now.
+/// Put the hand-off back in the windows' hands: hang up the session if this start
+/// spawned one, and set the row back to `Waiting` so the next window to show the
+/// worktree starts it with the prompt.
 async fn give_back(worktree_id: i64, session_id: &str, spawned: bool) {
-    match set_started(worktree_id, session_id, None).await {
+    match set_launch(
+        worktree_id,
+        session_id,
+        HandoffLaunch::Launching,
+        HandoffLaunch::Waiting,
+        None,
+    )
+    .await
+    {
         Ok(true) => {
             if spawned {
                 super::end_session(session_id, "handed-off agent never took its prompt").await;
             }
         }
+        // Deleted meanwhile (the worktree was deleted); nothing to give back to.
         Ok(false) => {}
         Err(e) => warn!(session = %session_id, "hand-off not given back to the windows: {e}"),
     }
 }
 
-/// Mark the hand-off started under `pane`, or unmark it with `None`. Whether the
-/// row was there for exactly this worktree and session.
-async fn set_started(
+async fn set_launch(
     worktree_id: i64,
     session_id: &str,
+    from: HandoffLaunch,
+    to: HandoffLaunch,
     pane: Option<&str>,
 ) -> Result<bool, String> {
     let (session_id, pane) = (session_id.to_owned(), pane.map(str::to_owned));
     crate::offload::blocking(move || {
         let db = super::open_db().map_err(|e| format!("database unavailable: {e}"))?;
-        match pane {
-            Some(pane) => db.mark_handoff_started(worktree_id, &session_id, &pane),
-            None => db.unmark_handoff_started(worktree_id, &session_id),
-        }
-        .map_err(|e| e.to_string())
+        db.set_handoff_launch(worktree_id, &session_id, from, to, pane.as_deref())
+            .map_err(|e| e.to_string())
     })
     .await
 }
@@ -277,7 +350,18 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
     };
     let mut mode = PasteMode::new(&seen);
     let deadline = Instant::now() + INPUT_WAIT;
+    // A launch handed the prompt is done the moment its staged file is gone: the
+    // agent (its wrapper, or the daemon for Claude on the mod) took it. Never wait
+    // for a gate then — an agent already working on its task must not be hung up
+    // because it has not drawn an input yet.
+    let staged = at_launch
+        .then(|| staged_launch_prompt(&session.id))
+        .flatten();
     while !mode.on {
+        if staged.as_ref().is_some_and(|path| !path.exists()) {
+            forget_launch_prompt(&session.id);
+            return Ok(());
+        }
         if session.exited().is_some() {
             return Err("the agent exited before it opened an input".to_owned());
         }
@@ -340,6 +424,23 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
         return Err("the agent's input closed before the prompt was submitted".to_owned());
     }
     send(session, b"\r".to_vec()).await
+}
+
+/// The file a launch prompt was staged to, while nobody has claimed it.
+fn staged_launch_prompt(session_id: &str) -> Option<std::path::PathBuf> {
+    super::LAUNCH_PROMPTS
+        .lock()
+        .expect("launch prompts poisoned")
+        .get(session_id)
+        .cloned()
+}
+
+/// Drop the record of a launch prompt the agent already took.
+fn forget_launch_prompt(session_id: &str) {
+    super::LAUNCH_PROMPTS
+        .lock()
+        .expect("launch prompts poisoned")
+        .remove(session_id);
 }
 
 /// Take the staged launch prompt back, as `launch-prompt/take` does for a window:

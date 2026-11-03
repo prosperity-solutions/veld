@@ -4133,16 +4133,30 @@ function AppInner(props: {
         let prompt: string | null = null;
         let started = false;
         let startedPane = "";
+        let relaunch = false;
+        let starting = false;
         try {
           const read = await api.worktreeHandoff(id);
-          prompt = read.prompt;
-          started = read.started === true;
-          startedPane = read.pane;
+          if (read.starting) {
+            starting = true;
+          } else {
+            prompt = read.prompt;
+            started = read.started === true;
+            startedPane = read.pane;
+            relaunch = read.relaunch === true;
+          }
         } catch {
           // Gone (another window started it a moment ago) or unreachable; either
           // way there is nothing to start, and a later show will look again.
         }
         if (cancelled) return;
+        // The daemon is still handing the agent its prompt. Look again shortly —
+        // this effect only re-runs when asked, and the agent is about to exist.
+        if (starting) {
+          window.setTimeout(() => {
+            if (!cancelled) setHandoffAsk((n) => n + 1);
+          }, 2000);
+        }
         const resolved =
           prompt === null
             ? null
@@ -4154,8 +4168,11 @@ function AppInner(props: {
         // The daemon already started it (`worktree.autostartHandoffs`): the agent
         // is running with its prompt, so the tab only attaches — no review, no
         // prompt typed a second time. Its attach retires the hand-off.
+        // Never the "could not start" path below for a running agent: that one
+        // drops the hand-off, and with it the only record of a session no tab names.
         const startedSpec = started
-          ? handed.ide.panes.find((p) => p.id === startedPane) ?? resolved
+          ? (handed.ide.panes.find((p) => p.id === startedPane) ??
+            resolved ?? { id: startedPane, label: "Agent" })
           : null;
         if (prompt !== null && startedSpec) {
           agentTab = startedHandoffTab(startedSpec, handed.handoff.session_id);
@@ -4185,7 +4202,11 @@ function AppInner(props: {
           // between Start and the agent spawning — so it is not asked again, and
           // the agent is the one that tab names: the review's menu can have
           // picked another than the one resolved above.
-          const approvedTab = findTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
+          // Not after a relaunch: that tab attached to an agent the daemon started,
+          // which died before anyone opened it — nobody approved anything.
+          const approvedTab = relaunch
+            ? null
+            : findTab(layoutsRef.current[id] ?? stored ?? defaultLayout(), sessionId);
           const approved = approvedTab !== null;
           const spec =
             handed.ide.panes.find((p) => approvedTab !== null && p.id === approvedTab.spec) ??

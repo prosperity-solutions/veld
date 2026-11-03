@@ -2523,11 +2523,32 @@ impl Db {
 
     /// Whether the daemon starts a handed-off worktree's agent itself, at once,
     /// rather than leaving it for the first window that shows the worktree.
+    ///
+    /// **A stored `worktree.reviewHandoffs = true` keeps its meaning.** Starting at
+    /// once skips the review, and somebody who saved that switch on chose to read
+    /// an agent's prompt before it runs — the new default must not quietly undo
+    /// that. So, unless this setting is stored itself, a stored review answers it:
+    /// review on → wait for a window; review off → start at once. Neither stored →
+    /// the default, on.
     pub fn worktree_autostart_handoffs(&self) -> bool {
-        self.setting(&SettingKey::WorktreeAutostartHandoffs)
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_bool())
+        // The row itself, not `setting`, which answers a missing row with the
+        // default — the very thing this has to tell apart from a choice.
+        let stored = |key: &SettingKey| -> Option<bool> {
+            let raw: Option<String> = self
+                .lock()
+                .query_row(
+                    "SELECT value FROM settings WHERE scope = ?1 AND key = ?2",
+                    params![SCOPE_GLOBAL, key.as_str()],
+                    |r| r.get(0),
+                )
+                .optional()
+                .ok()
+                .flatten();
+            raw.and_then(|s| serde_json::from_str::<Value>(&s).ok())
+                .and_then(|v| v.as_bool())
+        };
+        stored(&SettingKey::WorktreeAutostartHandoffs)
+            .or_else(|| stored(&SettingKey::WorktreeReviewHandoffs).map(|review| !review))
             .unwrap_or(true)
     }
 

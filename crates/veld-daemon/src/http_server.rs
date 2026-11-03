@@ -197,6 +197,9 @@ pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareMana
     // session's detach clock is running by the time anything can collect it, and
     // before the listener binds, so no attach can race a half-adopted registry.
     pty::adopt_existing_sessions().await;
+    // After adoption, so an agent a previous daemon left mid-start is in the
+    // registry to be hung up; before the reaper and the listener.
+    pty::give_back_interrupted_handoffs().await;
     pty::spawn_session_reaper();
     // The `$BROWSER` shims every new session's environment points at. Here rather
     // than on the first terminal so a machine that cannot have them says so in the

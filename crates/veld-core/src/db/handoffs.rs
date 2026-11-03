@@ -62,6 +62,37 @@ pub fn check_handoff_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where the daemon's own start of a hand-off's agent stands — the
+/// `worktree_handoffs.started` column (v22), `0`/`1`/`2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffLaunch {
+    /// Nothing started: the first window to show the worktree starts it.
+    Waiting,
+    /// The daemon is spawning it and handing it the prompt. No window may start
+    /// or attach to it meanwhile. A row left here by a daemon that stopped
+    /// mid-start is given back at the next boot ([`Db::reset_launching_handoffs`]).
+    Launching,
+    /// The agent is running and has its prompt. The row only tells the first
+    /// window which session to attach to; that attach retires it.
+    Running,
+}
+
+impl HandoffLaunch {
+    fn from_column(v: i64) -> Self {
+        match v {
+            1 => Self::Launching,
+            2 => Self::Running,
+            _ => Self::Waiting,
+        }
+    }
+
+    /// Whether the daemon has taken the start on — the rail's hourglass is gone.
+    #[must_use]
+    pub fn taken(self) -> bool {
+        self != Self::Waiting
+    }
+}
+
 /// An agent pane waiting to be started in a handed-off worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handoff {
@@ -76,10 +107,9 @@ pub struct Handoff {
     /// The first message the agent opens with.
     pub prompt: String,
     pub created_at: String,
-    /// The daemon has already launched this agent itself, with the prompt
-    /// delivered (`worktree.autostartHandoffs`). The row then only tells the first
-    /// window to show the worktree which session to attach to.
-    pub started: bool,
+    /// Where the daemon's own start of this agent stands
+    /// (`worktree.autostartHandoffs`).
+    pub launch: HandoffLaunch,
 }
 
 impl Db {
@@ -123,14 +153,15 @@ impl Db {
                         pane: r.get(2)?,
                         prompt: r.get(3)?,
                         created_at: r.get(4)?,
-                        started: r.get(5)?,
+                        launch: HandoffLaunch::from_column(r.get(5)?),
                     })
                 },
             )
             .optional()?)
     }
 
-    /// The session id, pane and `started` of a worktree's pending hand-off, without the
+    /// The session id, pane and whether the daemon took the start on
+    /// ([`HandoffLaunch::taken`]) of a worktree's pending hand-off, without the
     /// prompt — what every rail poll carries, where a prompt of up to 64 KiB per
     /// worktree would be paid for on every refresh by a client that only needs
     /// to know there is one.
@@ -144,7 +175,7 @@ impl Db {
         )?;
         Ok(stmt
             .query_row(params![worktree_id], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
             })
             .optional()?)
     }
@@ -161,7 +192,7 @@ impl Db {
     }
 
     /// Every pending hand-off in a repo, by worktree id, as `(session_id, pane,
-    /// started)` — [`Self::handoff_session`] for a whole listing in one query.
+    /// taken)` — [`Self::handoff_session`] for a whole listing in one query.
     pub fn handoff_sessions(
         &self,
         repo_root: &std::path::Path,
@@ -172,54 +203,66 @@ impl Db {
              JOIN worktrees w ON w.id = h.worktree_id WHERE w.repo_root = ?1",
         )?;
         let rows = stmt.query_map(params![repo_root.to_string_lossy()], |r| {
-            Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?, r.get(3)?)))
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0),
+            ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// The session ids of every hand-off the daemon launched itself and no window
-    /// has attached to yet — sessions the detach reaper must leave alone, since
-    /// nobody has had the chance to open them.
+    /// The session ids of every hand-off the daemon is starting or started and no
+    /// window has attached to yet — sessions the detach reaper must leave alone,
+    /// since nobody has had the chance to open them.
     pub fn started_handoff_sessions(&self) -> Result<Vec<String>, DbError> {
         let conn = self.lock();
         let mut stmt =
-            conn.prepare_cached("SELECT session_id FROM worktree_handoffs WHERE started = 1")?;
+            conn.prepare_cached("SELECT session_id FROM worktree_handoffs WHERE started != 0")?;
         let rows = stmt.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Undo [`Self::mark_handoff_started`]: the daemon's launch failed, so the next
-    /// window to show the worktree starts the agent itself. Matched on the session,
-    /// and only while still marked. Returns whether it did.
-    pub fn unmark_handoff_started(
+    /// Move a hand-off from `from` to `to`, matched on its session too so it can
+    /// never touch a later hand-off that replaced this one. `pane`, when given, is
+    /// the agent the daemon actually picked, which the window's tab has to name.
+    /// Returns whether it did.
+    pub fn set_handoff_launch(
         &self,
         worktree_id: i64,
         session_id: &str,
+        from: HandoffLaunch,
+        to: HandoffLaunch,
+        pane: Option<&str>,
     ) -> Result<bool, DbError> {
+        let column = |l: HandoffLaunch| match l {
+            HandoffLaunch::Waiting => 0,
+            HandoffLaunch::Launching => 1,
+            HandoffLaunch::Running => 2,
+        };
         let n = self.lock().execute(
-            "UPDATE worktree_handoffs SET started = 0
-             WHERE worktree_id = ?1 AND session_id = ?2 AND started = 1",
-            params![worktree_id, session_id],
+            "UPDATE worktree_handoffs SET started = ?4, pane = COALESCE(?5, pane)
+             WHERE worktree_id = ?1 AND session_id = ?2 AND started = ?3",
+            params![worktree_id, session_id, column(from), column(to), pane],
         )?;
         Ok(n > 0)
     }
 
-    /// Record that the daemon launched a hand-off's agent itself, under `pane` —
-    /// the agent it actually picked, which the window's tab has to name. Matched on
-    /// the session too, so it can never mark a later hand-off that replaced this
-    /// one. Returns whether it did.
-    pub fn mark_handoff_started(
-        &self,
-        worktree_id: i64,
-        session_id: &str,
-        pane: &str,
-    ) -> Result<bool, DbError> {
-        let n = self.lock().execute(
-            "UPDATE worktree_handoffs SET started = 1, pane = ?3
-             WHERE worktree_id = ?1 AND session_id = ?2",
-            params![worktree_id, session_id, pane],
+    /// Give back every hand-off a previous daemon left mid-start: its delivery
+    /// died with that daemon, so nobody knows whether the agent got the prompt.
+    /// Returns them as `(worktree_id, session_id)` so the caller can hang up any
+    /// agent still running under them; the next window starts each one afresh.
+    pub fn reset_launching_handoffs(&self) -> Result<Vec<(i64, String)>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare("SELECT worktree_id, session_id FROM worktree_handoffs WHERE started = 1")?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        conn.execute(
+            "UPDATE worktree_handoffs SET started = 0 WHERE started = 1",
+            [],
         )?;
-        Ok(n > 0)
+        Ok(rows)
     }
 
     /// Replace a pending hand-off's prompt with the one its reviewer edited, so a
