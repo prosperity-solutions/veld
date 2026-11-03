@@ -11,6 +11,7 @@
  * ones and `promptDelivery.test.ts` passes fakes.
  */
 
+import type { Terminal } from "@xterm/xterm";
 import { type PromptStep, promptStep } from "./model";
 import { echoed, isImagePath, pasteLanded, pathPayload, promptPastes, type WriteSource } from "./terminalPaste";
 
@@ -36,6 +37,30 @@ export const PROMPT_WAIT_MS = 25_000;
  * the first try rather than on the retry the user has to notice.
  */
 export const PROMPT_SETTLE_MS = 300;
+
+/**
+ * Returns the terminal state a killed program set for itself to its defaults,
+ * resolving once that is parsed: the normal screen, DECSTR for the DEC private
+ * modes and cursor visibility, and mouse reporting (`?1000l` turns off every
+ * protocol, `?1006l` the SGR encoding).
+ *
+ * Leaving the alternate screen hands the normal one the alternate screen's
+ * cursor, and only a program that entered with `?1049h` saved its own, so the
+ * normal screen's cursor is read first and put back. It is read once what is
+ * already queued has been parsed, since that can still switch screens.
+ */
+export function resetProgramModes(term: Pick<Terminal, "buffer" | "write">): Promise<void> {
+  return new Promise((parsed) => {
+    term.write("", () => {
+      const { active, normal } = term.buffer;
+      const screen =
+        active.type === "alternate"
+          ? `\x1b[?47l\x1b[!p\x1b[${normal.cursorY + 1};${normal.cursorX + 1}H`
+          : "\x1b[!p";
+      term.write(`${screen}\x1b[?1000l\x1b[?1006l`, parsed);
+    });
+  });
+}
 
 /**
  * How a paste is known to have landed before the next write: the program's

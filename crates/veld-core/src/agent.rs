@@ -435,6 +435,19 @@ impl AgentTool {
             Self::Codex | Self::Pi => "",
         }
     }
+
+    /// The flags that resume a conversation by id, as a shell `case` pattern. Their
+    /// value is optional (a bare `--resume` opens a picker), so they cannot join
+    /// [`AgentTool::launch_prompt_value_flags`]; a bare word after one counts as its
+    /// value only when it is the pane's own session token, which veld put there and
+    /// which is never a prompt. Empty for a tool that does not take a launch prompt.
+    #[must_use]
+    pub fn launch_prompt_resume_flags(self) -> &'static str {
+        match self {
+            Self::Claude => "--resume | -r",
+            Self::Codex | Self::Pi => "",
+        }
+    }
 }
 
 /// The agent a command line runs directly, from its first word: `claude`,
@@ -456,9 +469,10 @@ pub fn agent_tool_of(program: &str) -> Option<AgentTool> {
 /// pane's argv itself when no wrapper is in the way: an interactive launch (no
 /// subcommand), no print mode, no `--`, and no bare word that is not the value of a
 /// flag in [`AgentTool::launch_prompt_value_flags`] — the agent keeps the first
-/// positional and would silently drop a second. False for a tool that takes none.
+/// positional and would silently drop a second — or `pane_token` after one of
+/// [`AgentTool::launch_prompt_resume_flags`]. False for a tool that takes none.
 #[must_use]
-pub fn args_take_launch_prompt(tool: AgentTool, args: &[String]) -> bool {
+pub fn args_take_launch_prompt(tool: AgentTool, args: &[String], pane_token: Option<&str>) -> bool {
     if !tool.takes_launch_prompt() {
         return false;
     }
@@ -468,17 +482,26 @@ pub fn args_take_launch_prompt(tool: AgentTool, args: &[String]) -> bool {
     {
         return false;
     }
-    let value_flags: Vec<&str> = tool
-        .launch_prompt_value_flags()
-        .split('|')
-        .map(str::trim)
-        .collect();
+    let flags = |pattern: &'static str| -> Vec<&'static str> {
+        pattern
+            .split('|')
+            .map(str::trim)
+            .filter(|f| !f.is_empty())
+            .collect()
+    };
+    let value_flags = flags(tool.launch_prompt_value_flags());
+    let resume_flags = flags(tool.launch_prompt_resume_flags());
+    let pane_token = pane_token.filter(|t| !t.is_empty());
     let mut prev: Option<&str> = None;
     for arg in args {
         if arg.starts_with("-p") || arg == "--print" || arg == "--" {
             return false;
         }
-        if !arg.starts_with('-') && !prev.is_some_and(|p| value_flags.contains(&p)) {
+        let is_value = prev.is_some_and(|p| {
+            value_flags.contains(&p)
+                || (resume_flags.contains(&p) && pane_token == Some(arg.as_str()))
+        });
+        if !arg.starts_with('-') && !is_value {
             return false;
         }
         prev = Some(arg);
@@ -2073,7 +2096,9 @@ mod tests {
     #[test]
     fn a_launch_prompt_is_appended_only_where_the_wrapper_would() {
         let args = |a: &[&str]| a.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
-        let takes = |a: &[&str]| args_take_launch_prompt(AgentTool::Claude, &args(a));
+        let takes = |a: &[&str]| args_take_launch_prompt(AgentTool::Claude, &args(a), None);
+        let resuming =
+            |a: &[&str]| args_take_launch_prompt(AgentTool::Claude, &args(a), Some("tok-123"));
         assert!(takes(&[]));
         assert!(takes(&["--dangerously-skip-permissions"]));
         assert!(takes(&["--model", "opus", "--add-dir", "/tmp"]));
@@ -2089,7 +2114,22 @@ mod tests {
             !takes(&["--resume", "abc"]),
             "an optional value reads as a prompt"
         );
-        assert!(!args_take_launch_prompt(AgentTool::Codex, &[]));
+        assert!(resuming(&["--resume", "tok-123", "--model", "opus"]));
+        assert!(resuming(&["-r", "tok-123"]));
+        assert!(resuming(&["--resume=tok-123"]));
+        assert!(
+            !resuming(&["--resume", "Read AGENTS.md"]),
+            "not the pane's token"
+        );
+        assert!(
+            !resuming(&["--model", "tok-123", "tok-123"]),
+            "the token is a value only after a resume flag"
+        );
+        assert!(
+            !args_take_launch_prompt(AgentTool::Claude, &args(&["--resume", ""]), Some("")),
+            "an empty token matches nothing"
+        );
+        assert!(!args_take_launch_prompt(AgentTool::Codex, &[], None));
     }
 
     /// Whatever `claude plugin validate` says decides the answer, veld's own wrapper

@@ -1157,7 +1157,8 @@ if [ -n "$veld_prompt_file" ]; then
   # the first positional and silently drops a second. A bare word counts as a
   # value only after a flag known to take one (`launch_prompt_value_flags`), so
   # a flag missing from that list costs the flash-free launch, never the prompt:
-  # the window types it instead.
+  # the window types it instead. After a resume flag, only the pane's own token
+  # (`launch_prompt_resume_flags`).
   case "${{1-}}" in
     "" | -*) veld_prompt=1 ;;
   esac
@@ -1168,7 +1169,7 @@ if [ -n "$veld_prompt_file" ]; then
       -*) ;;
       *)
         case "$veld_prev" in
-          {value_flags}) ;;
+          {value_flags}) ;;{resume_arm}
           *) veld_prompt= ; break ;;
         esac
         ;;
@@ -1192,6 +1193,12 @@ unset veld_prompt veld_prompt_file
 "#,
             cli = quote(cli),
             value_flags = tool.launch_prompt_value_flags(),
+            resume_arm = match tool.launch_prompt_resume_flags() {
+                "" => String::new(),
+                flags => format!(
+                    "\n          {flags})\n            if [ -z \"${{VELD_PANE_TOKEN-}}\" ] || [ \"$veld_arg\" != \"$VELD_PANE_TOKEN\" ]; then\n              veld_prompt= ; break\n            fi\n            ;;"
+                ),
+            },
         )
     } else {
         "unset veld_prompt_file\n".to_owned()
@@ -2252,27 +2259,32 @@ mod tests {
         let prompt_file = tmp
             .path()
             .join("0123456789abcdef0123456789abcdef-launch-prompt.txt");
-        let run = |tool: &str, args: &[&str], prompt: Option<&str>| -> String {
+        let run_as = |tool: &str, args: &[&str], prompt: Option<&str>, token: Option<&str>| {
             match prompt {
                 Some(text) => std::fs::write(&prompt_file, text).unwrap(),
                 None => {
                     let _ = std::fs::remove_file(&prompt_file);
                 }
             }
-            let out = std::process::Command::new(shims.join(tool))
-                .args(args)
+            let mut cmd = std::process::Command::new(shims.join(tool));
+            cmd.args(args)
                 .env_clear()
                 .env("PATH", &path)
                 .env("VELD_AGENT_HOOKS", "1")
                 .env("VELD_PTY_SESSION", "pane-1")
-                .env("VELD_LAUNCH_PROMPT", &prompt_file)
-                .output()
-                .expect("run the shim");
+                .env("VELD_LAUNCH_PROMPT", &prompt_file);
+            if let Some(token) = token {
+                cmd.env("VELD_PANE_TOKEN", token);
+            }
+            let out = cmd.output().expect("run the shim");
             format!(
                 "{}{}",
                 String::from_utf8_lossy(&out.stdout),
                 String::from_utf8_lossy(&out.stderr)
             )
+        };
+        let run = |tool: &str, args: &[&str], prompt: Option<&str>| {
+            run_as(tool, args, prompt, Some("tok-123"))
         };
         let settings = format!("[--settings][{}]", settings.display());
         let prompt = "Fix the header.\n\n@\"/tmp/Bild schirm.png\"";
@@ -2299,6 +2311,24 @@ mod tests {
             .trim(),
             format!("REAL{settings}[--dangerously-skip-permissions][-c][--][go] env=unset")
         );
+        // A restart's relaunch: the resumed conversation is the pane's own token.
+        assert_eq!(
+            run(
+                "claude",
+                &["--resume", "tok-123", "--model", "opus"],
+                Some("go")
+            )
+            .trim(),
+            format!("REAL{settings}[--resume][tok-123][--model][opus][--][go] env=unset")
+        );
+        assert_eq!(
+            run("claude", &["-r", "tok-123"], Some("go")).trim(),
+            format!("REAL{settings}[-r][tok-123][--][go] env=unset")
+        );
+        assert_eq!(
+            run("claude", &["--resume=tok-123"], Some("go")).trim(),
+            format!("REAL{settings}[--resume=tok-123][--][go] env=unset")
+        );
 
         // Left for the window to type in — the file stays — wherever a trailing
         // argument would not be the first message: print mode, a subcommand, and an
@@ -2320,6 +2350,12 @@ mod tests {
             assert!(!out.contains("Fix the header"), "{args:?}: {out}");
             assert!(out.trim().ends_with("env=unset"), "{args:?}: {out}");
             assert!(prompt_file.exists(), "{args:?} took the prompt");
+        }
+        // With no token of its own, a pane resumes nothing it can vouch for.
+        for token in [None, Some("")] {
+            let out = run_as("claude", &["--resume", "tok-123"], Some(prompt), token);
+            assert!(!out.contains("Fix the header"), "{token:?}: {out}");
+            assert!(prompt_file.exists(), "{token:?} took the prompt");
         }
         // Already claimed by the window: the agent starts bare.
         assert_eq!(
