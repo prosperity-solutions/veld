@@ -115,8 +115,8 @@ const ELECTRON_TO_VELD = {
  * That reasoning was wrong for this surface: an allow with no row in the panel is
  * one nobody can see and nobody can revoke, which is exactly the "hidden clever
  * default" a permission UI exists to abolish. They are ordinary permissions now
- * (`clipboard-write`, `protected-media`), they ask like everything else, and a
- * project that wants them silent says so in `veld.json`.
+ * (`clipboard-write`, `protected-media`) with a row in the panel; the clipboard
+ * pair is default-allowed through `DEFAULT_ALLOW`, encrypted media asks.
  */
 const FIXED_VERDICTS = {
   unknown: "deny",
@@ -137,9 +137,14 @@ const FIXED_VERDICTS = {
  * no exit affordance of veld's own to fall back on. One prompt in a rare case is
  * the cheaper side of that trade.
  *
+ * `clipboard-read` and `clipboard-write` are here because prompting for copy
+ * and paste in every site a pane opens was all friction and no protection: the
+ * maintainer asked for them always on. They are still *defaults* — each shows a
+ * row in the per-site panel, and a user Block or a `veld.json` `deny` still wins.
+ *
  * `display-capture` is conditional rather than listed here — see `defaultVerdict`.
  */
-const DEFAULT_ALLOW = new Set(["fullscreen", "pointer-lock"]);
+const DEFAULT_ALLOW = new Set(["clipboard-read", "clipboard-write", "fullscreen", "pointer-lock"]);
 
 /** Default ports, so an origin with no port compares equal to one with it. */
 const DEFAULT_PORTS = { http: 80, https: 443 };

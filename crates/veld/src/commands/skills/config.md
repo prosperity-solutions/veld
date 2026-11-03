@@ -957,7 +957,8 @@ of the three layers are not in this file:
    config in both directions; a config grant they blocked stays blocked.
 2. **This file.** `deny` beats `allow`, across separate matching rules as well as
    within one.
-3. **Veld's defaults:** `fullscreen` and `pointer-lock` are allowed (every
+3. **Veld's defaults:** `clipboard-read` and `clipboard-write` are allowed
+   (copy and paste never prompt); `fullscreen` and `pointer-lock` are allowed (every
    browser grants them on a gesture, and Escape undoes both — which is why
    `keyboard-lock`, whose whole job is capturing Escape, is *not* in that set and
    asks like anything else); `display-capture` is allowed

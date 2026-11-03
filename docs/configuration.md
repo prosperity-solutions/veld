@@ -2163,9 +2163,9 @@ but `denied` before a feature has been used once.
     // Veld's own URLs — almost certainly the ones you mean. They are
     // {service}.{run}.{project}.localhost, so BOTH wildcards are needed: the run
     // name sits in the hostname, and the port is 18443 on a no-sudo install.
-    { "origin": "https://*.myproject.localhost:*", "allow": ["geolocation", "clipboard-read"] },
+    { "origin": "https://*.myproject.localhost:*", "allow": ["geolocation", "notifications"] },
     // A server veld does not route — its port moves, its host does not.
-    { "origin": "http://localhost:*", "allow": ["clipboard-read"] },
+    { "origin": "http://localhost:*", "allow": ["notifications"] },
     { "origin": "https://staging.example.com", "deny": ["display-capture"] }
   ]
 }
@@ -2228,6 +2228,7 @@ The rules around it, each of which exists to stop a specific mistake:
 | Permission | Default | Why |
 |---|---|---|
 | `fullscreen`, `pointer-lock` | **allow** | Every browser grants these on a user gesture without asking, and both are reversible with Escape. Prompting would make a pane worse than the browser it embeds. **`keyboard-lock` is deliberately not here** — capturing Escape is what it does, so the justification does not extend to it |
+| `clipboard-read`, `clipboard-write` | **allow** | Copy and paste work in every pane without a prompt. Asking on every site was friction with no real protection. A `deny` here or a Block in the per-site panel still turns them off |
 | `display-capture` | **allow at an origin veld serves**, otherwise ask | A pane only ever captures *its own frame*, which is what `preferCurrentTab` asks for — so a page at an origin veld serves can screenshot itself inside a pane. At any other origin it prompts |
 | everything else | **ask** | |
 
@@ -2236,7 +2237,8 @@ Nothing else is granted behind your back. Two permissions — sanitized clipboar
 on the reasoning that no browser shows them as a per-site switch. That was wrong
 for this surface: an allow with no row in the panel is one nobody can see and
 nobody can revoke. They are ordinary permissions now (`clipboard-write`,
-`protected-media`) and they ask like everything else.
+`protected-media`), each with a row in the panel; the clipboard is allowed by
+default (above) and encrypted media asks.
 
 A `deny` withdraws any of these, including the screen-capture default.
 

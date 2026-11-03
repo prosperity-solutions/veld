@@ -321,25 +321,31 @@ test("an unknown permission is denied and never prompts", () => {
 });
 
 // These two were allowed before the policy ran and had no row in the per-site
-// panel — an allow nobody could see and nobody could revoke, which is the exact
-// thing a permission UI exists to abolish. They are ordinary permissions now.
+// panel — an allow nobody could see and nobody could revoke. They go through the
+// policy now; the clipboard is default-allowed there, protected media asks.
 test("clipboard write and protected media go through the policy like everything else", () => {
-  for (const [electronName, id] of [
-    ["clipboard-sanitized-write", "clipboard-write"],
-    ["mediaKeySystem", "protected-media"],
+  for (const [electronName, id, verdict] of [
+    ["clipboard-sanitized-write", "clipboard-write", "allow"],
+    ["clipboard-read", "clipboard-read", "allow"],
+    ["mediaKeySystem", "protected-media", "ask"],
   ]) {
     assert.deepStrictEqual(permissionIds(electronName, {}, "request").ids, [id]);
-    // Nothing set anywhere: it asks, rather than being silently granted.
     assert.strictEqual(
       resolve({ electronName, kind: "request", origin: localhost }).verdict,
-      "ask",
+      verdict,
       electronName,
     );
-    // And a project can still make them silent on purpose.
-    const rules = [{ origin: anyPort, allow: [id], deny: [] }];
+    // A project can still decide either way on purpose.
+    const allow = [{ origin: anyPort, allow: [id], deny: [] }];
     assert.strictEqual(
-      resolve({ electronName, kind: "request", origin: localhost, rules }).verdict,
+      resolve({ electronName, kind: "request", origin: localhost, rules: allow }).verdict,
       "allow",
+      electronName,
+    );
+    const deny = [{ origin: anyPort, allow: [], deny: [id] }];
+    assert.strictEqual(
+      resolve({ electronName, kind: "request", origin: localhost, rules: deny }).verdict,
+      "deny",
       electronName,
     );
   }
