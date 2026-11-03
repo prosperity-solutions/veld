@@ -2773,6 +2773,11 @@ struct HandoffView {
     session_id: String,
     /// The declared pane to run, or `""` for the user's usual agent.
     pane: String,
+    /// The daemon already launched it (`worktree.autostartHandoffs`): the window
+    /// attaches to the running session instead of reviewing or typing the prompt.
+    /// In `POST /api/handoffs`' own answer, that the daemon has taken the start on
+    /// — it is spawning as the caller reads this.
+    started: bool,
 }
 
 #[derive(Serialize)]
@@ -3199,7 +3204,7 @@ fn worktree_view_with(
     db: &Db,
     wt: WorktreeRecord,
     declared: &mut DeclaredConfigs,
-    handoffs: Option<&std::collections::HashMap<i64, (String, String)>>,
+    handoffs: Option<&std::collections::HashMap<i64, (String, String, bool)>>,
 ) -> WorktreeView {
     let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
     let has_veld_config = config_path.is_some();
@@ -3377,7 +3382,11 @@ fn worktree_view_with(
         Some(all) => all.get(&wt.id).cloned(),
         None => db.handoff_session(wt.id).ok().flatten(),
     }
-    .map(|(session_id, pane)| HandoffView { session_id, pane });
+    .map(|(session_id, pane, started)| HandoffView {
+        session_id,
+        pane,
+        started,
+    });
     // Read before `wt` is moved into the view below, the same reason `deleting` is.
     let git = git_signals_for(wt.id, &wt.path);
     let machine_vars = cfg.as_ref().map(|c| {
@@ -5272,8 +5281,9 @@ struct HandoffRequest {
 /// is created exactly as `POST /api/worktrees` creates one; with a prompt it then
 /// gets a [`veld_core::db::Handoff`] and lands in the rail's "Waiting for you"
 /// section, unless the caller named a lane. The pane itself is started by the
-/// first window that shows the worktree — no window may be open now, and a
-/// terminal belongs to the window that shows it.
+/// daemon right away, with no window involved ([`super::pty::autostart_handoff`]);
+/// with `worktree.autostartHandoffs` off, by the first window that shows the
+/// worktree.
 ///
 /// **The agent, the group and an existing branch are refused before anything is
 /// created or hidden**: the agent is checked against the calling checkout's own
@@ -5435,6 +5445,26 @@ async fn create_handoff(
     .map(Json)
 }
 
+/// The agent pane the daemon starts for a hand-off by itself
+/// (`worktree.autostartHandoffs`): the one `--agent` named, else the checkout's
+/// first agent pane — [`check_handoff_agent`]'s predicate, `handoffAgent`'s order.
+///
+/// **Not the user's usual agent**, which the window would pick: that preference
+/// lives in each window's storage, and the daemon has none to read. A project
+/// that declares one agent — the common case — starts the same one either way;
+/// one with several starts its first unless the handing-off agent named one.
+fn handoff_autostart_pane(panes: &[PaneView], wanted: &str) -> Option<String> {
+    let agents: Vec<&PaneView> = panes
+        .iter()
+        .filter(|p| p.kind == "terminal" && p.available && p.agent.unwrap_or(p.can_resume))
+        .collect();
+    agents
+        .iter()
+        .find(|p| !wanted.is_empty() && p.id == wanted)
+        .or_else(|| agents.first())
+        .map(|p| p.id.clone())
+}
+
 /// The rest of [`create_handoff`]: create the checkout, then record its pending
 /// agent pane and file it.
 async fn record_handoff(
@@ -5500,7 +5530,8 @@ async fn record_handoff(
     let session_id = uuid::Uuid::new_v4().to_string();
     let carry_over = created.carry_over;
     let outfit = created.outfit;
-    let view = crate::offload::blocking(move || {
+    let (session, text) = (session_id.clone(), prompt.clone());
+    let (view, autostart) = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
         let recorded = db
             .put_handoff(worktree_id, &session_id, &agent, &prompt)
@@ -5523,9 +5554,29 @@ async fn record_handoff(
             .get_worktree(worktree_id)
             .map_err(db_err)?
             .ok_or_else(|| db_err("worktree vanished after the hand-off was recorded"))?;
-        Ok::<_, ApiError>(worktree_view(&db, wt))
+        let mut view = worktree_view(&db, wt);
+        // The agent to start now, resolved against the **new** checkout's panes —
+        // `None` leaves it for a window, as before the setting existed.
+        let autostart = db
+            .worktree_autostart_handoffs()
+            .then(|| handoff_autostart_pane(&view.ide.panes, &agent))
+            .flatten();
+        if let Some(handoff) = view.handoff.as_mut() {
+            handoff.started = autostart.is_some();
+        }
+        Ok::<_, ApiError>((view, autostart))
     })
     .await?;
+    if let Some(pane) = autostart {
+        // Not awaited: the caller is told the worktree exists now, and the agent
+        // may take a minute to open an input.
+        tokio::spawn(super::pty::autostart_handoff(
+            worktree_id,
+            session,
+            pane,
+            text,
+        ));
+    }
     Ok(CreatedWorktreeView {
         worktree: view,
         carry_over,
@@ -6016,6 +6067,10 @@ impl Drop for HandoffInFlight {
 /// `GET /api/worktrees/{id}/handoff` — the pending agent pane with its prompt, for
 /// the window about to start it. `404` when there is none.
 ///
+/// `started` says the daemon already launched it (`worktree.autostartHandoffs`):
+/// the window then attaches to the running session and neither reviews nor types
+/// the prompt.
+///
 /// Reading does not retire it; spawning the session does (`pty::finish_agent_handoff`),
 /// so a window that reads it and then reloads leaves it for the next one. A
 /// hand-off whose session is **already live** has been launched and only lost its
@@ -6034,10 +6089,30 @@ async fn get_handoff(
             "no agent pane is waiting in this worktree",
         )
     };
-    let handoff = crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
-        .await?
-        .ok_or_else(gone)?;
-    if super::pty::session_worktree(&handoff.session_id).await == Some(id) {
+    let mut handoff =
+        crate::offload::blocking(move || open_desktop_db()?.handoff(id).map_err(db_err))
+            .await?
+            .ok_or_else(gone)?;
+    // Started by the daemon, and the agent is gone without a window ever showing
+    // it — the worktree sat in the trash past its grace, or the daemon's start
+    // failed in a way it could not give back. It goes back to waiting, so this
+    // window starts it the old way, prompt and all, instead of attaching to nothing.
+    if handoff.started
+        && !super::pty::autostart_in_progress(&handoff.session_id)
+        && super::pty::session_worktree(&handoff.session_id).await != Some(id)
+    {
+        let session = handoff.session_id.clone();
+        crate::offload::blocking(move || {
+            open_desktop_db()?
+                .unmark_handoff_started(id, &session)
+                .map_err(write_err)
+        })
+        .await?;
+        handoff.started = false;
+    }
+    // A hand-off the daemon started itself is meant to be live: the window
+    // attaches to it, and that attach retires the row.
+    if !handoff.started && super::pty::session_worktree(&handoff.session_id).await == Some(id) {
         let session = handoff.session_id.clone();
         crate::offload::blocking(move || {
             open_desktop_db()?
@@ -6051,6 +6126,7 @@ async fn get_handoff(
         "session_id": handoff.session_id,
         "pane": handoff.pane,
         "prompt": handoff.prompt,
+        "started": handoff.started,
     })))
 }
 

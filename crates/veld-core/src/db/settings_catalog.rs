@@ -929,11 +929,19 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            Self::WorktreeAutostartHandoffs => toggle(
+                "Start handed-off agents right away",
+                "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
+                 Veld starts its agent at once, in the background, with the prompt as the agent \
+                 wrote it — open the worktree to find it already working. Off: it waits in \
+                 Waiting for you until you open it.",
+                Git,
+            ),
             Self::WorktreeReviewHandoffs => toggle(
                 "Review prompts handed off by agents",
-                "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
-                 opening it shows the agent's prompt first, to edit, start, or move to the trash. Off: \
-                 opening it starts the agent with the prompt as the agent wrote it.",
+                "Only while Start handed-off agents right away is off. Opening a handed-off \
+                 worktree shows the agent's prompt first, to edit, start, or move to the trash. \
+                 Off: opening it starts the agent with the prompt as the agent wrote it.",
                 Git,
             ),
             Self::GitCreateFrom => Spec {

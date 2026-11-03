@@ -390,6 +390,9 @@ export type CreateWorktreeSource =
 export interface WorktreeHandoff {
   session_id: string;
   pane: string;
+  /** The daemon already started this agent (`worktree.autostartHandoffs`): the
+   *  window attaches to `session_id` and neither reviews nor types the prompt. */
+  started: boolean;
 }
 
 export interface Worktree {

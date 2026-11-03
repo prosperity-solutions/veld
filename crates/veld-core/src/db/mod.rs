@@ -1248,6 +1248,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-named-by",
         apply: migrate_v21_worktree_named_by,
     },
+    Migration {
+        version: 22,
+        name: "handoff-started",
+        apply: migrate_v22_handoff_started,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2142,6 +2147,22 @@ fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v22: `worktree_handoffs.started` — the daemon has launched this hand-off's
+/// agent itself, with no window showing the worktree (`worktree.autostartHandoffs`).
+///
+/// The row stays until a window attaches to that session, because it is the only
+/// thing that tells the window the pane exists: the session is live in a holder,
+/// but no layout names it yet, and without the row the agent would run where
+/// nobody could ever reach it. `started` is what tells the window to attach to it
+/// rather than review or type the prompt a second time, and what tells the detach
+/// reaper to leave a session nobody has opened yet alone. Every existing row
+/// predates the setting, so `0` — it waits for a window, as it did.
+fn migrate_v22_handoff_started(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE worktree_handoffs ADD COLUMN started INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2948,7 +2969,7 @@ mod tests {
 
         for _ in 0..2 {
             let db = Db::open_at(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 21);
+            assert_eq!(db.schema_version().unwrap(), 22);
         }
         let conn = Connection::open(&path).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -2995,7 +3016,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open_at(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
         let named_by = |p| db.get_worktree_by_path(p).unwrap().unwrap().named_by;
         assert_eq!(named_by("/r/a"), "user");
         assert_eq!(named_by("/r/b"), "");

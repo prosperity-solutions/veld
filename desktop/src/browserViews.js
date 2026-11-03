@@ -1935,6 +1935,7 @@ function wirePermissionHandlers(ses, partition) {
       electronName: permission,
       details,
       kind: "request",
+      mainFrame: details?.isMainFrame === true,
       ...policyInputs(pane, origin),
     });
     if (outcome.verdict !== "ask") {
@@ -1990,6 +1991,7 @@ function wirePermissionHandlers(ses, partition) {
       electronName: permission,
       details,
       kind: "check",
+      mainFrame: details?.isMainFrame === true,
       ...policyInputs(pane, origin),
     });
     // "ask" is `false` here — this handler has no way to prompt. See the note at

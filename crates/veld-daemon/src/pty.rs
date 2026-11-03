@@ -94,6 +94,10 @@ pub(super) mod shims;
 #[path = "pty/wire.rs"]
 mod wire;
 
+#[path = "pty/autostart.rs"]
+mod autostart;
+pub(crate) use autostart::{autostart_handoff, in_progress as autostart_in_progress};
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -502,7 +506,8 @@ pub fn spawn_session_reaper() {
             // Database reads, so off the workers (see `offload`) — the
             // terminals this reaper looks after run on them.
             let grace = crate::offload::blocking(configured_detach_grace).await;
-            reap_detached(grace).await;
+            let unopened = crate::offload::blocking(started_handoff_sessions).await;
+            reap_detached(grace, &unopened).await;
             close_trashed_sessions().await;
         }
     });
@@ -1013,12 +1018,27 @@ async fn session_busy(session: Arc<Session>) -> Option<bool> {
 /// the composition — and the composition has one behaviour of its own, the clock
 /// restart below, which `the_reaper_keeps_a_session_a_client_has_a_pane_for`
 /// pins end to end.
-async fn reap_detached(grace: Duration) {
+/// The sessions of hand-offs the daemon started itself and nobody has opened
+/// (`pty::autostart`). Never reaped: no window has had the chance to keep them, and
+/// the human may not look for hours. Unreadable reads as none — the grace applies,
+/// as it did before these existed.
+fn started_handoff_sessions() -> std::collections::HashSet<String> {
+    match veld_core::db::Db::open().and_then(|db| db.started_handoff_sessions()) {
+        Ok(ids) => ids.into_iter().collect(),
+        Err(e) => {
+            warn!("could not read the started hand-offs: {e}");
+            Default::default()
+        }
+    }
+}
+
+async fn reap_detached(grace: Duration, unopened: &std::collections::HashSet<String>) {
     let now = Instant::now();
     let candidates: Vec<String> = {
         let sessions = SESSIONS.lock().await;
         sessions
             .values()
+            .filter(|s| !unopened.contains(&s.id))
             .filter(|s| {
                 let detached = *s.detached_since.lock().expect("detach clock poisoned");
                 is_reapable(detached, now, grace)
@@ -2330,7 +2350,43 @@ async fn mint_ticket(
 ) -> Result<Json<TicketResponse>, ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    let Prepared {
+        ticket: prepared,
+        resumed,
+        prompt_at_launch,
+    } = prepare_ticket(body).await?;
+    let ticket = uuid::Uuid::new_v4().simple().to_string();
+    let now = Instant::now();
+    {
+        let mut store = TICKETS.lock().expect("ticket store poisoned");
+        // Opportunistic sweep: a ticket that is minted and never redeemed
+        // (the user closes the tab mid-connect) would otherwise sit here for
+        // the life of the daemon.
+        store.retain(|_, t| t.expires_at > now);
+        store.insert(ticket.clone(), prepared);
+    }
 
+    Ok(Json(TicketResponse {
+        ticket,
+        expires_in_ms: TICKET_TTL.as_millis() as u64,
+        resumed,
+        prompt_at_launch,
+    }))
+}
+
+/// A ticket ready to redeem, and what the minting client is told about it.
+struct Prepared {
+    ticket: Ticket,
+    resumed: bool,
+    prompt_at_launch: bool,
+}
+
+/// Everything [`mint_ticket`] decides about a request, short of storing the ticket.
+///
+/// Its own function so the daemon can start a session with exactly a window's
+/// rules — [`autostart_handoff`] runs a handed-off agent with no window at all, and
+/// a second copy of these checks is a second place for them to drift.
+async fn prepare_ticket(body: TicketRequest) -> Result<Prepared, ApiError> {
     if !valid_session_id(&body.session_id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));
     }
@@ -2547,7 +2603,7 @@ async fn mint_ticket(
         None
     });
     let agent_handoff = match handoff_step(
-        recorded.as_ref().map(|(session, _)| session.as_str()),
+        recorded.as_ref().map(|(session, _, _)| session.as_str()),
         &body.session_id,
         resumed,
         pane.is_some() && body.mode == Some(PaneMode::Fresh),
@@ -2570,37 +2626,22 @@ async fn mint_ticket(
         .lock()
         .expect("upload reservations poisoned")
         .remove(&body.session_id);
-    let ticket = uuid::Uuid::new_v4().simple().to_string();
-    let now = Instant::now();
-    {
-        let mut store = TICKETS.lock().expect("ticket store poisoned");
-        // Opportunistic sweep: a ticket that is minted and never redeemed
-        // (the user closes the tab mid-connect) would otherwise sit here for
-        // the life of the daemon.
-        store.retain(|_, t| t.expires_at > now);
-        store.insert(
-            ticket.clone(),
-            Ticket {
-                session_id: body.session_id,
-                worktree_id: body.worktree_id,
-                cwd,
-                label: wt.alias.clone(),
-                pane,
-                shell,
-                shell_flags,
-                shim_env,
-                agent_handoff,
-                expires_at: now + TICKET_TTL,
-            },
-        );
-    }
-
-    Ok(Json(TicketResponse {
-        ticket,
-        expires_in_ms: TICKET_TTL.as_millis() as u64,
+    Ok(Prepared {
+        ticket: Ticket {
+            session_id: body.session_id,
+            worktree_id: body.worktree_id,
+            cwd,
+            label: wt.alias.clone(),
+            pane,
+            shell,
+            shell_flags,
+            shim_env,
+            agent_handoff,
+            expires_at: Instant::now() + TICKET_TTL,
+        },
         resumed,
         prompt_at_launch,
-    }))
+    })
 }
 
 /// Launch prompts handed to a pane and not yet claimed back by its window, by
@@ -9656,7 +9697,7 @@ mod tests {
 
             backdate(&sid).await;
             crate::http_server::ide::declare_kept_for_test(&client, &[&sid]).await;
-            reap_detached(HOUR).await;
+            reap_detached(HOUR, &Default::default()).await;
             assert!(
                 SESSIONS.lock().await.contains_key(&sid),
                 "a session a connected client has a pane for must survive its grace"
@@ -9668,7 +9709,7 @@ mod tests {
             // collects would satisfy an assertion on the field and none of the
             // behaviour.
             crate::http_server::ide::forget_client_for_test(&client).await;
-            reap_detached(HOUR).await;
+            reap_detached(HOUR, &Default::default()).await;
             assert!(
                 SESSIONS.lock().await.contains_key(&sid),
                 "losing the client must start the grace, not find it already spent"
@@ -9677,7 +9718,7 @@ mod tests {
             // Past that fresh grace, it is collected like anything else — the
             // exemption is a delay, not immortality.
             backdate(&sid).await;
-            reap_detached(HOUR).await;
+            reap_detached(HOUR, &Default::default()).await;
             assert!(
                 !SESSIONS.lock().await.contains_key(&sid),
                 "a session no client has a pane for is collected once its grace is up"

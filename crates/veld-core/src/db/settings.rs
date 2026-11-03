@@ -722,6 +722,9 @@ pub enum SettingKey {
     /// Whether a prompt handed off by an agent (`veld ide worktree new`) is shown for
     /// review before its agent starts.
     WorktreeReviewHandoffs,
+    /// Whether the daemon starts a handed-off worktree's agent right away, or
+    /// leaves it waiting until a window opens the worktree.
+    WorktreeAutostartHandoffs,
     WorktreeTrashRetention,
     RunsHistoryDays,
     LogsTimeZone,
@@ -807,6 +810,7 @@ impl SettingKey {
         Self::BackupDir,
         // ── Git ──────────────────────────────────────────────────────────────
         Self::WorktreeNewMode,
+        Self::WorktreeAutostartHandoffs,
         Self::WorktreeReviewHandoffs,
         Self::GitCreateFrom,
         Self::OutfitRequired,
@@ -932,6 +936,7 @@ impl SettingKey {
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
             Self::WorktreeNewMode => "worktree.newMode",
             Self::WorktreeReviewHandoffs => "worktree.reviewHandoffs",
+            Self::WorktreeAutostartHandoffs => "worktree.autostartHandoffs",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
             Self::RunsHistoryDays => "runs.historyDays",
             Self::LogsTimeZone => "logs.timeZone",
@@ -1017,6 +1022,7 @@ impl SettingKey {
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
             "worktree.newMode" => Self::WorktreeNewMode,
             "worktree.reviewHandoffs" => Self::WorktreeReviewHandoffs,
+            "worktree.autostartHandoffs" => Self::WorktreeAutostartHandoffs,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
             "runs.historyDays" => Self::RunsHistoryDays,
             "logs.timeZone" => Self::LogsTimeZone,
@@ -1161,6 +1167,7 @@ impl SettingKey {
             | Self::TerminalAgentIntegration
             | Self::TerminalAgentContext
             | Self::WorktreeReviewHandoffs
+            | Self::WorktreeAutostartHandoffs
             | Self::ExtensionsAutoRefresh
             | Self::ActivityShowWorking
             | Self::ActivityNotifyCommandFinished
@@ -1867,6 +1874,9 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // two, and defaulting to either would spend it.
         (SettingKey::WorktreeNewMode, Value::from("ask")),
         (SettingKey::WorktreeReviewHandoffs, Value::from(true)),
+        // On: an agent that hands off work wants it worked on now, not when the
+        // human next happens to click the row. Off brings back waiting for a window.
+        (SettingKey::WorktreeAutostartHandoffs, Value::from(true)),
         // Both quick switches ship **on**. Whether two more buttons belong in a
         // pane's chrome for everyone is a real question — the bar already carries
         // most of a browser's toolbar and has to read at 300px — but the alternative is
@@ -2505,6 +2515,16 @@ impl Db {
     /// Separate from [`Self::terminal_agent_integration`]; see the default's note.
     pub fn terminal_agent_context(&self) -> bool {
         self.setting(&SettingKey::TerminalAgentContext)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+    }
+
+    /// Whether the daemon starts a handed-off worktree's agent itself, at once,
+    /// rather than leaving it for the first window that shows the worktree.
+    pub fn worktree_autostart_handoffs(&self) -> bool {
+        self.setting(&SettingKey::WorktreeAutostartHandoffs)
             .ok()
             .flatten()
             .and_then(|v| v.as_bool())

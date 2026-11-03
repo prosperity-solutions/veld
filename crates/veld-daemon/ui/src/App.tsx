@@ -247,6 +247,7 @@ import {
   handoffAgent,
   handoffAlternatives,
   handoffPaneTab,
+  startedHandoffTab,
   handoffReviewStart,
   defaultLayout,
   diagTab,
@@ -4130,8 +4131,13 @@ function AppInner(props: {
       let agentTab: PaneTab | null = null;
       if (handed?.handoff) {
         let prompt: string | null = null;
+        let started = false;
+        let startedPane = "";
         try {
-          prompt = (await api.worktreeHandoff(id)).prompt;
+          const read = await api.worktreeHandoff(id);
+          prompt = read.prompt;
+          started = read.started === true;
+          startedPane = read.pane;
         } catch {
           // Gone (another window started it a moment ago) or unreachable; either
           // way there is nothing to start, and a later show will look again.
@@ -4145,7 +4151,16 @@ function AppInner(props: {
                 handed.handoff.pane,
                 recallLastAgent(window.localStorage, handed.repo_root),
               );
-        if (prompt !== null && resolved === null) {
+        // The daemon already started it (`worktree.autostartHandoffs`): the agent
+        // is running with its prompt, so the tab only attaches — no review, no
+        // prompt typed a second time. Its attach retires the hand-off.
+        const startedSpec = started
+          ? handed.ide.panes.find((p) => p.id === startedPane) ?? resolved
+          : null;
+        if (prompt !== null && startedSpec) {
+          agentTab = startedHandoffTab(startedSpec, handed.handoff.session_id);
+          noteExpectedResumes([agentTab.id]);
+        } else if (prompt !== null && resolved === null) {
           // Given up on only when the checkout declares no agent pane at all —
           // then nothing could ever start it, and keeping it would repeat this
           // toast on every show. One that is merely unavailable right now (a
@@ -10612,7 +10627,7 @@ function Rail(props: {
                   className="lane-name"
                   title={
                     group.key === HANDOFF_LANE
-                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. Opening one marked with an hourglass shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
+                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. Their agents start right away; one marked with an hourglass is waiting for you instead (Settings › Git) — opening it shows the task it was handed, or starts its agent on it with the review turned off. Drag a row into a group to file it."
                       : undefined
                   }
                 >
@@ -10945,7 +10960,7 @@ function Rail(props: {
                         ? `${worktreeLabel(w)} — in the trash, still on disk`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
-                          : w.handoff
+                          : w.handoff && !w.handoff.started
                           ? `${worktreeLabel(w)} — ${w.branch} · ${handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}`
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
@@ -11089,10 +11104,12 @@ function Rail(props: {
                       left it, and opening the row is what starts it. On the row
                       rather than the section, because a hand-off filed straight
                       into one of the user's groups (`--group`) is waiting too.
-                      Gone once the agent has started (the daemon retires it).
-                      Wide-only: the collapsed row's grid has no slot for it, and
-                      its hover text carries the same note there. */}
-                  {props.wide && !trashed && w.handoff && (
+                      Gone once the agent has started — including when the daemon
+                      started it with no window open (`handoff.started`), where
+                      the row stays only until a window attaches. Wide-only: the
+                      collapsed row's grid has no slot for it, and its hover text
+                      carries the same note there. */}
+                  {props.wide && !trashed && w.handoff && !w.handoff.started && (
                     <span className="wt-handoff" aria-hidden title={handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}>
                       <IconHourglassEmpty size={12} />
                     </span>

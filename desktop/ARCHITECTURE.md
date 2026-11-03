@@ -162,8 +162,19 @@ requests at runtime — branding rule.
   exists, where a flag would need clearing on each path and a drop into the
   ungrouped section (`""` → `""`) is a no-op that sends no PATCH at all. The
   pending agent pane is a `worktree_handoffs` row (v18) naming a session id the
-  daemon chose; the first window that shows the worktree seeds a tab under that
-  id (`handoffPaneTab`) and queues the prompt, and the row is deleted when *that*
+  daemon chose. **By default the daemon starts it itself** (`worktree.autostartHandoffs`,
+  `pty/autostart.rs`): it marks the row `started` (v22), spawns the session through
+  the same `prepare_ticket` a window's ticket goes through, and hands the agent the
+  prompt — at launch where it takes one, else typed behind the bracketed-paste
+  gate `promptDelivery.ts` uses. No window is involved, so the session is a
+  detached one nobody has kept; the reaper skips `started` rows' sessions. The
+  first window that shows the worktree then seeds an attach-only tab under that id
+  (`startedHandoffTab` — no `markPaneCreated`, no prompt, no review), and its
+  attach retires the row (`HandoffStep::RetireNow`). A start that cannot deliver
+  the prompt hangs up and unmarks, and a `started` row whose session has died
+  is unmarked by `GET …/handoff`, so both fall through to the window path below.
+  With the setting off — and for those fall-throughs — the first window that shows
+  the worktree seeds a tab under that id (`handoffPaneTab`) and queues the prompt, and the row is deleted when *that*
   session spawns (`pty::finish_agent_handoff`), not when a window reads it — so a
   reload or crash between the two leaves it for the next window, and the tab
   already in the layout is the same tab, not a second one. With

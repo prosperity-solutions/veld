@@ -4,15 +4,17 @@
 //! The way a coding agent branches work off without filing an issue somebody has
 //! to pick up later, and without a sub-agent working in a checkout nobody can see:
 //! Veld creates the worktree, files it into the rail's "Waiting for you" section, and
-//! the first window that shows it starts an agent pane there with the prompt
-//! already sent. From then on the human drives it; nothing reports back here.
+//! starts an agent pane there at once, in the background, with the prompt already
+//! sent — no window has to be open. With `worktree.autostartHandoffs` off it waits
+//! instead, and the first window that shows it starts the agent. From then on the
+//! human drives it; nothing reports back here.
 //!
 //! `veld ide worktree groups` lists the groups a hand-off can be filed into instead,
 //! and `veld ide worktree name` retitles the worktree the caller is in.
 //!
 //! # Exit status
 //!
-//! - `0` — the worktree exists (and, with a prompt, its agent pane is waiting).
+//! - `0` — the worktree exists (and, with a prompt, its agent is starting or waiting).
 //! - `1` — the request was refused, so nothing was created: the branch exists,
 //!   the daemon is not running, the prompt is too long.
 //! - `2` — usage: bad flags, a missing or too-wide `--name`, or the prompt could
@@ -36,13 +38,16 @@ use clap::Subcommand;
 #[derive(Subcommand)]
 pub enum WorktreeCommand {
     /// Create a worktree of this project and hand it to the human, optionally with
-    /// an agent waiting to start in it on a prompt.
+    /// an agent started in it on a prompt.
     ///
     /// The project is the one the current directory belongs to. With a prompt, the
     /// worktree lands in the rail's "Waiting for you" section (or the group named by
-    /// `--group`) and the first Veld window that shows it starts an agent pane there
-    /// with the prompt as its first message; the human takes it from there.
-    /// Nothing reports back to the caller.
+    /// `--group`) and Veld starts an agent pane there right away, in the
+    /// background, with the prompt as its first message — no window has to show
+    /// it. The human opens it to find the agent already working. If they turned
+    /// that off (Settings › Git, `worktree.autostartHandoffs`), the agent waits
+    /// until a Veld window shows the worktree instead. Nothing reports back to the
+    /// caller.
     ///
     /// When the project uses outfit profiles (outfit.oss.life.li), say which one
     /// the new worktree wears with `--outfit`; `outfit ls` shows them, and a
@@ -95,9 +100,11 @@ pub enum WorktreeCommand {
         #[arg(long, value_name = "PROFILE")]
         outfit: Option<String>,
 
-        /// Print `{"id", "path", "branch", "alias", "name", "waiting", "agent",
-        /// "outfit"}` on stdout. `waiting` is whether an agent pane is waiting to
-        /// start; `agent` is the pane named, or null for the human's usual one;
+        /// Print `{"id", "path", "branch", "alias", "name", "waiting", "starting",
+        /// "agent", "outfit"}` on stdout. `waiting` is whether an agent goes with
+        /// the worktree; `starting` whether Veld is starting it now rather than
+        /// when the human opens it; `agent` is the pane named, or null for the
+        /// default;
         /// `outfit` is the profile it wears, or null when it follows the clone's.
         #[arg(long)]
         json: bool,
@@ -369,7 +376,10 @@ fn report(body: &serde_json::Value, json: bool) {
         .unwrap_or("the worktree");
     let path = body["path"].as_str().unwrap_or_default();
     let waiting = body["handoff"].is_object();
-    if waiting {
+    let starting = body["handoff"]["started"].as_bool() == Some(true);
+    if starting {
+        eprintln!("Created {name} at {path}. Its agent is starting now, in the background.");
+    } else if waiting {
         eprintln!(
             "Created {name} at {path}. Its agent starts when the worktree is first opened in Veld."
         );
@@ -388,6 +398,7 @@ fn report(body: &serde_json::Value, json: bool) {
             "alias": body["alias"],
             "name": name,
             "waiting": waiting,
+            "starting": starting,
             "agent": agent,
             "outfit": body["outfit"]["profile"],
         });
