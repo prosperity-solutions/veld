@@ -2631,9 +2631,11 @@ enum LaunchPromptRoute {
 
 /// Who hands a pane launch its first message.
 ///
-/// Only a fresh start: a resumed or adopted conversation already has one, and a
-/// reattach spawns nothing. Then the wrapper, which is not on PATH — and would not
-/// look — without `VELD_AGENT_HOOKS`, i.e. with agent integration off; unless the
+/// Only a launch that spawns the agent for this prompt: a fresh start, or a resume
+/// (`veld agent restart`'s relaunch, where the prompt is the conversation's next
+/// message). A reattach spawns nothing, and no window offers a prompt to an adopt.
+/// Then the wrapper, which is not on PATH — and would not look — without
+/// `VELD_AGENT_HOOKS`, i.e. with agent integration off; unless the
 /// pane's own command is `claude` (`tool`) and Claude is on the mod, where the wrapper
 /// passes straight through and the daemon does the wrapper's part itself. Codex and Pi
 /// keep their wrappers on the mod, and so does their route. Every
@@ -2645,7 +2647,7 @@ fn launch_prompt_route(
     shim_env: &BTreeMap<String, String>,
     tool: Option<veld_core::agent::AgentTool>,
 ) -> LaunchPromptRoute {
-    if resumed || mode.unwrap_or(PaneMode::Fresh) != PaneMode::Fresh {
+    if resumed || mode == Some(PaneMode::Adopt) {
         return LaunchPromptRoute::Window;
     }
     if tool == Some(veld_core::agent::AgentTool::Claude)
@@ -2732,6 +2734,7 @@ async fn launch_prompt_in_argv(
         || !veld_core::agent::args_take_launch_prompt(
             veld_core::agent::AgentTool::Claude,
             &direct[1..],
+            Some(&launch.token),
         )
     {
         return false;
@@ -8170,10 +8173,25 @@ mod tests {
             assert_eq!(body["claimed"], false);
             assert_eq!(body["staged"], true);
 
+            // A restart's relaunch resumes the pane's own conversation by its token.
+            let sid = session_id();
+            let mut launch = agent_launch();
+            let resume: Vec<String> = ["claude", "--resume", "tok", "--model", "opus"]
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect();
+            launch.direct_argv = Some(resume.clone());
+            assert!(launch_prompt_in_argv(&sid, prompt, &mut launch, TEST_SHELL, &[]).await);
+            let mut expected = resume;
+            expected.extend(["--".to_owned(), prompt.to_owned()]);
+            assert_eq!(launch.argv, login_shell_command(TEST_SHELL, &[], &expected));
+            LAUNCH_PROMPTS.lock().unwrap().remove(&sid);
+
             // A command that already carries a prompt, or is not `claude` itself, is
             // left alone, and the window types it as before.
             for direct in [
                 vec!["claude", "--dangerously-skip-permissions", "Read AGENTS.md"],
+                vec!["claude", "--resume", "not-this-panes-token"],
                 vec!["claude-yolo"],
                 vec!["claude", "-p"],
             ] {
@@ -8266,7 +8284,7 @@ mod tests {
         }
 
         #[test]
-        fn only_a_fresh_launch_with_agent_integration_takes_a_prompt() {
+        fn only_a_spawning_launch_with_agent_integration_takes_a_prompt() {
             use LaunchPromptRoute::{Argv, Window, Wrapper};
             const CLAUDE: Option<veld_core::agent::AgentTool> =
                 Some(veld_core::agent::AgentTool::Claude);
@@ -8283,8 +8301,28 @@ mod tests {
                 launch_prompt_route(false, Some(PaneMode::Fresh), &on, CLAUDE),
                 Wrapper
             );
+            // A restart's relaunch: the prompt is the resumed conversation's next turn.
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Resume), &on, CLAUDE),
+                Wrapper
+            );
             // On the mod the wrapper steps aside, so the daemon is the one to pass it.
             assert_eq!(launch_prompt_route(false, None, &on_mod, CLAUDE), Argv);
+            assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Resume), &on_mod, CLAUDE),
+                Argv
+            );
+            // Codex and Pi stage the file on a resume too; their wrappers leave it, so
+            // the window's claim wins and it types the prompt.
+            for tool in [
+                veld_core::agent::AgentTool::Codex,
+                veld_core::agent::AgentTool::Pi,
+            ] {
+                assert_eq!(
+                    launch_prompt_route(false, Some(PaneMode::Resume), &on, Some(tool)),
+                    Wrapper
+                );
+            }
             // Codex and Pi keep their wrappers on the mod, and a command that is not
             // `claude` itself (a `shell` spec) leaves it to the wrapper's file as well.
             for tool in [
@@ -8300,12 +8338,16 @@ mod tests {
                 Window
             );
             assert_eq!(
+                launch_prompt_route(false, Some(PaneMode::Resume), &off, CLAUDE),
+                Window
+            );
+            assert_eq!(
                 launch_prompt_route(true, Some(PaneMode::Fresh), &on, CLAUDE),
                 Window
             );
             assert_eq!(launch_prompt_route(true, None, &on_mod, CLAUDE), Window);
             assert_eq!(
-                launch_prompt_route(false, Some(PaneMode::Resume), &on, CLAUDE),
+                launch_prompt_route(true, Some(PaneMode::Resume), &on, CLAUDE),
                 Window
             );
             assert_eq!(

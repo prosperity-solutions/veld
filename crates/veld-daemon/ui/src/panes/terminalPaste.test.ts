@@ -196,9 +196,26 @@ describe("the paths reach the terminal as a paste", () => {
     expect(TERMINAL_HOST).toContain("bracketedPaste: s.term.modes.bracketedPasteMode,");
   });
 
-  it("offers the prompt to a fresh launch only, and only once", () => {
-    expect(TERMINAL_HOST).toContain('const prompt = pane?.mode === "fresh" ? await offerAtLaunch(s) : undefined;');
+  it("offers the prompt to a fresh or resume launch only, and only once", () => {
+    // A resume is `veld agent restart`'s relaunch: its prompt must reach the
+    // agent's argv, or it sits typed into the input waiting for an Enter.
+    expect(TERMINAL_HOST).toContain(
+      'const prompt = pane?.mode === "fresh" || pane?.mode === "resume" ? await offerAtLaunch(s) : undefined;',
+    );
     expect(TERMINAL_HOST).toMatch(/if \(queued === undefined \|\| queued\.offered\) return undefined;\s*queued\.offered = true;/);
+  });
+
+  it("turns a dead program's modes off before a spawn's notice and socket", () => {
+    // The gate reads bracketed paste from this xterm. A restart reuses it, so the
+    // killed agent's mode would open the gate before the new one exists, and the
+    // window would claim the prompt ahead of the wrapper. Leaving the alternate
+    // screen erases it, so a notice written before the reset would be lost.
+    expect(TERMINAL_HOST).toMatch(
+      /ticket = minted\.ticket;[\s\S]*?if \(!minted\.resumed\) \{\s*if \(s\.generation !== generation\) return;\s*await resetProgramModes\(s\.term\);\s*if \(s\.generation !== generation\) return;\s*\}[\s\S]*?EXPECTED_RESUMES\.delete\(s\.id\)[\s\S]*?const ws = new WebSocket\(/,
+    );
+    expect(TERMINAL_HOST).toMatch(
+      /await resetProgramModes\(s\.term\);\s*if \(s\.generation !== generation\) return;\s*writeNotice\(s, "starting a new shell"\);\s*await connect\(s\);/,
+    );
   });
 
   it("never writes the payload straight to the socket", () => {

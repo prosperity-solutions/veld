@@ -1,3 +1,4 @@
+import { Terminal } from "@xterm/xterm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   type DeliverablePrompt,
@@ -9,6 +10,7 @@ import {
   PROMPT_SETTLE_MS,
   PROMPT_WAIT_MS,
   type PromptPorts,
+  resetProgramModes,
 } from "./promptDelivery";
 
 /**
@@ -362,5 +364,45 @@ describe("a prompt that is never typed", () => {
     expect(p.ports.dequeue).toHaveBeenCalled();
     expect(p.writes()).toEqual([]);
     expect(p.ports.fail).not.toHaveBeenCalled();
+  });
+});
+
+describe("a restart's reused xterm", () => {
+  const rows = (term: Terminal, n: number): string[] =>
+    Array.from({ length: n }, (_, y) => term.buffer.active.getLine(y)?.translateToString(true) ?? "");
+
+  it.each(["?1049h", "?1047h", "?47h"])(
+    "has the killed program's modes off and its screen left, after %s",
+    async (altScreen) => {
+      vi.useRealTimers();
+      const term = new Terminal();
+      const write = (data: string) => new Promise<void>((parsed) => term.write(data, parsed));
+      await write("history 1\r\nhistory 2\r\n$ agent");
+      term.write(`\x1b[${altScreen}\x1b[?2004h\x1b[?1000h\x1b[?1006h\x1b[?1004h\x1b[?1h\x1b[20;10Hdrawn`);
+
+      await resetProgramModes(term);
+      expect(term.modes).toMatchObject({
+        bracketedPasteMode: false,
+        mouseTrackingMode: "none",
+        sendFocusMode: false,
+        applicationCursorKeysMode: false,
+      });
+      expect(term.buffer.active.type).toBe("normal");
+      await write("\r\n[veld] notice");
+      expect(rows(term, 4)).toEqual(["history 1", "history 2", "$ agent", "[veld] notice"]);
+      term.dispose();
+    },
+  );
+
+  it("leaves the cursor alone on the normal screen", async () => {
+    vi.useRealTimers();
+    const term = new Terminal();
+    const write = (data: string) => new Promise<void>((parsed) => term.write(data, parsed));
+    await write("history 1\r\n$ shell\x1b[?2004h");
+
+    await resetProgramModes(term);
+    expect(term.modes.bracketedPasteMode).toBe(false);
+    expect([term.buffer.active.cursorX, term.buffer.active.cursorY]).toEqual([7, 1]);
+    term.dispose();
   });
 });

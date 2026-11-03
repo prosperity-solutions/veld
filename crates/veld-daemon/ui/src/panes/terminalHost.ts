@@ -38,7 +38,7 @@ import {
   storedTerminalIds,
   terminalIds,
 } from "./model";
-import { deliverQueuedPrompt } from "./promptDelivery";
+import { deliverQueuedPrompt, resetProgramModes } from "./promptDelivery";
 import { RETRY_STAGGER_MS, isStalled, planSweep } from "./retrySweep";
 import { clearTermTitle, setTermTitle } from "./termTitles";
 import { handleKeyEvent } from "./terminalKeys";
@@ -1004,9 +1004,9 @@ interface QueuedPrompt {
   label: string;
   files: readonly QueuedFile[];
   /**
-   * Set by the first fresh connect, which is the only one that offers the
-   * prompt to the launch ([`offerAtLaunch`]): a reconnect's spawn may follow a
-   * launch that already sent it.
+   * Set by the first fresh or resume connect, which is the only one that offers
+   * the prompt to the launch ([`offerAtLaunch`]): a reconnect's spawn may follow
+   * a launch that already sent it.
    */
   offered?: boolean;
   /** The files' paths, once that connect has resolved them — uploads included,
@@ -1116,7 +1116,8 @@ async function resolveQueuedFiles(
 }
 
 /**
- * The queued prompt as a launch argument, for the first fresh spawn of its pane.
+ * The queued prompt as a launch argument, for the first fresh or resume spawn of
+ * its pane.
  *
  * **Why at launch at all:** typed in, the message is visible in the agent's input
  * for the second or so it takes to paste the text, each path and the Return —
@@ -1237,7 +1238,7 @@ async function connect(
       s.spec !== undefined && mode !== undefined
         ? { spec: s.spec, mode, sessionToken }
         : undefined;
-    const prompt = pane?.mode === "fresh" ? await offerAtLaunch(s) : undefined;
+    const prompt = pane?.mode === "fresh" || pane?.mode === "resume" ? await offerAtLaunch(s) : undefined;
     const minted = await api.ptyTicket(s.worktreeId, s.id, pane, prompt);
     if (prompt !== undefined && minted.prompt_at_launch === true) {
       const queued = INITIAL_PROMPTS.get(s.id);
@@ -1256,6 +1257,16 @@ async function connect(
       return;
     }
     ticket = minted.ticket;
+    // A restart reuses this xterm, and a program that was killed never turned its
+    // modes off. Left on, a dead agent's bracketed paste opens the prompt gate
+    // before the new process exists: the window claims the launch prompt ahead of
+    // the agent's wrapper and types it into a terminal nothing is reading yet.
+    // Ahead of any notice, which leaving the alternate screen would erase.
+    if (!minted.resumed) {
+      if (s.generation !== generation) return;
+      await resetProgramModes(s.term);
+      if (s.generation !== generation) return;
+    }
     // A tab restored from sessionStorage expected its shell to still be there.
     // If it isn't (the daemon restarted, or the detach grace expired) say so —
     // otherwise a running build is silently replaced by an empty prompt, which
@@ -1977,6 +1988,10 @@ export function restartTerminal(id: string): void {
     // never created because the spawn failed), which is the state we want.
     await api.closePtySession(id).catch(() => {});
     if (s.generation !== generation) return;
+    // `connect` resets the modes too, but after this notice: leaving the alternate
+    // screen there would erase it.
+    await resetProgramModes(s.term);
+    if (s.generation !== generation) return;
     writeNotice(s, "starting a new shell");
     await connect(s);
   })();
@@ -2109,8 +2124,9 @@ const RESTART_POLL_MS = 250;
  * person's click, and nobody is there to answer it.
  *
  * The prompt rides the ordinary launch-prompt queue, so it is delivered exactly
- * as the New worktree dialog's is: handed to the launch on a `fresh` start, typed
- * in once the agent is reading input on `resume`. Ignored when this window has no
+ * as the New worktree dialog's is: handed to the launch, `fresh` or `resume`, and
+ * typed in once the agent is reading input only if the launch did not take it.
+ * Ignored when this window has no
  * live session under that id for that worktree — only the window that holds the
  * tab can restart it — or when the tab is a plain shell, which has no agent.
  */
