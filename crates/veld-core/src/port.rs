@@ -35,10 +35,12 @@ pub const PORT_RANGE_END: u16 = 29999;
 /// that was learned: this function runs in whichever process is *allocating*, so it
 /// cannot see a dev daemon's derived port. `instance::files_port` therefore sits below
 /// [`PORT_RANGE_START`], outside everything this allocator can hand out.
-fn infrastructure_ports() -> [u16; 2] {
+fn infrastructure_ports() -> [u16; 4] {
     [
         crate::instance::DEFAULT_DAEMON_PORT,
         crate::instance::daemon_port(),
+        crate::runner::DEFAULT_DAEMON_PORT,
+        crate::runner::DEFAULT_REMOTE_PORT,
     ]
 }
 

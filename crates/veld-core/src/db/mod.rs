@@ -14,6 +14,7 @@
 //! newer than this binary fails to open with [`DbError::NewerSchema`]
 //! instead of corrupting data — running environments are never touched.
 
+pub mod agent_runtime;
 pub mod backup;
 pub mod engine_actions;
 mod handoffs;
@@ -22,6 +23,7 @@ mod kv;
 mod layouts;
 mod logs;
 mod panes;
+mod remote_sessions;
 mod settings;
 mod settings_catalog;
 pub(crate) mod state;
@@ -34,6 +36,7 @@ pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
+pub use remote_sessions::RemoteTerminal;
 pub use settings::{
     BackupPrefs, ConfigSource, DEFAULT_BACKUP_INTERVAL_MINUTES, DEFAULT_BACKUP_KEEP,
     DEFAULT_BACKUP_KEEP_DAILY, DEFAULT_DETACH_GRACE_MINUTES,

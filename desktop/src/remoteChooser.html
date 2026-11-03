@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-4XN0aLEaDyKx8c2bMEBX8Znkh+WP9zWcgumsiDoJQ7k='; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Remote connections — Veld</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.2 36L12 12H16.4L23.7 31.8H23.8L31.1 12H35.5L26.3 36H21.2Z' fill='white'/><path d='M32.5 37C33.8807 37 35 35.8807 35 34.5C35 33.1193 33.8807 32 32.5 32C31.1193 32 30 33.1193 30 34.5C30 35.8807 31.1193 37 32.5 37Z' fill='%23C4F56A'/></svg>">
+<style>
+:root{color-scheme:dark;--bg:#0d0e10;--panel:#141619;--panel2:#1a1d21;--border:#2a2e35;--text:#e7e9ec;--muted:#98a0a9;--accent:oklch(0.74 0.14 158);--live-ink:#04140b;--danger:oklch(0.68 0.17 22)}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,sans-serif}main{max-width:780px;margin:auto;padding:28px}header{display:flex;gap:16px;align-items:center;margin-bottom:24px}.wordmark{width:84px;height:32px;flex-shrink:0}.wordmark path{fill:var(--text)}.wordmark path:last-child{fill:var(--accent)}header p{margin:0;color:var(--muted)}h1{font-size:20px;margin:0}h2{font-size:16px;margin:0 0 12px}p{margin:8px 0;color:var(--muted)}section{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:20px;margin-bottom:16px}label{display:block;margin:12px 0 6px}input,textarea,button{font:inherit}input,textarea{display:block;width:100%;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px}textarea{resize:vertical;min-height:90px;font-family:ui-monospace,monospace}button{border:1px solid var(--border);border-radius:6px;padding:8px 12px;background:var(--panel2);color:var(--text);cursor:pointer}button.primary{background:var(--accent);border-color:var(--accent);color:var(--live-ink);font-weight:600}button:disabled{opacity:.55;cursor:wait}:focus-visible{outline:2px solid var(--accent);outline-offset:3px}.actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}ul{list-style:none;padding:0;margin:0}li{padding:14px 0;border-top:1px solid var(--border)}li:first-child{border-top:0;padding-top:0}li p{margin:4px 0}.identity{font:12px/1.6 ui-monospace,monospace;overflow-wrap:anywhere}.status{min-height:24px}.error{color:color-mix(in oklab,var(--danger) 75%,var(--text))}.note{font-size:12px}strong{font-weight:600}@media(max-width:520px){main{padding:16px}header{align-items:flex-start}section{padding:16px}}
+</style>
+</head>
+<body>
+<main>
+<header><svg class="wordmark" viewBox="0 0 3837 1463" role="img" aria-label="veld" focusable="false"><path d="M383 1463L0 423H183L470 1278H474L762 423H943L561 1463H383Z" />
+<path d="M1507 1463C1407.67 1463 1322.17 1441 1250.5 1397C1178.83 1353 1123.83 1290.83 1085.5 1210.5C1047.17 1130.17 1028 1035.67 1028 927V926C1028 818.667 1047.33 724.167 1086 642.5C1124.67 560.833 1179 497.167 1249 451.5C1319 405.833 1401.33 383 1496 383C1590.67 383 1672.17 404.833 1740.5 448.5C1808.83 492.167 1861.33 553.333 1898 632C1934.67 710.667 1953 802 1953 906V970H1115V834H1867L1779 960V893C1779 812.333 1766.83 745.667 1742.5 693C1718.17 640.333 1684.67 601.167 1642 575.5C1599.33 549.833 1550.33 537 1495 537C1439.67 537 1390 550.5 1346 577.5C1302 604.5 1267.33 644.5 1242 697.5C1216.67 750.5 1204 815.667 1204 893V960C1204 1033.33 1216.5 1096 1241.5 1148C1266.5 1200 1302 1239.83 1348 1267.5C1394 1295.17 1448.33 1309 1511 1309C1555 1309 1594.33 1302.33 1629 1289C1663.67 1275.67 1692.67 1257.33 1716 1234C1739.33 1210.67 1756 1184 1766 1154L1769 1145H1940L1938 1155C1929.33 1197.67 1912.83 1237.67 1888.5 1275C1864.17 1312.33 1833 1345.17 1795 1373.5C1757 1401.83 1713.67 1423.83 1665 1439.5C1616.33 1455.17 1563.67 1463 1507 1463Z" />
+<path d="M2137 1463V20H2311V1463H2137Z" />
+<path d="M2937 1463C2848.33 1463 2770.83 1440.83 2704.5 1396.5C2638.17 1352.17 2586.67 1289.5 2550 1208.5C2513.33 1127.5 2495 1032.33 2495 923V922C2495 812.667 2513.5 717.667 2550.5 637C2587.5 556.333 2639 493.833 2705 449.5C2771 405.167 2847.33 383 2934 383C2983.33 383 3029.17 390.833 3071.5 406.5C3113.83 422.167 3151.67 444.5 3185 473.5C3218.33 502.5 3245.67 537 3267 577H3271V0H3445V1443H3271V1267H3267C3245.67 1307.67 3218.67 1342.5 3186 1371.5C3153.33 1400.5 3116.17 1423 3074.5 1439C3032.83 1455 2987 1463 2937 1463ZM2971 1309C3029.67 1309 3081.67 1293 3127 1261C3172.33 1229 3207.83 1184 3233.5 1126C3259.17 1068 3272 1000.33 3272 923V922C3272 844.667 3259 777.167 3233 719.5C3207 661.833 3171.5 617 3126.5 585C3081.5 553 3029.67 537 2971 537C2909.67 537 2856.67 552.667 2812 584C2767.33 615.333 2733 659.667 2709 717C2685 774.333 2673 842.667 2673 922V923C2673 1002.33 2685 1071 2709 1129C2733 1187 2767.33 1231.5 2812 1262.5C2856.67 1293.5 2909.67 1309 2971 1309Z" />
+<path d="M3757 1463C3801.18 1463 3837 1427.18 3837 1383C3837 1338.82 3801.18 1303 3757 1303C3712.82 1303 3677 1338.82 3677 1383C3677 1427.18 3712.82 1463 3757 1463Z" /></svg><div><h1>Remote connections</h1><p>Use Veld on another machine.</p></div></header>
+<p id="status" class="status" role="status" aria-live="polite"></p>
+<section aria-labelledby="saved-title"><h2 id="saved-title">Saved connections</h2><ul id="saved"></ul><p id="empty">Loading saved connections…</p><button id="refresh" type="button">Refresh</button></section>
+<section aria-labelledby="pair-title"><h2 id="pair-title">Pair a machine</h2><p>Create an invitation on the remote machine, then paste it here. Pairing grants full control, including commands and files.</p>
+<form id="pair-form" autocomplete="off">
+<label for="label">Connection name</label><input id="label" maxlength="80" required placeholder="My build machine" autocomplete="off">
+<label for="invitation">Invitation</label><textarea id="invitation" required maxlength="16384" spellcheck="false" autocomplete="off" placeholder="veld-pair-v1:…"></textarea>
+<div class="actions"><button class="primary" id="pair" type="submit">Review and pair</button></div>
+</form><p class="note">The next dialog shows the address and identity before you allow full control.</p></section>
+<section aria-labelledby="discover-title"><h2 id="discover-title">Machines on Tailscale</h2><p>Discovery checks up to 24 machines on HTTPS port 19896. You still need an invitation to pair.</p><button id="discover" type="button">Find machines</button><p id="discovery-status" role="status"></p><ul id="candidates"></ul><p class="note">If discovery is unavailable or the machine uses another port, paste its invitation above. Veld does not start or configure Tailscale.</p></section>
+</main>
+<script>
+"use strict";
+const api = window.veldRemote;
+const status = document.getElementById("status");
+const saved = document.getElementById("saved");
+const empty = document.getElementById("empty");
+function message(text, error = false) {
+  status.textContent = text;
+  status.classList.toggle("error", error);
+}
+function element(tag, text, className) {
+  const node = document.createElement(tag);
+  node.textContent = text;
+  if (className) node.className = className;
+  return node;
+}
+async function invoke(operation) {
+  const result = await operation;
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
+}
+async function action(button, operation) {
+  button.disabled = true;
+  try { await operation(); } catch (error) { message(error.message, true); }
+  finally { button.disabled = false; }
+}
+async function refresh() {
+  const connections = await invoke(api.list());
+  saved.replaceChildren();
+  empty.hidden = connections.length > 0;
+  empty.textContent = "No saved connections yet.";
+  for (const connection of connections) {
+    const row = element("li", "");
+    row.append(element("strong", connection.label));
+    row.append(element("p", connection.descriptor.endpoint, "identity"));
+    row.append(element("p", `Machine: ${connection.descriptor.instance_id}`, "identity"));
+    const actions = element("div", "", "actions");
+    const open = element("button", "Open");
+    open.type = "button";
+    open.addEventListener("click", () => action(open, async () => {
+      message("Verifying the remote machine…");
+      await invoke(api.open(connection.id));
+      message("Remote connection opened.");
+    }));
+    const forget = element("button", "Forget");
+    forget.type = "button";
+    forget.addEventListener("click", () => action(forget, async () => {
+      await invoke(api.forget(connection.id));
+      await refresh();
+      message("Connection forgotten on this Desktop. Revoke its access on the remote machine if needed.");
+    }));
+    actions.append(open, forget);
+    row.append(actions);
+    saved.append(row);
+  }
+}
+document.getElementById("refresh").addEventListener("click", (event) => action(event.currentTarget, refresh));
+document.getElementById("pair-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("invitation");
+  const request = api.pair(input.value, document.getElementById("label").value.trim());
+  input.value = "";
+  action(document.getElementById("pair"), async () => {
+    message("Review the full-control confirmation dialog.");
+    await invoke(request);
+    await refresh();
+    message("Connection saved. Select Open to connect.");
+  });
+});
+document.getElementById("discover").addEventListener("click", (event) => action(event.currentTarget, async () => {
+  const discoveryStatus = document.getElementById("discovery-status");
+  const candidates = document.getElementById("candidates");
+  discoveryStatus.textContent = "Looking for remote machines…";
+  candidates.replaceChildren();
+  const result = await invoke(api.discover());
+  discoveryStatus.textContent = result.status === "unavailable"
+    ? "Tailscale discovery is unavailable. You can still paste an invitation."
+    : result.candidates.length === 0 ? "No machines found. You can still paste an invitation."
+    : result.truncated ? "Showing the first 24 machines. Paste an invitation for any other machine."
+    : "Discovery complete. An invitation is required for every new connection.";
+  const states = { available: "Veld available — invitation required", unreachable: "Unreachable", incompatible: "Incompatible response" };
+  for (const candidate of result.candidates) {
+    const row = element("li", "");
+    row.append(element("p", candidate.endpoint, "identity"), element("p", states[candidate.status]));
+    if (candidate.descriptor) row.append(element("p", `Machine: ${candidate.descriptor.instance_id}`, "identity"));
+    candidates.append(row);
+  }
+}));
+refresh().catch((error) => {
+  empty.textContent = "Saved connections are unavailable.";
+  message(error.message, true);
+});
+</script>
+</body>
+</html>

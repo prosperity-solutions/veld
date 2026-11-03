@@ -6,4 +6,5 @@ pub mod agent;
 pub mod ide;
 pub mod network;
 pub mod orchestrator;
+pub mod runner;
 pub mod self_;

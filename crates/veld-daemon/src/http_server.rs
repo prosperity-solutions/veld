@@ -1,8 +1,9 @@
+use anyhow::{Context, Result};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use tracing::{info, warn};
+use tracing::info;
 
 #[path = "management.rs"]
 pub mod management;
@@ -140,7 +141,13 @@ pub async fn run_pty_holder() -> anyhow::Result<()> {
 
 /// Start the daemon's HTTP server on 127.0.0.1 at this instance's daemon
 /// port (`veld_core::instance::daemon_port()`).
-pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareManager>) {
+pub async fn run_http_server(
+    share_manager: Arc<crate::share::manager::ShareManager>,
+) -> Result<()> {
+    let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("cannot own daemon API listener {addr}"))?;
     let app = Router::new()
         // Management UI (served at veld.localhost via Caddy, also reachable
         // directly on this port for debugging).
@@ -195,7 +202,7 @@ pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareMana
     // Holders whose daemon went away are still serving their shells; this is
     // where a fresh daemon takes them back. Before the reaper, so an adopted
     // session's detach clock is running by the time anything can collect it, and
-    // before the listener binds, so no attach can race a half-adopted registry.
+    // before the listener accepts requests, so no attach races partial adoption.
     pty::adopt_existing_sessions().await;
     pty::spawn_session_reaper();
     // The `$BROWSER` shims every new session's environment points at. Here rather
@@ -209,32 +216,21 @@ pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareMana
     // is (not inside `routes()`), so building a router in a test starts no worker.
     worktree_trash::spawn();
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
     info!("http server listening on {addr}");
-
-    match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => {
-            // **After the bind, because binding the port is what proves this process
-            // owns this instance's state.** `pty_dir` — and so the shim directory — is
-            // keyed on the daemon port alone, so a second daemon started on the default
-            // port (a bare `cargo run -p veld-daemon`, which also builds no `veld`
-            // sibling to resolve) would otherwise delete the *installed*, running
-            // daemon's shims and then fail to bind and keep going, leaving every
-            // terminal opened afterwards without `$BROWSER` until that daemon restarts.
-            // Writing them before the bind is harmless — it is idempotent and produces
-            // the same bytes — but deleting is not.
-            pty::clear_unbacked_shims();
-            if let Err(e) = axum::serve(listener, app).await {
-                warn!("http server error: {e}");
-            }
+    pty::clear_unbacked_shims();
+    let database = veld_core::db::Db::default_path()?;
+    let load_path = database.clone();
+    let config =
+        crate::offload::blocking(move || veld_core::runner::load_config(&load_path)).await?;
+    if let Some(config) = config {
+        // Ingress must never outlive this owned listener and reach a replacement daemon.
+        tokio::select! {
+            result = axum::serve(listener, app) => result.context("daemon API stopped"),
+            result = crate::remote::run(database, config) => result.context("runner ingress stopped"),
         }
-        Err(e) => {
-            warn!(
-                "failed to bind http server on {addr}: {e} — is another \
-                 veld-daemon instance already running on this port? The daemon \
-                 will keep running WITHOUT its HTTP API (no dashboard, no \
-                 shares) until restarted"
-            );
-        }
+    } else {
+        axum::serve(listener, app)
+            .await
+            .context("daemon API stopped")
     }
 }

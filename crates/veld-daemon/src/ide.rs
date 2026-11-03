@@ -607,6 +607,7 @@ fn worktree_state(db: Option<&veld_core::db::Db>, worktree_id: i64) -> WorktreeS
 struct Ticket {
     /// The identity the socket this ticket opens will carry.
     client_id: String,
+    remote_client: Option<String>,
     expires_at: Instant,
 }
 
@@ -643,8 +644,19 @@ struct TicketResponse {
 async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiError> {
     check_csrf(&headers)
         .map_err(|_| err(StatusCode::FORBIDDEN, "missing X-Veld-Request header"))?;
+    let remote_client = super::pty::remote_client(&headers)?;
+    let _authorization = super::pty::authorize_remote(remote_client.as_deref()).await?;
     let ticket = uuid::Uuid::new_v4().simple().to_string();
     let client_id = uuid::Uuid::new_v4().simple().to_string();
+    if let Some(owner) = remote_client.clone() {
+        let id = client_id.clone();
+        crate::offload::blocking(move || {
+            let db = open_db().map_err(|status| err(status, "database error"))?;
+            db.record_remote_ide_client(&id, &owner)
+                .map_err(remote_identity_db_error)
+        })
+        .await?;
+    }
     let now = Instant::now();
     {
         let mut store = TICKETS.lock().expect("ide ticket store poisoned");
@@ -655,6 +667,7 @@ async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiErro
             ticket.clone(),
             Ticket {
                 client_id: client_id.clone(),
+                remote_client,
                 expires_at: now + TICKET_TTL,
             },
         );
@@ -666,10 +679,26 @@ async fn mint_ticket(headers: HeaderMap) -> Result<Json<TicketResponse>, ApiErro
     }))
 }
 
+pub(super) fn revoke_remote_tickets(client_id: &str) {
+    TICKETS
+        .lock()
+        .expect("ide ticket store poisoned")
+        .retain(|_, ticket| ticket.remote_client.as_deref() != Some(client_id));
+}
+
+fn remote_identity_db_error(error: veld_core::db::DbError) -> ApiError {
+    warn!("remote IDE identity: database error: {error}");
+    crate::dbhealth::note_error(&error);
+    err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
+}
+
 /// Consume a ticket, returning the identity it carries. `None` if it is unknown
 /// or expired.
-fn redeem(ticket: &str) -> Option<String> {
+fn redeem(ticket: &str, remote_client: Option<&str>) -> Option<String> {
     let mut store = TICKETS.lock().expect("ide ticket store poisoned");
+    if store.get(ticket)?.remote_client.as_deref() != remote_client {
+        return None;
+    }
     let t = store.remove(ticket)?;
     (t.expires_at > Instant::now()).then_some(t.client_id)
 }
@@ -1585,11 +1614,19 @@ async fn channel(
         super::pty::log_rejected_origin("ide channel upgrade", &headers);
         return (StatusCode::FORBIDDEN, "origin not allowed").into_response();
     }
-    let Some(minted) = redeem(&q.ticket) else {
+    let remote_client = match super::pty::remote_client(&headers) {
+        Ok(id) => id,
+        Err(error) => return error.into_response(),
+    };
+    let _authorization = match super::pty::authorize_remote(remote_client.as_deref()).await {
+        Ok(permit) => permit,
+        Err(error) => return error.into_response(),
+    };
+    let Some(minted) = redeem(&q.ticket, remote_client.as_deref()) else {
         return (StatusCode::FORBIDDEN, "invalid or expired ticket").into_response();
     };
     ws.max_message_size(MAX_FRAME_BYTES)
-        .on_upgrade(move |socket| serve_channel(socket, minted))
+        .on_upgrade(move |socket| serve_channel(socket, minted, remote_client))
 }
 
 /// Bound on the identity strings a client may send.
@@ -1601,15 +1638,22 @@ fn valid_client_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-async fn serve_channel(socket: WebSocket, minted: String) {
+async fn serve_channel(socket: WebSocket, minted: String, remote_client: Option<String>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
+    let mut revoked = remote_client
+        .as_ref()
+        .map(|id| super::pty::revocation::subscribe(id));
 
     // The first frame must be the hello. Everything after it is scoped to the
     // identity it establishes, so there is nothing useful a client can do before
     // sending one — and accepting other messages first would mean every handler
     // below has to cope with an unidentified sender.
     let hello: Hello = loop {
-        match ws_rx.next().await {
+        let frame = tokio::select! {
+            _ = super::pty::wait_for_revocation(&mut revoked) => return,
+            frame = ws_rx.next() => frame,
+        };
+        match frame {
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<Hello>(&text) {
                 Ok(h) => break h,
                 Err(e) => {
@@ -1625,6 +1669,31 @@ async fn serve_channel(socket: WebSocket, minted: String) {
             }
             None => return,
         }
+    };
+
+    let authorization = match super::pty::authorize_remote(remote_client.as_deref()).await {
+        Ok(permit) => permit,
+        Err(_) => return,
+    };
+
+    let resume = match hello.resume.filter(|id| valid_client_id(id)) {
+        Some(id) => {
+            let owner = remote_client.clone();
+            let result = crate::offload::blocking(move || {
+                let db = veld_core::db::Db::open()?;
+                db.ide_client_matches(&id, owner.as_deref())
+                    .map(|matches| matches.then_some(id))
+            })
+            .await;
+            match result {
+                Ok(resume) => resume,
+                Err(error) => {
+                    warn!("ide resume ownership check failed: {error}");
+                    return;
+                }
+            }
+        }
+        None => None,
     };
 
     let info = ClientInfo {
@@ -1649,10 +1718,8 @@ async fn serve_channel(socket: WebSocket, minted: String) {
         // socket is closed by definition) and costs a duplicated tab only the
         // claims it never had. `valid_client_id` first, because the id becomes a
         // map key and a `%client` field in the log.
-        client_id = match hello.resume {
-            Some(resume) if valid_client_id(&resume) && !reg.clients.contains_key(&resume) => {
-                resume
-            }
+        client_id = match resume {
+            Some(resume) if !reg.clients.contains_key(&resume) => resume,
             _ => minted,
         };
         reg.reclaim_orphans_of(&client_id);
@@ -1675,6 +1742,8 @@ async fn serve_channel(socket: WebSocket, minted: String) {
         reg.broadcast();
     }
 
+    drop(authorization);
+
     // Writer: one task draining the queue, so a handler never awaits the socket
     // while holding the registry lock.
     let writer = tokio::spawn(async move {
@@ -1689,7 +1758,11 @@ async fn serve_channel(socket: WebSocket, minted: String) {
         let _ = ws_tx.close().await;
     });
 
-    while let Some(frame) = ws_rx.next().await {
+    loop {
+        let frame = tokio::select! {
+            _ = super::pty::wait_for_revocation(&mut revoked) => break,
+            frame = ws_rx.next() => match frame { Some(frame) => frame, None => break },
+        };
         let text = match frame {
             Ok(Message::Text(t)) => t,
             Ok(Message::Close(_)) => break,
@@ -1736,6 +1809,30 @@ async fn serve_channel(socket: WebSocket, minted: String) {
                 tokio::spawn(async move {
                     claim(&id, conn, worktree_id, request_id, focus_holder, seq).await;
                 });
+            }
+            Ok(ClientMsg::Keep { session_ids }) if remote_client.is_some() => {
+                let owner = remote_client.clone().expect("remote keep guard");
+                let kept = crate::offload::blocking(move || {
+                    let db = veld_core::db::Db::open()?;
+                    let mut kept = Vec::new();
+                    for id in session_ids.into_iter().take(MAX_KEPT) {
+                        if db
+                            .remote_terminal(&id)?
+                            .is_some_and(|scope| scope.client_id == owner)
+                        {
+                            kept.push(id);
+                        }
+                    }
+                    Ok::<_, veld_core::db::DbError>(kept)
+                })
+                .await;
+                match kept {
+                    Ok(session_ids) => handle(&client_id, ClientMsg::Keep { session_ids }).await,
+                    Err(error) => {
+                        warn!("ide keep ownership check failed: {error}");
+                        break;
+                    }
+                }
             }
             Ok(msg) => handle(&client_id, msg).await,
             Err(e) => debug!(client = %client_id, "ide channel: unreadable message: {e}"),
@@ -2970,15 +3067,36 @@ mod tests {
             ticket.clone(),
             Ticket {
                 client_id: "c".to_owned(),
+                remote_client: None,
                 expires_at: Instant::now() + TICKET_TTL,
             },
         );
-        assert_eq!(redeem(&ticket).as_deref(), Some("c"));
+        assert_eq!(redeem(&ticket, None).as_deref(), Some("c"));
         assert!(
-            redeem(&ticket).is_none(),
+            redeem(&ticket, None).is_none(),
             "a redeemed ticket must not work twice"
         );
-        assert!(redeem("never-minted").is_none());
+        assert!(redeem("never-minted", None).is_none());
+    }
+
+    #[test]
+    fn remote_tickets_cannot_cross_authentication_scopes() {
+        let ticket = uuid::Uuid::new_v4().simple().to_string();
+        TICKETS.lock().unwrap().insert(
+            ticket.clone(),
+            Ticket {
+                client_id: "ide-client".into(),
+                remote_client: Some("client-a".into()),
+                expires_at: Instant::now() + TICKET_TTL,
+            },
+        );
+        assert!(redeem(&ticket, None).is_none());
+        assert!(redeem(&ticket, Some("client-b")).is_none());
+        assert_eq!(
+            redeem(&ticket, Some("client-a")).as_deref(),
+            Some("ide-client")
+        );
+        assert!(redeem(&ticket, Some("client-a")).is_none());
     }
 
     #[test]
@@ -2988,9 +3106,10 @@ mod tests {
             ticket.clone(),
             Ticket {
                 client_id: "c".to_owned(),
+                remote_client: None,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
         );
-        assert!(redeem(&ticket).is_none());
+        assert!(redeem(&ticket, None).is_none());
     }
 }

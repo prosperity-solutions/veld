@@ -16,7 +16,7 @@ use crate::output;
 /// The parts `veld --help` lists. A test pins this against the clap tree (both
 /// ways: `help_lists_parts_only` in `main.rs`), so the overview cannot advertise a
 /// part that does not exist or leave one out.
-pub const PARTS: &[&str] = &["orchestrator", "ide", "agent", "network", "self"];
+pub const PARTS: &[&str] = &["orchestrator", "ide", "agent", "network", "runner", "self"];
 
 #[derive(Serialize)]
 struct Overview {

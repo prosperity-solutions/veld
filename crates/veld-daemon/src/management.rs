@@ -1360,31 +1360,31 @@ async fn stop_environment(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
     Query(scope): Query<RunScope>,
-) -> StatusCode {
+) -> Response {
     if let Err(s) = check_csrf(&headers) {
-        return s;
+        return s.into_response();
     }
     if let Err(s) = validate_run_name(&run_name) {
-        return s;
+        return s.into_response();
     }
-    run_veld_command(&scope, &run_name, "stop").await
+    engine_status(run_veld_command(&headers, &scope, &run_name, "stop").await)
 }
 
 async fn restart_environment(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
     Query(scope): Query<RunScope>,
-) -> StatusCode {
+) -> Response {
     if let Err(s) = check_csrf(&headers) {
-        return s;
+        return s.into_response();
     }
     if let Err(s) = validate_run_name(&run_name) {
-        return s;
+        return s.into_response();
     }
-    run_veld_command(&scope, &run_name, "restart").await
+    engine_status(run_veld_command(&headers, &scope, &run_name, "restart").await)
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct ActionBody {
     /// The action name (must match an action configured on a node).
     action: String,
@@ -1401,20 +1401,34 @@ async fn run_action(
     Path(run_name): Path<String>,
     Query(scope): Query<RunScope>,
     Json(body): Json<ActionBody>,
-) -> StatusCode {
+) -> Response {
     if let Err(s) = check_csrf(&headers) {
-        return s;
+        return s.into_response();
     }
     if let Err(s) = validate_run_name(&run_name) {
-        return s;
+        return s.into_response();
     }
     if !is_safe_identifier(&body.action) {
-        return StatusCode::BAD_REQUEST;
+        return StatusCode::BAD_REQUEST.into_response();
     }
     if let Some(ref node) = body.node {
         if !is_safe_identifier(node) {
-            return StatusCode::BAD_REQUEST;
+            return StatusCode::BAD_REQUEST.into_response();
         }
+    }
+
+    let submission = match super::engine::UiSubmission::new(
+        &headers,
+        &format!("/api/environments/{run_name}/action"),
+        serde_json::json!({ "project_root": scope.project_root, "body": body }),
+    ) {
+        Ok(submission) => submission,
+        Err(e) => return engine_status(Err(e)),
+    };
+    match submission.replay().await {
+        Ok(Some(id)) => return engine_status(Ok(id)),
+        Ok(None) => {}
+        Err(e) => return engine_status(Err(e)),
     }
 
     let registry = match open_db().and_then(|db| {
@@ -1424,11 +1438,11 @@ async fn run_action(
         })
     }) {
         Ok(r) => r,
-        Err(code) => return code,
+        Err(code) => return code.into_response(),
     };
     let project_root = match resolve_run_project(&registry, &scope.project_root, &run_name) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return code.into_response(),
     };
 
     // Only spawn actions that actually exist in the project's config.
@@ -1445,17 +1459,18 @@ async fn run_action(
         })
         .unwrap_or(false);
     if !action_defined {
-        return StatusCode::NOT_FOUND;
+        return StatusCode::NOT_FOUND.into_response();
     }
 
     engine_status(
-        super::engine::spawn_daemon_action(
+        super::engine::spawn_ui_action(
             &project_root,
             veld_engine::api::ActionKind::Action {
                 run: run_name,
                 action: body.action,
                 node: body.node,
             },
+            submission,
         )
         .await,
     )
@@ -1463,12 +1478,12 @@ async fn run_action(
 
 /// What an IDE button gets back: `202` once the worker is running, or the
 /// engine's refusal (`503` during an update).
-fn engine_status(r: Result<String, (StatusCode, String)>) -> StatusCode {
+fn engine_status(r: Result<String, (StatusCode, String)>) -> Response {
     match r {
-        Ok(_) => StatusCode::ACCEPTED,
+        Ok(id) => super::engine::submitted(id).into_response(),
         Err((code, message)) => {
             warn!("engine refused an IDE action ({code}): {message}");
-            code
+            super::engine::into_response::<()>(Err((code, message)))
         }
     }
 }
@@ -1476,7 +1491,20 @@ fn engine_status(r: Result<String, (StatusCode, String)>) -> StatusCode {
 /// Stop / restart helper: an engine action for the run in the project the
 /// caller scoped it to — the project root is what disambiguates which
 /// project's `main` gets stopped.
-async fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCode {
+async fn run_veld_command(
+    headers: &axum::http::HeaderMap,
+    scope: &RunScope,
+    run_name: &str,
+    action: &str,
+) -> Result<String, (StatusCode, String)> {
+    let submission = super::engine::UiSubmission::new(
+        headers,
+        &format!("/api/environments/{run_name}/{action}"),
+        serde_json::json!({ "project_root": scope.project_root }),
+    )?;
+    if let Some(id) = submission.replay().await? {
+        return Ok(id);
+    }
     let registry = match open_db().and_then(|db| {
         db.registry().map_err(|e| {
             warn!("failed to load registry for {action}: {e}");
@@ -1484,18 +1512,18 @@ async fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> Sta
         })
     }) {
         Ok(r) => r,
-        Err(code) => return code,
+        Err(code) => return Err((code, "could not load the run registry".into())),
     };
     let project_root = match resolve_run_project(&registry, &scope.project_root, run_name) {
         Ok(p) => p,
-        Err(code) => return code,
+        Err(code) => return Err((code, "no such run in this project".into())),
     };
     let run = run_name.to_owned();
     let kind = match action {
         "restart" => veld_engine::api::ActionKind::Restart { run },
         _ => veld_engine::api::ActionKind::Stop { run },
     };
-    engine_status(super::engine::spawn_daemon_action(&project_root, kind).await)
+    super::engine::spawn_ui_action(&project_root, kind, submission).await
 }
 
 /// Where an older daemon captured a spawned `veld`'s stderr.

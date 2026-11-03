@@ -46,7 +46,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # user, so another account's copy of Veld Desktop cannot be mistaken for this
 # one's (and signalled, fruitlessly, with EPERM).
 nix = { version = "0.29", features = ["signal", "process", "net", "fs", "user"] }
-reqwest = { version = "0.12", features = ["rustls-tls", "json"], default-features = false }
+reqwest = { version = "0.12", features = ["rustls-tls", "json", "stream"], default-features = false }
 # Reading the validity dates off the certificate Caddy serves (`veld_core::tls_health`).
 # RustCrypto's `der`/`spki`/`const-oid`/`pem-rfc7468` are already in the tree, so what is
 # actually built is x509-cert plus `der_derive` (a proc macro) and `flagset`. Cargo.lock also

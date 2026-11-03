@@ -13,6 +13,8 @@
 //! and nowhere else. See `veld_engine::api::ActionSecrets`.
 
 use rusqlite::{OptionalExtension as _, params};
+use sha2::{Digest as _, Sha256};
+use uuid::Uuid;
 
 use super::{Db, DbError, now_str};
 
@@ -24,6 +26,37 @@ pub const STATUS_FAILED: &str = "failed";
 pub const STATUS_CANCELLED: &str = "cancelled";
 /// The worker vanished without saying how it ended.
 pub const STATUS_LOST: &str = "lost";
+
+/// A retry key issued by a client and scoped to its authenticated ingress identity.
+#[derive(Debug, Clone, Copy)]
+pub struct EngineActionKey {
+    pub client_id: Uuid,
+    pub idempotency_key: Uuid,
+}
+
+impl EngineActionKey {
+    /// Stable across restarts, without storing credentials or transient secrets.
+    pub fn action_id(&self) -> String {
+        let mut hash = Sha256::new();
+        hash.update(b"veld.remote.engine-action.v1\0");
+        hash.update(self.client_id.as_bytes());
+        hash.update(self.idempotency_key.as_bytes());
+        format!("remote-{}-{:x}", self.client_id, hash.finalize())
+    }
+
+    /// Whether an operation id belongs to this authenticated client.
+    pub fn belongs_to(id: &str, client_id: Uuid) -> bool {
+        id.starts_with(&format!("remote-{client_id}-"))
+    }
+}
+
+/// Only `Reserved` permits spawning. Existing and conflicting rows are never restarted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineActionReservation {
+    Reserved,
+    Existing,
+    Conflict,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineActionRow {
@@ -59,6 +92,55 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<EngineActionRow> {
 }
 
 impl Db {
+    /// Reserve a keyed action in the existing action insert, with one winner.
+    ///
+    /// `request_json` must be the canonical serialization of the public request,
+    /// excluding secrets. Reservations survive a daemon restart, including one
+    /// before spawning. The supervisor ends abandoned reservations as `lost`.
+    /// Deduplication lasts until the finished row is pruned (currently seven days).
+    pub fn reserve_engine_action(
+        &self,
+        key: EngineActionKey,
+        project_root: &str,
+        run_name: &str,
+        kind: &str,
+        request_json: &str,
+    ) -> Result<EngineActionReservation, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let id = key.action_id();
+        let inserted = tx.execute(
+            "INSERT INTO engine_actions
+                 (id, project_root, run_name, kind, request_json, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING",
+            params![
+                id,
+                project_root,
+                run_name,
+                kind,
+                request_json,
+                STATUS_RUNNING,
+                now_str()
+            ],
+        )?;
+        let result = if inserted > 0 {
+            EngineActionReservation::Reserved
+        } else {
+            let existing: String = tx.query_row(
+                "SELECT request_json FROM engine_actions WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )?;
+            if existing == request_json {
+                EngineActionReservation::Existing
+            } else {
+                EngineActionReservation::Conflict
+            }
+        };
+        tx.commit()?;
+        Ok(result)
+    }
+
     /// Record a new, running action.
     pub fn insert_engine_action(
         &self,
@@ -218,6 +300,145 @@ impl Db {
 mod tests {
     use super::*;
     use crate::db::test_db;
+
+    fn retry_key() -> EngineActionKey {
+        EngineActionKey {
+            client_id: Uuid::new_v4(),
+            idempotency_key: Uuid::new_v4(),
+        }
+    }
+
+    #[test]
+    fn retry_keys_bind_the_client_and_public_request() {
+        let (_dir, db) = test_db();
+        let key = retry_key();
+        let reserve = |key, payload| db.reserve_engine_action(key, "/p", "dev", "stop", payload);
+        assert_eq!(
+            reserve(key, "{}").unwrap(),
+            EngineActionReservation::Reserved
+        );
+        assert_eq!(
+            reserve(key, "{}").unwrap(),
+            EngineActionReservation::Existing
+        );
+        assert_eq!(
+            reserve(key, r#"{"debug":true}"#).unwrap(),
+            EngineActionReservation::Conflict
+        );
+        let other_client = EngineActionKey {
+            client_id: Uuid::new_v4(),
+            ..key
+        };
+        assert_ne!(key.action_id(), other_client.action_id());
+        assert_eq!(
+            reserve(other_client, "{}").unwrap(),
+            EngineActionReservation::Reserved
+        );
+        assert!(EngineActionKey::belongs_to(&key.action_id(), key.client_id));
+        assert!(!EngineActionKey::belongs_to(
+            &key.action_id(),
+            other_client.client_id
+        ));
+        assert_eq!(db.running_engine_actions().unwrap().len(), 2);
+        assert_eq!(
+            db.engine_action(&key.action_id())
+                .unwrap()
+                .unwrap()
+                .request_json,
+            "{}"
+        );
+    }
+
+    #[test]
+    fn concurrent_connections_reserve_exactly_one_worker() {
+        use std::sync::{Arc, Barrier};
+
+        let (dir, db) = test_db();
+        let path = dir.path().join("veld.db");
+        let key = retry_key();
+        let connections: Vec<_> = (0..4).map(|_| Db::open_at(&path).unwrap()).collect();
+        let barrier = Arc::new(Barrier::new(connections.len()));
+        let tasks: Vec<_> = connections
+            .into_iter()
+            .map(|db| {
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+                        .unwrap()
+                })
+            })
+            .collect();
+        let results: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&r| r == EngineActionReservation::Reserved)
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|&&r| r == EngineActionReservation::Existing)
+                .count(),
+            3
+        );
+        assert_eq!(db.running_engine_actions().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn reservations_survive_reopening_before_spawn_and_after_completion() {
+        let (dir, db) = test_db();
+        let path = dir.path().join("veld.db");
+        let key = retry_key();
+        let id = key.action_id();
+        assert_eq!(
+            db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+                .unwrap(),
+            EngineActionReservation::Reserved
+        );
+        drop(db);
+        let db = Db::open_at(&path).unwrap();
+        let row = db.engine_action(&id).unwrap().unwrap();
+        assert_eq!(row.status, STATUS_RUNNING);
+        assert_eq!(row.worker_pid, None);
+        assert_eq!(
+            db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+                .unwrap(),
+            EngineActionReservation::Existing
+        );
+        assert!(db.finish_engine_action(&id, STATUS_LOST, "{}").unwrap());
+        drop(db);
+        let db = Db::open_at(&path).unwrap();
+        assert_eq!(
+            db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+                .unwrap(),
+            EngineActionReservation::Existing
+        );
+        assert_eq!(db.engine_action(&id).unwrap().unwrap().status, STATUS_LOST);
+        assert_eq!(
+            db.reserve_engine_action(key, "/q", "dev", "stop", r#"{"project_root":"/q"}"#)
+                .unwrap(),
+            EngineActionReservation::Conflict
+        );
+    }
+
+    #[test]
+    fn pruning_finished_rows_also_ends_the_retry_guarantee() {
+        let (_dir, db) = test_db();
+        let key = retry_key();
+        db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+            .unwrap();
+        db.finish_engine_action(&key.action_id(), STATUS_SUCCEEDED, "{}")
+            .unwrap();
+        assert_eq!(db.prune_engine_actions("9999-01-01T00:00:00Z").unwrap(), 1);
+        assert_eq!(
+            db.reserve_engine_action(key, "/p", "dev", "stop", "{}")
+                .unwrap(),
+            EngineActionReservation::Reserved
+        );
+    }
 
     #[test]
     fn events_resume_from_a_seq_and_finish_is_single_winner() {
