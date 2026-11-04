@@ -20,6 +20,7 @@ mod handoffs;
 mod import;
 mod kv;
 mod layouts;
+mod links;
 mod logs;
 mod panes;
 mod session_links;
@@ -35,6 +36,11 @@ pub use handoffs::{
 };
 pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
+pub use links::{
+    LINK_KINDS, LINK_TONES, LinkInput, LinkRejected, LinkSet, MAX_LINK_ID_CHARS,
+    MAX_LINK_LABEL_CHARS, MAX_LINK_TOOLTIP_CHARS, MAX_LINK_URL_LEN, MAX_LINKS_PER_WORKTREE,
+    WorktreeLink, default_link_label, normalize_link_url,
+};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
 pub use session_links::{Conversation, SessionLink, valid_link_id};
@@ -1262,6 +1268,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "session-links",
         apply: migrate_v23_session_links,
     },
+    Migration {
+        version: 24,
+        name: "worktree-links",
+        apply: migrate_v24_worktree_links,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2210,6 +2221,40 @@ fn migrate_v23_session_links(conn: &Connection) -> rusqlite::Result<()> {
         -- let a plain terminal mint a new link on every ask.
         CREATE UNIQUE INDEX idx_session_links_conversation
             ON session_links(session_id, IFNULL(token, ''));
+        "#,
+    )
+}
+
+/// v24: `worktree_links` — the links an agent pins to its worktree with `veld
+/// ide link set` (see `db/links.rs`).
+///
+/// Keyed by the worktree's row and cascading with it, like `pane_layouts`: a link
+/// is about one checkout's work, so it goes when Veld forgets that checkout — the
+/// directory leaving `git worktree list`, a `git worktree move`, the project being
+/// removed. Rowids are reused, so a link that outlived its row would one day turn
+/// up on an unrelated worktree.
+///
+/// `label` and `icon` are stored empty when the agent gave none and resolved on
+/// read, so a default can change without a migration. `branch` is the worktree's
+/// branch when the link was set: the row survives a branch switch, and a link set
+/// on another branch is about other work.
+fn migrate_v24_worktree_links(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE worktree_links (
+            worktree_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+            link_id     TEXT NOT NULL,
+            kind        TEXT NOT NULL,
+            url         TEXT NOT NULL,
+            label       TEXT NOT NULL DEFAULT '',
+            icon        TEXT NOT NULL DEFAULT '',
+            tone        TEXT NOT NULL DEFAULT 'neutral',
+            tooltip     TEXT NOT NULL DEFAULT '',
+            branch      TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (worktree_id, link_id)
+        );
         "#,
     )
 }

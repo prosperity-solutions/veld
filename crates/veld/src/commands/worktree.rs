@@ -162,7 +162,7 @@ pub enum WorktreeCommand {
 
 /// Where this caller is: its working directory, and its terminal session for a
 /// daemon to fall back on when the directory cannot be read.
-fn whereabouts(session: Option<String>) -> (Option<String>, Option<String>) {
+pub(crate) fn whereabouts(session: Option<String>) -> (Option<String>, Option<String>) {
     let session = session.or_else(|| {
         std::env::var("VELD_PTY_SESSION")
             .ok()

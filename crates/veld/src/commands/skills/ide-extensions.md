@@ -412,6 +412,10 @@ knows your provider.
 
 ### Worked adapter: GitHub pull request
 
+A badge polls, which is the live option. If you are an agent and the project has no
+badge, `veld ide link set <pr-url> --kind pr` pins the pull request with no
+configuration, and you keep it current yourself (see the `ide` topic).
+
 `scripts/veld/pr-badge.sh` in this repo is the maintained version; the shape:
 
 ```bash

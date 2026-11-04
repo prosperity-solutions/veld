@@ -66,6 +66,9 @@ mod session_links;
 pub(crate) mod files;
 
 /// The file pane's text reads, its grants outside the worktree, and `veld ide open`.
+#[path = "links.rs"]
+mod links;
+
 #[path = "file_pane.rs"]
 mod file_pane;
 

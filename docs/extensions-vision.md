@@ -1355,7 +1355,7 @@ idea.
 
 | Feature | Data contract it needs | UI surface | Status |
 |---|---|---|---|
-| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**; rail row still backlog, and now the *only* route to this — core deliberately renders no merged glyph (decision log, 2026-09-08). Rendering is half-built already: per-value `icon` override plus `display: "icon"`; missing is `rail` in `EXTENSION_SLOTS` and the per-worktree fan-out |
+| PR / merge-request status (open, draft, closed, merged) | provider API (`gh`/`glab`/`bb`) | top bar, rail row | **top bar: Tier 1 round 1**. **Agent-maintained alternative shipped in core** (`veld ide link set --kind pr`, top bar and rail row — decision log, 2026-11-04); a *live, polled* rail badge is still backlog. Core still infers no merged glyph from git (decision log, 2026-09-08). Rendering is half-built already: per-value `icon` override plus `display: "icon"`; missing is `rail` in `EXTENSION_SLOTS` and the per-worktree fan-out |
 | Open a worktree in an external IDE (WebStorm, VS Code, …) | a local binary per editor | top bar | **Tier 1 round 1** (`type: "action"`) |
 | Open a **clicked file or directory** in an external IDE, at its line | a local binary per editor | a file path in terminal output | **shipped** (`type: "action"` + `accepts: "file"`) — see both 2026-09-21 decision log entries; listed under core's *View in Veld* since 2026-10-06 |
 | CI check status for a worktree's branch | provider API | top bar, worktree detail | backlog — expressible as a second `type: "status"` today |
@@ -1365,7 +1365,7 @@ idea.
 | Per-project setup/teardown on worktree create/delete | lifecycle hooks (Tier 1) | n/a (background) | backlog — home is the reserved `hooks` key |
 | Launch a local review tool and open it in a browser pane (e.g. [difit](https://github.com/yoshiko-pg/difit)) | a local binary that serves HTTP on a port | top bar action + browser pane | backlog — needs an action that can *start a server and route a pane at it*, which round 1's fire-and-forget action cannot express |
 | Badges on every worktree at once | same as the badges themselves | rail row | backlog — the trigger for moving evaluation to the daemon-owned push model |
-| Migrate `ide.quicklinks` into `ide.extensions` as `type: "link"` | none (static) | browser pane place list | backlog — the first planned breaking consolidation |
+| Migrate `ide.quicklinks` into `ide.extensions` as `type: "link"` | none (static) | browser pane place list | backlog — the first planned breaking consolidation. Not to be confused with per-worktree links an agent pins (`veld ide link`, decision log 2026-11-04), which are runtime data, not config |
 | An availability predicate for a **GUI application**, not just a `PATH` binary | a filesystem probe (`/Applications/X.app`, a Windows registry key, a `.desktop` file) | every slot | backlog — see the note below |
 
 > **Note on `requires_bin` and GUI apps:** `requires_bin` asks the user's `PATH`,
@@ -1661,3 +1661,63 @@ people share. And the `outfit list|use` subcommands Veld had added under its
 `ide worktree` part were dropped as duplicates of `outfit ls`/`outfit use`: an agent runs outfit directly, then `veld agent restart`.
 Veld keeps only what outfit cannot do — pin at create time, before the agent
 starts, and restart the agent.
+
+### 2026-11-04 — Agent-pinned links are core; the rail shows a pull request after all
+
+A worktree now carries **links an agent pins to it** — `veld ide link set <url>
+--kind pr|preview|issue|doc|link`, with a label, tone, icon and tooltip the agent
+chooses. A click opens it the way a link printed in the worktree's terminal opens
+(`terminal.openUrlsInApp`, the exempt list, ⌘-click for the system browser), so
+the agent does not choose where. The top bar shows them grouped by kind, and `pr` links appear
+beside the worktree's name in the rail. Asked for by the maintainer, as the way PR
+connections reach the IDE without each project writing a `gh` badge.
+
+**Classification: core.** It passes the universal-primitive test because Veld
+learns nothing about a provider. It stores what the agent says and parses no URL
+schema: there is no forge detection, no `gh` call and no state check. The agent
+does the provider work, which it already does when it runs `gh pr create`. The one
+derived value, a fallback label, is the URL's host and the end of its path. That
+is provider-blind on purpose. `kind` is Veld's own vocabulary for grouping, not a
+provider's.
+
+**This reverses the 2026-09-08 entry for the rail, and says why.** That entry
+dropped a merged glyph because "a mark whose whole value is confidence must not be
+the one that is sometimes wrong". It was a mark Veld would have *inferred*. A link
+is a mark Veld *reports*. The agent's word is shown as the agent's word: the
+tooltip says who set it and how long ago ("set by agent 3h ago"). A link set on
+another branch is dimmed, and its rail glyph is dropped. Only `danger` and
+`success` tint the rail glyph, so the marker colour stays the row's identity
+(#204). The 09-08 reasoning still governs anything Veld would infer from git.
+
+**Extensions stay.** A `type: "status"` badge is the *live* option: Veld polls
+the project's command, so "checks failing" updates with nobody in the loop. Links
+are the *agent-maintained* option, which needs no config and covers what a
+command cannot rediscover from a branch name: a preview URL the agent just
+deployed, or a pull request in another repository. A project can run both.
+
+**Rejected:**
+- **Detecting the kind and label from the URL** (`/pull/N` → `pr`, `repo#N`). It
+  is friendlier for one `set`, but it is a provider URL schema in core, and the
+  agent already knows what it opened.
+- **One `preview` per worktree by default.** It stopped a preview that changes
+  URL with every deploy from piling up, but a worktree often previews several
+  services. Every link is filed under its URL (ignoring the query, the fragment and
+  a trailing slash), and a preview that moves takes `--id web`, `--id api`.
+- **An agent-chosen `open_in`.** Where a link opens is the human's setting and the
+  project's exempt list, already applied to every link in the terminal; a second
+  rule per link would make the same URL open in two places.
+- **Letting the agent pin what the top bar already shows.** The URLs of the
+  worktree's own runs are refused, and `set`/`list` name the project's own top-bar
+  entries with what a status badge currently shows and links to.
+- **Telling the agent to skip a pull request a project badge already shows.** The
+  rail shows only pinned pull requests, and a badge covers one repository, so an
+  agent that skipped would lose the rail glyph and every other repository's pull
+  request. The agent pins every pull request; the *top bar* leaves out a link
+  whose URL is a status badge's current `href`.
+- **A `set` that replaces every field.** Marking a pull request merged would reset
+  the label it was opened with. A `set` merges, and `""` resets one field.
+- **Resolving the caller by directory first**, as `veld ide worktree new` does. An
+  agent working across repositories runs `gh pr create` in a sibling checkout. The
+  link belongs to the terminal's worktree, so the session is asked first.
+- **Editing links in the window.** The agent is the author, and the maintainer
+  asked for agent-only editing.

@@ -3928,7 +3928,7 @@ async fn take_context(
 /// daemon restart. A worktree that has been removed, or has no config, contributes
 /// nothing — an unreadable config must not turn into "everything is exempt" or into
 /// a failed request.
-fn project_external_origins(
+pub(super) fn project_external_origins(
     db: &veld_core::db::Db,
     worktree_id: i64,
 ) -> Vec<veld_core::ide::OriginPattern> {

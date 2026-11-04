@@ -369,6 +369,7 @@ import { ConfigVarsDialog } from "./components/ConfigVars";
 import { MarkerOrderProvider, PixelMark } from "./components/PixelMark";
 import { HighlightProvider } from "./highlights/FeatureHighlight";
 import { TopBarExtensions, useExtensionStatus } from "./components/Extensions";
+import { RailPrLinks, WorktreeLinks } from "./components/WorktreeLinks";
 import {
   ChangeMarkerDialog,
   ConfirmDeleteWorktreeDialog,
@@ -7980,6 +7981,7 @@ function AppInner(props: {
             onMenu={(e, w) => worktreeMenu(w)(e)}
             onStop={stopWorktree}
             onDiagnose={diagnoseWorktree}
+            onOpenInPane={layout ? openUrlInPane : undefined}
             showWorking={activity.showWorking}
             onAddLane={() => setDialog({ kind: "new-lane" })}
             onLaneMenu={(e, lane) => laneMenu(lane)(e)}
@@ -9437,6 +9439,21 @@ function TopBar(props: {
           )}
         </>
       )}
+      {/* Links agents pinned to this worktree. Outside the `canRun` block above —
+          a worktree with no veld.json can still have a pull request — and last in
+          the left cluster, after veld's own controls and the project's badges. */}
+      {worktree && (
+        <WorktreeLinks
+          links={worktree.links ?? []}
+          branch={worktree.branch}
+          worktreeId={worktree.id}
+          badgeHrefs={props.extensions
+            .filter((e) => e.kind === "status" && e.slot === "topBar")
+            .map((e) => extensionStatus.value(e.id)?.href)
+            .filter((h): h is string => Boolean(h))}
+          onOpenInPane={props.onOpenInPane}
+        />
+      )}
       <div style={{ flex: 1 }} />
       {worktree && (
         <TopBarExtensions
@@ -9850,6 +9867,8 @@ function Rail(props: {
   onToggle: () => void;
   onWidth: (w: number) => void;
   onSelect: (w: Worktree) => void;
+  /** Open a URL in a browser pane of the worktree on screen, when it has a layout. */
+  onOpenInPane?: (url: string) => void;
   /** Open the create dialog, filing the result into `lane` (`""` = ungrouped). */
   onAdd: (lane: string) => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
@@ -11142,6 +11161,18 @@ function Rail(props: {
                       branch is derived from the same input and usually *is* it. */}
                   {props.wide && (
                     <span className="wt-alias">{worktreeLabel(w)}</span>
+                  )}
+                  {/* Pull requests an agent pinned here. After the alias for the
+                      same accessible-name reason as the controls below, and muted
+                      by default: the marker is the row's identity. */}
+                  {props.wide && !trashed && !discoveredRow && w.links && (
+                    <RailPrLinks
+                      links={w.links}
+                      branch={w.branch}
+                      name={worktreeLabel(w)}
+                      worktreeId={w.id}
+                      onOpenInPane={w.id === props.active?.id ? props.onOpenInPane : undefined}
+                    />
                   )}
                   {/* The branch column carries the removal failure — the one thing
                       about a row that is not the branch any more. Branch names and

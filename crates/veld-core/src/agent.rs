@@ -1380,7 +1380,9 @@ pub fn agent_context(cli: &str) -> String {
          tell them to rename it in the Veld window instead of retrying. To show the human a file (markdown, CSV, code) or a web page next to this \
          terminal, run `{cli} ide open <path-or-url>[:line] \
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
-         not for every file you touch. Veld can also hand work to the human as a new \
+         not for every file you touch. Pin every PR you open (any repo), preview and tracking issue: `{cli} ide link \
+         set <url> --kind pr|preview|issue --label <text>`; re-run with `--tone` when it \
+         changes. Not research pages. Veld can also hand work to the human as a new \
          worktree. Whenever your reply points out something outside the current task that \
          someone would have to fix later (a bug, an outdated or missing doc, a follow-up), \
          finish that reply with one short question asking whether to hand it off as a new \
@@ -2866,6 +2868,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         assert!(text.contains(&format!("`{} ide worktree new`", dev.display())));
         assert!(text.contains(&format!("`{} ide worktree name ", dev.display())));
         assert!(text.contains(&format!("`{} agent link`", dev.display())));
+        assert!(text.contains(&format!("`{} ide link set <url>", dev.display())));
         assert!(
             !text.contains("`veld "),
             "no bare word left for a dev instance: {text}"

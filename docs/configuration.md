@@ -3111,6 +3111,8 @@ branch starting with `-` is a separate case veld closes at the source instead:
 `${veld.branch_raw}` is simply not populated for one, so the command reports an
 unresolved variable rather than handing the receiving program a flag.
 
+A status badge is the live, polled option, configured per project. A coding agent can instead pin a pull request itself with `veld ide link set <url> --kind pr`, which needs no configuration; the agent keeps it current. Both can coexist.
+
 #### `type: "status"` — a badge
 
 Veld runs the command in the worktree root and reads stdout:

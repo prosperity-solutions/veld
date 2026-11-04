@@ -183,6 +183,25 @@ fn invalidate(worktree: &str) {
     stamps.insert(worktree.to_owned(), Instant::now());
 }
 
+/// What a status badge showed when it last ran in `worktree` — its text and link
+/// — without running it: `None` when it has not run, is running right now, or
+/// showed nothing. For `veld ide link`, which tells an agent what the badge is
+/// about so it can tell the badge's pull request from its own.
+pub(crate) fn last_shown(worktree: &str, id: &str) -> Option<(String, Option<String>)> {
+    let cells: Vec<Cell> = RESULTS
+        .lock()
+        .expect("extension results poisoned")
+        .iter()
+        .filter(|((wt, _, ext), _)| wt == worktree && ext == id)
+        .map(|(_, cell)| Arc::clone(cell))
+        .collect();
+    cells.iter().find_map(|cell| {
+        let guard = cell.try_lock().ok()?;
+        let (_, view) = guard.as_ref()?;
+        (view.state == "ok").then(|| (view.text.clone().unwrap_or_default(), view.href.clone()))
+    })
+}
+
 fn cell(worktree: &str, declare_root: &str, id: &str) -> Cell {
     let mut map = RESULTS.lock().expect("extension results poisoned");
     if map.len() > MAX_TRACKED {

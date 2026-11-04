@@ -10,6 +10,7 @@ pub mod graph;
 pub mod helper_install;
 pub mod ide;
 pub mod init;
+pub mod link;
 pub mod lint;
 pub mod list;
 pub mod logs;
