@@ -150,8 +150,13 @@ pub(crate) async fn cancel_and_wait(id: i64) -> Result<(), String> {
     Ok(())
 }
 
-/// Start cleaning every trashed worktree that is due. Called from the GC pass,
-/// inside its database-health gate. Returns how many were queued.
+/// Start cleaning every trashed worktree that is due. Returns how many were queued.
+///
+/// **Callers must hold the GC pass's database-health gate** (`housekeeping()` in
+/// `gc.rs`): this deletes files on the strength of rows, and a damaged database
+/// must not decide that. And go through here, not `cleanable_trashed_worktrees`
+/// directly — [`due`] is what applies the cooldown from when the cleanup was
+/// switched on.
 ///
 /// The work happens on a task of its own, one worktree at a time; a pass that
 /// finds one still running queues nothing.
@@ -265,7 +270,7 @@ async fn clean(id: i64) {
     // Conditional on this trashing: a cleanup cancelled by a restore still
     // records what it removed, but one whose worktree was restored and binned
     // again must not mark the new trashing as cleaned.
-    if let Err(e) = db.mark_trash_cleaned(id, &wt.trashed_at, &summary) {
+    if let Err(e) = db.mark_trash_cleaned(id, &wt.path, &wt.trashed_at, &summary) {
         warn!(
             "trash cleanup: cannot record the cleanup of {}: {e}",
             wt.path
@@ -304,6 +309,12 @@ async fn run(
         Err(problem) => notes.push(problem),
         Ok(Some(p)) => {
             patterns = runtime_patterns(&p.section.paths);
+            let dropped = p.section.paths.len() - patterns.len();
+            if dropped > 0 {
+                notes.push(format!(
+                    "{dropped} pattern(s) ignored — see `veld orchestrator lint`"
+                ));
+            }
             let builtins = super::pty::worktree_builtins(&root, &wt.branch, &p.config);
             // The one switch for everything Veld runs from a repo's config without
             // a click. Off skips the steps; the deletion is Veld's own and stays.
@@ -731,6 +742,9 @@ fn scan(
             continue;
         };
         for child in read.flatten() {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
             let name = child.file_name().to_string_lossy().into_owned();
             if name == ".git" {
                 out.nested_repo = true;
@@ -803,9 +817,10 @@ fn remove_one(path: &Path, rel: &str, bytes: u64, flag: &AtomicBool, removed: &m
             removed.bytes += bytes;
             removed.paths.push((rel.to_owned(), bytes));
         }
-        // Stopped partway: what is gone is gone, but the entry is not reported as
-        // removed, because it is not.
-        Ok(false) => {}
+        // Stopped partway: not reported as removed, because it is not — but named,
+        // because a half-deleted dependency folder is exactly what a restored
+        // worktree's first run trips over.
+        Ok(false) => removed.problems.push(format!("partly deleted {rel}")),
         Err(e) => {
             warn!("trash cleanup: cannot delete {}: {e}", path.display());
             removed.problems.push(format!("could not delete {rel}"));
@@ -840,7 +855,13 @@ fn remove_tree(path: &Path, flag: &AtomicBool) -> std::io::Result<bool> {
 /// The one-line summary stored on the row and shown in the rail.
 ///
 /// Written to read after "the cleanup …", which is how the restore notice uses it.
+///
+/// Empty when nothing was removed and there is nothing to report, so a restore
+/// stays quiet after a cleanup that had nothing to do.
 fn summarize(removed: &Removed, notes: &[String]) -> String {
+    if removed.paths.is_empty() && notes.is_empty() {
+        return String::new();
+    }
     let mut out = if removed.paths.is_empty() {
         "found nothing large enough to free".to_owned()
     } else {
@@ -1207,9 +1228,10 @@ mod tests {
             summarize(&removed, &["step \"x\" exited 1".into()]),
             "freed 3.0 GB — node_modules, target, b and 1 more; step \"x\" exited 1"
         );
+        assert_eq!(summarize(&Removed::default(), &[]), "", "quiet when idle");
         assert_eq!(
-            summarize(&Removed::default(), &[]),
-            "found nothing large enough to free"
+            summarize(&Removed::default(), &["step \"x\" exited 1".into()]),
+            "found nothing large enough to free; step \"x\" exited 1"
         );
     }
 }

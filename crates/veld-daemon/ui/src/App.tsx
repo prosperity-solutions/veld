@@ -650,6 +650,8 @@ function usePersisted(
  */
 /** Removal failures this window has already announced. See the effect that uses it. */
 const TRASH_ACK_KEY = "veld.trashAcked";
+/** Worktrees whose trash-cleanup summary this machine has already announced. */
+const CLEANED_ACK_KEY = "veld.trashCleanedAcked";
 
 function selectionKeys(name: string): [string, string] {
   return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
@@ -6168,6 +6170,38 @@ function AppInner(props: {
     }
   }, [worktrees]);
 
+  /**
+   * Say once what the trash cleanup removed from a worktree that is back in the
+   * rail — whichever way it came back: this window's Restore, ⌘K, a session link
+   * opened in the browser, another window. Its files went while it sat in the
+   * trash, so its first run would otherwise fail on missing dependencies with no
+   * hint why. Same once-per-machine bookkeeping as the deletion errors above.
+   */
+  useEffect(() => {
+    const cleaned = worktrees.filter((w) => !w.trashed_at && w.trash_cleaned);
+    if (cleaned.length === 0) return;
+    let acked: string[] = [];
+    try {
+      acked = JSON.parse(window.localStorage.getItem(CLEANED_ACK_KEY) ?? "[]");
+    } catch {
+      acked = [];
+    }
+    const keys = cleaned.map((w) => `${w.path}\u0000${w.trash_cleaned_at}`);
+    const fresh = cleaned.filter((_, i) => !acked.includes(keys[i]));
+    for (const w of fresh) {
+      notifyDone(
+        `${worktreeLabel(w)}: while it was in the trash, the cleanup ${w.trash_cleaned}`,
+      );
+    }
+    if (fresh.length > 0) {
+      try {
+        window.localStorage.setItem(CLEANED_ACK_KEY, JSON.stringify(keys));
+      } catch {
+        // Storage unavailable: the cost is a repeated toast.
+      }
+    }
+  }, [worktrees]);
+
   const dismissTrashError = async (w: Worktree) => {
     try {
       await api.dismissTrashError(w.id);
@@ -6271,16 +6305,10 @@ function AppInner(props: {
     // did nothing — and invites the next one.
     const write = async () => {
       try {
-        // The daemon's row, not this one: a cleanup the restore cancelled
-        // records what it had already removed only once it has stopped.
-        const back = await api.restoreWorktree(w.id);
-        // Its files went while it sat in the trash, so the first run after a
-        // restore would fail on missing dependencies with no hint why.
-        notifyDone(
-          back.trash_cleaned_at
-            ? `Restored ${worktreeLabel(w)} — while it was in the trash, the cleanup ${back.trash_cleaned}`
-            : `Restored ${worktreeLabel(w)}`,
-        );
+        // What the trash cleanup removed is announced by the effect that watches
+        // the list, which covers every way back out of the trash, not just this.
+        await api.restoreWorktree(w.id);
+        notifyDone(`Restored ${worktreeLabel(w)}`);
         restored = true;
       } catch (e) {
         // 404 is the expected failure — the worker got there first — and saying so
@@ -11109,7 +11137,7 @@ function Rail(props: {
                     deletingRow
                       ? `${worktreeLabel(w)} — being deleted, cannot be restored`
                       : trashed
-                        ? `${worktreeLabel(w)} — in the trash, still on disk${w.trash_cleaned_at ? ` (cleaned: ${w.trash_cleaned})` : ""}`
+                        ? `${worktreeLabel(w)} — in the trash, still on disk${w.trash_cleaned ? ` (cleaned: ${w.trash_cleaned})` : ""}`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
                           : w.handoff && !w.handoff.started

@@ -1615,17 +1615,21 @@ impl Db {
     /// worktree is still in that trashing, and also once it has been restored —
     /// whatever was removed is gone either way, and the restore reports it — but
     /// not after it was binned again, which is a new trashing still to clean.
+    ///
+    /// `path` pins the row too: ids are reused once a row is dropped, and a new
+    /// worktree must not inherit an old one's summary.
     pub fn mark_trash_cleaned(
         &self,
         id: i64,
+        path: &str,
         trashed_at: &str,
         summary: &str,
     ) -> Result<bool, DbError> {
         let conn = self.lock();
         let n = conn.execute(
             "UPDATE worktrees SET trash_cleaned_at = ?1, trash_cleaned = ?2
-              WHERE id = ?3 AND (trashed_at = ?4 OR trashed_at = '')",
-            params![now_str(), summary, id, trashed_at],
+              WHERE id = ?3 AND path = ?5 AND (trashed_at = ?4 OR trashed_at = '')",
+            params![now_str(), summary, id, trashed_at, path],
         )?;
         Ok(n > 0)
     }
@@ -3811,7 +3815,7 @@ mod tests {
         );
 
         let first = db.get_worktree(id).unwrap().unwrap().trashed_at;
-        db.mark_trash_cleaned(id, &first, "freed 1.0 GB — node_modules")
+        db.mark_trash_cleaned(id, "/tmp/cleanwt-a", &first, "freed 1.0 GB — node_modules")
             .unwrap();
         assert!(
             db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
@@ -3839,7 +3843,15 @@ mod tests {
 
         // A cleanup that started on the first trashing and finishes late must
         // not mark this one as cleaned.
-        assert!(!db.mark_trash_cleaned(id, &first, "stale").unwrap());
+        assert!(
+            !db.mark_trash_cleaned(id, "/tmp/cleanwt-a", &first, "stale")
+                .unwrap()
+        );
+        assert!(
+            !db.mark_trash_cleaned(id, "/tmp/elsewhere", "", "reused id")
+                .unwrap(),
+            "a different checkout under the same id"
+        );
         assert_eq!(
             db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
                 .unwrap()

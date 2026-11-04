@@ -516,7 +516,7 @@ export const PROMOTIONS: Promotion[] = [
     since: "2026-11-04",
     eyebrow: "On by default",
     headline: "Get your disk back from binned worktrees",
-    body: "A day after you trash a worktree, its large gitignored files — dependencies, build output — are deleted. Set the wait or turn it off in Settings, General.",
+    body: "A day after you trash a worktree, its large gitignored files — dependencies, build output, local data — are deleted. Set the wait or sizes in Settings, General.",
     glyph: "inbox",
   },
 ];

@@ -3387,6 +3387,17 @@ fn check_trash_cleanup(config: &VeldConfig, out: &mut Vec<Finding>) {
             )
         } else if trimmed.split('/').any(|seg| seg == "..") {
             Some("`..` would leave the worktree; patterns only select inside it".to_owned())
+        } else if trimmed.trim_matches(|c| c == '*' || c == '/').is_empty() {
+            out.push(Finding {
+                severity: Severity::Warning,
+                location: location.clone(),
+                message: format!(
+                    "`{trimmed}` selects every untracked file in the worktree — uncommitted \
+                     new files included. Name what is safe to throw away instead"
+                ),
+                rule: "trash-cleanup".to_owned(),
+            });
+            None
         } else if trimmed.ends_with('/') {
             Some(format!(
                 "drop the trailing `/` — `{}` already matches the folder",
@@ -7154,6 +7165,14 @@ mod tests {
     /// `veld orchestrator stop`.
     #[test]
     fn a_malformed_trash_cleanup_is_reported_not_fatal() {
+        let f = trash_cleanup_findings(serde_json::json!({ "paths": ["**"] }));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].severity,
+            Severity::Warning,
+            "a catch-all is legal, and warned"
+        );
+
         let f = trash_cleanup_findings(serde_json::json!({ "pathz": [] }));
         assert_eq!(f.len(), 1, "{f:?}");
         assert!(f[0].message.contains("pathz"), "{f:?}");

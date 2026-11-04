@@ -365,7 +365,7 @@ disposable. `trash_cleanup` adds to it for one project:
 
 | Field   | Type   | Description |
 |---------|--------|-------------|
-| `paths` | array of strings | Glob patterns relative to the worktree root, in the `files.viewPatterns` grammar: `*` and `?` never cross `/`, `**` does, matching is case-insensitive, and a pattern **without** `/` matches the name at any depth (`.next` finds `apps/web/.next`). A match covers everything under it, as a `.gitignore` line does. At most 64, each up to 256 bytes. |
+| `paths` | array of strings | Glob patterns relative to the worktree root, in the `files.viewPatterns` grammar: `*` and `?` never cross `/`, `**` does, matching is case-insensitive, and a pattern **without** `/` matches the name at any depth (`.next` finds `apps/web/.next`). A match covers everything under it, as a `.gitignore` line does — so a bare common name like `build` also reaches an untracked `src/build/` you have not committed yet; when the name is generic, anchor it with a `/` (`build/**` for the root's `build`, or `apps/*/build`). Read from the main checkout by default (see *Whose config* below). At most 64, each up to 256 bytes. |
 | `steps` | array | [Setup steps](#step-fields) — `name`, `argv` or `shell`, `failureMessage` — run in order before anything is deleted; at most 16. Skipped when `extensions.autoRefresh` (*Let projects run their own status commands*) is off, like every other command Veld runs from a repo without a click. A failure (non-zero exit, five-minute timeout) is noted in the cleanup's summary and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: `root`, `worktree`, `branch`, `branch_raw` (`argv` only), `project`, `username` — there is no run here, so no `run`. |
 
 **What it can delete.** The size rule only ever deletes what git ignores — what
@@ -381,7 +381,9 @@ a link is unlinked only when a pattern names it, and never followed. The cost is
 a reinstall: a worktree restored after its cleanup comes back without what was
 deleted, and the toast that confirms the restore says what that was. Ignored data
 you cannot regenerate — a local database file, a `.venv` you built by hand — goes
-too once it is over the size; raise the size, or set it to `0`, if that matters.
+too once it is over the size — and a file under the file size still goes when
+the ignored folder holding it is over the folder size. If that matters, raise
+both sizes (or set them to `0`), or set the hours to `0`.
 
 **When it runs.** The daemon's housekeeping pass (every ten minutes) cleans each
 trashed worktree once each time it is moved to the trash: restore it and trash
