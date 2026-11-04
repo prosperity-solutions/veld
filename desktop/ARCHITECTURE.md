@@ -1095,7 +1095,11 @@ Minimal by design. Main process only does:
    delivers it before `ready` on a cold launch) and held until `restoreWindows`
    has run. Registered by the bundle's `protocols` on macOS and by
    `setAsDefaultProtocolClient` on Linux — never from a dev run, which would take
-   the scheme away from the installed app.
+   the scheme away from the installed app. Anything that changes state waits for
+   a native dialog whose default is "Not now": resuming an ended conversation,
+   and taking the link's worktree out of the Trash (`restore: true`, offered only
+   when the daemon answers `deleting: false` — a daemon from before link restores
+   sends no `deleting`, and the app points at the sidebar instead).
 
 ## Packaging and updates
 

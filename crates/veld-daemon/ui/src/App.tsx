@@ -5267,6 +5267,13 @@ function AppInner(props: {
    */
   const reveal = async (req: RevealPaneRequest) => {
     const from = mode;
+    // A link's page can restore the worktree just before the jump, and until the
+    // next poll this window still shows the row in the Trash. The refresh queues
+    // the fresh list for the render that applies the selection below; the rows read
+    // here stay the old objects, which is fine because both paths go by id.
+    if (allWorktreesRef.current.find((w) => w.id === req.worktreeId)?.trashed_at) {
+      await refresh();
+    }
     let landed: boolean;
     if (req.sessionId !== undefined) {
       landed = await focusPane(req.worktreeId, req.sessionId);

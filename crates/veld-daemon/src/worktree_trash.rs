@@ -127,6 +127,13 @@ impl DeletingGuard {
     }
 }
 
+/// Hold `id` as being deleted until the returned guard drops, for tests of
+/// callers outside this module.
+#[cfg(test)]
+pub(crate) fn hold_deleting(id: i64) -> impl Drop {
+    DeletingGuard::claim(id)
+}
+
 impl Drop for DeletingGuard {
     fn drop(&mut self) {
         if let Some(set) = DELETING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {

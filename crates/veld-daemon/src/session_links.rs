@@ -25,8 +25,9 @@
 //!   jumps on load only when it was reached from GitHub (`document.referrer`);
 //!   from anywhere else it waits for a click on itself.
 //! - **Starting** a process — resuming a closed conversation — needs
-//!   `resume: true`, which the page sends only from a button press, and the page
-//!   refuses to be framed, so neither press can be borrowed by another site.
+//!   `resume: true`, and taking a worktree out of the Trash needs
+//!   `restore: true`. The page sends either only from a button press, and it
+//!   refuses to be framed, so no press can be borrowed by another site.
 //!   [`plan`] is the one place that turns `resume` into a [`ResumeRequest`].
 
 use axum::extract::Path;
@@ -147,6 +148,10 @@ struct OpenRequest {
     /// Only ever sent from a button press on the link's page.
     #[serde(default)]
     resume: bool,
+    /// Take the link's worktree out of the Trash first, then open it as usual.
+    /// Only ever sent from a button press, like `resume`.
+    #[serde(default)]
+    restore: bool,
 }
 
 /// What a link resolved to, before a window is asked.
@@ -170,13 +175,18 @@ async fn open(
     body: Option<Json<OpenRequest>>,
 ) -> Result<Response, ApiError> {
     csrf(&headers)?;
-    let resume = body.map(|Json(b)| b.resume).unwrap_or(false);
+    let (resume, restore) = body.map_or((false, false), |Json(b)| (b.resume, b.restore));
+    // One press, one effect: each comes from its own button.
+    if resume && restore {
+        return Err(coded(
+            StatusCode::BAD_REQUEST,
+            "one_at_a_time",
+            "send `restore` and `resume` in separate requests",
+        ));
+    }
     let found = crate::offload::blocking(move || {
         let db = open_desktop_db()?;
-        let Some(link) = db.session_link(&id).map_err(db_err)? else {
-            return Ok(None);
-        };
-        let Some(wt) = db.get_worktree(link.worktree_id).map_err(db_err)? else {
+        let Some((link, wt)) = find(&db, &id, restore)? else {
             return Ok(None);
         };
         let candidates = match &link.conversation {
@@ -201,10 +211,13 @@ async fn open(
     };
     let name = worktree_name(&wt);
     if !wt.trashed_at.is_empty() {
+        // `deleting` tells the page and the app not to offer a restore that
+        // `try_restore` would refuse.
         return Ok(Json(serde_json::json!({
             "found": true,
             "worktree": name,
             "trashed": true,
+            "deleting": super::worktree_trash::now_deleting(wt.id),
         }))
         .into_response());
     }
@@ -251,6 +264,31 @@ async fn open(
         "ide_url": ide_url,
     }))
     .into_response())
+}
+
+/// The link `id` and its worktree, after taking the worktree out of the Trash
+/// when `restore` asks for it. `None` for a link, or a worktree, this machine
+/// does not have.
+///
+/// The restore is the sidebar's guarded one: once the worktree's deletion has
+/// started it refuses, and the row comes back still trashed.
+fn find(
+    db: &veld_core::db::Db,
+    id: &str,
+    restore: bool,
+) -> Result<Option<(veld_core::db::SessionLink, veld_core::db::WorktreeRecord)>, ApiError> {
+    let Some(link) = db.session_link(id).map_err(db_err)? else {
+        return Ok(None);
+    };
+    let Some(wt) = db.get_worktree(link.worktree_id).map_err(db_err)? else {
+        return Ok(None);
+    };
+    if !restore || wt.trashed_at.is_empty() {
+        return Ok(Some((link, wt)));
+    }
+    super::worktree_trash::try_restore(db, wt.id).map_err(db_err)?;
+    let wt = db.get_worktree(wt.id).map_err(db_err)?;
+    Ok(wt.map(|wt| (link, wt)))
 }
 
 /// Whether a Veld Desktop that answers `veld://` is installed where Veld would
@@ -411,6 +449,63 @@ mod tests {
         }
     }
 
+    /// The page's two buttons each send one flag; a plain open sends neither.
+    #[test]
+    fn the_open_body_carries_restore_and_resume() {
+        let body: OpenRequest = serde_json::from_str(r#"{"restore":true}"#).unwrap();
+        assert!(body.restore && !body.resume);
+        let body: OpenRequest = serde_json::from_str("{}").unwrap();
+        assert!(!body.restore && !body.resume);
+    }
+
+    /// A worktree in the Trash, with a link minted for one of its terminals.
+    fn trashed_link() -> (tempfile::TempDir, veld_core::db::Db, i64, String) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = veld_core::db::Db::open_at(&dir.path().join("t.db")).unwrap();
+        let root = std::path::Path::new("/tmp/repo-session-link-restore");
+        db.upsert_repo(root, "repo").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[veld_core::db::DiscoveredWorktree {
+                    path: "/tmp/repo-session-link-restore/wt".into(),
+                    branch: "feature".into(),
+                    is_main: false,
+                }],
+            )
+            .unwrap();
+        let wt = wts.iter().find(|w| !w.is_main).unwrap().id;
+        let link = db.session_link_for("tab", wt).unwrap().id;
+        db.trash_worktree(wt).unwrap();
+        (dir, db, wt, link)
+    }
+
+    /// One test, not two: `DELETING` is process-wide and every temp database
+    /// numbers its worktrees alike, so a parallel test holding "its" id as being
+    /// deleted would hold this one's too.
+    #[test]
+    fn a_link_restores_its_worktree_only_when_asked_and_not_mid_delete() {
+        let (_dir, db, wt, link) = trashed_link();
+        {
+            let _deleting = super::super::worktree_trash::hold_deleting(wt);
+            let (_, found) = find(&db, &link, true).unwrap().unwrap();
+            assert!(!found.trashed_at.is_empty(), "a deletion under way wins");
+            assert!(super::super::worktree_trash::now_deleting(wt));
+        }
+        let (_, found) = find(&db, &link, false).unwrap().unwrap();
+        assert!(
+            !found.trashed_at.is_empty(),
+            "a plain open restores nothing"
+        );
+        let (_, found) = find(&db, &link, true).unwrap().unwrap();
+        assert!(found.trashed_at.is_empty());
+        assert!(db.get_worktree(wt).unwrap().unwrap().trashed_at.is_empty());
+        // Asking again, as Veld Desktop does when an answer was lost, is harmless.
+        let (_, found) = find(&db, &link, true).unwrap().unwrap();
+        assert!(found.trashed_at.is_empty());
+        assert!(find(&db, &"0".repeat(32), true).unwrap().is_none());
+    }
+
     /// Only an app that registers the scheme gets the hand-off; one from before
     /// session links (no URL types, or another app's scheme) does not.
     #[test]
@@ -449,6 +544,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(&bytes[..], PAGE_HTML.as_bytes());
+    }
+
+    /// One press, one effect: a request asking to restore and resume at once is
+    /// refused before anything is looked up.
+    #[tokio::test]
+    async fn restore_and_resume_are_never_sent_together() {
+        let res = routes()
+            .oneshot(
+                Request::post("/api/session-links/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/open")
+                    .header("host", "127.0.0.1")
+                    .header("x-veld-request", "1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"restore":true,"resume":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
