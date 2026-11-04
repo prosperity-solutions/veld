@@ -428,7 +428,8 @@ each of them, and the human picks.
 The human runs many sessions at once and tells which pull request came from which
 by these links: clicked on their machine, one brings the Veld window to that
 worktree and terminal — or, in one of the project's agent panes, to that
-conversation wherever it runs by then, offering to resume it if it has ended. When
+conversation wherever it runs by then, offering to resume it if it has ended, and
+to restore the worktree if it is in the Trash. When
 no Veld window is open, the link starts Veld Desktop (`veld://session/<id>`), or
 opens the IDE in the browser where the app is not installed. It opens nothing on
 any other machine: another Veld says the session is not there, and a browser

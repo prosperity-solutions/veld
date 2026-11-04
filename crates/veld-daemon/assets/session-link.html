@@ -73,7 +73,8 @@ button.button:disabled{opacity:.6;cursor:default}
 </section>
 <section id="trashed" hidden>
 <h1 id="trashed-title">This session&rsquo;s worktree is in the Trash</h1>
-<p>Restore it from the Trash in Veld&rsquo;s sidebar, then open this link again.</p>
+<p id="trashed-where">Veld can take it out of the Trash and open it, the same as Restore in the sidebar.</p>
+<button type="button" id="restore" class="button">Restore and open</button>
 </section>
 <section id="missing" hidden>
 <h1>This session could not be found</h1>
@@ -94,12 +95,13 @@ button.button:disabled{opacity:.6;cursor:default}
     sections.forEach(function (s) { $(s).hidden = s !== which; });
   }
   function quote(name) { return "\u201c" + name + "\u201d"; }
-  // Starting a process needs this page's own button: see `session_links.rs`.
-  function open(resume) {
+  // Starting a process or restoring a worktree needs this page's own button:
+  // see `session_links.rs`.
+  function open(ask) {
     return fetch("/api/session-links/" + encodeURIComponent(id) + "/open", {
       method: "POST",
       headers: { "x-veld-request": "1", "content-type": "application/json" },
-      body: JSON.stringify({ resume: resume })
+      body: JSON.stringify(ask || {})
     }).then(function (res) {
       if (res.status === 404) return { found: false };
       if (!res.ok) throw new Error("status " + res.status);
@@ -123,6 +125,11 @@ button.button:disabled{opacity:.6;cursor:default}
     var name = body.worktree || "the worktree";
     if (body.trashed) {
       $("trashed-title").textContent = quote(name) + " is in the Trash";
+      $("restore").disabled = false;
+      if (body.deleting) {
+        $("trashed-where").textContent = "Veld is deleting it right now, so it cannot be restored. If the deletion fails, it returns to Veld\u2019s sidebar.";
+        $("restore").hidden = true;
+      }
       show("trashed");
       return;
     }
@@ -153,11 +160,15 @@ button.button:disabled{opacity:.6;cursor:default}
   }
   $("resume").addEventListener("click", function () {
     $("resume").disabled = true;
-    open(true).then(render).catch(function () { show("failed"); });
+    open({ resume: true }).then(render).catch(function () { show("failed"); });
+  });
+  $("restore").addEventListener("click", function () {
+    $("restore").disabled = true;
+    open({ restore: true }).then(render).catch(function () { show("failed"); });
   });
   function go() {
     show("opening");
-    open(false).then(render).catch(function () { show("failed"); });
+    open().then(render).catch(function () { show("failed"); });
   }
   // Jumping to a session moves the user's Veld window, and that is visible to
   // the page that sent them here: a site could load public links one by one and

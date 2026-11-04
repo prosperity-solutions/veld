@@ -30,8 +30,8 @@ function harness(answers, choice = 0) {
     calls,
     said,
     deps: {
-      open: async (id, resume) => {
-        calls.push({ id, resume });
+      open: async (id, body) => {
+        calls.push({ id, resume: !!body.resume, restore: !!body.restore });
         return answers[Math.min(calls.length - 1, answers.length - 1)];
       },
       ensureWindow: () => said.push("window"),
@@ -83,10 +83,53 @@ test("an ended conversation is resumed only on a click", async () => {
   assert.deepEqual(no.calls.map((c) => c.resume), [false]);
 });
 
-test("a trashed worktree is not retried", async () => {
+const trashed = { found: true, worktree: "W", trashed: true, deleting: false };
+
+test("a trashed worktree is restored only on a click, then opened", async () => {
+  const yes = harness([trashed, shown], 0);
+  assert.equal(await openSessionLink(ID, yes.deps), "shown");
+  assert.deepEqual(yes.calls.map((c) => c.restore), [false, true]);
+  assert.deepEqual(yes.said, ["window", "ask:\u201cW\u201d is in the Trash"]);
+
+  const no = harness([trashed], 1);
+  assert.equal(await openSessionLink(ID, no.deps), "trashed");
+  assert.deepEqual(no.calls.map((c) => c.restore), [false]);
+});
+
+test("a restore keeps asking until a window takes it, without restoring again", async () => {
+  const h = harness([trashed, { found: true, state: "closed", delivered: null }, shown], 0);
+  assert.equal(await openSessionLink(ID, h.deps), "shown");
+  assert.deepEqual(h.calls.map((c) => c.restore), [false, true, false]);
+});
+
+test("a restored worktree whose conversation ended still offers the resume", async () => {
+  const ended = { found: true, worktree: "W", state: "resumable", delivered: "electron" };
+  const h = harness([trashed, ended], 0);
+  assert.equal(await openSessionLink(ID, h.deps), "resumed");
+  assert.deepEqual(
+    h.calls.map((c) => [c.restore, c.resume]),
+    [[false, false], [true, false], [false, true]],
+  );
+});
+
+test("a restore that got no answer is sent again, not reported as a deletion", async () => {
+  const h = harness([trashed, null, shown], 0);
+  assert.equal(await openSessionLink(ID, h.deps), "shown");
+  assert.deepEqual(h.calls.map((c) => c.restore), [false, true, true]);
+});
+
+test("a daemon that cannot restore from a link points at the sidebar", async () => {
   const h = harness([{ found: true, worktree: "W", trashed: true }]);
   assert.equal(await openSessionLink(ID, h.deps), "trashed");
   assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.said, ["window", "tell:\u201cW\u201d is in the Trash"]);
+});
+
+test("a worktree already being deleted is explained, not offered", async () => {
+  const h = harness([{ ...trashed, deleting: true }]);
+  assert.equal(await openSessionLink(ID, h.deps), "trashed");
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(h.said, ["window", "tell:\u201cW\u201d is in the Trash"]);
 });
 
 test("a window that never connects is explained, not silent", async () => {

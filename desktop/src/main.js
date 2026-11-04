@@ -137,12 +137,12 @@ function receiveLink(url) {
 
 async function handleSessionLink(id) {
   await openSessionLink(id, {
-    open: async (linkId, resume) => {
+    open: async (linkId, body) => {
       try {
         const res = await fetch(`${BASE_URL}/api/session-links/${linkId}/open`, {
           method: "POST",
           headers: { "x-veld-request": "1", "content-type": "application/json" },
-          body: JSON.stringify({ resume }),
+          body: JSON.stringify(body),
           signal: AbortSignal.timeout(5000),
         });
         if (res.status === 404) return { found: false };
@@ -153,8 +153,9 @@ async function handleSessionLink(id) {
       }
     },
     ensureWindow: () => ensureMainWindow(),
-    // Return defaults to "Not now": resuming starts a process, and a dialog that a
-    // link can raise while somebody is typing must not start one on Return.
+    // Return defaults to "Not now": resuming starts a process and restoring changes
+    // the sidebar, and a dialog that a link can raise while somebody is typing must
+    // do neither on Return.
     // Attached to the focused window, so it lands where the jump did.
     ask: async (message, detail, buttons) => {
       const options = { type: "question", message, detail, buttons, defaultId: 1, cancelId: 1 };
