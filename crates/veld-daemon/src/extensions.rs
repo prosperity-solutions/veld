@@ -183,9 +183,9 @@ fn invalidate(worktree: &str) {
     stamps.insert(worktree.to_owned(), Instant::now());
 }
 
-/// What a status badge showed when it last ran in `worktree` — its text and link
-/// — without running it: `None` when it has not run, is running right now, or
-/// showed nothing. For `veld ide link`, which tells an agent what the badge is
+/// What a status badge showed on its last `ok` run in `worktree` — its text and
+/// link — without running it: `None` when it has not run, is running right now,
+/// or its last run was not `ok`. For `veld ide link`, which tells an agent what the badge is
 /// about so it can tell the badge's pull request from its own.
 pub(crate) fn last_shown(worktree: &str, id: &str) -> Option<(String, Option<String>)> {
     let cells: Vec<Cell> = RESULTS

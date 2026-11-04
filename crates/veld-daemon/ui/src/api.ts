@@ -407,7 +407,7 @@ export interface WorktreeHandoff {
 
 /** Mirrors `veld_core::db::WorktreeLink`. A link an agent pinned to a worktree
  *  with `veld ide link set`. Read through `normalizeLink`, which is lenient about
- *  kinds, tones and openers a newer daemon may add. */
+ *  kinds and tones a newer daemon may add. */
 export interface WorktreeLink {
   id: string;
   /** `"pr" | "preview" | "issue" | "doc" | "link"`; anything else reads as `"link"`. */

@@ -31,7 +31,7 @@ const link = (over: Partial<WorktreeLink> = {}): WorktreeLink => ({
 const kinds = (ls: WorktreeLink[]) => arrangeLinks(ls).map((s) => s.type);
 
 describe("normalizeLink", () => {
-  it("falls back for an unknown kind, tone and opener", () => {
+  it("falls back for an unknown kind and tone", () => {
     const l = normalizeLink(link({ kind: "ticket", tone: "purple" }));
     expect([l.kind, l.tone]).toEqual(["link", "neutral"]);
   });

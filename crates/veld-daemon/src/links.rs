@@ -130,7 +130,7 @@ fn worktree_json(db: &veld_core::db::Db, id: i64) -> Result<serde_json::Value, A
 }
 
 /// `POST /api/ide/links/set` — add a link to the caller's worktree, or update the
-/// one with the same id. Answers `{worktree, link, created}`.
+/// one with the same id. Answers `{worktree, link, created, also_in_top_bar}`.
 pub(super) async fn set(
     headers: HeaderMap,
     Json(body): Json<SetRequest>,
@@ -198,7 +198,7 @@ pub(super) async fn set(
 }
 
 /// `POST /api/ide/links/list` — the caller's worktree's links, in the order they
-/// were first set. Answers `{worktree, links}`.
+/// were first set. Answers `{worktree, links, also_in_top_bar}`.
 pub(super) async fn list(
     headers: HeaderMap,
     Json(body): Json<Caller>,

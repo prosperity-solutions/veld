@@ -266,7 +266,11 @@ fn report(path: &str, body: &serde_json::Value) {
                 if id != veld_core::db::normalize_link_url(url) {
                     extra.push_str(&format!(" id={id}"));
                 }
-                if !set_on.is_empty() && !branch.is_empty() && set_on != branch {
+                if !set_on.is_empty()
+                    && !branch.is_empty()
+                    && branch != "(detached)"
+                    && set_on != branch
+                {
                     extra.push_str(&format!(" (set on {set_on})"));
                 }
                 println!(

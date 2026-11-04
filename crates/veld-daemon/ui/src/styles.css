@@ -462,8 +462,8 @@ body[data-fullscreen="true"] .topbar.electron {
 .wt-link-stale {
   opacity: 0.55;
 }
-/* A menu row's glyph carries the link's tone, as the pill does. Neutral is the
-   inherited text colour so an untoned link adds no colour of its own. */
+/* A menu row's glyph carries the link's tone, as the pill does; neutral is muted,
+   like a neutral pill's glyph. */
 .wt-link-icon {
   display: inline-flex;
 }
