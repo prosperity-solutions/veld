@@ -1291,7 +1291,9 @@ export function withWorktreeTrashed(
   at: string,
 ): Worktree[] {
   return worktrees.map((w) =>
-    w.path === path && !w.trashed_at ? { ...w, trashed_at: at } : w,
+    w.path === path && !w.trashed_at
+      ? { ...w, trashed_at: at, trash_cleaned_at: "", trash_cleaned: "" }
+      : w,
   );
 }
 

@@ -508,6 +508,14 @@ export interface Worktree {
    */
   trash_error: string;
   /**
+   * When the trash cleanup ran since this checkout was last moved to the trash
+   * (kept after a restore, so the rail can say what is missing), or `""`.
+   * Binning resets it. Optional only so an older daemon reads as "never cleaned".
+   */
+  trash_cleaned_at?: string;
+  /** One line on what the trash cleanup removed, for a human. Never parsed. */
+  trash_cleaned?: string;
+  /**
    * Whether the rail lists this worktree among the user's own. `false` for a
    * checkout the daemon discovered by itself — made outside Veld, typically by a
    * coding agent — that nobody has adopted yet; the rail keeps those in its

@@ -211,7 +211,7 @@ learn. Relative paths (`cwd`, `script`, output paths) stay relative to the
 
 Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge across files:
 each entry has an owning file, so there is nothing to arbitrate. The project-level
-singletons — `url_template`, `default_preset`, `proxy`, `sharing` — are read from the root file only, because a single value
+singletons — `url_template`, `default_preset`, `proxy`, `sharing`, `trash_cleanup` — are read from the root file only, because a single value
 would need a precedence rule. Declaring one in an included file is a `root-only-key` error rather than a
 silent no-op.
 
@@ -464,6 +464,15 @@ Purely
 additive — a config without it is unaffected — and see
 [configuration.md](configuration.md#idenews-telling-your-own-team-something-changed)
 for the fields and [promotions.md](promotions.md) for how the channel behaves.
+
+### Freeing the space of trashed worktrees
+
+`trash_cleanup` is new and optional: `paths` (globs) and `steps` (setup-step
+shape) that Veld's trash cleanup adds to its default, which deletes a trashed
+worktree's large gitignored files after a day. Patterns reach any untracked
+path, gitignored or not, and never a tracked file. Additive — a config without it still gets the size-based
+cleanup — and `veld orchestrator lint` reports a malformed one rather than failing
+the load. See [configuration.md](configuration.md#trash_cleanup).
 
 ### How long a share link lives
 

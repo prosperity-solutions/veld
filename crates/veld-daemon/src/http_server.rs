@@ -31,6 +31,10 @@ mod pane_sessions;
 #[path = "worktree_trash.rs"]
 pub mod worktree_trash;
 
+/// Freeing the space of worktrees that sat in the trash.
+#[path = "trash_cleanup.rs"]
+pub mod trash_cleanup;
+
 #[path = "pty.rs"]
 // `pub(crate)` only so the periodic GC can call `pty::prune_pastes_now` — the
 // pasted-file directory is the pty module's, and nothing else reaches into it.

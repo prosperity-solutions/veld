@@ -61,7 +61,7 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned, {} trash purged",
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned, {} trash purged, {} trash cleanups",
                     summary.stale_removed,
                     summary.orphans_killed,
                     summary.logs_pruned,
@@ -71,7 +71,8 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
                     // Logged because it is the only destructive number in this
                     // summary: if a checkout disappeared overnight, this line is
                     // where the answer has to be.
-                    summary.trash_purged
+                    summary.trash_purged,
+                    summary.trash_cleanups
                 );
                 // Stop any shares whose run just died so they don't outlive the
                 // environment they expose (crash path — CLI `veld orchestrator stop` already
@@ -103,6 +104,8 @@ pub struct GcSummary {
     /// deletion. Zero unless the user has set `worktree.trashRetentionDays`, which
     /// defaults to "keep until emptied".
     pub trash_purged: usize,
+    /// Trashed worktrees whose space the trash cleanup started freeing this pass.
+    pub trash_cleanups: usize,
     /// Run ids whose processes were found dead this pass — their P2P shares
     /// should be stopped.
     pub orphaned_runs: Vec<Uuid>,
@@ -460,6 +463,8 @@ pub(crate) async fn run_gc_pass(
     // worth taking to reclaim a directory ten minutes sooner.
     if housekeeping() {
         summary.trash_purged = crate::http_server::worktree_trash::purge_expired_trash(db);
+        // Same gate, same reason: it deletes files on the strength of a row.
+        summary.trash_cleanups = crate::http_server::trash_cleanup::sweep(db);
     }
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's
@@ -602,6 +607,7 @@ mod tests {
             "a pass told the database is damaged must not prune a single row"
         );
         assert_eq!(refused.trash_purged, 0, "nor empty the worktree trash");
+        assert_eq!(refused.trash_cleanups, 0, "nor clean it");
 
         // And the rows really are still there — `logs_pruned` being 0 could also
         // mean there was nothing to prune, which would make the assertion above

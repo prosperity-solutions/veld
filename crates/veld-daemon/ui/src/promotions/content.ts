@@ -504,4 +504,19 @@ export const PROMOTIONS: Promotion[] = [
     body: "When an agent hands you a task as a new worktree, its agent starts at once. Open the worktree to find it working — or read prompts first: Settings, Git.",
     glyph: "terminal",
   },
+  {
+    // The maintainer asked for this one: a cleanup that ships switched on deletes
+    // files nobody asked it to, so everybody hears about it once, with the switch.
+    // It deletes only what git ignores, but a worktree restored afterwards needs a
+    // reinstall — the body says what goes, so nobody is surprised by that.
+    //
+    // From "you": what you get back is disk. Not "trash cleanup", the mechanism.
+    // `inbox`, the default: nothing in the closed set is a disk.
+    id: "trash-cleanup",
+    since: "2026-11-04",
+    eyebrow: "On by default",
+    headline: "Get your disk back from binned worktrees",
+    body: "A day after you trash a worktree, its large gitignored files — dependencies, build output — are deleted. Set the wait or turn it off in Settings, General.",
+    glyph: "inbox",
+  },
 ];

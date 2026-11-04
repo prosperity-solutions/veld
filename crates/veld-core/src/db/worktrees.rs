@@ -116,6 +116,15 @@ pub struct WorktreeRecord {
     /// with the reason attached, rather than leaving it in a state that looks like
     /// pending work forever.
     pub trash_error: String,
+    /// When the trash cleanup ran since this worktree was last moved to the trash,
+    /// or `""`. Binning resets it; restoring keeps it, so the rail can say what is
+    /// missing from a worktree that came back.
+    #[serde(default)]
+    pub trash_cleaned_at: String,
+    /// One line on what the trash cleanup removed (or why it did nothing), for a
+    /// human. Never parsed.
+    #[serde(default)]
+    pub trash_cleaned: String,
     /// Whether the rail lists this worktree among the user's own, rather than in
     /// its "Discovered" section.
     ///
@@ -307,7 +316,7 @@ pub struct DiscoveredWorktree {
 // flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, \
      marker_color, lane, sort_position, trashed_at, trash_error, display_name, adopted, \
-     named_by";
+     named_by, trash_cleaned_at, trash_cleaned";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -327,6 +336,8 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         display_name: row.get(13)?,
         adopted: row.get::<_, i64>(14)? != 0,
         named_by: row.get(15)?,
+        trash_cleaned_at: row.get(16)?,
+        trash_cleaned: row.get(17)?,
     })
 }
 
@@ -1448,7 +1459,8 @@ impl Db {
             Some(false) => {}
         }
         tx.execute(
-            "UPDATE worktrees SET trashed_at = ?1, trash_error = '' WHERE id = ?2",
+            "UPDATE worktrees SET trashed_at = ?1, trash_error = '', trash_cleaned_at = '', \
+             trash_cleaned = '' WHERE id = ?2",
             params![now_str(), id],
         )?;
         let wt = tx
@@ -1578,6 +1590,36 @@ impl Db {
         ))?;
         let rows = stmt.query_map(params![cutoff], wt_from_row)?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Trashed worktrees the trash cleanup is due on: in the bin for longer than
+    /// `after_secs`, and not yet cleaned since they were binned. Oldest first.
+    pub fn cleanable_trashed_worktrees(
+        &self,
+        after_secs: i64,
+    ) -> Result<Vec<WorktreeRecord>, DbError> {
+        let cutoff = super::ts_to_str(chrono::Utc::now() - chrono::Duration::seconds(after_secs));
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {WT_COLS} FROM worktrees
+              WHERE trashed_at != '' AND trashed_at < ?1 AND trash_cleaned_at = ''
+              ORDER BY trashed_at"
+        ))?;
+        let rows = stmt.query_map(params![cutoff], wt_from_row)?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Record that the trash cleanup ran on this worktree, and what it did.
+    ///
+    /// Written even when the worktree was restored partway through: whatever was
+    /// removed is gone either way, and the rail reads this to say so.
+    pub fn mark_trash_cleaned(&self, id: i64, summary: &str) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees SET trash_cleaned_at = ?1, trash_cleaned = ?2 WHERE id = ?3",
+            params![now_str(), summary, id],
+        )?;
+        Ok(n > 0)
     }
 }
 
@@ -3716,6 +3758,59 @@ mod tests {
             !row.trashed_at.is_empty(),
             "and updating it must not take it out of the trash"
         );
+    }
+
+    /// The cleanup runs once each time a worktree is binned: binning again makes
+    /// it due again, and restoring keeps the record so the rail can say what is
+    /// missing.
+    #[test]
+    fn the_trash_cleanup_record_lasts_until_the_next_trashing() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/cleanwt");
+        db.upsert_repo(root, "cleanwt").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/cleanwt", "main", true),
+                wt("/tmp/cleanwt-a", "a", false),
+            ],
+        )
+        .unwrap();
+        let id = db
+            .get_worktree_by_path("/tmp/cleanwt-a")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        assert!(
+            db.cleanable_trashed_worktrees(0).unwrap().is_empty(),
+            "not trashed"
+        );
+        db.trash_worktree(id).unwrap();
+        assert!(
+            db.cleanable_trashed_worktrees(3_600).unwrap().is_empty(),
+            "not in the trash long enough"
+        );
+        assert_eq!(db.cleanable_trashed_worktrees(-1).unwrap().len(), 1);
+
+        db.mark_trash_cleaned(id, "freed 1.0 GB — node_modules")
+            .unwrap();
+        assert!(
+            db.cleanable_trashed_worktrees(-1).unwrap().is_empty(),
+            "once per trashing"
+        );
+
+        db.untrash_worktree(id, "").unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(
+            row.trash_cleaned, "freed 1.0 GB — node_modules",
+            "kept on restore"
+        );
+
+        db.trash_worktree(id).unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(row.trash_cleaned_at, "", "binning again makes it due again");
+        assert_eq!(db.cleanable_trashed_worktrees(-1).unwrap().len(), 1);
     }
 
     #[test]

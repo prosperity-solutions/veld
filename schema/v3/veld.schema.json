@@ -134,6 +134,30 @@
         }
       }
     },
+    "trash_cleanup": {
+      "type": "object",
+      "description": "What Veld's trash cleanup does in this project. After the user's `worktree.trashCleanupHours` in the trash, a worktree's large gitignored files and folders are deleted (sizes from `worktree.trashCleanupMinFolderMB` / `worktree.trashCleanupMinFileMB`); this adds to that. `steps` run first, in the trashed worktree; then `paths` select untracked entries to delete whatever their size, gitignored or not. Nothing deletes a tracked file, and a folder holding its own .git is never touched. Read from the main checkout's config by default (`extensions.source`), and only from the root config file. Off when the user sets `worktree.trashCleanupHours` to 0.",
+      "additionalProperties": false,
+      "properties": {
+        "paths": {
+          "type": "array",
+          "description": "Glob patterns, relative to the worktree root: `*` and `?` never cross `/`, `**` does, matching is case-insensitive, and a pattern without `/` matches the name at any depth (`.next` finds `apps/web/.next`). A match covers everything under it, as a .gitignore line does; tracked files are never deleted. At most 64.",
+          "maxItems": 64,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "steps": {
+          "type": "array",
+          "description": "Commands run in the trashed worktree before anything is deleted \u2014 `docker compose down -v`, `cargo clean`. Five minutes each; a failure is noted and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: root, worktree, branch, branch_raw (argv only), project, username.",
+          "items": {
+            "$ref": "#/$defs/lifecycleStep"
+          }
+        }
+      }
+    },
     "ide": {
       "type": "object",
       "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks`, `permissions`, `externalOrigins`, `panes`, `news` and the `git` subscope are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld orchestrator lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",

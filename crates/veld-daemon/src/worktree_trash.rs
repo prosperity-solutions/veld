@@ -323,6 +323,10 @@ async fn delete_checkout(
 ) -> Result<Deleted, String> {
     let _deleting = DeletingGuard::claim(wt.id);
 
+    // A trash cleanup must not be deleting files in the same checkout while git
+    // does. It checks the guard just claimed, so none starts from here on.
+    super::trash_cleanup::cancel_and_wait(wt.id).await?;
+
     // Re-read the intent now that no restore can slip past. `stop_runs` may have
     // taken up to STOP_TIMEOUT, and the retention sweep may have queued this minutes
     // ago; the check when the job was picked up covers neither.
@@ -402,6 +406,8 @@ pub fn try_restore(db: &Db, id: i64) -> Result<bool, veld_core::db::DbError> {
     }
     db.untrash_worktree(id, "")?;
     drop(deleting);
+    // A cleanup in flight stops at its next entry; restoring never waits for it.
+    super::trash_cleanup::cancel(id);
     Ok(true)
 }
 

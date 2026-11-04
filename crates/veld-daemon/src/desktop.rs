@@ -7087,6 +7087,8 @@ mod tests {
             sort_position: None,
             trashed_at: String::new(),
             trash_error: String::new(),
+            trash_cleaned_at: String::new(),
+            trash_cleaned: String::new(),
             adopted: true,
             named_by: String::new(),
         }

@@ -93,6 +93,7 @@ The same applies to anything else that reads the file as strict JSON — `veld o
 | `sharing`           | object | No       | Sharing policy: relays, public gateway, share-link lifetimes (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
+| `trash_cleanup`     | object | No       | What the trash cleanup deletes in this project's trashed worktrees, and what it runs first (see [`trash_cleanup`](#trash_cleanup)) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
 
 [URL Templates]: #url-templates
@@ -339,6 +340,64 @@ see [When `on_stop` runs](#when-on_stop-runs).
 If setup fails, Veld runs teardown steps to clean up anything that earlier setup steps may have created.
 
 ---
+
+### `trash_cleanup`
+
+A worktree in Veld's trash is still on disk, with its `node_modules/`, `target/`
+and caches at full size. Once it has been in the trash for
+`worktree.trashCleanupHours` (a user setting, **24 by default**; `0` turns the
+cleanup off), Veld deletes its **gitignored** files and folders over a size:
+folders from `worktree.trashCleanupMinFolderMB` (100) and files from
+`worktree.trashCleanupMinFileMB` (10), wherever they sit. That needs no
+configuration and no list of folder names — git already knows what is
+disposable. `trash_cleanup` adds to it for one project:
+
+```jsonc
+"trash_cleanup": {
+  // Untracked paths to delete whatever their size, gitignored or not.
+  "paths": ["**/.next", ".turbo", "coverage"],
+  // Run first, in the trashed worktree. Five minutes each.
+  "steps": [
+    { "name": "volumes", "argv": ["docker", "compose", "-p", "${veld.worktree}", "down", "-v"] }
+  ]
+}
+```
+
+| Field   | Type   | Description |
+|---------|--------|-------------|
+| `paths` | array of strings | Glob patterns relative to the worktree root, in the `files.viewPatterns` grammar: `*` and `?` never cross `/`, `**` does, matching is case-insensitive, and a pattern **without** `/` matches the name at any depth (`.next` finds `apps/web/.next`). A match covers everything under it, as a `.gitignore` line does. At most 64, each up to 256 bytes. |
+| `steps` | array | [Setup steps](#step-fields) — `name`, `argv` or `shell`, `failureMessage` — run in order before anything is deleted. A failure (non-zero exit, five-minute timeout) is noted in the cleanup's summary and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: `root`, `worktree`, `branch`, `branch_raw` (`argv` only), `project`, `username` — there is no run here, so no `run`. |
+
+**What it can delete.** The size rule only ever deletes what git ignores — what
+`git worktree remove` would delete anyway. `paths` are your project's list of what
+is always safe to throw away, so they go further: they reach **any untracked
+path**, gitignored or not, which covers build output nobody added to
+`.gitignore`. Nothing deletes a **tracked** file — that would make the checkout
+look modified, and an un-forced delete refuses a modified checkout — so `dist`
+in a folder that also holds committed files removes only the untracked ones.
+Two things are never touched at all: a folder holding its own `.git` (a nested
+clone may have commits that exist nowhere else), and anything behind a symlink —
+a link is unlinked only when a pattern names it, and never followed. The cost is
+a reinstall: a worktree restored after its cleanup comes back without what was
+deleted, and the toast that confirms the restore says what that was. Ignored data
+you cannot regenerate — a local database file, a `.venv` you built by hand — goes
+too once it is over the size; raise the size, or set it to `0`, if that matters.
+
+**When it runs.** The daemon's housekeeping pass (every ten minutes) cleans each
+trashed worktree once each time it is moved to the trash: restore it and trash
+it again, and it is due again. A worktree with an environment still running is skipped until it stops.
+Restoring a worktree, or deleting it, stops a cleanup in flight — a running
+step is killed and nothing more is deleted. On the first pass after the setting
+is switched on, the cooldown counts from that moment, so turning it on does not
+empty everything already in the trash at once.
+
+**Whose config.** Like every command Veld runs without a click, the steps and
+patterns are read from the **main checkout's** `veld.json` by default
+(`extensions.source`), so a branch cannot add commands that run on your machine
+by editing its own copy. `trash_cleanup` is read only from the root config
+file. `veld orchestrator lint` checks patterns (no leading `/`, no `..`) and steps
+(exactly one of `argv`/`shell`, only the variables above) under the rule
+`trash-cleanup`.
 
 ## Nodes
 

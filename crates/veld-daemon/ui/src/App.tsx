@@ -6272,7 +6272,13 @@ function AppInner(props: {
     const write = async () => {
       try {
         await api.restoreWorktree(w.id);
-        notifyDone(`Restored ${worktreeLabel(w)}`);
+        // Its ignored files went while it sat in the trash, so the first run
+        // after a restore would fail on missing dependencies with no hint why.
+        notifyDone(
+          w.trash_cleaned_at
+            ? `Restored ${worktreeLabel(w)} — while it was in the trash, the cleanup ${w.trash_cleaned}`
+            : `Restored ${worktreeLabel(w)}`,
+        );
         restored = true;
       } catch (e) {
         // 404 is the expected failure — the worker got there first — and saying so
@@ -11101,7 +11107,7 @@ function Rail(props: {
                     deletingRow
                       ? `${worktreeLabel(w)} — being deleted, cannot be restored`
                       : trashed
-                        ? `${worktreeLabel(w)} — in the trash, still on disk`
+                        ? `${worktreeLabel(w)} — in the trash, still on disk${w.trash_cleaned_at ? ` (cleaned: ${w.trash_cleaned})` : ""}`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
                           : w.handoff && !w.handoff.started

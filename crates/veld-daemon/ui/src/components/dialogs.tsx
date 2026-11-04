@@ -3541,6 +3541,8 @@ export function TrashWorktreeDialog(props: {
           disk and you can restore it from the rail. It is deleted for good when
           its retention period runs out (Settings → General, off by default) or
           when you delete it from the trash. The branch itself is always kept.
+          After a while in the trash its large gitignored files — dependencies,
+          build output — are deleted to free the space (Settings → General).
           {force
             ? " Forcing deletes it right now and discards uncommitted changes; it will not start if an environment is still running."
             : ""}
@@ -4019,7 +4021,9 @@ export function TrashLaneWorktreesDialog(props: {
                 restored from the trash in the rail. They are deleted for good
                 when the retention period runs out (Settings → General, off by
                 default) or when you delete them from the trash. The branches are
-                always kept.
+                always kept. After a while in the trash their large gitignored
+                files — dependencies, build output — are deleted to free the
+                space (Settings → General).
               </Text>
               {props.mainExcluded && (
                 <Text size="sm" c="dimmed">

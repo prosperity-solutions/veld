@@ -51,7 +51,8 @@ pub use settings::{
     DEFAULT_MAX_SESSIONS, DEFAULT_SHARING_PEER_TTL_MINUTES, DEFAULT_SHARING_WEB_TTL_MINUTES,
     DEFAULT_TRASHED_GRACE_MINUTES, GitCreateSource, KeepAwakePrefs, LogTimeZone,
     MAX_KEEP_AWAKE_MINUTES, MAX_MAX_SESSIONS, MAX_RUN_HISTORY_DAYS, MAX_SHARE_TTL_MINUTES,
-    MIN_KEEP_AWAKE_MINUTES, MIN_SHARE_TTL_MINUTES, SettingKey, defaults, parse_search_template,
+    MIN_KEEP_AWAKE_MINUTES, MIN_SHARE_TTL_MINUTES, SettingKey, TrashCleanup, defaults,
+    parse_search_template,
 };
 pub use settings_catalog::{
     CatalogEntry, CatalogGroup, Choice, Choices, Requires, RuntimeSource, SettingGroup, Spec,
@@ -1273,6 +1274,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-links",
         apply: migrate_v24_worktree_links,
     },
+    Migration {
+        version: 25,
+        name: "worktree-trash-cleanup",
+        apply: migrate_v25_worktree_trash_cleanup,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2255,6 +2261,22 @@ fn migrate_v24_worktree_links(conn: &Connection) -> rusqlite::Result<()> {
             updated_at  TEXT NOT NULL,
             PRIMARY KEY (worktree_id, link_id)
         );
+        "#,
+    )
+}
+
+/// v25: the trash cleanup (`worktree.trashCleanupHours`) — when it ran since the
+/// worktree was last moved to the trash, and what it removed.
+///
+/// `trash_cleaned_at` is what makes the cleanup run once per trashing: binning resets
+/// both columns, so a worktree restored and binned again is cleaned again.
+/// Restoring leaves them, so the rail can tell the user what is missing.
+/// `trash_cleaned` is a one-line human summary, never parsed.
+fn migrate_v25_worktree_trash_cleanup(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE worktrees ADD COLUMN trash_cleaned_at TEXT NOT NULL DEFAULT '';
+        ALTER TABLE worktrees ADD COLUMN trash_cleaned TEXT NOT NULL DEFAULT '';
         "#,
     )
 }

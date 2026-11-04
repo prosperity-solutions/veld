@@ -91,6 +91,8 @@ pub struct Document {
     /// [`crate::config::VeldConfig::hooks`].
     #[serde(default)]
     pub hooks: Option<serde_json::Value>,
+    #[serde(default)]
+    pub trash_cleanup: Option<serde_json::Value>,
     /// **Reserved, parsed and held, never executed** (F8).
     #[serde(default)]
     pub ide: Option<serde_json::Value>,
@@ -441,6 +443,7 @@ fn merge(
                 ("sharing", doc.sharing.is_some()),
                 ("default_preset", doc.default_preset.is_some()),
                 ("name", doc.name.is_some()),
+                ("trash_cleanup", doc.trash_cleanup.is_some()),
             ] {
                 if present {
                     findings.push(crate::config::Finding::root_only_key(
@@ -531,6 +534,7 @@ fn merge(
         teardown: (!teardown.is_empty()).then_some(teardown),
         nodes,
         hooks,
+        trash_cleanup: root.trash_cleanup.clone(),
         ide,
         loaded_from_multiple_files: false,
         deferred_findings: Vec::new(),
@@ -1084,7 +1088,7 @@ mod tests {
                 continue;
             }
             let value = match *key {
-                "proxy" | "sharing" => "{}",
+                "proxy" | "sharing" | "trash_cleanup" => "{}",
                 // url_template, default_preset, name
                 _ => "\"x\"",
             };
