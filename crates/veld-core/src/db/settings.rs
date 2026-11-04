@@ -700,6 +700,7 @@ pub enum SettingKey {
     TerminalAgentIntegration,
     TerminalAgentContext,
     TerminalClaudeIntegration,
+    TerminalSessionLinks,
     KeepAwakeSharingOnPower,
     KeepAwakeSharingOnPowerMinutes,
     KeepAwakeSharingOnBattery,
@@ -843,6 +844,7 @@ impl SettingKey {
         Self::TerminalAgentIntegration,
         Self::TerminalAgentContext,
         Self::TerminalClaudeIntegration,
+        Self::TerminalSessionLinks,
         Self::ActivityShowWorking,
         // ── Activity › Notifying ─────────────────────────────────────────────
         Self::ActivityNotifyCommandFinished,
@@ -924,6 +926,7 @@ impl SettingKey {
             Self::TerminalAgentIntegration => "terminal.agentIntegration",
             Self::TerminalAgentContext => "terminal.agentContext",
             Self::TerminalClaudeIntegration => "terminal.claudeIntegration",
+            Self::TerminalSessionLinks => "terminal.sessionLinks",
             Self::ExtensionsAutoRefresh => "extensions.autoRefresh",
             Self::ExtensionsSource => "extensions.source",
             Self::NewsSource => "news.source",
@@ -1010,6 +1013,7 @@ impl SettingKey {
             "terminal.agentIntegration" => Self::TerminalAgentIntegration,
             "terminal.agentContext" => Self::TerminalAgentContext,
             "terminal.claudeIntegration" => Self::TerminalClaudeIntegration,
+            "terminal.sessionLinks" => Self::TerminalSessionLinks,
             "extensions.autoRefresh" => Self::ExtensionsAutoRefresh,
             "extensions.source" => Self::ExtensionsSource,
             "news.source" => Self::NewsSource,
@@ -1166,6 +1170,7 @@ impl SettingKey {
             | Self::TerminalShellIntegration
             | Self::TerminalAgentIntegration
             | Self::TerminalAgentContext
+            | Self::TerminalSessionLinks
             | Self::WorktreeReviewHandoffs
             | Self::WorktreeAutostartHandoffs
             | Self::ExtensionsAutoRefresh
@@ -1943,6 +1948,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::TerminalClaudeIntegration,
             Value::from("wrapper"),
         ),
+        // On: it costs a reader who has no Veld one line at the bottom of a pull
+        // request — a link that does not open for them — and saves the person running
+        // the sessions the work of telling them apart.
+        (SettingKey::TerminalSessionLinks, Value::from(true)),
         // On: a project that declares badges declared them to be seen, and the
         // switch exists for the machine that wants none rather than as a gate
         // everybody steps through. See `Db::extensions_auto_refresh`.
@@ -2549,6 +2558,17 @@ impl Db {
         };
         stored(&SettingKey::WorktreeAutostartHandoffs)
             .or_else(|| stored(&SettingKey::WorktreeReviewHandoffs).map(|review| !review))
+            .unwrap_or(true)
+    }
+
+    /// Whether `veld agent link` hands an agent a link back to its session to add to
+    /// a pull request. Off, the command says so instead, so the agent context that
+    /// asks for it stays the same text either way.
+    pub fn terminal_session_links(&self) -> bool {
+        self.setting(&SettingKey::TerminalSessionLinks)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_bool())
             .unwrap_or(true)
     }
 

@@ -1386,7 +1386,11 @@ pub fn agent_context(cli: &str) -> String {
          finish that reply with one short question asking whether to hand it off as a new \
          worktree. Ask even when they told you to leave it alone; leaving it is their call. \
          Only once they agree, run `{cli} ide worktree new` (see its `--help`): it creates a \
-         worktree where an agent starts on a prompt you write. Details: `{cli} agent skills ide`."
+         worktree where an agent starts on a prompt you write. When you open a pull request, or \
+         change the description of one, add the URL `{cli} agent link` prints as a link at \
+         the end of the description, unless it is already there. Read the current description \
+         first and keep any links to other Veld sessions (URLs ending `/session/<id>`) beside yours. If it says \
+         session links are off instead, add none and carry on. Details: `{cli} agent skills ide`."
     )
 }
 
@@ -2861,6 +2865,7 @@ printf '⚠ Found 1 warning:\n\n  ❯ author: No author information provided\n\n
         assert!(text.contains("--quiet") && text.contains("--notify"));
         assert!(text.contains(&format!("`{} ide worktree new`", dev.display())));
         assert!(text.contains(&format!("`{} ide worktree name ", dev.display())));
+        assert!(text.contains(&format!("`{} agent link`", dev.display())));
         assert!(
             !text.contains("`veld "),
             "no bare word left for a dev instance: {text}"

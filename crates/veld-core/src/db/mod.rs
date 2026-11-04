@@ -22,6 +22,7 @@ mod kv;
 mod layouts;
 mod logs;
 mod panes;
+mod session_links;
 mod settings;
 mod settings_catalog;
 pub(crate) mod state;
@@ -36,6 +37,7 @@ pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 pub use panes::{PaneSession, mint_pane_token};
+pub use session_links::{Conversation, SessionLink, valid_link_id};
 pub use settings::{
     BackupPrefs, ConfigSource, DEFAULT_BACKUP_INTERVAL_MINUTES, DEFAULT_BACKUP_KEEP,
     DEFAULT_BACKUP_KEEP_DAILY, DEFAULT_DETACH_GRACE_MINUTES,
@@ -1255,6 +1257,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "handoff-started",
         apply: migrate_v22_handoff_started,
     },
+    Migration {
+        version: 23,
+        name: "session-links",
+        apply: migrate_v23_session_links,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2167,6 +2174,46 @@ fn migrate_v22_handoff_started(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v23: links back to a terminal, for an agent to end a pull request with
+/// (`veld agent link`), and what `/session/<id>` resolves.
+///
+/// **The id is minted, never derived.** The link is pasted into pull requests
+/// other people read, so it may say nothing about this machine: not a path, not
+/// a user name, and not the pane's token, which is the agent's own session id and
+/// never leaves the daemon (v11). **One link per terminal and conversation**
+/// (the unique index), so a second pull request from the same tab gets the same
+/// link while it is the same conversation.
+///
+/// **`token` and `spec_id` are what the link is really about** when the terminal
+/// is one of the project's agent panes: the conversation, not the tab. A tab is
+/// restarted from scratch under the same id with a new conversation, and an old
+/// conversation is picked up again in a new tab, so following the tab alone
+/// would open the wrong conversation in the first case and nothing in the second.
+/// Both are `NULL` for a plain terminal, which has no conversation to follow.
+///
+/// **`ON DELETE CASCADE`, for the reason v11 and v15 spell out**: `worktrees.id`
+/// is a reused rowid, and a link that outlived its checkout would open whichever
+/// worktree takes the number next. A deleted worktree's link reads as not found.
+fn migrate_v23_session_links(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE session_links (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL,
+            worktree_id INTEGER NOT NULL REFERENCES worktrees(id) ON DELETE CASCADE,
+            token       TEXT,
+            spec_id     TEXT,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX idx_session_links_worktree ON session_links(worktree_id);
+        -- IFNULL: SQLite treats NULLs as distinct in a unique index, which would
+        -- let a plain terminal mint a new link on every ask.
+        CREATE UNIQUE INDEX idx_session_links_conversation
+            ON session_links(session_id, IFNULL(token, ''));
+        "#,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2973,7 +3020,7 @@ mod tests {
 
         for _ in 0..2 {
             let db = Db::open_at(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 22);
+            assert_eq!(db.schema_version().unwrap(), latest_version());
         }
         let conn = Connection::open(&path).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -2991,6 +3038,39 @@ mod tests {
             0
         );
         assert_eq!(count("SELECT COUNT(*) FROM log_lines"), 1);
+    }
+
+    fn latest_version() -> i64 {
+        MIGRATIONS.last().unwrap().version
+    }
+
+    /// v23 against a real v22 database: the links table arrives empty, and a
+    /// worktree's links go with it.
+    #[test]
+    fn v22_v23_upgrade_adds_session_links() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            for m in MIGRATIONS.iter().take_while(|m| m.version <= 22) {
+                (m.apply)(&conn).unwrap();
+            }
+            conn.pragma_update(None, "user_version", 22).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO repos (root, name, created_at) VALUES ('/r', 'r', 'x');
+                INSERT INTO worktrees (repo_root, path, branch, alias, is_main, created_at)
+                  VALUES ('/r', '/r/a', 'a', 'a', 0, 'x');
+                "#,
+            )
+            .unwrap();
+        }
+        let db = Db::open_at(&path).unwrap();
+        assert!(db.schema_version().unwrap() >= 23);
+        let wt = db.get_worktree_by_path("/r/a").unwrap().unwrap().id;
+        let link = db.session_link_for("tab", wt).unwrap();
+        assert_eq!(db.session_link(&link.id).unwrap().unwrap().worktree_id, wt);
     }
 
     /// v21 against a real v20 database: a worktree that already wears a label is
@@ -3020,7 +3100,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open_at(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 22);
+        assert_eq!(db.schema_version().unwrap(), latest_version());
         let named_by = |p| db.get_worktree_by_path(p).unwrap().unwrap().named_by;
         assert_eq!(named_by("/r/a"), "user");
         assert_eq!(named_by("/r/b"), "");

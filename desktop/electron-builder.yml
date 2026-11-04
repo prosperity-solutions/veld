@@ -18,6 +18,15 @@ copyright: Copyright © Prosperity Solutions
 directories:
   output: dist
 
+# `veld://session/<id>` — a session link handed to the app by the `/session/<id>`
+# page when no Veld window was open to take it (see `src/sessionLinks.js`). The
+# bundle's URL types are what start the app for one on macOS; the deb's
+# `x-scheme-handler` comes from the same entry.
+protocols:
+  - name: Veld session link
+    schemes:
+      - veld
+
 # An allow-list, not an ignore-list: the shell is a handful of source files plus
 # the generated icons, and anything else in here (scripts/, tests, dist/) has no
 # business inside the bundle. Production `dependencies` are added implicitly.

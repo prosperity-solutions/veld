@@ -1103,6 +1103,26 @@ function openSettings() {
 }
 
 /**
+ * Bring a **main** window forward, opening one if none is left — for a session
+ * link (`sessionLinks.js`), which only a main window can take.
+ *
+ * Not `focusPrimary`, for `openSettings`' reason: its second fallback is any live
+ * window, so with only a detached window open it would raise that and stop, and
+ * the link would wait for a main window that never comes.
+ */
+function ensureMainWindow() {
+  const target = allRecords().find((r) => r.kind === "main" && !r.win.isDestroyed());
+  if (!target) {
+    if (takenSuffixes().has(null)) openWindow({ kind: "main" });
+    else openWindow({ kind: "main", suffix: null });
+    return;
+  }
+  if (target.win.isMinimized()) target.win.restore();
+  target.win.show();
+  target.win.focus();
+}
+
+/**
  * Hand a File-menu tab command (`"new"` / `"close"`) to the focused window.
  *
  * These are **menu accelerators rather than key handlers in the page**, for the
@@ -1866,6 +1886,7 @@ module.exports = {
   initWindows,
   openWindow,
   focusPrimary,
+  ensureMainWindow,
   openSettings,
   tabCommand,
   restoreWindows,

@@ -891,7 +891,9 @@ terminal reports when a command started and how it ended, which marks a
 worktree in the rail), `terminal.agentIntegration` (an agent wrapper —
 `claude`, `codex`, `pi` — installs lifecycle hooks so an agent waiting on the user
 reaches the same glyph) and `terminal.agentContext` (the same wrapper tells the
-agent that `veld ide open` exists — see `veld agent skills ide`). A fourth,
+agent that `veld ide open` exists, and to add a `veld agent link` back to the session
+to each pull request — see `veld agent skills ide`). `terminal.sessionLinks` decides whether that
+command hands out a link at all. Another,
 `terminal.claudeIntegration` (`wrapper` or `mod`), picks how the last two reach
 Claude Code: the wrapper's flags, or a Claude Code mod Veld names in the
 terminal's `CLAUDE_CODE_PLUGIN_DIRS` while the wrapper passes straight through;

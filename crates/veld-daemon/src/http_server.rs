@@ -55,6 +55,10 @@ mod repo_fingerprint;
 #[path = "promotions.rs"]
 mod promotions;
 
+/// Links an agent ends a pull request with, back to the session it came from.
+#[path = "session_links.rs"]
+mod session_links;
+
 /// Local files served to a browser pane, on an origin of their own.
 #[path = "files.rs"]
 // `pub(crate)` so `main.rs` can start the second listener, and the `open` shim's
@@ -186,6 +190,9 @@ pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareMana
         // desktop::routes() for the same reason pty is: its load-bearing route
         // is a WebSocket upgrade, which that router's CSRF layer cannot gate.
         .merge(ide::routes())
+        // Session links. Their own CSRF and Host checks, like settings; the page
+        // itself is a static GET.
+        .merge(session_links::routes())
         .merge(crate::share::api::routes(share_manager));
 
     // Terminal sessions outlive their socket (so a page reload keeps its

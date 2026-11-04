@@ -281,6 +281,7 @@ import {
 import { acquireWorktree } from "./ide/acquire";
 import { onOpenFileRequest, onOpenUrlRequest } from "./files/openRequests";
 import { onRestartPaneRequest } from "./panes/restartRequests";
+import { onRevealPaneRequest, type RevealPaneRequest } from "./panes/revealRequests";
 import { channel, type ClaimResult, type ClientInfo } from "./ide/channel";
 import { CLAUDE_MOD_OFFER_ID, setClaudeModAsker, wantsClaudeModOffer } from "./ide/claudeModOffer";
 import {
@@ -1727,8 +1728,9 @@ function AppInner(props: {
     // holding a pane somebody deliberately pulled out to watch.
     //
     // Handlers, not a second `start`: it must never be granted a worktree, and
-    // `onReady` re-acquiring one is exactly how it would be. Every handler here
-    // is inert, so the only frames it ever sends are `hello` and `keep`.
+    // `onReady` re-acquiring one is exactly how it would be. No handler here
+    // sends anything (focus only raises the window), so the only frames it ever
+    // sends are `hello` and `keep`.
     if (chromeless) {
       // `relayInboxEvents: false` restores exactly what a detached window did
       // before it had a socket at all. The daemon relays an agent hook to every
@@ -1742,7 +1744,11 @@ function AppInner(props: {
         // Never asked: a yield goes to a client the daemon recorded as holding
         // the worktree, and this one neither claims nor reports `holds`.
         onYield: (_worktreeId, ack) => ack(),
-        onFocus: () => {},
+        // A session link whose terminal lives in this window (`push_reveal`): the
+        // one request that names a detached window, and all it asks is a raise.
+        onFocus: () => {
+          void desktopWindow?.focusSelf?.().catch(() => {});
+        },
         onLayoutChanged: () => {},
         // The one handler with work to do, and the same work it does in a main
         // window: the daemon answering again is the evidence a terminal whose
@@ -2858,6 +2864,7 @@ function AppInner(props: {
   const openPaletteRef = useRef<() => void>(() => {});
   /** "Go to what needs me", likewise — the button and ⌘⇧J are one owner. */
   const goNextRef = useRef<() => void>(() => {});
+  const revealRef = useRef<(req: RevealPaneRequest) => void>(() => {});
 
   const previousRepoRootRef = useRef<string | null>(null);
   const lastRepoRootRef = useRef<string | null>(null);
@@ -4802,6 +4809,9 @@ function AppInner(props: {
     [openFileInWorktree],
   );
 
+  // A session link was opened — see `reveal`.
+  useEffect(() => onRevealPaneRequest((req) => revealRef.current(req)), []);
+
   // An agent asked for its own pane to be relaunched (`veld agent restart`, or an
   // outfit switch followed by `veld agent restart`). Only a tab this window holds counts:
   // the daemon addresses the one window showing the worktree, but a layout may
@@ -5246,15 +5256,91 @@ function AppInner(props: {
   goNextRef.current = goNext;
 
   /**
+   * Go where a session link points (`reveal_pane`, sent after somebody opened
+   * `/session/<id>`): the tab when it is still open, else the worktree — with a
+   * new tab adopting the conversation when the link's page asked to resume it.
+   *
+   * The same claim path as a notification click, so a worktree another window
+   * holds raises that window instead. The view switches to the IDE only once the
+   * claim lands, for `goNext`'s reason.
+   */
+  const reveal = async (req: RevealPaneRequest) => {
+    const from = mode;
+    let landed: boolean;
+    if (req.sessionId !== undefined) {
+      landed = await focusPane(req.worktreeId, req.sessionId);
+    } else {
+      const worktree = allWorktreesRef.current.find((w) => w.id === req.worktreeId);
+      if (!worktree) return;
+      const alreadyHere =
+        shownRef.current === req.worktreeId && worktreeRef.current?.id === req.worktreeId;
+      landed = alreadyHere || (await selectWorktree(worktree));
+      const spec = req.resume
+        ? worktree.ide.panes.find((p) => p.id === req.resume?.spec && p.available)
+        : undefined;
+      if (landed && spec && req.resume) {
+        setPendingFocusPane({
+          worktreeId: req.worktreeId,
+          resume: { spec: { id: spec.id, label: spec.label }, session: req.resume.session },
+        });
+      }
+    }
+    if (landed && modeRef.current === from && from !== "ide") setModeRef.current("ide");
+  };
+  // **Held until the worktree list has loaded.** The control socket opens at
+  // mount, independently of the repos fetch, so a Veld Desktop started by a
+  // `veld://` link is told where to go before it knows any worktree — and the
+  // daemon has already counted that as delivered, so nothing would ask again.
+  const queuedRevealsRef = useRef<RevealPaneRequest[]>([]);
+  const worktreesKnownRef = useRef(false);
+  worktreesKnownRef.current = repoList !== null;
+  revealRef.current = (req) => {
+    if (worktreesKnownRef.current) void reveal(req);
+    else queuedRevealsRef.current.push(req);
+  };
+  useEffect(() => {
+    if (!repoList) return;
+    for (const req of queuedRevealsRef.current.splice(0)) revealRef.current(req);
+  }, [repoList]);
+
+  // `/ide?repo=<root>&wt=<id>&pane=<session>` — where a session link's page sends
+  // a browser when no Veld window is open to go there itself. Consumed once the
+  // worktrees are known, then dropped from the URL: the self-heal keeps every
+  // other parameter, and a `pane` left there would pull a reload back to that tab.
+  // `wt` is read here, at mount, together with `pane`: the URL self-heal effect
+  // rewrites `wt` to whatever the selection resolved to before this one runs.
+  const bootPaneRef = useRef(
+    (() => {
+      const p = new URLSearchParams(window.location.search);
+      const pane = p.get("pane");
+      const wt = Number(p.get("wt"));
+      return pane && Number.isInteger(wt) && wt > 0 ? { pane, wt } : null;
+    })(),
+  );
+  useEffect(() => {
+    const boot = bootPaneRef.current;
+    if (!boot || !repoList) return;
+    bootPaneRef.current = null;
+    const p = new URLSearchParams(window.location.search);
+    p.delete("pane");
+    const query = p.toString();
+    window.history.replaceState(null, "", query ? `?${query}` : window.location.pathname);
+    void focusPane(boot.wt, boot.pane);
+  }, [repoList]);
+
+  /**
    * A pane to activate as soon as its worktree's panes arrive.
    *
    * Set by `focusPane` when the layout is not here yet; cleared by the effect below
    * on the first render that can act on it — or that can prove it never will.
    */
-  const [pendingFocusPane, setPendingFocusPane] = useState<{
-    worktreeId: number;
-    sessionId: string;
-  } | null>(null);
+  const [pendingFocusPane, setPendingFocusPane] = useState<
+    | { worktreeId: number; sessionId: string }
+    /** A new tab of a project pane adopting an earlier conversation — a session
+     *  link's resume. Opened here, once the panes are, like a focus. */
+    | { worktreeId: number; resume: { spec: { id: string; label: string }; session: string } }
+    | null
+  >(null);
   useEffect(() => {
     const req = pendingFocusPane;
     if (!req) return;
@@ -5270,6 +5356,17 @@ function AppInner(props: {
     // Still being fetched. Not cleared: this effect re-runs when it lands.
     if (!l) return;
     setPendingFocusPane(null);
+    if ("resume" in req) {
+      // Minted once, outside the updater: a React updater may run twice, and a
+      // second `configPaneTab` would be a second tab adopting one conversation.
+      const tab = configPaneTab(req.resume.spec, req.resume.session);
+      setLayouts((prev) =>
+        prev[req.worktreeId] === l
+          ? { ...prev, [req.worktreeId]: addTabToFocused(l, tab) }
+          : prev,
+      );
+      return;
+    }
     const next = activateTab(l, req.sessionId);
     // The pane may have gone (closed in the window that had it) between the
     // notification and the layout arriving; `activateTab` then returns the layout

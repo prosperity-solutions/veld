@@ -44,6 +44,21 @@ pub enum AgentCmd {
     /// restart, or one that cannot resume (pass `--fresh`).
     Restart(commands::ide::RestartArgs),
 
+    /// Print a link back to this terminal, to add to a pull request description.
+    ///
+    /// Prints one URL. Clicked on this machine, it brings the Veld window to this
+    /// worktree and this tab — or, for one of the project's agent panes, to the
+    /// conversation running here, wherever it is by then. It opens nothing anywhere
+    /// else: another Veld says the session is not on that machine, and a browser
+    /// without Veld cannot connect at all. The link is an opaque id; it names no
+    /// path, user or conversation.
+    ///
+    /// When the human has turned this off (`terminal.sessionLinks`, Settings →
+    /// Activity) it prints a sentence saying so instead, and exits 0: add no link.
+    ///
+    /// Exit status: 0 printed (or off), 1 failed, 3 not inside a Veld terminal.
+    Link(AgentLinkArgs),
+
     /// Report a coding agent's state, from a lifecycle hook.
     ///
     /// Reads the payload on stdin for a tool that pipes it there (Claude); a tool that
@@ -117,6 +132,18 @@ pub struct AgentSettingsArgs {
 }
 
 #[derive(Args)]
+pub struct AgentLinkArgs {
+    /// Output as JSON: `{enabled, id, url, conversation}`, with `enabled: false`
+    /// and no link when session links are off.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Terminal session to link to. Defaults to `$VELD_PTY_SESSION`.
+    #[arg(long)]
+    pub session: Option<String>,
+}
+
+#[derive(Args)]
 pub struct AgentPromptArgs {
     /// The launch-prompt file to claim. Removed by the claim.
     #[arg(long, value_name = "PATH")]
@@ -128,6 +155,7 @@ pub async fn run(command: AgentCmd) -> i32 {
     match command {
         AgentCmd::Skills { topic, json } => commands::skills::run(topic, json),
         AgentCmd::Restart(args) => commands::ide::restart(args).await,
+        AgentCmd::Link(args) => commands::agent::link(args.session, args.json).await,
         AgentCmd::State(args) => state(args),
         AgentCmd::Settings(args) => commands::agent::settings(args.tool, args.session),
         AgentCmd::Prompt(args) => commands::agent::take_prompt(&args.take),
@@ -152,6 +180,9 @@ pub fn survives_an_update(command: &AgentCmd) -> bool {
         | AgentCmd::Settings(_)
         | AgentCmd::Prompt(_) => true,
         AgentCmd::Restart(_) => false,
+        // Blocked for the same reason as `restart`: it asks the daemon, which an
+        // update is replacing.
+        AgentCmd::Link(_) => false,
     }
 }
 

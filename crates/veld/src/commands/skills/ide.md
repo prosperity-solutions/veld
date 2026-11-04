@@ -357,6 +357,36 @@ its way; `3` not in a Veld terminal; `4` no Veld window is showing this worktree
 (tell the human instead); `5` not such a pane, or one that cannot resume (use
 `--fresh` only if losing the conversation is fine).
 
+## Linking a pull request back to you (`veld agent link`)
+
+When you open a pull request, or change the description of one, run `veld agent
+link` and add the URL it prints as a link at the end of the description, unless it
+is already there. **Read the
+current description first** (`gh pr view --json body -q .body`; `gh pr edit --body`
+replaces all of it) and keep every link to another Veld session — a URL ending
+`/session/<32 hex characters>`, on `veld.localhost`, a loopback address or another
+Veld instance's own dashboard host — beside
+yours. Never replace one: a pull request worked on from several sessions links to
+each of them, and the human picks.
+
+The human runs many sessions at once and tells which pull request came from which
+by these links: clicked on their machine, one brings the Veld window to that
+worktree and terminal — or, in one of the project's agent panes, to that
+conversation wherever it runs by then, offering to resume it if it has ended. When
+no Veld window is open, the link starts Veld Desktop (`veld://session/<id>`), or
+opens the IDE in the browser where the app is not installed. It opens nothing on
+any other machine: another Veld says the session is not there, and a browser
+without Veld cannot connect at all. The link is an opaque id and names no path,
+user or conversation. Its port is the one Veld's dashboard used when it was
+made, so switching between privileged and unprivileged setup breaks older links.
+
+When the human has turned session links off (`terminal.sessionLinks`, *Settings →
+Activity*) it prints a sentence saying so instead of a URL, and exits `0`. Nothing is
+wrong: add no link and carry on. `--json` prints
+`{"enabled":…,"id":…,"url":…,"conversation":…}`, where `conversation` says
+whether the link follows a project agent pane's conversation rather than just the
+terminal. Exit `3`: not inside a Veld terminal.
+
 ## Why you may already know this
 
 Veld tells Claude Code, Codex CLI and Pi about this command when they start in a

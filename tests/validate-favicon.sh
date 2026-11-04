@@ -6,7 +6,7 @@
 # The brand mark (rounded dark tile, white `V`, accent dot — docs/branding.md)
 # is inlined as a data-URI on every page a Veld binary serves, because those
 # pages must stay self-contained: no external request for an icon. That means
-# the same bytes live in five files across three languages, and nothing in any
+# the same bytes live in six files across three languages, and nothing in any
 # type system ties them together. This script is that tie.
 #
 # `website/favicon.svg` is the canonical copy — the only one that is a real SVG
@@ -41,6 +41,7 @@ SURFACES=(
   "website/index.html"
   "crates/veld-gateway/src/pages.rs"
   "crates/veld-daemon/assets/management-ui.html"
+  "crates/veld-daemon/assets/session-link.html"
   "crates/veld-daemon/ui/index.html"
   "desktop/src/waitingScreen.js"
 )
@@ -59,7 +60,7 @@ fail() {
 # A gate that has rotted into checking nothing passes trivially, which reads as
 # a clean bill of health — the same reason the workflow-gate script beside this
 # one self-tests. An emptied SURFACES array would print "all 0 surfaces match".
-[ "${#SURFACES[@]}" -ge 5 ] || fail "SURFACES lists ${#SURFACES[@]} entries, expected at least 5 — see docs/branding.md"
+[ "${#SURFACES[@]}" -ge 6 ] || fail "SURFACES lists ${#SURFACES[@]} entries, expected at least 6 — see docs/branding.md"
 
 [ -f "$CANONICAL" ] || fail "canonical favicon missing: website/favicon.svg"
 

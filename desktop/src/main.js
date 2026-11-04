@@ -22,6 +22,7 @@ const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 const { menuBarIconFrom, serialize } = require("./trayVisibility");
 const { dockBadgeStyleFrom, registerDockBadgeIpc } = require("./dockBadge");
 const {
+  ensureMainWindow,
   focusPrimary,
   initWindows,
   openWindow,
@@ -45,6 +46,7 @@ const {
   settingsChanged: updaterSettingsChanged,
   skewMenuItem,
 } = require("./updater");
+const { openSessionLink, parseSessionLink } = require("./sessionLinks");
 
 /**
  * Brand assets, generated from the repo's canonical sources by
@@ -116,6 +118,67 @@ let refreshTray = null;
  */
 const isPrimaryInstance = !app.isPackaged || app.requestSingleInstanceLock();
 if (!isPrimaryInstance) app.quit();
+
+/**
+ * `veld://session/<id>` links (see `sessionLinks.js`), held until the windows the
+ * last run ended with are back: a cold launch delivers the link before `ready`,
+ * and acting on it then would open a window that `restoreWindows` opens again.
+ */
+const pendingLinks = [];
+let linksReady = false;
+
+/** Act on `url` if it is a session link; anything else is ignored. */
+function receiveLink(url) {
+  const id = parseSessionLink(url);
+  if (!id) return;
+  if (linksReady) void handleSessionLink(id);
+  else pendingLinks.push(id);
+}
+
+async function handleSessionLink(id) {
+  await openSessionLink(id, {
+    open: async (linkId, resume) => {
+      try {
+        const res = await fetch(`${BASE_URL}/api/session-links/${linkId}/open`, {
+          method: "POST",
+          headers: { "x-veld-request": "1", "content-type": "application/json" },
+          body: JSON.stringify({ resume }),
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.status === 404) return { found: false };
+        if (!res.ok) return null;
+        return await res.json();
+      } catch {
+        return null;
+      }
+    },
+    ensureWindow: () => ensureMainWindow(),
+    // Return defaults to "Not now": resuming starts a process, and a dialog that a
+    // link can raise while somebody is typing must not start one on Return.
+    // Attached to the focused window, so it lands where the jump did.
+    ask: async (message, detail, buttons) => {
+      const options = { type: "question", message, detail, buttons, defaultId: 1, cancelId: 1 };
+      const parent = BrowserWindow.getFocusedWindow();
+      return (await (parent ? dialog.showMessageBox(parent, options) : dialog.showMessageBox(options)))
+        .response;
+    },
+    tell: async (message, detail) => {
+      await dialog.showMessageBox({ type: "info", message, detail, buttons: ["OK"] });
+    },
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    now: () => Date.now(),
+  });
+}
+
+// Registered at load, not in `ready`: on a cold launch macOS delivers the URL
+// before the app is ready, and a listener added later never hears it.
+app.on("open-url", (event, url) => {
+  event.preventDefault();
+  receiveLink(url);
+});
+// Linux hands a link to an app that is already running as the second launch's
+// argv, and to a cold start as this one's.
+if (process.platform !== "darwin") for (const arg of process.argv) receiveLink(arg);
 
 /**
  * The **process's** half of a layout slot; `windows.js` adds the per-window half.
@@ -760,7 +823,10 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.on("second-instance", () => focusPrimary());
+app.on("second-instance", (_event, argv) => {
+  focusPrimary();
+  for (const arg of argv) receiveLink(arg);
+});
 
 /**
  * Keep the daemon's version current for the skew notice. The reachability poll
@@ -845,6 +911,12 @@ app.whenReady().then(async () => {
   // live shells, and reopening only the main window would leave them running,
   // unreachable, until the detach grace hangs them up.
   restoreWindows();
+  // A packaged macOS app is registered for `veld://` by its bundle
+  // (`protocols` in electron-builder.yml); Linux needs asking. Never from a dev
+  // run, which would take the scheme away from the installed app.
+  if (app.isPackaged && process.platform !== "darwin") app.setAsDefaultProtocolClient("veld");
+  linksReady = true;
+  for (const id of pendingLinks.splice(0)) void handleSessionLink(id);
   if (process.platform === "darwin") {
     // The icon now appears after one settings read rather than immediately, and
     // that order is deliberate: creating it first would flash an icon in the menu

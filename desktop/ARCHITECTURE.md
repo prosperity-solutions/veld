@@ -1083,6 +1083,19 @@ Minimal by design. Main process only does:
    one over the same daemon, tray and browser partitions. The lock is taken only
    when packaged — two *dev* instances are a normal thing to want, and they would
    share one lock because they share one `appId`.
+8. Answer `veld://session/<id>` (`src/sessionLinks.js`). A coding agent ends a
+   pull request with an https link to the user's own daemon (`/session/<id>`),
+   because GitHub renders no other scheme; that page asks the daemon to send a
+   window to the session, and only when no window takes it and the app is
+   installed does it hand the link here as `veld://` — the one way a link can
+   *start* the app. The app then makes the page's own request
+   (`POST /api/session-links/<id>/open`) and repeats it until one of its windows
+   has connected and taken the jump, which is what makes a cold start work
+   without a second delivery path. The URL is caught at module load (macOS
+   delivers it before `ready` on a cold launch) and held until `restoreWindows`
+   has run. Registered by the bundle's `protocols` on macOS and by
+   `setAsDefaultProtocolClient` on Linux — never from a dev run, which would take
+   the scheme away from the installed app.
 
 ## Packaging and updates
 

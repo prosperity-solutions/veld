@@ -598,6 +598,68 @@ fn read_stdin() -> Option<Vec<u8>> {
         .map(|_| buf)
 }
 
+/// What `veld agent link` prints when the human turned session links off. A whole
+/// instruction, so it cannot be mistaken for a failure or for a link.
+pub const LINKS_OFF: &str = "Session links are turned off in Veld (terminal.sessionLinks). \
+                             Nothing is wrong: add no link to the pull request.";
+
+/// `veld agent link` — print this terminal's session link (see the part's help).
+///
+/// Stdout is the URL, or — with session links off (`terminal.sessionLinks`) — the
+/// sentence [`LINKS_OFF`], exit 0 either way. Never empty: an agent that ran a
+/// command and got nothing back reads it as broken and starts debugging it.
+pub async fn link(session: Option<String>, json: bool) -> i32 {
+    let Some(session) = session_id(session) else {
+        eprintln!("veld: not inside a Veld terminal ($VELD_PTY_SESSION is not set)");
+        return 3;
+    };
+    let answer = match super::worktree::send(
+        reqwest::Client::new()
+            .post(format!(
+                "{}/api/agent/link",
+                veld_core::instance::daemon_base()
+            ))
+            .json(&serde_json::json!({ "session_id": session })),
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    {
+        Ok(answer) => answer,
+        Err(refusal) if refusal.code.as_deref() == Some(super::worktree::NO_ANSWER) => {
+            eprintln!("veld: no answer from the daemon — try again in a moment");
+            return 1;
+        }
+        Err(refusal) => {
+            eprintln!("veld: {}", refusal.message);
+            return super::worktree::exit_for(refusal.code.as_deref());
+        }
+    };
+    if json {
+        println!("{answer}");
+        return 0;
+    }
+    match link_stdout(&answer) {
+        Some(line) => {
+            println!("{line}");
+            0
+        }
+        None => {
+            eprintln!("veld: the daemon answered without a link");
+            1
+        }
+    }
+}
+
+/// The one line `veld agent link` prints for the daemon's `answer`: the URL, or
+/// [`LINKS_OFF`] when links are off — never nothing. `None` is a daemon that said
+/// links are on and sent no URL.
+fn link_stdout(answer: &serde_json::Value) -> Option<&str> {
+    if answer["enabled"] != true {
+        return Some(LINKS_OFF);
+    }
+    answer["url"].as_str()
+}
+
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -690,6 +752,24 @@ mod tests {
         let pi_real = payload_from_arg(Some(r#"{"event":"agent_settled"}"#.to_owned()))
             .expect("a present, well-formed argument parses");
         assert_eq!(agent::pi_state(&pi_real), agent::State::Idle);
+    }
+
+    /// Off is a sentence, never empty output: an agent that gets nothing back
+    /// reads the command as broken and starts debugging it.
+    #[test]
+    fn a_link_answer_always_prints_something() {
+        let on = serde_json::json!({"enabled": true, "url": "https://v/session/a"});
+        assert_eq!(link_stdout(&on), Some("https://v/session/a"));
+        assert_eq!(
+            link_stdout(&serde_json::json!({"enabled": false})),
+            Some(LINKS_OFF)
+        );
+        assert_eq!(link_stdout(&serde_json::json!({})), Some(LINKS_OFF));
+        assert_eq!(link_stdout(&serde_json::json!({"enabled": true})), None);
+        assert!(
+            !LINKS_OFF.contains("://"),
+            "the off sentence must not look like a link"
+        );
     }
 
     #[test]
