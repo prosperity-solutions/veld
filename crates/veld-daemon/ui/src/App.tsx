@@ -6271,12 +6271,14 @@ function AppInner(props: {
     // did nothing — and invites the next one.
     const write = async () => {
       try {
-        await api.restoreWorktree(w.id);
-        // Its ignored files went while it sat in the trash, so the first run
-        // after a restore would fail on missing dependencies with no hint why.
+        // The daemon's row, not this one: a cleanup the restore cancelled
+        // records what it had already removed only once it has stopped.
+        const back = await api.restoreWorktree(w.id);
+        // Its files went while it sat in the trash, so the first run after a
+        // restore would fail on missing dependencies with no hint why.
         notifyDone(
-          w.trash_cleaned_at
-            ? `Restored ${worktreeLabel(w)} — while it was in the trash, the cleanup ${w.trash_cleaned}`
+          back.trash_cleaned_at
+            ? `Restored ${worktreeLabel(w)} — while it was in the trash, the cleanup ${back.trash_cleaned}`
             : `Restored ${worktreeLabel(w)}`,
         );
         restored = true;

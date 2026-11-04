@@ -2640,8 +2640,9 @@ impl Db {
     /// Whether the daemon may evaluate a project's `ide.extensions` status badges
     /// automatically.
     ///
-    /// The one machine-global off switch for the only thing veld runs from a repo's
-    /// config with no user action. Off leaves the declarations visible and the
+    /// The one machine-global off switch for the things veld runs from a repo's
+    /// config with no user action — status badges, pane session listings, and the
+    /// trash cleanup's `trash_cleanup.steps`. Off leaves the declarations visible and the
     /// buttons clickable — a click is the user asking — and stops only the
     /// unattended, repeated half. It exists because that half is the part a
     /// consent prompt would have gated, and a prompt was rejected: bound to the

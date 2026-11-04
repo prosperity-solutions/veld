@@ -2528,10 +2528,7 @@ fn check_command_variables(
 /// resolve, or `None` when it can. The closed set is [`EXTENSION_BUILTINS`],
 /// which is exactly what the daemon's `worktree_builtins` provides; `scope`
 /// names the command in the message.
-pub(crate) fn worktree_command_problem(
-    spec: &crate::config::CommandSpec,
-    scope: &str,
-) -> Option<String> {
+pub fn worktree_command_problem(spec: &crate::config::CommandSpec, scope: &str) -> Option<String> {
     let mut scratch = IdeSection::default();
     match check_command_variables(spec, "", scope, EXTENSION_BUILTINS, &mut scratch) {
         Some(()) => None,

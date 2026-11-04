@@ -366,7 +366,7 @@ disposable. `trash_cleanup` adds to it for one project:
 | Field   | Type   | Description |
 |---------|--------|-------------|
 | `paths` | array of strings | Glob patterns relative to the worktree root, in the `files.viewPatterns` grammar: `*` and `?` never cross `/`, `**` does, matching is case-insensitive, and a pattern **without** `/` matches the name at any depth (`.next` finds `apps/web/.next`). A match covers everything under it, as a `.gitignore` line does. At most 64, each up to 256 bytes. |
-| `steps` | array | [Setup steps](#step-fields) — `name`, `argv` or `shell`, `failureMessage` — run in order before anything is deleted. A failure (non-zero exit, five-minute timeout) is noted in the cleanup's summary and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: `root`, `worktree`, `branch`, `branch_raw` (`argv` only), `project`, `username` — there is no run here, so no `run`. |
+| `steps` | array | [Setup steps](#step-fields) — `name`, `argv` or `shell`, `failureMessage` — run in order before anything is deleted; at most 16. Skipped when `extensions.autoRefresh` (*Let projects run their own status commands*) is off, like every other command Veld runs from a repo without a click. A failure (non-zero exit, five-minute timeout) is noted in the cleanup's summary and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: `root`, `worktree`, `branch`, `branch_raw` (`argv` only), `project`, `username` — there is no run here, so no `run`. |
 
 **What it can delete.** The size rule only ever deletes what git ignores — what
 `git worktree remove` would delete anyway. `paths` are your project's list of what
@@ -387,9 +387,12 @@ too once it is over the size; raise the size, or set it to `0`, if that matters.
 trashed worktree once each time it is moved to the trash: restore it and trash
 it again, and it is due again. A worktree with an environment still running is skipped until it stops.
 Restoring a worktree, or deleting it, stops a cleanup in flight — a running
-step is killed and nothing more is deleted. On the first pass after the setting
-is switched on, the cooldown counts from that moment, so turning it on does not
-empty everything already in the trash at once.
+step is killed and nothing more is deleted, and the restore toast still says
+what had gone. Whenever the setting is switched on — by the release that ships
+it, or by you after turning it off — the cooldown counts from that moment, so
+turning it on does not empty everything already in the trash at once. A
+checkout git no longer recognises as a worktree (its `.git` file gone) is left
+alone.
 
 **Whose config.** Like every command Veld runs without a click, the steps and
 patterns are read from the **main checkout's** `veld.json` by default
@@ -3442,7 +3445,8 @@ config without you clicking something**:
 - Every command is written to the daemon log with its full arguments.
 - The **`extensions.autoRefresh` setting** (Settings → General, on by default)
   turns automatic evaluation off machine-wide. Buttons and menus keep working,
-  because a click is you asking; only the unattended half stops.
+  because a click is you asking; only the unattended half stops. The same switch
+  skips [`trash_cleanup.steps`](#trash_cleanup).
 
 There is deliberately **no consent prompt**. The command is declared in your own
 repo, which is the rule veld already holds for everything it runs; a prompt tied

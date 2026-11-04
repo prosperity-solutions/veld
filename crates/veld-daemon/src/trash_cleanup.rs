@@ -50,6 +50,8 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(300);
 const LIST_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a deletion waits for a cleanup it cancelled to stop.
 const CANCEL_WAIT: Duration = Duration::from_secs(30);
+/// How long a restore waits for a cleanup it cancelled to record what it removed.
+const RESTORE_WAIT: Duration = Duration::from_secs(5);
 /// Poll interval for the cancellation flag while a step runs.
 const CANCEL_POLL: Duration = Duration::from_millis(200);
 
@@ -115,6 +117,16 @@ fn is_cleaning(id: i64) -> bool {
     cleaning().as_ref().is_some_and(|m| m.contains_key(&id))
 }
 
+/// After a restore cancelled a cleanup, wait briefly for it to stop and record
+/// what it removed, so the restore can report that. Gives up quietly: the
+/// restore has already happened, and only the report is at stake.
+pub(crate) async fn wait_stopped(id: i64) {
+    let deadline = tokio::time::Instant::now() + RESTORE_WAIT;
+    while is_cleaning(id) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(CANCEL_POLL).await;
+    }
+}
+
 /// Cancel a cleanup of this worktree and wait for it to stop, for a deletion
 /// that is about to run `git worktree remove` on the same files.
 ///
@@ -144,10 +156,31 @@ pub(crate) async fn cancel_and_wait(id: i64) -> Result<(), String> {
 /// The work happens on a task of its own, one worktree at a time; a pass that
 /// finds one still running queues nothing.
 pub fn sweep(db: &Db) -> usize {
-    let Some(settings) = db.trash_cleanup() else {
+    let ids = due(db, chrono::Utc::now());
+    if ids.is_empty() || RUNNING.swap(true, Ordering::SeqCst) {
         return 0;
+    }
+    let queued = ids.len();
+    tokio::spawn(async move {
+        let _running = RunningGuard;
+        for id in ids {
+            clean(id).await;
+        }
+    });
+    queued
+}
+
+/// The trashed worktrees a sweep at `now` should clean, in order.
+///
+/// Also keeps the [`ENABLED_SINCE_KEY`] record: cleared while the cleanup is off,
+/// written on the first pass that finds it on. So *every* switch from off to on —
+/// the release that ships it on, and a user turning it back on — starts the
+/// cooldown from that moment rather than emptying the whole bin at once.
+fn due(db: &Db, now: chrono::DateTime<chrono::Utc>) -> Vec<i64> {
+    let Some(settings) = db.trash_cleanup() else {
+        let _ = db.kv_delete(ENABLED_SINCE_KEY);
+        return Vec::new();
     };
-    let now = chrono::Utc::now();
     let since = match db.kv_get(ENABLED_SINCE_KEY) {
         Ok(Some(s)) => chrono::DateTime::parse_from_rfc3339(&s)
             .map(|t| t.with_timezone(&chrono::Utc))
@@ -156,40 +189,28 @@ pub fn sweep(db: &Db) -> usize {
             if let Err(e) = db.kv_set(ENABLED_SINCE_KEY, &now.to_rfc3339()) {
                 warn!("trash cleanup: cannot record when it was enabled: {e}");
             }
-            return 0;
+            return Vec::new();
         }
         Err(e) => {
             warn!("trash cleanup: cannot read when it was enabled: {e}");
-            return 0;
+            return Vec::new();
         }
     };
     let after = chrono::Duration::from_std(settings.after).unwrap_or(chrono::Duration::MAX);
     if now - since < after {
-        return 0;
+        return Vec::new();
     }
-    let due = match db.cleanable_trashed_worktrees(settings.after.as_secs() as i64) {
-        Ok(rows) => rows,
+    match db.cleanable_trashed_worktrees(now - after) {
+        Ok(rows) => rows.iter().map(|w| w.id).collect(),
         Err(e) => {
             warn!("trash cleanup: cannot list the trash: {e}");
-            return 0;
+            Vec::new()
         }
-    };
-    if due.is_empty() || RUNNING.swap(true, Ordering::SeqCst) {
-        return 0;
     }
-    let ids: Vec<i64> = due.iter().map(|w| w.id).collect();
-    let queued = ids.len();
-    tokio::spawn(async move {
-        let _running = RunningGuard;
-        for id in ids {
-            clean(id, settings).await;
-        }
-    });
-    queued
 }
 
 /// Clean one trashed worktree, if it still wants cleaning.
-async fn clean(id: i64, settings: TrashCleanup) {
+async fn clean(id: i64) {
     let db = match Db::open() {
         Ok(db) => db,
         Err(e) => {
@@ -197,6 +218,11 @@ async fn clean(id: i64, settings: TrashCleanup) {
             crate::dbhealth::note_error(&e);
             return;
         }
+    };
+    // Re-read for each worktree: a queue can take minutes, and turning the
+    // cleanup off (or changing a size) applies to what is still waiting in it.
+    let Some(settings) = db.trash_cleanup() else {
+        return;
     };
     let guard = CleaningGuard::claim(id);
     let wt = match db.get_worktree(id) {
@@ -236,7 +262,10 @@ async fn clean(id: i64, settings: TrashCleanup) {
         "found nothing to clean — the checkout is no longer on disk".to_owned()
     };
     info!("trash cleanup: {} — {summary}", wt.path);
-    if let Err(e) = db.mark_trash_cleaned(id, &summary) {
+    // Conditional on this trashing: a cleanup cancelled by a restore still
+    // records what it removed, but one whose worktree was restored and binned
+    // again must not mark the new trashing as cleaned.
+    if let Err(e) = db.mark_trash_cleaned(id, &wt.trashed_at, &summary) {
         warn!(
             "trash cleanup: cannot record the cleanup of {}: {e}",
             wt.path
@@ -254,26 +283,66 @@ async fn run(
     let root = PathBuf::from(&wt.path);
     let mut notes: Vec<String> = Vec::new();
 
+    // A checkout whose `.git` went missing sits inside whatever repository
+    // encloses it, and git would answer with *that* repository's ignore rules.
+    match tokio::time::timeout(
+        LIST_TIMEOUT,
+        super::desktop::git(&root, &["rev-parse", "--show-toplevel"]),
+    )
+    .await
+    {
+        Ok(Ok(top)) if same_dir(Path::new(&top), &root) => {}
+        _ => {
+            return "found nothing to clean — git no longer sees a worktree there".to_owned();
+        }
+    }
+
     let project = project_cleanup(db, wt);
     let mut patterns: Vec<String> = Vec::new();
     match project {
         Ok(None) => {}
         Err(problem) => notes.push(problem),
         Ok(Some(p)) => {
-            patterns = p
-                .section
-                .paths
-                .iter()
-                .map(|s| s.trim().to_owned())
-                .collect();
+            patterns = runtime_patterns(&p.section.paths);
             let builtins = super::pty::worktree_builtins(&root, &wt.branch, &p.config);
-            for step in &p.section.steps {
+            // The one switch for everything Veld runs from a repo's config without
+            // a click. Off skips the steps; the deletion is Veld's own and stays.
+            let steps: &[veld_core::config::SetupStep] = if p.section.steps.is_empty() {
+                &[]
+            } else if !db.extensions_auto_refresh() {
+                notes.push(
+                    "the project's steps were skipped — Let projects run their own status \
+                     commands is off"
+                        .to_owned(),
+                );
+                &[]
+            } else {
+                &p.section.steps[..p
+                    .section
+                    .steps
+                    .len()
+                    .min(veld_core::config::MAX_TRASH_CLEANUP_STEPS)]
+            };
+            for step in steps {
                 if flag.load(Ordering::SeqCst) {
                     break;
                 }
                 let Some(spec) = step.cmd.spec() else {
                     continue;
                 };
+                // Lint refuses these, but lint is advice: `ide.extensions` drops the
+                // same commands at runtime, and so does this. A `shell` step must
+                // never see the raw branch name, which whoever named the branch chose.
+                if let Some(problem) =
+                    veld_core::ide::worktree_command_problem(&spec, "trash cleanup")
+                {
+                    warn!("trash cleanup: step \"{}\" skipped: {problem}", step.name);
+                    notes.push(format!(
+                        "step \"{}\" skipped — see `veld orchestrator lint`",
+                        step.name
+                    ));
+                    continue;
+                }
                 let running = super::extensions::spawn_command(
                     &spec,
                     &wt.path,
@@ -299,11 +368,13 @@ async fn run(
                                 None => "was killed".to_owned(),
                             }
                         };
+                        // The last line only: tools print tokens and environment in
+                        // errors, and the daemon log outlives the worktree.
                         warn!(
                             "trash cleanup: step \"{}\" in {} {why}: {}",
                             step.name,
                             wt.path,
-                            out.stderr.trim()
+                            out.stderr.trim().lines().last().unwrap_or("")
                         );
                         notes.push(match &step.failure_message {
                             Some(m) => format!("step \"{}\" {why}: {m}", step.name),
@@ -324,12 +395,20 @@ async fn run(
     } else {
         // Untracked work git does not ignore is listed only when a pattern could
         // select it: the size limits never apply to it.
-        let listed = match list_untracked(&root, Untracked::Ignored).await {
-            Ok(ignored) if patterns.is_empty() => Ok((ignored, Vec::new())),
-            Ok(ignored) => list_untracked(&root, Untracked::NotIgnored)
-                .await
-                .map(|other| (ignored, other)),
-            Err(e) => Err(e),
+        // Raced against the flag like the steps are: a deletion waits for this
+        // cleanup to stop, and must not wait out a slow listing.
+        let listing = async {
+            match list_untracked(&root, Untracked::Ignored).await {
+                Ok(ignored) if patterns.is_empty() => Ok((ignored, Vec::new())),
+                Ok(ignored) => list_untracked(&root, Untracked::NotIgnored)
+                    .await
+                    .map(|other| (ignored, other)),
+                Err(e) => Err(e),
+            }
+        };
+        let listed = tokio::select! {
+            l = listing => l,
+            () = cancelled(&flag) => Ok((Vec::new(), Vec::new())),
         };
         match listed {
             Err(e) => {
@@ -363,6 +442,32 @@ async fn run(
         notes.push("stopped early — the worktree was restored or deleted".to_owned());
     }
     summarize(&removed, &notes)
+}
+
+/// The project's patterns as the cleanup applies them: trimmed, without a
+/// trailing `/`, and within the limits lint states — lint is advice, and a config
+/// that fails it still runs here.
+fn runtime_patterns(paths: &[String]) -> Vec<String> {
+    paths
+        .iter()
+        .take(veld_core::config::MAX_TRASH_CLEANUP_PATHS)
+        .map(|p| p.trim().trim_end_matches('/').to_owned())
+        .filter(|p| {
+            !p.is_empty()
+                && p.len() <= veld_core::config::MAX_TRASH_CLEANUP_PATH_LEN
+                && !p.starts_with('/')
+                && !p.split('/').any(|seg| seg == "..")
+        })
+        .collect()
+}
+
+/// Whether two paths name the same directory, through any symlinks on the way
+/// (git reports the realpath; `/tmp` is `/private/tmp` on macOS).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
 }
 
 async fn cancelled(flag: &AtomicBool) {
@@ -992,6 +1097,77 @@ mod tests {
         let flag = AtomicBool::new(true);
         assert!(!remove_tree(&dir.path().join("a"), &flag).unwrap());
         assert!(dir.path().join("a/b/c.txt").exists());
+    }
+
+    /// Every switch from off to on starts the cooldown then — not only the first
+    /// one — so turning the cleanup back on does not empty the whole bin.
+    #[test]
+    fn the_cooldown_counts_from_each_time_the_cleanup_is_switched_on() {
+        use serde_json::Value;
+        use std::collections::BTreeMap;
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Db::open_at(&dir.path().join("t.db")).unwrap();
+        let root = Path::new("/tmp/repo-trash-cleanup-due");
+        db.upsert_repo(root, "repo").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[veld_core::db::DiscoveredWorktree {
+                    path: "/tmp/repo-trash-cleanup-due/wt".into(),
+                    branch: "feature".into(),
+                    is_main: false,
+                }],
+            )
+            .unwrap();
+        let id = wts.iter().find(|w| !w.is_main).unwrap().id;
+        db.trash_worktree(id).unwrap();
+        let set = |hours: i64| {
+            let mut patch = BTreeMap::new();
+            patch.insert("worktree.trashCleanupHours".to_owned(), Value::from(hours));
+            db.patch_settings(&patch).unwrap();
+        };
+        let now = chrono::Utc::now();
+        let later = |h: i64| now + chrono::Duration::hours(h);
+
+        assert!(
+            due(&db, now).is_empty(),
+            "the first pass only records the switch"
+        );
+        assert!(due(&db, later(23)).is_empty(), "still inside the cooldown");
+        assert_eq!(
+            due(&db, later(25)),
+            [id],
+            "due a day after it was switched on"
+        );
+
+        set(0);
+        assert!(due(&db, later(30)).is_empty(), "off");
+        set(24);
+        assert!(
+            due(&db, later(31)).is_empty(),
+            "switched back on: the cooldown starts again"
+        );
+        assert!(due(&db, later(54)).is_empty());
+        assert_eq!(due(&db, later(56)), [id]);
+    }
+
+    #[test]
+    fn runtime_patterns_apply_the_limits_lint_states() {
+        let mut paths: Vec<String> = vec![
+            " dist/ ".into(),
+            "/abs".into(),
+            "../up".into(),
+            "".into(),
+            "x".repeat(veld_core::config::MAX_TRASH_CLEANUP_PATH_LEN + 1),
+        ];
+        paths.extend((0..100).map(|i| format!("p{i}")));
+        let got = runtime_patterns(&paths);
+        assert_eq!(got[0], "dist");
+        assert_eq!(
+            got.len(),
+            1 + veld_core::config::MAX_TRASH_CLEANUP_PATHS - 5,
+            "only the first 64 are read, and the four invalid ones dropped"
+        );
     }
 
     #[test]

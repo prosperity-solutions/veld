@@ -625,11 +625,13 @@ impl SettingKey {
                  request's state, a deploy tag — each backed by a command Veld runs in that \
                  worktree and re-runs on the interval the project asked for. It can also give a \
                  pane a command that lists earlier sessions of the tool it runs, so the pane \
-                 chooser can offer you one to resume. Those are the only things Veld runs from a \
-                 repo's configuration without you clicking the thing they are about, so they \
-                 have a switch. Turning it off leaves the project's buttons and menus working (a \
-                 click is you asking) and stops the unattended half: badges render nothing, and \
-                 panes offer no earlier sessions. Veld bounds these commands either way: no \
+                 chooser can offer you one to resume, and steps that run when the trash \
+                 cleanup frees a trashed worktree's space. Those are the only things Veld runs \
+                 from a repo's configuration without you clicking the thing they are about, so \
+                 they have a switch. Turning it off leaves the project's buttons and menus \
+                 working (a click is you asking) and stops the unattended half: badges render \
+                 nothing, panes offer no earlier sessions, and the trash cleanup skips the \
+                 project's steps (it still deletes by size and by the project's paths). Veld bounds these commands either way: no \
                  terminal is attached, so a tool that would ask for credentials fails instead of \
                  waiting; there is a hard timeout and an output limit; a cap on how many a project \
                  may declare, and a floor on how often the same one is re-run; and every command \
@@ -693,10 +695,13 @@ impl SettingKey {
                 title: "Free the space of trashed worktrees after",
                 help: "Hours a worktree sits in the trash before Veld deletes its large \
                        gitignored files and folders — dependencies, build output, caches — \
-                       using the two sizes below. Only what git ignores is touched, which is \
-                       what deleting the worktree would remove anyway, so restoring one \
-                       afterwards means reinstalling, never lost work. A project can name more \
-                       to delete, and commands to run first, in its veld.json. 0 never cleans.",
+                       using the two sizes below. By size, only what git ignores is touched — \
+                       what deleting the worktree would remove anyway — so restoring one \
+                       afterwards usually means a reinstall; but ignored data you cannot \
+                       regenerate, like a local database file, goes too once it is that large. \
+                       A project can name more to delete in its veld.json, including untracked \
+                       files git does not ignore, and commands to run first. Tracked files are \
+                       never deleted. 0 never cleans.",
                 group: General,
                 section: None,
                 shape: ValueShape::Int,

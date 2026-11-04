@@ -1592,13 +1592,13 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Trashed worktrees the trash cleanup is due on: in the bin for longer than
-    /// `after_secs`, and not yet cleaned since they were binned. Oldest first.
+    /// Trashed worktrees the trash cleanup is due on: binned before `cutoff`, and
+    /// not yet cleaned since. Oldest first.
     pub fn cleanable_trashed_worktrees(
         &self,
-        after_secs: i64,
+        cutoff: chrono::DateTime<chrono::Utc>,
     ) -> Result<Vec<WorktreeRecord>, DbError> {
-        let cutoff = super::ts_to_str(chrono::Utc::now() - chrono::Duration::seconds(after_secs));
+        let cutoff = super::ts_to_str(cutoff);
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT {WT_COLS} FROM worktrees
@@ -1611,13 +1611,21 @@ impl Db {
 
     /// Record that the trash cleanup ran on this worktree, and what it did.
     ///
-    /// Written even when the worktree was restored partway through: whatever was
-    /// removed is gone either way, and the rail reads this to say so.
-    pub fn mark_trash_cleaned(&self, id: i64, summary: &str) -> Result<bool, DbError> {
+    /// `trashed_at` is the trashing the cleanup started on. Written while the
+    /// worktree is still in that trashing, and also once it has been restored —
+    /// whatever was removed is gone either way, and the restore reports it — but
+    /// not after it was binned again, which is a new trashing still to clean.
+    pub fn mark_trash_cleaned(
+        &self,
+        id: i64,
+        trashed_at: &str,
+        summary: &str,
+    ) -> Result<bool, DbError> {
         let conn = self.lock();
         let n = conn.execute(
-            "UPDATE worktrees SET trash_cleaned_at = ?1, trash_cleaned = ?2 WHERE id = ?3",
-            params![now_str(), summary, id],
+            "UPDATE worktrees SET trash_cleaned_at = ?1, trash_cleaned = ?2
+              WHERE id = ?3 AND (trashed_at = ?4 OR trashed_at = '')",
+            params![now_str(), summary, id, trashed_at],
         )?;
         Ok(n > 0)
     }
@@ -3783,20 +3791,32 @@ mod tests {
             .id;
 
         assert!(
-            db.cleanable_trashed_worktrees(0).unwrap().is_empty(),
+            db.cleanable_trashed_worktrees(chrono::Utc::now())
+                .unwrap()
+                .is_empty(),
             "not trashed"
         );
         db.trash_worktree(id).unwrap();
         assert!(
-            db.cleanable_trashed_worktrees(3_600).unwrap().is_empty(),
+            db.cleanable_trashed_worktrees(chrono::Utc::now() - chrono::Duration::hours(1))
+                .unwrap()
+                .is_empty(),
             "not in the trash long enough"
         );
-        assert_eq!(db.cleanable_trashed_worktrees(-1).unwrap().len(), 1);
+        assert_eq!(
+            db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .unwrap()
+                .len(),
+            1
+        );
 
-        db.mark_trash_cleaned(id, "freed 1.0 GB — node_modules")
+        let first = db.get_worktree(id).unwrap().unwrap().trashed_at;
+        db.mark_trash_cleaned(id, &first, "freed 1.0 GB — node_modules")
             .unwrap();
         assert!(
-            db.cleanable_trashed_worktrees(-1).unwrap().is_empty(),
+            db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .unwrap()
+                .is_empty(),
             "once per trashing"
         );
 
@@ -3810,7 +3830,22 @@ mod tests {
         db.trash_worktree(id).unwrap();
         let row = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(row.trash_cleaned_at, "", "binning again makes it due again");
-        assert_eq!(db.cleanable_trashed_worktrees(-1).unwrap().len(), 1);
+        assert_eq!(
+            db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // A cleanup that started on the first trashing and finishes late must
+        // not mark this one as cleaned.
+        assert!(!db.mark_trash_cleaned(id, &first, "stale").unwrap());
+        assert_eq!(
+            db.cleanable_trashed_worktrees(chrono::Utc::now() + chrono::Duration::seconds(1))
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

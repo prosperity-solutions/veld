@@ -1599,6 +1599,8 @@ pub struct TrashCleanupConfig {
 pub const MAX_TRASH_CLEANUP_PATHS: usize = 64;
 /// Longest single `trash_cleanup.paths` pattern, in bytes.
 pub const MAX_TRASH_CLEANUP_PATH_LEN: usize = 256;
+/// Most `trash_cleanup.steps` a config may declare.
+pub const MAX_TRASH_CLEANUP_STEPS: usize = 16;
 
 pub(crate) fn default_url_template() -> String {
     "{service}.{run}.{project}.localhost".to_owned()
@@ -3365,7 +3367,7 @@ fn check_trash_cleanup(config: &VeldConfig, out: &mut Vec<Finding>) {
         out.push(error(
             "trash_cleanup.paths".to_owned(),
             format!(
-                "{} patterns; at most {MAX_TRASH_CLEANUP_PATHS} are read",
+                "{} patterns; only the first {MAX_TRASH_CLEANUP_PATHS} are used",
                 tc.paths.len()
             ),
         ));
@@ -3396,6 +3398,15 @@ fn check_trash_cleanup(config: &VeldConfig, out: &mut Vec<Finding>) {
         if let Some(message) = problem {
             out.push(error(location, message));
         }
+    }
+    if tc.steps.len() > MAX_TRASH_CLEANUP_STEPS {
+        out.push(error(
+            "trash_cleanup.steps".to_owned(),
+            format!(
+                "{} steps; only the first {MAX_TRASH_CLEANUP_STEPS} are run",
+                tc.steps.len()
+            ),
+        ));
     }
     for (i, step) in tc.steps.iter().enumerate() {
         let location = format!("trash_cleanup.steps[{i}] ({})", step.name);
