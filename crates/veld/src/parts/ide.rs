@@ -23,6 +23,15 @@ pub enum IdeCmd {
     #[command(name = "open-url")]
     OpenUrl(OpenUrlArgs),
 
+    /// Pin links to the worktree this runs in — its pull requests, its preview
+    /// environment, the issue it works on — and keep them current (`set`,
+    /// `list`, `rm`). The Veld window shows them in the top bar, and pull requests
+    /// beside the worktree's name in the rail.
+    Link {
+        #[command(subcommand)]
+        command: commands::link::LinkCommand,
+    },
+
     /// Open the management dashboard in the browser.
     Dashboard,
 }
@@ -52,6 +61,7 @@ pub async fn run(command: IdeCmd) -> i32 {
     match command {
         IdeCmd::Window(command) => commands::ide::run(command).await,
         IdeCmd::OpenUrl(args) => open_url(args).await,
+        IdeCmd::Link { command } => commands::link::run(command).await,
         IdeCmd::Dashboard => commands::ui::run().await,
     }
 }
@@ -68,5 +78,7 @@ pub async fn open_url(args: OpenUrlArgs) -> i32 {
 pub fn survives_an_update(command: &IdeCmd) -> bool {
     match command {
         IdeCmd::Window(_) | IdeCmd::OpenUrl(_) | IdeCmd::Dashboard => false,
+        // Every verb reads or writes the daemon's database through its API.
+        IdeCmd::Link { .. } => false,
     }
 }

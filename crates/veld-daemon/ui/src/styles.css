@@ -454,6 +454,34 @@ body[data-fullscreen="true"] .topbar.electron {
   --tone: var(--muted);
   --tone-bg: color-mix(in oklab, var(--muted) 12%, transparent);
 }
+/* A link an agent pinned while the worktree was on another branch: still worth
+   showing, but it may describe work that is no longer here. Dimmed rather than
+   hidden, so it can still be opened; its tooltip says which branch it was set on.
+   Not scoped to `.topbar`, because the same class marks a row in the group menu,
+   which is portaled out of the bar. */
+.wt-link-stale {
+  opacity: 0.55;
+}
+/* A menu row's glyph carries the link's tone, as the pill does; neutral is muted,
+   like a neutral pill's glyph. */
+.wt-link-icon {
+  display: inline-flex;
+}
+.wt-link-icon.tone-success {
+  color: var(--live);
+}
+.wt-link-icon.tone-warning {
+  color: var(--warn);
+}
+.wt-link-icon.tone-danger {
+  color: var(--danger);
+}
+.wt-link-icon.tone-info {
+  color: var(--info);
+}
+.wt-link-icon.tone-neutral {
+  color: var(--muted);
+}
 /* An unavailable extension rendered as a hint: legible, but plainly not live
    state. Dashed rather than dimmer, because a project's install instruction has
    to survive being ignored twice. */
@@ -1788,6 +1816,34 @@ body.pointer-dragging * {
 .run-count.alert {
   color: var(--warn);
 }
+/* Pull requests an agent pinned to this worktree, beside its name. Muted unless a
+   PR is failing or green: the marker's colour is the row's identity, and
+   this is a status mark that must not compete with it. */
+.wt-links {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 17px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  padding: 0 3px;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.wt-links.tone-danger {
+  color: var(--danger);
+}
+.wt-links.tone-success {
+  color: var(--live);
+}
+.wt-links:hover {
+  background: var(--elev);
+}
 .run-item-name {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 12px;
@@ -2230,6 +2286,7 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-row:focus-visible,
 .wt-run:focus-visible,
 .wt-alert:focus-visible,
+.wt-links:focus-visible,
 .wt-git:focus-visible,
 .wt-inbox:focus-visible,
 .wt-edit:focus-visible {

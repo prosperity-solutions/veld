@@ -405,11 +405,35 @@ export interface WorktreeHandoff {
   started: boolean;
 }
 
+/** Mirrors `veld_core::db::WorktreeLink`. A link an agent pinned to a worktree
+ *  with `veld ide link set`. Read through `normalizeLink`, which is lenient about
+ *  kinds and tones a newer daemon may add. */
+export interface WorktreeLink {
+  id: string;
+  /** `"pr" | "preview" | "issue" | "doc" | "link"`; anything else reads as `"link"`. */
+  kind: string;
+  url: string;
+  /** At most 60 characters, never empty. */
+  label: string;
+  /** `null` means the kind's default glyph. */
+  icon: PaneIcon | null;
+  /** `"neutral" | "info" | "success" | "warning" | "danger"`; anything else reads as neutral. */
+  tone: string;
+  /** `""` means none. */
+  tooltip: string;
+  /** The worktree's branch when the link was set; `""` when unknown. */
+  branch: string;
+  /** RFC 3339. */
+  updated_at: string;
+}
+
 export interface Worktree {
   id: number;
   repo_root: string;
   path: string;
   branch: string;
+  /** Links agents pinned here. Absent when there are none. */
+  links?: WorktreeLink[];
   /**
    * The identifier: `[A-Za-z0-9._-]`, unique among the repo's checkouts, and the
    * default run name — which is why it is bounded, since the run name reaches a
@@ -2549,6 +2573,15 @@ export const api = {
       `/api/worktrees/${worktreeId}/file-base?path=${encodeURIComponent(path)}`,
       { headers: { "X-Veld-Request": "1" } },
     ),
+  /**
+   * Where a click on one of a worktree's links opens — the daemon's answer for a
+   * link in that worktree's terminal (`terminal.openUrlsInApp`, the exempt list).
+   */
+  linkOpenTarget: (worktreeId: number, url: string) =>
+    request<{ target: "pane" | "system" }>(`/api/worktrees/${worktreeId}/open-target`, {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
   ptyOpenUrl: (sessionId: string, url: string) =>
     request<PtyOpenUrl>(`/api/pty/sessions/${encodeURIComponent(sessionId)}/open-url`, {
       method: "POST",

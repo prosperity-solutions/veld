@@ -203,6 +203,62 @@ Exit status: `0` named; `1` failed (the daemon is not running, or refused);
 `2` not a usable title; `3` not inside a worktree Veld knows; `9` the name is
 kept (the main checkout, or already named).
 
+## Pinning links to the worktree (`veld ide link`)
+
+The human keeps coming back to a few pages while your work is open. Pin them:
+
+```sh
+veld ide link set https://github.com/acme/api/pull/412 --kind pr --label "api#412 Add login"
+veld ide link set https://web-412.preview.acme.dev --kind preview --id web --label "Web preview"
+veld ide link set https://api-412.preview.acme.dev --kind preview --id api --label "API preview"
+veld ide link list [--json]
+veld ide link rm <id-or-url>        # or --all
+```
+
+- **What belongs**: the pull requests you opened (across repositories too), the
+  preview deploy, the tracking issue or spec, an important doc. **Not research
+  links** — pages you read on the way do not go here.
+- **Kinds**: `pr`, `preview`, `issue`, `doc`, `link` (the default). Optional
+  `--label` (at most 60 characters), `--tone` (`neutral`, `info`, `success`,
+  `warning`, `danger`), `--icon` (a Tabler name such as `git-merge`, or an emoji),
+  `--tooltip`, `--id`, `--json`. A click opens it the way a link printed in the
+  terminal opens: a pane, or the system browser for an exempt origin, a ⌘-click or
+  `terminal.openUrlsInApp` off.
+- **Setting again merges.** The same id updates the link: a flag you leave out
+  keeps its value, and `""` (`--label ""`) resets it. The default id is the URL
+  without query, fragment and trailing slash. A preview whose URL changes with
+  every deploy gets an id per service (`--id web`, `--id api`), so the next deploy
+  replaces it rather than adding another; a new URL under an id starts over, so
+  the last deploy's tone and tooltip do not carry across. Without `--id`, a URL
+  also finds the link it was pinned under with one.
+- **Pull requests: pin every one, always.** Even when the project has its own PR
+  badge: the rail shows only pinned pull requests, the badge covers one repository
+  at most, and the top bar hides a pinned link the badge already links to.
+- **Otherwise, don't duplicate the top bar.** It already opens this worktree's
+  live runs (`set` refuses any URL on a live run's origin) and shows the
+  project's own top-bar badges and buttons. `list` and `set` name both, with what
+  a status badge currently shows and links to.
+- **Keep it current.** Veld checks nothing against a forge; a link is as current
+  as its last `set`. A pull request's life:
+
+```sh
+veld ide link set "$PR" --kind pr --tone info                      # opened
+veld ide link set "$PR" --tone danger --tooltip "CI: 2 checks failing"
+veld ide link set "$PR" --tone success --icon git-merge           # merged
+```
+
+- A worktree holds at most 20 links. The worktree is your terminal's
+  (`$VELD_PTY_SESSION`), then your working directory.
+- The window shows them in the top bar grouped by kind (one link of a kind is a
+  pill, two or more a counted pill that opens a menu, tinted by the worst tone),
+  and `pr` links beside the worktree's name in the rail. Links set on another
+  branch are dimmed.
+
+Exit status: `0` done; `1` failed (the daemon is not running, or did not answer);
+`2` not a usable link (bad URL, kind, tone, icon or id, a label too long, a
+control or invisible character, a URL on a live run's origin, or the worktree is
+full); `3` not inside a worktree Veld knows; `4` `rm`: no such link.
+
 ## Handing a task to the human in a new worktree (`veld ide worktree new`)
 
 When your reply points out something outside the current task that somebody

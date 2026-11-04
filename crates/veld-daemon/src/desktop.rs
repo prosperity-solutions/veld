@@ -71,6 +71,17 @@ pub fn routes() -> Router {
         // What `veld ide worktree name` calls: retitle the worktree the caller is
         // in, resolved from where it runs the way a hand-off is.
         .route("/api/ide/worktree/name", post(name_caller_worktree))
+        // What `veld ide link` calls: the links an agent pins to the worktree it
+        // works for. The window reads them from `WorktreeView::links`.
+        .route("/api/ide/links/set", post(super::links::set))
+        .route("/api/ide/links/list", post(super::links::list))
+        .route("/api/ide/links/remove", post(super::links::remove))
+        // Where a click on one of a worktree's links opens — the answer a terminal
+        // link gets, for a link that has no terminal.
+        .route(
+            "/api/worktrees/{id}/open-target",
+            post(super::links::open_target),
+        )
         .route(
             "/api/worktrees/{id}/handoff",
             get(get_handoff).put(put_handoff).delete(delete_handoff),
@@ -2858,6 +2869,10 @@ struct WorktreeView {
     /// See [`git_signals_for`] for which half is refreshed where.
     #[serde(skip_serializing_if = "Option::is_none")]
     git: Option<WorktreeGitSignals>,
+    /// The links agents pinned here with `veld ide link set`, in the order they
+    /// were first set. Omitted when there are none, which is almost every row.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    links: Vec<veld_core::db::WorktreeLink>,
     /// The interpreted part of the checkout's `ide` config section.
     ///
     /// **Always present, with arrays that may be empty.** Omitting it when empty
@@ -3203,7 +3218,36 @@ pub(super) fn pane_can_resume(db: &Db, wt: WorktreeRecord, spec: &str) -> bool {
 }
 
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
+    let id = wt.id;
+    let mut view = worktree_view_with(db, wt, &mut DeclaredConfigs::new(), None);
+    view.links = db.worktree_links(id).unwrap_or_default();
+    view
+}
+
+/// What the project contributes to a worktree's top bar — its badges, buttons
+/// and menus, as `{id, label, type}`, and for a status badge what it showed when
+/// it last ran (`shown: {text, href}`, or `null` when it has not run). `veld ide
+/// link` hands this to the agent so it can tell what the bar already shows.
+pub(super) fn top_bar_entries(db: &Db, id: i64) -> Vec<serde_json::Value> {
+    let Ok(Some(wt)) = db.get_worktree(id) else {
+        return Vec::new();
+    };
+    let path = wt.path.clone();
     worktree_view_with(db, wt, &mut DeclaredConfigs::new(), None)
+        .ide
+        .extensions
+        .into_iter()
+        .filter(|e| {
+            e.slot.as_deref() == Some("topBar") && (e.available || e.when_missing != "hide")
+        })
+        .map(|e| {
+            let shown = (e.kind == "status")
+                .then(|| super::extensions::last_shown(&path, &e.id))
+                .flatten()
+                .map(|(text, href)| serde_json::json!({ "text": text, "href": href }));
+            serde_json::json!({ "id": e.id, "label": e.label, "type": e.kind, "shown": shown })
+        })
+        .collect()
 }
 
 /// Declaring roots' configs already looked up in this listing, by root path.
@@ -3423,6 +3467,7 @@ fn worktree_view_with(
         nodes,
         machine_vars,
         git,
+        links: Vec::new(),
         ide,
     }
 }
@@ -3576,6 +3621,14 @@ fn repo_view_blocking(
         .filter(|wt| !handoff_in_flight(&wt.repo_root, &wt.branch))
         .map(|wt| worktree_view_with(db, wt, &mut declared, Some(&handoffs)))
         .collect();
+    // Same shape as the hand-offs above: one read for the whole repo, and an
+    // unreadable one reads as no links rather than failing the rail.
+    let mut links = db
+        .links_in_repo(FsPath::new(&repo.root))
+        .unwrap_or_default();
+    for view in &mut worktrees {
+        view.links = links.remove(&view.worktree.id).unwrap_or_default();
+    }
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
     Ok(RepoView {
@@ -5830,7 +5883,10 @@ fn swapped_files(files: &[String]) -> String {
 /// that has `cd`'d into a repository Veld has not imported means that one, and
 /// quietly falling back to the project its terminal started in would create the
 /// branch somewhere it did not ask for.
-async fn resolve_caller(session: Option<&str>, cwd: Option<&str>) -> Result<i64, ApiError> {
+pub(super) async fn resolve_caller(
+    session: Option<&str>,
+    cwd: Option<&str>,
+) -> Result<i64, ApiError> {
     use super::file_pane::{coded, worktree_containing};
     let refused = |msg: String| coded(StatusCode::NOT_FOUND, "not_in_worktree", msg);
     match (
@@ -7046,6 +7102,7 @@ mod tests {
             nodes: Vec::new(),
             machine_vars: None,
             git: None,
+            links: Vec::new(),
             ide: IdeView {
                 news,
                 ..Default::default()
