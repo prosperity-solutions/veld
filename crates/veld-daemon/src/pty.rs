@@ -97,7 +97,8 @@ mod wire;
 #[path = "pty/autostart.rs"]
 mod autostart;
 pub(crate) use autostart::{
-    autostart_handoff, give_back_interrupted as give_back_interrupted_handoffs,
+    autostart_handoff, begin as begin_autostart, end as end_autostart,
+    give_back_interrupted as give_back_interrupted_handoffs, in_progress as autostart_in_progress,
 };
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
@@ -2388,6 +2389,10 @@ struct Prepared {
 /// Its own function so the daemon can start a session with exactly a window's
 /// rules — [`autostart_handoff`] runs a handed-off agent with no window at all, and
 /// a second copy of these checks is a second place for them to drift.
+///
+/// **It can retire a hand-off** (`HandoffStep::RetireNow`), except while
+/// `autostart::in_progress` says the daemon is still starting it. A new caller
+/// inherits both halves of that.
 async fn prepare_ticket(body: TicketRequest) -> Result<Prepared, ApiError> {
     if !valid_session_id(&body.session_id) {
         return Err(err(StatusCode::BAD_REQUEST, "invalid session id"));

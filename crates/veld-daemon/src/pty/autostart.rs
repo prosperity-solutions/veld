@@ -6,7 +6,8 @@
 //! itself, the moment the hand-off is recorded. The row's [`HandoffLaunch`] says
 //! where that stands:
 //!
-//! 1. **`Launching`**, written before anything spawns. While it holds, no window
+//! 1. **`Launching`**, written with the hand-off itself, before anything spawns
+//!    (`desktop::record_handoff`, after [`begin`] claims the start). While it holds, no window
 //!    starts or attaches to the agent — `GET /api/worktrees/{id}/handoff` answers
 //!    "starting", so nobody types into an agent that is being handed its prompt —
 //!    and an attach does not retire the row. The detach reaper leaves the session
@@ -28,6 +29,8 @@
 //! exits — the session is hung up and the row goes back to `Waiting`, so the next
 //! window to show the worktree starts it the old way and the human sees the
 //! prompt. An agent that silently never got its task is the outcome this avoids.
+//! So is one whose prompt never shows on screen after the paste: the `\r` is
+//! only sent onto a visible echo, never into a first-run screen.
 //! **Once the agent has the prompt it is never hung up**: a launch that took the
 //! prompt (its staged file is gone) counts as delivered without waiting for the
 //! gate. A daemon that stops mid-start leaves `Launching` behind, and the next
@@ -92,21 +95,18 @@ const BRACKETED_OFF: &[u8] = b"\x1b[?2004l";
 /// message. `pane` is the declared pane to run, already resolved against the new
 /// checkout. Logs and gives the hand-off back to the windows on any failure; never
 /// panics the caller, which has long since answered the CLI.
+///
+/// The caller has already [`begin`]-claimed the session and marked the row
+/// `Launching`, in the same step that recorded the hand-off — so no window ever
+/// sees it `Waiting` and starts a second agent.
 pub(crate) async fn autostart_handoff(
     worktree_id: i64,
     session_id: String,
     pane: String,
     prompt: String,
 ) {
-    IN_PROGRESS
-        .lock()
-        .expect("autostart set poisoned")
-        .insert(session_id.clone());
     let outcome = run(worktree_id, &session_id, &pane, &prompt).await;
-    IN_PROGRESS
-        .lock()
-        .expect("autostart set poisoned")
-        .remove(&session_id);
+    end(&session_id);
     match outcome {
         Ok(()) => info!(
             session = %session_id,
@@ -120,6 +120,28 @@ pub(crate) async fn autostart_handoff(
             "handed-off agent not started in the background, it waits for a window: {why}"
         ),
     }
+}
+
+/// Claim a background start for `session_id`, if there is room for one: the live
+/// sessions plus every start already under way must leave [`RESERVED_SLOTS`] free.
+/// Counted under the lock that records the claim, so a fan-out of hand-offs cannot
+/// all read the same count and pass together. Synchronous, for the database step
+/// that marks the row `Launching` right after it.
+pub(crate) fn begin(session_id: &str) -> bool {
+    let mut starting = IN_PROGRESS.lock().expect("autostart set poisoned");
+    let live = super::LIVE_SESSIONS.load(std::sync::atomic::Ordering::Acquire);
+    if live + starting.len() + RESERVED_SLOTS >= super::session_cap() {
+        return false;
+    }
+    starting.insert(session_id.to_owned())
+}
+
+/// Release a claim [`begin`] made — the start is over, or never happened.
+pub(crate) fn end(session_id: &str) {
+    IN_PROGRESS
+        .lock()
+        .expect("autostart set poisoned")
+        .remove(session_id);
 }
 
 /// At boot, after the holders are adopted: every hand-off a previous daemon left
@@ -151,25 +173,6 @@ pub(crate) async fn give_back_interrupted() {
 }
 
 async fn run(worktree_id: i64, session_id: &str, pane: &str, prompt: &str) -> Result<(), String> {
-    let live = super::LIVE_SESSIONS.load(std::sync::atomic::Ordering::Acquire);
-    if live + RESERVED_SLOTS >= super::session_cap() {
-        return Err(format!(
-            "{live} terminals are open, and the last {RESERVED_SLOTS} slots are kept for you"
-        ));
-    }
-    // `false` means the row is gone or no longer waiting — a window got there
-    // first, or the hand-off was replaced.
-    let marked = set_launch(
-        worktree_id,
-        session_id,
-        HandoffLaunch::Waiting,
-        HandoffLaunch::Launching,
-        Some(pane),
-    )
-    .await?;
-    if !marked {
-        return Err("the hand-off changed before it could start".to_owned());
-    }
     let (session, at_launch) = match spawn(worktree_id, session_id, pane, prompt).await {
         Ok(started) => started,
         Err(why) => {
@@ -181,14 +184,24 @@ async fn run(worktree_id: i64, session_id: &str, pane: &str, prompt: &str) -> Re
         give_back(worktree_id, session_id, true).await;
         return Err(why);
     }
-    set_launch(
-        worktree_id,
-        session_id,
-        HandoffLaunch::Launching,
-        HandoffLaunch::Running,
-        None,
-    )
-    .await?;
+    // The agent has its prompt now, so a failure here never hangs it up. One retry
+    // for a busy database; past that, `GET …/handoff` settles a `Launching` row
+    // that no start owns any more by whether its session is live.
+    for _ in 0..2 {
+        match set_launch(
+            worktree_id,
+            session_id,
+            HandoffLaunch::Launching,
+            HandoffLaunch::Running,
+            None,
+        )
+        .await
+        {
+            Ok(_) => return Ok(()),
+            Err(e) => warn!(session = %session_id, "hand-off not marked running yet: {e}"),
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
     Ok(())
 }
 
@@ -244,8 +257,16 @@ async fn spawn(
 /// Put the hand-off back in the windows' hands: hang up the session if this start
 /// spawned one, and set the row back to `Waiting` so the next window to show the
 /// worktree starts it with the prompt.
+///
+/// **Hung up first, then unmarked.** The other order leaves a moment where the row
+/// says `Waiting` while its session is still live, which `GET …/handoff` reads as
+/// a window's launch that lost its retirement — it would retire the row, and the
+/// hang-up would then take the prompt with it.
 async fn give_back(worktree_id: i64, session_id: &str, spawned: bool) {
-    match set_launch(
+    if spawned {
+        super::end_session(session_id, "handed-off agent never took its prompt").await;
+    }
+    if let Err(e) = set_launch(
         worktree_id,
         session_id,
         HandoffLaunch::Launching,
@@ -254,14 +275,7 @@ async fn give_back(worktree_id: i64, session_id: &str, spawned: bool) {
     )
     .await
     {
-        Ok(true) => {
-            if spawned {
-                super::end_session(session_id, "handed-off agent never took its prompt").await;
-            }
-        }
-        // Deleted meanwhile (the worktree was deleted); nothing to give back to.
-        Ok(false) => {}
-        Err(e) => warn!(session = %session_id, "hand-off not given back to the windows: {e}"),
+        warn!(session = %session_id, "hand-off not given back to the windows: {e}");
     }
 }
 
@@ -320,19 +334,36 @@ enum Heard {
     Gone,
 }
 
+/// One read of the session's output, at most `wait` long. What arrives updates
+/// `mode` and, when given, is kept in `sink`.
 async fn listen(
+    session: &Session,
     rx: &mut broadcast::Receiver<axum::body::Bytes>,
     mode: &mut PasteMode,
     wait: Duration,
+    sink: Option<&mut Vec<u8>>,
 ) -> Heard {
     match tokio::time::timeout(wait, rx.recv()).await {
         Ok(Ok(chunk)) => {
             mode.feed(&chunk);
+            if let Some(sink) = sink {
+                if sink.len() < ECHO_SINK_BYTES {
+                    sink.extend_from_slice(&chunk);
+                }
+            }
             Heard::Output
         }
-        // Fell behind: the bytes in between are lost to this reader, but the
-        // next chunk still says where the mode stands as soon as it changes.
-        Ok(Err(broadcast::error::RecvError::Lagged(_))) => Heard::Output,
+        // Fell behind, and the bytes in between may have held the only switch.
+        // The scrollback mirror has them all: read the mode from it again.
+        Ok(Err(broadcast::error::RecvError::Lagged(_))) => {
+            let seen = session
+                .scrollback
+                .lock()
+                .expect("scrollback poisoned")
+                .snapshot();
+            *mode = PasteMode::new(&seen);
+            Heard::Output
+        }
         Ok(Err(broadcast::error::RecvError::Closed)) => Heard::Gone,
         Err(_) => Heard::Quiet,
     }
@@ -372,7 +403,15 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
                 INPUT_WAIT.as_secs()
             ));
         }
-        if let Heard::Gone = listen(&mut rx, &mut mode, left.min(Duration::from_secs(1))).await {
+        if let Heard::Gone = listen(
+            session,
+            &mut rx,
+            &mut mode,
+            left.min(Duration::from_secs(1)),
+            None,
+        )
+        .await
+        {
             return Err("the session ended before the agent opened an input".to_owned());
         }
     }
@@ -383,7 +422,7 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
         if left.is_zero() {
             break;
         }
-        if let Heard::Gone = listen(&mut rx, &mut mode, left).await {
+        if let Heard::Gone = listen(session, &mut rx, &mut mode, left, None).await {
             return Err("the session ended before the prompt was sent".to_owned());
         }
     }
@@ -401,15 +440,18 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
     // the `\r` cannot submit a message the agent is still reading in.
     let cap = Instant::now() + ECHO_CAP;
     let mut heard = false;
+    let mut echo = Vec::new();
     loop {
         let left = cap.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
         match listen(
+            session,
             &mut rx,
             &mut mode,
             if heard { ECHO_QUIET.min(left) } else { left },
+            Some(&mut echo),
         )
         .await
         {
@@ -423,7 +465,76 @@ async fn deliver(session: &Arc<Session>, prompt: &str, at_launch: bool) -> Resul
     if !mode.on || session.exited().is_some() {
         return Err("the agent's input closed before the prompt was submitted".to_owned());
     }
+    // **And the prompt has to be on screen.** Bracketed paste is on from the moment
+    // an agent's TUI starts, including the first-run screens before its input —
+    // trust this folder, sign in, update — and a `\r` there picks the screen's
+    // default answer with nobody watching. The window gets away with the same gate
+    // because a person is looking at the pane; here, no echo means no `\r`, and
+    // the start goes back to the human.
+    if !shows_paste(prompt, &echo) {
+        return Err(
+            "the prompt did not show in the agent's input, so it was not submitted".to_owned(),
+        );
+    }
     send(session, b"\r".to_vec()).await
+}
+
+/// How much output after the paste is kept to look for its echo.
+const ECHO_SINK_BYTES: usize = 256 * 1024;
+
+/// Whether `echo` — the agent's output after the paste — shows the pasted text:
+/// the start of the prompt, compared without whitespace or escape sequences (the
+/// TUI wraps and colours it), or the placeholder an agent draws for a long paste
+/// (Claude's and Codex's both say "Pasted").
+fn shows_paste(prompt: &str, echo: &[u8]) -> bool {
+    let shown: String = strip_escapes(&String::from_utf8_lossy(echo))
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    if shown.to_lowercase().contains("pasted") {
+        return true;
+    }
+    let head: String = prompt
+        .chars()
+        .filter(|c| !c.is_whitespace() && !c.is_control())
+        .take(16)
+        .collect();
+    !head.is_empty() && shown.contains(&head)
+}
+
+/// Text with CSI and OSC sequences and other control characters taken out.
+fn strip_escapes(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\x1b' {
+            if !c.is_control() {
+                out.push(c);
+            }
+            continue;
+        }
+        match chars.next() {
+            // CSI: parameters, then one final byte in @..~.
+            Some('[') => {
+                for c in chars.by_ref() {
+                    if ('@'..='~').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            // OSC: up to BEL or ST.
+            Some(']') => {
+                while let Some(c) = chars.next() {
+                    if c == '\x07' || (c == '\x1b' && chars.peek() == Some(&'\\')) {
+                        chars.next_if_eq(&'\\');
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// The file a launch prompt was staged to, while nobody has claimed it.

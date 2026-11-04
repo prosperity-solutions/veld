@@ -934,8 +934,9 @@ impl SettingKey {
                 "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
                  Veld starts its agent at once, in the background, with the prompt as the agent \
                  wrote it — open the worktree to find it already working. It still waits for \
-                 you when the agent pane's command differs from your main checkout's, or when the \
-                 agent never takes the prompt. Off: it waits in Waiting for you until you open \
+                 you when the worktree was cut from the agent's own commits, when the agent \
+                 pane's command differs from your main checkout's, or when the agent never \
+                 shows the prompt. Off: it waits in Waiting for you until you open \
                  it. Until you set this, a review switch you saved on keeps it off.",
                 Git,
             ),

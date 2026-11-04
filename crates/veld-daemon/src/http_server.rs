@@ -198,7 +198,10 @@ pub async fn run_http_server(share_manager: Arc<crate::share::manager::ShareMana
     // before the listener binds, so no attach can race a half-adopted registry.
     pty::adopt_existing_sessions().await;
     // After adoption, so an agent a previous daemon left mid-start is in the
-    // registry to be hung up; before the reaper and the listener.
+    // registry to be hung up. **Before the listener binds, and it must stay
+    // there**: what stops a window's attach retiring a `Launching` hand-off is
+    // `autostart::in_progress`, which is memory and empty after a restart — so
+    // every `Launching` row has to be gone before anything can mint a ticket.
     pty::give_back_interrupted_handoffs().await;
     pty::spawn_session_reaper();
     // The `$BROWSER` shims every new session's environment points at. Here rather

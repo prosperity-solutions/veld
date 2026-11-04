@@ -163,12 +163,14 @@ requests at runtime — branding rule.
   ungrouped section (`""` → `""`) is a no-op that sends no PATCH at all. The
   pending agent pane is a `worktree_handoffs` row (v18) naming a session id the
   daemon chose. **By default the daemon starts it itself** (`worktree.autostartHandoffs`,
-  `pty/autostart.rs`) — only when the pane is declared identically in the project's
-  main checkout and the new one, so an agent cannot commit a command and have it run
-  unwatched. The row's `started` column (v22) is `HandoffLaunch`: `Launching` while
-  it spawns the session through the same `prepare_ticket` a window's ticket goes
+  `pty/autostart.rs`) — never for `--from-here`, and only when the pane is declared
+  identically in the project's main checkout and the new one, so an agent cannot
+  commit a command and have it run unwatched. The row's `started` column (v22) is
+  `HandoffLaunch`: `Launching` — written with the hand-off itself, after
+  `autostart::begin` claims a slot — while it spawns the session through the same `prepare_ticket` a window's ticket goes
   through and hands the agent the prompt (at launch where it takes one, else typed
-  behind the bracketed-paste gate `promptDelivery.ts` uses), then `Running`. While
+  behind the bracketed-paste gate `promptDelivery.ts` uses, with the `\r` sent
+  only once the paste visibly echoed), then `Running`. While
   `Launching`, `GET …/handoff` answers `409 starting` (the window asks again in 2s)
   and an attach does not retire the row; a daemon that stops mid-start leaves it
   `Launching`, and the next boot hangs the agent up and gives it back. No window is

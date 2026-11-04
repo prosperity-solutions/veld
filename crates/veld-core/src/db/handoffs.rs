@@ -78,6 +78,19 @@ pub enum HandoffLaunch {
 }
 
 impl HandoffLaunch {
+    /// The stored number. Every query on the column binds this rather than
+    /// spelling a literal, so a new state is a compiler error everywhere it
+    /// matters.
+    fn column(self) -> i64 {
+        match self {
+            Self::Waiting => 0,
+            Self::Launching => 1,
+            Self::Running => 2,
+        }
+    }
+
+    /// A number this build does not know reads as `Waiting`: the window then
+    /// starts the agent itself, the behaviour before the column existed.
     fn from_column(v: i64) -> Self {
         match v {
             1 => Self::Launching,
@@ -214,11 +227,21 @@ impl Db {
     /// The session ids of every hand-off the daemon is starting or started and no
     /// window has attached to yet — sessions the detach reaper must leave alone,
     /// since nobody has had the chance to open them.
+    ///
+    /// **Not "agents alive"**: a `Running` row can name a session that has since
+    /// died. `GET /api/worktrees/{id}/handoff` is what notices and moves it back to
+    /// `Waiting`.
     pub fn started_handoff_sessions(&self) -> Result<Vec<String>, DbError> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare_cached("SELECT session_id FROM worktree_handoffs WHERE started != 0")?;
-        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut stmt = conn
+            .prepare_cached("SELECT session_id FROM worktree_handoffs WHERE started IN (?1, ?2)")?;
+        let rows = stmt.query_map(
+            params![
+                HandoffLaunch::Launching.column(),
+                HandoffLaunch::Running.column()
+            ],
+            |r| r.get(0),
+        )?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -234,15 +257,10 @@ impl Db {
         to: HandoffLaunch,
         pane: Option<&str>,
     ) -> Result<bool, DbError> {
-        let column = |l: HandoffLaunch| match l {
-            HandoffLaunch::Waiting => 0,
-            HandoffLaunch::Launching => 1,
-            HandoffLaunch::Running => 2,
-        };
         let n = self.lock().execute(
             "UPDATE worktree_handoffs SET started = ?4, pane = COALESCE(?5, pane)
              WHERE worktree_id = ?1 AND session_id = ?2 AND started = ?3",
-            params![worktree_id, session_id, column(from), column(to), pane],
+            params![worktree_id, session_id, from.column(), to.column(), pane],
         )?;
         Ok(n > 0)
     }
@@ -253,14 +271,18 @@ impl Db {
     /// agent still running under them; the next window starts each one afresh.
     pub fn reset_launching_handoffs(&self) -> Result<Vec<(i64, String)>, DbError> {
         let conn = self.lock();
+        let (launching, waiting) = (
+            HandoffLaunch::Launching.column(),
+            HandoffLaunch::Waiting.column(),
+        );
         let mut stmt = conn
-            .prepare("SELECT worktree_id, session_id FROM worktree_handoffs WHERE started = 1")?;
+            .prepare("SELECT worktree_id, session_id FROM worktree_handoffs WHERE started = ?1")?;
         let rows: Vec<(i64, String)> = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map(params![launching], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<Result<_, _>>()?;
         conn.execute(
-            "UPDATE worktree_handoffs SET started = 0 WHERE started = 1",
-            [],
+            "UPDATE worktree_handoffs SET started = ?2 WHERE started = ?1",
+            params![launching, waiting],
         )?;
         Ok(rows)
     }

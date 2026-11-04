@@ -102,10 +102,12 @@ pub enum WorktreeCommand {
 
         /// Print `{"id", "path", "branch", "alias", "name", "waiting", "starting",
         /// "agent", "outfit"}` on stdout. `waiting` is whether an agent goes with
-        /// the worktree; `starting` whether Veld is starting it now rather than
-        /// when the human opens it; `agent` is the pane named, or null for the
-        /// default;
-        /// `outfit` is the profile it wears, or null when it follows the clone's.
+        /// the worktree; `starting` whether Veld took its start on rather than
+        /// leaving it for when the human opens it (it can still fall back to
+        /// waiting if the agent never takes the prompt); `agent` is the pane Veld
+        /// is starting — or, when it waits, the pane named, null for the human's
+        /// usual one; `outfit` is the profile it wears, or null when it follows
+        /// the clone's.
         #[arg(long)]
         json: bool,
 
