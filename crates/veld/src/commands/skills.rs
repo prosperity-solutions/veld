@@ -147,8 +147,9 @@ const TOPICS: &[Topic] = &[
         name: "ide",
         summary: "Show the human a file or a page beside your terminal (`veld ide open`), \
                   read the references they copy back, hand a task off to a new worktree \
-                  (`veld ide worktree new`), pick its outfit profile, and restart yourself \
-                  (`veld agent restart`).",
+                  (`veld ide worktree new`), pick its outfit profile, restart yourself \
+                  (`veld agent restart`), and link a pull request back to your session \
+                  (`veld agent link`).",
         body: include_str!("skills/ide.md"),
     },
     Topic {

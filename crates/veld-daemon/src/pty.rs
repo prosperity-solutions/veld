@@ -1972,7 +1972,11 @@ async fn resolve_pane(
 /// whether that row could exist. Fails **closed**: an unresolvable declaring
 /// root, an unreadable config or a missing pane all mean "no list was offered",
 /// which refuses the adopt rather than allowing one nothing vouched for.
-fn declares_sessions_at(db: &veld_core::db::Db, worktree_id: i64, spec_id: &str) -> bool {
+pub(super) fn declares_sessions_at(
+    db: &veld_core::db::Db,
+    worktree_id: i64,
+    spec_id: &str,
+) -> bool {
     let Ok(Some(wt)) = db.get_worktree(worktree_id) else {
         return false;
     };

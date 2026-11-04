@@ -3184,6 +3184,24 @@ fn extensions_view_for(declared_cfg: Option<&veld_core::config::VeldConfig>) -> 
         .unwrap_or_default()
 }
 
+/// Whether `wt` declares a pane `spec` that is available here and that a new tab
+/// can adopt an earlier conversation in — what a session link's resume needs
+/// before it offers to start one.
+///
+/// **The same two tests the adopt itself passes** (`pty::resolve_pane`'s
+/// `PaneMode::Adopt`): a `resume` command, and a `sessions` picker declared in
+/// the declaring root. A pane with `resume` alone would be offered here and then
+/// refused with a 409 in the tab the resume opened.
+pub(super) fn pane_can_resume(db: &Db, wt: WorktreeRecord, spec: &str) -> bool {
+    let id = wt.id;
+    let offered = worktree_view(db, wt)
+        .ide
+        .panes
+        .iter()
+        .any(|p| p.id == spec && p.kind == "terminal" && p.available && p.can_resume);
+    offered && super::pty::declares_sessions_at(db, id, spec)
+}
+
 fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     worktree_view_with(db, wt, &mut DeclaredConfigs::new(), None)
 }

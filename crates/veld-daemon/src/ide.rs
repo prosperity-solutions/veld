@@ -734,6 +734,12 @@ struct Hello {
     /// Free text, bounded, and rendered — never used to route anything.
     #[serde(default)]
     label: String,
+    /// Whether this is a main window, which shows worktrees, rather than a detached
+    /// one holding a single pane. Only a main window is sent a session link's
+    /// reveal; a detached one is at most raised (see [`push_reveal`]). Absent reads as `false`: a client too
+    /// old to say would not understand the request anyway.
+    #[serde(default)]
+    main: bool,
 }
 
 /// Client → daemon.
@@ -934,6 +940,28 @@ enum ServerMsg {
         mode: &'static str,
         prompt: String,
     },
+    /// Take the user to a worktree, and to one of its terminals — a session link
+    /// was opened (`/session/<id>`). `session_id` is the tab to bring forward, when
+    /// it is still open; `resume` asks for a new tab of a project pane adopting an
+    /// earlier conversation instead, and is only ever sent after a click on the
+    /// link's page, because it starts a process.
+    ///
+    /// Sent to **one** client — see [`push_reveal`] for which.
+    RevealPane {
+        worktree_id: i64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        session_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        resume: Option<ResumeRequest>,
+    },
+}
+
+/// What [`ServerMsg::RevealPane`] asks a window to start: the project pane `spec`,
+/// adopting `session` — the same pair the earlier-sessions picker hands a pane.
+#[derive(Debug, Clone, Serialize)]
+pub struct ResumeRequest {
+    pub spec: String,
+    pub session: String,
 }
 
 /// Ask the window showing `worktree_id` to restart one of its agent panes. Returns
@@ -953,6 +981,32 @@ pub async fn push_restart(
     let reg = REGISTRY.lock().await;
     reg.showing(worktree_id)
         .is_some_and(|client| client.tx.send(msg).is_ok())
+}
+
+/// Take a window to `worktree_id`, and to `session_id` or a resumed conversation in
+/// it, for a session link. Returns which kind of window was asked, or `None` when
+/// there was none to ask — the link's page then opens the IDE itself.
+///
+/// **The window showing the worktree if there is one** (its claim), because it is
+/// the one that can switch to the tab without asking anybody to yield. Otherwise
+/// a Veld Desktop main window — one with the worktree mounted first, else the
+/// newest — which claims it the way a click in its rail would. A terminal that
+/// was moved to a detached window raises that window instead. A browser tab is
+/// never picked for a worktree it is not already showing: it cannot bring itself
+/// forward, and the page the link opened is a better place to show the worktree
+/// than a tab the user is not looking at. A detached window is never sent a
+/// reveal — it shows one pane, no worktree — only raised, and only when it keeps
+/// the session.
+///
+/// An Electron window is raised with [`ServerMsg::Focus`] as well, since being
+/// sent somewhere unseen is no use to the person who clicked.
+pub async fn push_reveal(
+    worktree_id: i64,
+    session_id: Option<String>,
+    resume: Option<ResumeRequest>,
+) -> Option<ClientKind> {
+    let reg = REGISTRY.lock().await;
+    reg.reveal(worktree_id, session_id, resume)
 }
 
 /// What [`push_open`] asks a window to show.
@@ -1040,6 +1094,9 @@ struct Client {
     /// assumed it could would tear down the live client's state.
     conn: u64,
     info: ClientInfo,
+    /// [`Hello::main`]. Kept off [`ClientInfo`], which is broadcast and has no
+    /// use for it.
+    main: bool,
     /// Frames queued towards this client's socket.
     tx: mpsc::UnboundedSender<ServerMsg>,
     /// Worktrees whose panes this client has mounted.
@@ -1149,6 +1206,7 @@ pub(super) async fn declare_kept_for_test(client_id: &str, session_ids: &[&str])
             kind: ClientKind::Browser,
             label: client_id.to_owned(),
         },
+        main: true,
         tx,
         holds: HashSet::new(),
         keeps: HashSet::new(),
@@ -1447,6 +1505,53 @@ impl Registry {
         Some(waits)
     }
 
+    /// [`push_reveal`]'s half that needs no lock: pick the window, send it there.
+    fn reveal(
+        &self,
+        worktree_id: i64,
+        session_id: Option<String>,
+        resume: Option<ResumeRequest>,
+    ) -> Option<ClientKind> {
+        // A terminal moved out to a detached window lives only there: no main
+        // window's layout names it, so a main window would land on nothing. That
+        // window shows no worktree to switch, so it is only raised.
+        if let Some(session) = &session_id {
+            if let Some(detached) = self.clients.values().find(|c| {
+                !c.main && c.info.kind == ClientKind::Electron && c.keeps.contains(session)
+            }) {
+                detached.tx.send(ServerMsg::Focus).ok()?;
+                return Some(ClientKind::Electron);
+            }
+        }
+        // The window *showing* it — its claim — and not [`Self::showing`]'s
+        // fallback to a client with its panes mounted in the background: a browser
+        // tab that once had the worktree open must not take the jump from a Veld
+        // Desktop window that can come forward.
+        let client = self
+            .claims
+            .get(&worktree_id)
+            .and_then(|owner| self.clients.get(owner))
+            .filter(|c| c.main)
+            .or_else(|| {
+                self.clients
+                    .values()
+                    .filter(|c| c.main && c.info.kind == ClientKind::Electron)
+                    .max_by_key(|c| (c.holds.contains(&worktree_id), c.conn))
+            })?;
+        client
+            .tx
+            .send(ServerMsg::RevealPane {
+                worktree_id,
+                session_id,
+                resume,
+            })
+            .ok()?;
+        if client.info.kind == ClientKind::Electron {
+            let _ = client.tx.send(ServerMsg::Focus);
+        }
+        Some(client.info.kind)
+    }
+
     /// The connected client that should receive a request about `worktree_id`.
     ///
     /// The one **showing** it if anybody is, else one that has its panes mounted
@@ -1661,6 +1766,7 @@ async fn serve_channel(socket: WebSocket, minted: String) {
             Client {
                 conn,
                 info: info.clone(),
+                main: hello.main,
                 tx,
                 holds: HashSet::new(),
                 keeps: HashSet::new(),
@@ -2039,6 +2145,7 @@ mod tests {
                     kind,
                     label: id.to_owned(),
                 },
+                main: true,
                 tx,
                 holds: HashSet::new(),
                 keeps: HashSet::new(),
@@ -2070,6 +2177,85 @@ mod tests {
             focus_holder,
             seq,
         )
+    }
+
+    /// How many reveals and focuses `msgs` holds.
+    fn reveals(msgs: &[ServerMsg]) -> (usize, usize) {
+        let reveal = msgs
+            .iter()
+            .filter(|m| matches!(m, ServerMsg::RevealPane { .. }))
+            .count();
+        let focus = msgs
+            .iter()
+            .filter(|m| matches!(m, ServerMsg::Focus))
+            .count();
+        (reveal, focus)
+    }
+
+    /// A session link goes to the main window showing the worktree; with none, to
+    /// a Veld Desktop main window — never to a detached window (except raising the
+    /// one that keeps the session), never to a browser tab that is not showing
+    /// it — and only Electron is raised.
+    #[test]
+    fn a_session_link_goes_to_the_right_window() {
+        let mut reg = Registry::default();
+        let mut tab = connect(&mut reg, "tab", ClientKind::Browser);
+        let mut detached = connect(&mut reg, "detached", ClientKind::Electron);
+        reg.clients.get_mut("detached").unwrap().main = false;
+        assert_eq!(
+            reg.reveal(7, None, None),
+            None,
+            "a browser tab elsewhere is not picked"
+        );
+        assert_eq!(reveals(&drain(&mut tab)), (0, 0));
+        assert_eq!(
+            reveals(&drain(&mut detached)),
+            (0, 0),
+            "nor is a detached window"
+        );
+
+        let mut old = connect(&mut reg, "old", ClientKind::Electron);
+        let mut new = connect(&mut reg, "new", ClientKind::Electron);
+        assert_eq!(
+            reg.reveal(7, Some("s".into()), None),
+            Some(ClientKind::Electron)
+        );
+        assert_eq!(
+            reveals(&drain(&mut new)),
+            (1, 1),
+            "the newest window, raised"
+        );
+        assert_eq!(reveals(&drain(&mut old)), (0, 0));
+
+        // A browser tab with the worktree only mounted in the background does not
+        // take it from Desktop; the one *showing* it (its claim) does, unraised.
+        reg.clients.get_mut("tab").unwrap().holds.insert(7);
+        assert_eq!(
+            reg.reveal(7, Some("s".into()), None),
+            Some(ClientKind::Electron)
+        );
+        assert_eq!(reveals(&drain(&mut tab)), (0, 0));
+        assert_eq!(reveals(&drain(&mut new)), (1, 1));
+        reg.claims.insert(7, "tab".to_owned());
+        assert_eq!(
+            reg.reveal(7, Some("s".into()), None),
+            Some(ClientKind::Browser)
+        );
+        assert_eq!(reveals(&drain(&mut tab)), (1, 0));
+        assert_eq!(reveals(&drain(&mut new)), (0, 0));
+
+        // A tab living in a detached window: that window is raised, nothing else.
+        reg.clients
+            .get_mut("detached")
+            .unwrap()
+            .keeps
+            .insert("moved".to_owned());
+        assert_eq!(
+            reg.reveal(7, Some("moved".into()), None),
+            Some(ClientKind::Electron)
+        );
+        assert_eq!(reveals(&drain(&mut detached)), (0, 1));
+        assert_eq!(reveals(&drain(&mut tab)), (0, 0));
     }
 
     /// Everything queued for this client so far, so a test can assert on what a

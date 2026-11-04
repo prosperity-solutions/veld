@@ -1278,7 +1278,8 @@ impl SettingKey {
                 "Adds a short paragraph to what Claude Code, Codex CLI and Pi are told when they start \
                  in a Veld terminal: to name its worktree first (`veld ide worktree name`), that \
                  `veld ide open` puts a file or a page next to that terminal, and that separate work they come across can be offered to you as a \
-                 new worktree (`veld ide worktree new`). Nothing of yours is edited, and the text \
+                 new worktree (`veld ide worktree new`), and to end a pull request with a link back \
+                 to its session (`veld agent link`, which \"Link pull requests back to their session\" turns off). Nothing of yours is edited, and the text \
                  is the same every time. \
                  Works without the row above. Takes effect for new agents.",
                 Activity,
@@ -1303,6 +1304,21 @@ impl SettingKey {
                 },
                 requires: None,
             },
+            Self::TerminalSessionLinks => toggle_in(
+                "Link pull requests back to their session",
+                "When a coding agent in a Veld terminal opens a pull request, it adds a link to \
+                 that terminal at the end of the description (`veld agent link`), beside any \
+                 other sessions' links. Clicking it on \
+                 this machine brings you to the worktree and the tab the work came from. On any \
+                 other machine it opens nothing: another Veld says the session is not there, \
+                 and a browser without Veld cannot connect. The link names nothing but an \
+                 opaque id, and its port is the one your dashboard uses now, so switching \
+                 between privileged and unprivileged setup breaks older links. Agents are asked to add it by the row \
+                 \"Tell coding agents how to show you files\" above; off here, they are told \
+                 links are off and add none.",
+                Activity,
+                NOTICING,
+            ),
             Self::ActivityShowWorking => toggle_in(
                 "Show what is working",
                 "A spinner for any worktree with something running. Accuracy varies by \

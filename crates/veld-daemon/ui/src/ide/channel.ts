@@ -28,6 +28,7 @@
 import { api } from "../api";
 import { dispatchOpenFile, dispatchOpenUrl } from "../files/openRequests";
 import { dispatchRestartPane } from "../panes/restartRequests";
+import { dispatchRevealPane } from "../panes/revealRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
 /** What kind of client this is, which decides whether it can be raised. */
@@ -275,6 +276,12 @@ class Channel {
           ...(resume && resume !== minted ? { resume } : {}),
           kind: this.kind,
           label: this.label,
+          // A detached window relays nothing and shows no worktree, so the daemon
+          // must not send it anywhere — see `push_reveal`. **This reuses
+          // `relayInboxEvents` as "is a main window"**: if detached windows ever
+          // relay inbox events, give this its own option, or session links start
+          // landing in windows that show no worktree.
+          main: this.relayInboxEvents,
         }),
       );
       // Re-report what this page holds. The daemon's copy died with the old
@@ -439,6 +446,12 @@ class Channel {
         // detached window holds none of its tabs.
         if (!this.relayInboxEvents) return;
         dispatchRestartPane(msg);
+        return;
+      case "reveal_pane":
+        // A session link was opened. Sent to one main window only, and a detached
+        // one shows no worktree to go to — same gate as `restart_pane`.
+        if (!this.relayInboxEvents) return;
+        dispatchRevealPane(msg);
         return;
       default:
         // An older client meeting a newer daemon. Ignoring is right: every
