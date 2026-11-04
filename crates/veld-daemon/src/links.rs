@@ -252,16 +252,7 @@ pub(super) async fn remove(
                     ));
                 }
             },
-            None => {
-                let ids = db
-                    .worktree_links(id)
-                    .map_err(db_err)?
-                    .into_iter()
-                    .map(|l| l.id)
-                    .collect();
-                db.clear_worktree_links(id).map_err(db_err)?;
-                ids
-            }
+            None => db.clear_worktree_links(id).map_err(db_err)?,
         };
         Ok(Json(serde_json::json!({
             "worktree": worktree_json(&db, id)?,

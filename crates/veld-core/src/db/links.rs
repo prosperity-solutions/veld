@@ -26,7 +26,7 @@ use rusqlite::{OptionalExtension as _, params};
 use serde::Serialize;
 
 use super::{Db, DbError, now_str};
-use crate::ide::{PaneIcon, is_web_url, parse_icon_name};
+use crate::ide::{PaneIcon, is_web_url, parse_icon_name, parse_web_url};
 
 /// Links one worktree may carry. A cap, not a target: past a handful the top bar
 /// folds them into a menu, and twenty is far beyond what a human scans.
@@ -41,6 +41,12 @@ pub const MAX_LINK_URL_LEN: usize = 2048;
 pub const MAX_LINK_ID_CHARS: usize = 128;
 
 /// What a link is, which decides its default glyph and how the top bar groups it.
+///
+/// A new kind also goes in `linkModel.ts` (`LinkKind`, `KIND_ORDER`,
+/// `DEFAULT_GLYPH`, `PLURAL`), the `--kind` help, `veld agent skills ide` and the
+/// agent prompt; a new tone in `linkModel.ts` (`LinkTone`, `TONES` — ranked by
+/// severity there) and the `tone-*` rules in `styles.css`.
+/// `the_ui_knows_every_kind_and_tone` catches the `linkModel.ts` half.
 /// `pr` links are also the ones the rail shows beside the worktree's name.
 pub const LINK_KINDS: &[&str] = &["pr", "preview", "issue", "doc", "link"];
 /// A link's colour — the vocabulary extension badges use.
@@ -140,6 +146,20 @@ fn check(input: LinkInput) -> Result<CheckedLink, LinkRejected> {
         return Err(LinkRejected(format!(
             "{url:?} is not an http(s) URL — a link opens in a browser"
         )));
+    }
+    // The parser a browser uses, as `open-target` does: a host is required, and
+    // credentials in the URL would show in the label a default derives from it.
+    match reqwest::Url::parse(&url) {
+        Ok(parsed) if parse_web_url(&url).is_some() => {
+            if !parsed.username().is_empty() || parsed.password().is_some() {
+                return Err(LinkRejected(
+                    "the URL carries credentials (user:password@) — pin it without them".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(LinkRejected(format!("{url:?} is not a URL with a host")));
+        }
     }
     if url.len() > MAX_LINK_URL_LEN || url.chars().any(char::is_whitespace) {
         return Err(LinkRejected(format!(
@@ -249,6 +269,10 @@ fn check_link_id(id: &str) -> Result<(), LinkRejected> {
     }
 }
 
+/// **Mirrored by `normalizeUrl` in `crates/veld-daemon/ui/src/components/linkModel.ts`**,
+/// which hides a link a project badge already links to; change both, and the
+/// shared cases in both test suites.
+///
 /// The id a URL is filed under when none is given — and what `rm <url>` looks
 /// for: scheme and host lowercased, the query, fragment and trailing slash
 /// dropped. So `…/pull/12/` and `…/pull/12#issuecomment-1` are the same link.
@@ -372,9 +396,13 @@ impl Db {
                 },
             )
             .optional()?;
+        // Without an id, a URL also finds the link pinned under one (as `rm <url>`
+        // does). With an id the URL was first pinned without, that link is adopted
+        // under the id rather than pinned a second time.
+        let wanted = normalize_link_url(&link.url);
         let existing = match by_id {
             Some(row) => Some(row),
-            None if !link.explicit_id => {
+            None => {
                 let mut stmt = tx.prepare(
                     "SELECT link_id, url, branch FROM worktree_links WHERE worktree_id = ?1
                      ORDER BY created_at, rowid",
@@ -388,10 +416,22 @@ impl Db {
                         ))
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows.into_iter()
-                    .find(|(_, url, _)| normalize_link_url(url) == link.id)
+                drop(stmt);
+                let found = rows.into_iter().find(|(id, url, _)| {
+                    normalize_link_url(url) == wanted && (!link.explicit_id || *id == wanted)
+                });
+                match found {
+                    Some((old_id, url, branch)) if link.explicit_id => {
+                        tx.execute(
+                            "UPDATE worktree_links SET link_id = ?3
+                             WHERE worktree_id = ?1 AND link_id = ?2",
+                            params![worktree_id, old_id, link.id],
+                        )?;
+                        Some((link.id.clone(), url, branch))
+                    }
+                    other => other,
+                }
             }
-            None => None,
         };
         let exists = existing.is_some();
         let id = existing
@@ -402,7 +442,8 @@ impl Db {
             let moved = normalize_link_url(&stored_url) != normalize_link_url(&link.url);
             // A new URL under the same id is a new deploy, not the same page: what
             // the caller did not pass starts over rather than carrying the last
-            // one's tone, tooltip or label. Otherwise `COALESCE(?, column)` keeps
+            // one's tone, tooltip, icon or label. "New" is by `normalize_link_url`,
+            // so a changed query or fragment is the same page; `kind` always stays. Otherwise `COALESCE(?, column)` keeps
             // what is stored. The branch is the one the link was first set on —
             // re-toning a pull request from another branch does not adopt it — and
             // `created_at` is never touched, so the top bar's order holds.
@@ -583,13 +624,24 @@ impl Db {
         Ok(found)
     }
 
-    /// Remove every link of a worktree. Returns how many there were.
-    pub fn clear_worktree_links(&self, worktree_id: i64) -> Result<usize, DbError> {
-        let conn = self.lock();
-        Ok(conn.execute(
+    /// Remove every link of a worktree, in one transaction. Returns their ids.
+    pub fn clear_worktree_links(&self, worktree_id: i64) -> Result<Vec<String>, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let ids = {
+            let mut stmt = tx.prepare(
+                "SELECT link_id FROM worktree_links WHERE worktree_id = ?1
+                 ORDER BY created_at, rowid",
+            )?;
+            stmt.query_map(params![worktree_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.execute(
             "DELETE FROM worktree_links WHERE worktree_id = ?1",
             params![worktree_id],
-        )?)
+        )?;
+        tx.commit()?;
+        Ok(ids)
     }
 }
 
@@ -844,7 +896,7 @@ mod tests {
         let by_repo = db.links_in_repo(Path::new("/repo")).unwrap();
         let ids: Vec<_> = by_repo[&wt].iter().map(|l| l.id.as_str()).collect();
         assert_eq!(ids, ["https://a.dev", "https://b.dev"]);
-        assert_eq!(db.clear_worktree_links(wt).unwrap(), 2);
+        assert_eq!(db.clear_worktree_links(wt).unwrap().len(), 2);
     }
 
     #[test]
@@ -980,6 +1032,105 @@ mod tests {
         ] {
             let err = db.set_worktree_link(wt, input).unwrap_err();
             assert!(err.0.contains("plain text"), "{err}");
+        }
+    }
+
+    #[test]
+    fn an_id_given_later_adopts_the_link_pinned_without_one() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        set(
+            &db,
+            wt,
+            LinkInput {
+                kind: Some("preview".into()),
+                ..url("https://web-1.dev")
+            },
+        );
+        let adopted = set(
+            &db,
+            wt,
+            LinkInput {
+                id: Some("web".into()),
+                ..url("https://web-1.dev/")
+            },
+        );
+        assert_eq!(adopted.id, "web");
+        assert_eq!(adopted.kind, "preview");
+        assert_eq!(db.worktree_links(wt).unwrap().len(), 1);
+        // A link filed under another explicit id is not taken over.
+        set(
+            &db,
+            wt,
+            LinkInput {
+                id: Some("api".into()),
+                ..url("https://web-1.dev")
+            },
+        );
+        assert_eq!(db.worktree_links(wt).unwrap().len(), 2);
+    }
+
+    /// The same cases `linkModel.test.ts` runs against `normalizeUrl`.
+    #[test]
+    fn normalization_matches_the_ui_cases() {
+        for (input, normalized) in [
+            ("https://A.dev/x/", "https://a.dev/x"),
+            ("https://a.dev/x#y", "https://a.dev/x"),
+            ("https://a.dev/x?q=1", "https://a.dev/x"),
+            (
+                "HTTPS://GitHub.com/O/r/pull/7/",
+                "https://github.com/O/r/pull/7",
+            ),
+            ("https://a.dev", "https://a.dev"),
+        ] {
+            assert_eq!(normalize_link_url(input), normalized, "{input}");
+        }
+    }
+
+    #[test]
+    fn the_ui_knows_every_kind_and_tone() {
+        let model = include_str!("../../../veld-daemon/ui/src/components/linkModel.ts");
+        let list = |name: &str| -> Vec<String> {
+            let start = model.find(&format!("{name}: readonly")).expect(name);
+            let body = &model[start..start + model[start..].find(';').unwrap()];
+            body.split('"')
+                .skip(1)
+                .step_by(2)
+                .map(str::to_owned)
+                .collect()
+        };
+        let mut kinds = list("KIND_ORDER");
+        let mut tones = list("TONES");
+        kinds.sort();
+        tones.sort();
+        let mut want_kinds: Vec<_> = LINK_KINDS.iter().map(|k| (*k).to_owned()).collect();
+        let mut want_tones: Vec<_> = LINK_TONES.iter().map(|t| (*t).to_owned()).collect();
+        want_kinds.sort();
+        want_tones.sort();
+        assert_eq!(
+            kinds, want_kinds,
+            "KIND_ORDER in linkModel.ts has drifted from LINK_KINDS"
+        );
+        assert_eq!(
+            tones, want_tones,
+            "TONES in linkModel.ts has drifted from LINK_TONES"
+        );
+    }
+
+    #[test]
+    fn a_url_needs_a_host_and_no_credentials() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        for (u, needle) in [
+            ("https://", "with a host"),
+            (
+                "https://x-access-token:ghp_secret@github.com/o/r/pull/1",
+                "credentials",
+            ),
+            ("https://user@github.com/o/r", "credentials"),
+        ] {
+            let err = db.set_worktree_link(wt, url(u)).unwrap_err();
+            assert!(err.0.contains(needle), "{u}: {err}");
         }
     }
 }

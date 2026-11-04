@@ -1,5 +1,7 @@
 import type { PaneIcon, WorktreeLink } from "../api";
 
+/** Mirrors `LINK_KINDS` / `LINK_TONES` in `crates/veld-core/src/db/links.rs`; a Rust
+ *  test (`the_ui_knows_every_kind_and_tone`) fails when these lists drift. */
 export type LinkKind = "pr" | "preview" | "issue" | "doc" | "link";
 export type LinkTone = "neutral" | "info" | "success" | "warning" | "danger";
 
@@ -86,8 +88,9 @@ export function groupLabel(kind: LinkKind, count: number): string {
 
 /**
  * A URL as `veld ide link` files it: scheme and host lowercased, the query,
- * fragment and trailing slash dropped (`normalize_link_url` in Rust). Two URLs that
- * normalize alike are the same link.
+ * fragment and trailing slash dropped. **Mirrors `normalize_link_url` in
+ * `crates/veld-core/src/db/links.rs`**; change both, and the shared cases in both
+ * test suites. Two URLs that normalize alike are the same link.
  */
 export function sameLink(a: string, b: string): boolean {
   return normalizeUrl(a) === normalizeUrl(b);
@@ -101,7 +104,10 @@ function normalizeUrl(url: string): string {
   const slash = rest.indexOf("/");
   const host = slash < 0 ? rest : rest.slice(0, slash);
   const path = slash < 0 ? "" : rest.slice(slash).replace(/\/+$/u, "");
-  return `${bare.slice(0, at).toLowerCase()}://${host.toLowerCase()}${path}`;
+  // ASCII only, as Rust's `to_ascii_lowercase`: `toLowerCase` would also fold a
+  // non-ASCII host, and the two sides would file the same URL apart.
+  const ascii = (s: string) => s.replace(/[A-Z]+/gu, (c) => c.toLowerCase());
+  return `${ascii(bare.slice(0, at))}://${ascii(host)}${path}`;
 }
 
 /**

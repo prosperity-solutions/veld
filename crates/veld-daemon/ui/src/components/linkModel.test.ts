@@ -190,6 +190,18 @@ describe("withoutBadged", () => {
     expect(withoutBadged([pr, other], [])).toHaveLength(2);
   });
 
+  it("normalizes the cases Rust's normalization_matches_the_ui_cases does", () => {
+    for (const [input, normalized] of [
+      ["https://A.dev/x/", "https://a.dev/x"],
+      ["https://a.dev/x#y", "https://a.dev/x"],
+      ["https://a.dev/x?q=1", "https://a.dev/x"],
+      ["HTTPS://GitHub.com/O/r/pull/7/", "https://github.com/O/r/pull/7"],
+      ["https://a.dev", "https://a.dev"],
+    ]) {
+      expect(sameLink(input, normalized)).toBe(true);
+    }
+  });
+
   it("compares URLs the way the daemon files them", () => {
     expect(sameLink("https://A.dev/x/", "https://a.dev/x#y")).toBe(true);
     expect(sameLink("https://a.dev/x", "https://a.dev/X")).toBe(false);
