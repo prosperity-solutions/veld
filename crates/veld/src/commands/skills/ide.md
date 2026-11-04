@@ -226,9 +226,20 @@ veld ide worktree new --branch spike/cache --name "Cache spike" --group Experime
 Veld creates the worktree in **the project your working directory is in** — run
 it from the checkout you mean; a directory outside any project Veld knows is
 refused (exit `3`), not guessed at. With a prompt it lands in the rail's
-**Waiting for you** section, marked as not started yet. The first time the human
-opens it, an agent pane starts there with your prompt as its first message, and
-from then on it is theirs. **Nothing comes back to you** — no status, no result.
+**Waiting for you** section and an agent pane **starts there right away**, in the
+background, with your prompt as its first message — nobody has to open it first.
+When the human opens the worktree they find that agent already working, and from
+then on it is theirs. If they turned that off (`worktree.autostartHandoffs`), the
+worktree is marked as not started instead, and the agent starts the first time
+they open it. It also waits for them with `--from-here` (your own commits), when
+the agent pane's command in the new worktree differs from the one in the
+project's main checkout — committing a pane of your own does not get it run
+unwatched — when the agent you named cannot start there, when only the human's
+last few terminal slots are free, or when the agent never shows the prompt in
+its input. `--json`'s `starting`
+is `true` when Veld took the start on — that last case can still send it back
+to waiting about a minute and a half later — and `false` when it waits from
+the start. **Nothing comes back to you** — no status, no result.
 Write the prompt for an agent that has none of your context: what to do, why,
 which files, how to tell it is done.
 
@@ -240,22 +251,25 @@ which files, how to tell it is done.
   long or structured one belongs in a file; the limit is 64 KiB. Without a prompt
   you get a plain worktree, filed with the user's other new worktrees, and no
   agent.
-- By default the human sees your prompt before anything runs, and can edit it,
-  start it — in the agent you named or in another agent pane of the project —
-  or move it to the trash; if they have turned that review off
-  (`worktree.reviewHandoffs`), it is sent **as you wrote it** the moment they
-  open the worktree. Write it for both: an instruction a person can judge at a
-  glance, and one that is safe to run unread.
+- By default your prompt is sent **as you wrote it**, before anyone reads it.
+  Whenever it waits instead — the human turned the immediate start off, or one
+  of the cases above applied — they open the worktree first, and then — unless
+  they also turned off the review (`worktree.reviewHandoffs`) — they see your
+  prompt before anything runs, and
+  can edit it, start it in the agent you named or another agent pane of the
+  project, or move it to the trash. Write it for both: an instruction a person
+  can judge at a glance, and one that is safe to run unread.
 - `--group` files it into one of the human's existing groups instead of
   **Waiting for you** (`--lane` is the same flag). `veld ide worktree groups` lists
   them (`--json` for `{"project", "groups"}`); a name that is not one of them is
-  refused before anything is created (exit `4`). With a prompt it still waits
-  there, marked, until they open it.
+  refused before anything is created (exit `4`). With a prompt its agent starts
+  the same way.
 - `--agent` names the pane to start (an `ide.panes` id). Leave it out and the
-  human's usual agent for this project starts. An agent this project does not
-  declare is refused before anything is created (exit `5`); if the new checkout
-  turns out not to declare it (a branch cut from `origin` without it), the
-  human's usual agent starts instead and they are told. It is the default, not a
+  project's first agent pane starts (or, when the start waits for the human, the
+  agent they usually pick). Name it when the project declares several. An agent
+  this project does not declare is refused before anything is created (exit
+  `5`); if the new checkout turns out not to declare it (a branch cut from
+  `origin` without it), another agent starts instead. It is the default, not a
   guarantee: the review can start the prompt in another agent, so keep the
   prompt free of one agent's slash commands unless it only makes sense there.
 - `--outfit` names the outfit profile the new worktree wears — see the next
@@ -277,10 +291,12 @@ retry would collide with its branch); `7` an outfit profile is needed and none
 was named, or the one named is not offered here (nothing created); `8` the
 worktree was created but outfit could not put it in that profile, so no agent
 waits in it — the message says how to fix it. `--json` prints `{"id", "path",
-"branch", "alias", "name", "waiting", "agent", "outfit"}` on stdout, where
-`waiting` says an agent is waiting to start, `agent` is the pane you named or
-`null` for the human's usual one, and `outfit` is the profile it wears or `null`
-when it follows the clone's.
+"branch", "alias", "name", "waiting", "starting", "agent", "outfit"}` on stdout,
+where `waiting` says an agent goes with the worktree, `starting` that Veld took
+its start on (false: it waits until the human opens the worktree; true can
+still fall back to waiting, see above), `agent` is the pane Veld is starting —
+or, when it waits, the pane you named, `null` for the human's usual one — and
+`outfit` is the profile it wears or `null` when it follows the clone's.
 
 Hand off one task per worktree, and only when the human would want it as its own
 branch. Each one is a checkout on their disk and a row in their rail until they

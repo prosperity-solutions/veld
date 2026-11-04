@@ -146,6 +146,25 @@ const FIXED_VERDICTS = {
  */
 const DEFAULT_ALLOW = new Set(["clipboard-read", "clipboard-write", "fullscreen", "pointer-lock"]);
 
+/**
+ * The ids still granted when the top-level page has no origin at all.
+ *
+ * A pane showing `file:`, `about:blank` or `data:` has no origin to look a rule
+ * or a stored answer up under, so `resolve` refuses it outright — and that used
+ * to include copy and paste, the one thing the maintainer asked to always work in
+ * a pane. The clipboard is the only exemption, and for a reason that holds for
+ * nothing else on the list: it is already default-allowed *everywhere*, so
+ * granting it here grants nothing an http page would not get. Every other id is
+ * either a prompt (which would have to name an origin it does not have) or a
+ * device, and both stay refused.
+ *
+ * **Main frame only.** An opaque-origin *subframe* (a `data:` or sandboxed
+ * iframe) inside an https page would otherwise get the clipboard even where the
+ * user Blocked it for that page — a Block escaped by wrapping the call in an
+ * iframe. The exemption is for the page the pane itself is showing.
+ */
+const NO_ORIGIN_ALLOW = new Set(["clipboard-read", "clipboard-write"]);
+
 /** Default ports, so an origin with no port compares equal to one with it. */
 const DEFAULT_PORTS = { http: 80, https: 443 };
 
@@ -368,8 +387,11 @@ function permissionIds(electronName, details, kind) {
  * any deny denies, any ask asks, and it is allowed only when every id is. The
  * alternative — granting the half that was allowed — would hand a page a
  * microphone stream it never got a prompt for.
+ *
+ * `mainFrame` is true when the request comes from the pane's top-level page; it
+ * only matters when there is no origin — see `NO_ORIGIN_ALLOW`.
  */
-function resolve({ electronName, details, origin, stored, rules, trustedOrigins, kind }) {
+function resolve({ electronName, details, origin, stored, rules, trustedOrigins, kind, mainFrame }) {
   const mapped = permissionIds(electronName, details, kind);
   if (mapped.verdict) {
     return { verdict: mapped.verdict, ids: [], source: mapped.unmapped ? "unmapped" : "fixed" };
@@ -380,7 +402,12 @@ function resolve({ electronName, details, origin, stored, rules, trustedOrigins,
   // that resolved to no permission veld models. Collapsing them into a single
   // "unattributable" sent the reader hunting for a missing origin that was
   // right there in the message.
-  if (!origin) return { verdict: "deny", ids, source: "no-origin" };
+  if (!origin) {
+    if (mainFrame === true && ids.length > 0 && ids.every((id) => NO_ORIGIN_ALLOW.has(id))) {
+      return { verdict: "allow", ids, source: "no-origin-clipboard" };
+    }
+    return { verdict: "deny", ids, source: "no-origin" };
+  }
   if (ids.length === 0) return { verdict: "deny", ids, source: "no-permission" };
 
   const inferred = isInferred(electronName, details);
@@ -545,6 +572,7 @@ module.exports = {
   ELECTRON_TO_VELD,
   FIXED_VERDICTS,
   DEFAULT_ALLOW,
+  NO_ORIGIN_ALLOW,
   parseOrigin,
   originKey,
   matchesPattern,

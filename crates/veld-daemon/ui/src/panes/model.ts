@@ -1773,6 +1773,16 @@ export function handoffPaneTab(spec: { id: string; label: string }, sessionId: s
 }
 
 /**
+ * The tab for a handed-off agent the daemon already started
+ * (`worktree.autostartHandoffs`): [`handoffPaneTab`] without the consent to a
+ * fresh launch. The session is running in its holder, so the pane attaches to it
+ * as a stored pane would; it must never start a second agent under the same id.
+ */
+export function startedHandoffTab(spec: { id: string; label: string }, sessionId: string): PaneTab {
+  return { id: sessionId, kind: "terminal", title: spec.label, spec: spec.id };
+}
+
+/**
  * What a queued prompt should do about this terminal, right now.
  *
  * **Pure, exported and tested, because it is the entire safety argument for

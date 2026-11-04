@@ -3,10 +3,14 @@
 //!
 //! `veld ide worktree new --prompt` is how a coding agent branches a task off into a
 //! checkout of its own: the daemon creates the worktree, files it into the
-//! rail's "Waiting for you" section ([`HANDOFF_LANE`]), and records a [`Handoff`]. The
-//! first window to show that worktree starts the agent pane under the session id
-//! recorded here with the prompt as its first message, and from then on the
-//! human drives it. Nothing reports back to the agent that handed it off.
+//! rail's "Waiting for you" section ([`HANDOFF_LANE`]), and records a [`Handoff`].
+//! The daemon then starts the agent pane itself under the session id recorded
+//! here, with the prompt as its first message, and marks it
+//! [`Handoff::launch`] `Launching`, then `Running`; the first window to show the
+//! worktree attaches to it.
+//! With `worktree.autostartHandoffs` off, that first window starts it instead.
+//! From then on the human drives it. Nothing reports back to the agent that
+//! handed it off.
 //!
 //! See `migrate_v18_worktree_handoffs` for why the row outlives a window reading
 //! it and why it cascades with its worktree.
@@ -59,6 +63,50 @@ pub fn check_handoff_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Where the daemon's own start of a hand-off's agent stands — the
+/// `worktree_handoffs.started` column (v22), `0`/`1`/`2`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandoffLaunch {
+    /// Nothing started: the first window to show the worktree starts it.
+    Waiting,
+    /// The daemon is spawning it and handing it the prompt. No window may start
+    /// or attach to it meanwhile. A row left here by a daemon that stopped
+    /// mid-start is given back at the next boot ([`Db::reset_launching_handoffs`]).
+    Launching,
+    /// The agent is running and has its prompt. The row only tells the first
+    /// window which session to attach to; that attach retires it.
+    Running,
+}
+
+impl HandoffLaunch {
+    /// The stored number. Every query on the column binds this rather than
+    /// spelling a literal, so a new state is a compiler error everywhere it
+    /// matters.
+    fn column(self) -> i64 {
+        match self {
+            Self::Waiting => 0,
+            Self::Launching => 1,
+            Self::Running => 2,
+        }
+    }
+
+    /// A number this build does not know reads as `Waiting`: the window then
+    /// starts the agent itself, the behaviour before the column existed.
+    fn from_column(v: i64) -> Self {
+        match v {
+            1 => Self::Launching,
+            2 => Self::Running,
+            _ => Self::Waiting,
+        }
+    }
+
+    /// Whether the daemon has taken the start on — the rail's hourglass is gone.
+    #[must_use]
+    pub fn taken(self) -> bool {
+        self != Self::Waiting
+    }
+}
+
 /// An agent pane waiting to be started in a handed-off worktree.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Handoff {
@@ -73,6 +121,9 @@ pub struct Handoff {
     /// The first message the agent opens with.
     pub prompt: String,
     pub created_at: String,
+    /// Where the daemon's own start of this agent stands
+    /// (`worktree.autostartHandoffs`).
+    pub launch: HandoffLaunch,
 }
 
 impl Db {
@@ -94,7 +145,8 @@ impl Db {
                  session_id = excluded.session_id,
                  pane = excluded.pane,
                  prompt = excluded.prompt,
-                 created_at = excluded.created_at",
+                 created_at = excluded.created_at,
+                 started = 0",
             params![worktree_id, session_id, pane, prompt, now_str()],
         )?;
         Ok(())
@@ -105,7 +157,7 @@ impl Db {
         let conn = self.lock();
         Ok(conn
             .query_row(
-                "SELECT worktree_id, session_id, pane, prompt, created_at
+                "SELECT worktree_id, session_id, pane, prompt, created_at, started
                  FROM worktree_handoffs WHERE worktree_id = ?1",
                 params![worktree_id],
                 |r| {
@@ -115,23 +167,30 @@ impl Db {
                         pane: r.get(2)?,
                         prompt: r.get(3)?,
                         created_at: r.get(4)?,
+                        launch: HandoffLaunch::from_column(r.get(5)?),
                     })
                 },
             )
             .optional()?)
     }
 
-    /// The session id and pane of a worktree's pending hand-off, without the
+    /// The session id, pane and whether the daemon took the start on
+    /// ([`HandoffLaunch::taken`]) of a worktree's pending hand-off, without the
     /// prompt — what every rail poll carries, where a prompt of up to 64 KiB per
     /// worktree would be paid for on every refresh by a client that only needs
     /// to know there is one.
-    pub fn handoff_session(&self, worktree_id: i64) -> Result<Option<(String, String)>, DbError> {
+    pub fn handoff_session(
+        &self,
+        worktree_id: i64,
+    ) -> Result<Option<(String, String, bool)>, DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT session_id, pane FROM worktree_handoffs WHERE worktree_id = ?1",
+            "SELECT session_id, pane, started FROM worktree_handoffs WHERE worktree_id = ?1",
         )?;
         Ok(stmt
-            .query_row(params![worktree_id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .query_row(params![worktree_id], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)? != 0))
+            })
             .optional()?)
     }
 
@@ -146,21 +205,87 @@ impl Db {
         Ok(n > 0)
     }
 
-    /// Every pending hand-off in a repo, by worktree id, as `(session_id, pane)` —
-    /// [`Self::handoff_session`] for a whole listing in one query.
+    /// Every pending hand-off in a repo, by worktree id, as `(session_id, pane,
+    /// taken)` — [`Self::handoff_session`] for a whole listing in one query.
     pub fn handoff_sessions(
         &self,
         repo_root: &std::path::Path,
-    ) -> Result<std::collections::HashMap<i64, (String, String)>, DbError> {
+    ) -> Result<std::collections::HashMap<i64, (String, String, bool)>, DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "SELECT h.worktree_id, h.session_id, h.pane FROM worktree_handoffs h
+            "SELECT h.worktree_id, h.session_id, h.pane, h.started FROM worktree_handoffs h
              JOIN worktrees w ON w.id = h.worktree_id WHERE w.repo_root = ?1",
         )?;
         let rows = stmt.query_map(params![repo_root.to_string_lossy()], |r| {
-            Ok((r.get::<_, i64>(0)?, (r.get(1)?, r.get(2)?)))
+            Ok((
+                r.get::<_, i64>(0)?,
+                (r.get(1)?, r.get(2)?, r.get::<_, i64>(3)? != 0),
+            ))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The session ids of every hand-off the daemon is starting or started and no
+    /// window has attached to yet — sessions the detach reaper must leave alone,
+    /// since nobody has had the chance to open them.
+    ///
+    /// **Not "agents alive"**: a `Running` row can name a session that has since
+    /// died. `GET /api/worktrees/{id}/handoff` is what notices and moves it back to
+    /// `Waiting`.
+    pub fn started_handoff_sessions(&self) -> Result<Vec<String>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn
+            .prepare_cached("SELECT session_id FROM worktree_handoffs WHERE started IN (?1, ?2)")?;
+        let rows = stmt.query_map(
+            params![
+                HandoffLaunch::Launching.column(),
+                HandoffLaunch::Running.column()
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Move a hand-off from `from` to `to`, matched on its session too so it can
+    /// never touch a later hand-off that replaced this one. `pane`, when given, is
+    /// the agent the daemon actually picked, which the window's tab has to name.
+    /// Returns whether it did.
+    pub fn set_handoff_launch(
+        &self,
+        worktree_id: i64,
+        session_id: &str,
+        from: HandoffLaunch,
+        to: HandoffLaunch,
+        pane: Option<&str>,
+    ) -> Result<bool, DbError> {
+        let n = self.lock().execute(
+            "UPDATE worktree_handoffs SET started = ?4, pane = COALESCE(?5, pane)
+             WHERE worktree_id = ?1 AND session_id = ?2 AND started = ?3",
+            params![worktree_id, session_id, from.column(), to.column(), pane],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Give back every hand-off a previous daemon left mid-start: its delivery
+    /// died with that daemon, so nobody knows whether the agent got the prompt.
+    /// Returns them as `(worktree_id, session_id)` so the caller can hang up any
+    /// agent still running under them; the next window starts each one afresh.
+    pub fn reset_launching_handoffs(&self) -> Result<Vec<(i64, String)>, DbError> {
+        let conn = self.lock();
+        let (launching, waiting) = (
+            HandoffLaunch::Launching.column(),
+            HandoffLaunch::Waiting.column(),
+        );
+        let mut stmt = conn
+            .prepare("SELECT worktree_id, session_id FROM worktree_handoffs WHERE started = ?1")?;
+        let rows: Vec<(i64, String)> = stmt
+            .query_map(params![launching], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<Result<_, _>>()?;
+        conn.execute(
+            "UPDATE worktree_handoffs SET started = ?2 WHERE started = ?1",
+            params![launching, waiting],
+        )?;
+        Ok(rows)
     }
 
     /// Replace a pending hand-off's prompt with the one its reviewer edited, so a
@@ -238,7 +363,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             db.handoff_session(wt).unwrap(),
-            Some(("sess-1".to_owned(), "claude".to_owned()))
+            Some(("sess-1".to_owned(), "claude".to_owned(), false))
         );
         assert!(!db.finish_handoff(wt, "a-shell-beside-it").unwrap());
         assert!(db.handoff(wt).unwrap().is_some());
@@ -257,7 +382,7 @@ mod tests {
         db.put_handoff(other, "sess-c", "", "p").unwrap();
         let got = db.handoff_sessions(std::path::Path::new("/r")).unwrap();
         assert_eq!(got.len(), 1);
-        assert_eq!(got[&a], ("sess-a".to_owned(), "claude".to_owned()));
+        assert_eq!(got[&a], ("sess-a".to_owned(), "claude".to_owned(), false));
     }
 
     /// Declared twice, here and as `HANDOFF_LANE` in the UI's `model.ts`, with

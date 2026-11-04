@@ -29,7 +29,9 @@ mod stats;
 mod var_overrides;
 mod worktrees;
 
-pub use handoffs::{HANDOFF_LANE, Handoff, MAX_HANDOFF_NAME_COLUMNS, check_handoff_name};
+pub use handoffs::{
+    HANDOFF_LANE, Handoff, HandoffLaunch, MAX_HANDOFF_NAME_COLUMNS, check_handoff_name,
+};
 pub use kv::PromotionState;
 pub use layouts::{LayoutRejected, LayoutWrite, MAX_LAYOUT_BYTES, PaneLayout};
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
@@ -1248,6 +1250,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-named-by",
         apply: migrate_v21_worktree_named_by,
     },
+    Migration {
+        version: 22,
+        name: "handoff-started",
+        apply: migrate_v22_handoff_started,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -2142,6 +2149,24 @@ fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v22: `worktree_handoffs.started` — where the daemon's own start of this
+/// hand-off's agent stands (`worktree.autostartHandoffs`, `HandoffLaunch`):
+/// `0` waiting for a window, `1` launching (spawning, handing it the prompt),
+/// `2` running.
+///
+/// A running row stays until a window attaches to that session, because it is the
+/// only thing that tells the window the pane exists: the session is live in a
+/// holder, but no layout names it yet, and without the row the agent would run
+/// where nobody could ever reach it. `2` is what tells the window to attach rather
+/// than review or type the prompt a second time; `1` and `2` are what tell the
+/// detach reaper to leave a session nobody has opened alone. Every existing row
+/// predates the setting, so `0` — it waits for a window, as it did.
+fn migrate_v22_handoff_started(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        "ALTER TABLE worktree_handoffs ADD COLUMN started INTEGER NOT NULL DEFAULT 0;",
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -2948,7 +2973,7 @@ mod tests {
 
         for _ in 0..2 {
             let db = Db::open_at(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 21);
+            assert_eq!(db.schema_version().unwrap(), 22);
         }
         let conn = Connection::open(&path).unwrap();
         let count = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -2995,7 +3020,7 @@ mod tests {
             .unwrap();
         }
         let db = Db::open_at(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 21);
+        assert_eq!(db.schema_version().unwrap(), 22);
         let named_by = |p| db.get_worktree_by_path(p).unwrap().unwrap().named_by;
         assert_eq!(named_by("/r/a"), "user");
         assert_eq!(named_by("/r/b"), "");

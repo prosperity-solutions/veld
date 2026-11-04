@@ -965,6 +965,11 @@ of the three layers are not in this file:
    **at an origin veld serves** and asks anywhere else; everything else asks. A `deny`
    withdraws any of these.
 
+A page with **no origin** (`file:`, `about:blank`, `data:`) matches no rule and no
+stored answer, so every permission is refused there — except `clipboard-read` and
+`clipboard-write`, which are allowed so copy and paste always work. That holds for
+the pane's own page only; an opaque-origin iframe is still refused.
+
 **Anything malformed is dropped and reported by `veld orchestrator lint` as a warning, never a
 load error** — and the dropped rule grants nothing. Do not assume a rule works
 because the config loaded; run `veld orchestrator lint`.

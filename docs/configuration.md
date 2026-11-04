@@ -2242,6 +2242,13 @@ default (above) and encrypted media asks.
 
 A `deny` withdraws any of these, including the screen-capture default.
 
+**Pages with no origin.** A pane showing a `file:`, `about:blank` or `data:`
+page has no origin, so no rule, stored answer or per-site panel row can apply to
+it, and every permission is refused there — except `clipboard-read` and
+`clipboard-write`, which are allowed so copy and paste always work in a pane.
+Only for the page the pane itself shows: an opaque-origin iframe inside another
+page is still refused, so it cannot get around a Block on its parent.
+
 **Understand what a grant is.** An entry for a *remote* origin hands that
 server's JavaScript a standing capability on the machine of anyone who opens it
 in a pane. That is a real step beyond what the rest of a veld config does: a
