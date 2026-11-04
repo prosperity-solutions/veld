@@ -1006,21 +1006,6 @@ async fn session_busy(session: Arc<Session>) -> Option<bool> {
         .and_then(|r| r.ok())
 }
 
-/// Collect sessions that no window has had a pane for in `grace`.
-///
-/// An exited shell gets the same grace as a live one on purpose. Its scrollback,
-/// its exit notice and its exit code are exactly the post-mortem the detach
-/// model exists to preserve — "the socket dropped while I was away and then the
-/// build died" is the case worth answering, and a short grace would collect the
-/// answer before anyone could read it.
-///
-/// **Two questions, two owners.** The socket clock is [`is_reapable`], which is
-/// pure and testable without waiting [`DETACH_GRACE`] or touching the
-/// process-global registry; whether a window still has the pane is
-/// `ide::kept_among`, tested over a local registry there. This function is only
-/// the composition — and the composition has one behaviour of its own, the clock
-/// restart below, which `the_reaper_keeps_a_session_a_client_has_a_pane_for`
-/// pins end to end.
 /// The sessions of hand-offs the daemon started itself and nobody has opened
 /// (`pty::autostart`). Never reaped: no window has had the chance to keep them, and
 /// the human may not look for hours. Unreadable reads as none — the grace applies,
@@ -1035,6 +1020,22 @@ fn started_handoff_sessions() -> std::collections::HashSet<String> {
     }
 }
 
+/// Collect sessions that no window has had a pane for in `grace`.
+///
+/// An exited shell gets the same grace as a live one on purpose. Its scrollback,
+/// its exit notice and its exit code are exactly the post-mortem the detach
+/// model exists to preserve — "the socket dropped while I was away and then the
+/// build died" is the case worth answering, and a short grace would collect the
+/// answer before anyone could read it.
+///
+/// **Two questions, two owners.** The socket clock is [`is_reapable`], which is
+/// pure and testable without waiting [`DETACH_GRACE`] or touching the
+/// process-global registry; whether a window still has the pane is
+/// `ide::kept_among`, tested over a local registry there. This function is only
+/// the composition — and the composition has one behaviour of its own, the clock
+/// restart below, which `the_reaper_keeps_a_session_a_client_has_a_pane_for`
+/// pins end to end. Sessions in `unopened` — hand-offs the daemon started that no
+/// window has opened yet ([`started_handoff_sessions`]) — are never collected.
 async fn reap_detached(grace: Duration, unopened: &std::collections::HashSet<String>) {
     let now = Instant::now();
     let candidates: Vec<String> = {

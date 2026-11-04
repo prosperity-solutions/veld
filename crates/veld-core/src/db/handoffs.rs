@@ -6,7 +6,8 @@
 //! rail's "Waiting for you" section ([`HANDOFF_LANE`]), and records a [`Handoff`].
 //! The daemon then starts the agent pane itself under the session id recorded
 //! here, with the prompt as its first message, and marks it
-//! [`Handoff::started`]; the first window to show the worktree attaches to it.
+//! [`Handoff::launch`] `Launching`, then `Running`; the first window to show the
+//! worktree attaches to it.
 //! With `worktree.autostartHandoffs` off, that first window starts it instead.
 //! From then on the human drives it. Nothing reports back to the agent that
 //! handed it off.

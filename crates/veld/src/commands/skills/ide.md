@@ -234,8 +234,9 @@ worktree is marked as not started instead, and the agent starts the first time
 they open it. It also waits for them with `--from-here` (your own commits), when
 the agent pane's command in the new worktree differs from the one in the
 project's main checkout — committing a pane of your own does not get it run
-unwatched — when the agent you named cannot start there, or when the agent
-never shows the prompt in its input. `--json`'s `starting`
+unwatched — when the agent you named cannot start there, when only the human's
+last few terminal slots are free, or when the agent never shows the prompt in
+its input. `--json`'s `starting`
 is `true` when Veld took the start on — that last case can still send it back
 to waiting about a minute and a half later — and `false` when it waits from
 the start. **Nothing comes back to you** — no status, no result.

@@ -14,7 +14,8 @@
  * open (`worktree.autostartHandoffs`) gets its prompt from
  * `crates/veld-daemon/src/pty/autostart.rs`'s `deliver`: the same gate, settle,
  * bracketed paste, echo wait and `\r`, and the same timings (`SETTLE`,
- * `ECHO_QUIET`, `ECHO_CAP`; its input wait is longer on purpose). A change to the
+ * `ECHO_QUIET`, `ECHO_CAP`; its input wait is longer on purpose, and it sends the
+ * `\r` only onto a visible echo — no person is watching that pane). A change to the
  * sequence or a constant here belongs there too — nothing checks the two agree.
  */
 

@@ -492,4 +492,16 @@ export const PROMOTIONS: Promotion[] = [
     body: "Using outfit? Pick a profile when you create a worktree, or switch from the shirt by the project selector. Running agents read it once restarted.",
     glyph: "terminal",
   },
+  {
+    // A default that flipped: a worktree an agent hands off used to sit until you
+    // opened it, and now its agent is already working. Somebody who relied on
+    // reading the prompt first needs to hear where the switch went, which is the
+    // half the body ends on.
+    id: "handoffs-start-at-once",
+    since: "2026-11-04",
+    eyebrow: "Changed",
+    headline: "Find handed-off tasks already underway",
+    body: "When an agent hands you a task as a new worktree, its agent starts at once. Open the worktree to find it working — or read prompts first: Settings, Git.",
+    glyph: "terminal",
+  },
 ];

@@ -2149,15 +2149,17 @@ fn migrate_v21_worktree_named_by(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// v22: `worktree_handoffs.started` — the daemon has launched this hand-off's
-/// agent itself, with no window showing the worktree (`worktree.autostartHandoffs`).
+/// v22: `worktree_handoffs.started` — where the daemon's own start of this
+/// hand-off's agent stands (`worktree.autostartHandoffs`, `HandoffLaunch`):
+/// `0` waiting for a window, `1` launching (spawning, handing it the prompt),
+/// `2` running.
 ///
-/// The row stays until a window attaches to that session, because it is the only
-/// thing that tells the window the pane exists: the session is live in a holder,
-/// but no layout names it yet, and without the row the agent would run where
-/// nobody could ever reach it. `started` is what tells the window to attach to it
-/// rather than review or type the prompt a second time, and what tells the detach
-/// reaper to leave a session nobody has opened yet alone. Every existing row
+/// A running row stays until a window attaches to that session, because it is the
+/// only thing that tells the window the pane exists: the session is live in a
+/// holder, but no layout names it yet, and without the row the agent would run
+/// where nobody could ever reach it. `2` is what tells the window to attach rather
+/// than review or type the prompt a second time; `1` and `2` are what tell the
+/// detach reaper to leave a session nobody has opened alone. Every existing row
 /// predates the setting, so `0` — it waits for a window, as it did.
 fn migrate_v22_handoff_started(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(

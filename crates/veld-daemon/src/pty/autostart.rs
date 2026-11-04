@@ -31,7 +31,7 @@
 //! prompt. An agent that silently never got its task is the outcome this avoids.
 //! So is one whose prompt never shows on screen after the paste: the `\r` is
 //! only sent onto a visible echo, never into a first-run screen.
-//! **Once the agent has the prompt it is never hung up**: a launch that took the
+//! **A launch that took the prompt is never hung up**: one whose agent took the
 //! prompt (its staged file is gone) counts as delivered without waiting for the
 //! gate. A daemon that stops mid-start leaves `Launching` behind, and the next
 //! boot gives it back the same way ([`give_back_interrupted`]).
@@ -58,7 +58,8 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// The paste counts as shown after this long without output — `PROMPT_ECHO_QUIET_MS`.
 const ECHO_QUIET: Duration = Duration::from_millis(250);
 
-/// And the `\r` goes anyway after this long — `PROMPT_ECHO_CAP_MS`.
+/// The echo wait ends after this long — `PROMPT_ECHO_CAP_MS` — and the `\r` goes
+/// only if the paste showed (unlike the window, which sends it anyway).
 const ECHO_CAP: Duration = Duration::from_millis(5_000);
 
 /// Terminal slots a background start always leaves for the human. Hand-offs the

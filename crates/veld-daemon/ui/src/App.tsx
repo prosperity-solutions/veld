@@ -10648,7 +10648,7 @@ function Rail(props: {
                   className="lane-name"
                   title={
                     group.key === HANDOFF_LANE
-                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. Their agents start right away; one marked with an hourglass is waiting for you instead (Settings › Git) — opening it shows the task it was handed, or starts its agent on it with the review turned off. Drag a row into a group to file it."
+                      ? "Worktrees an agent or a script made for you with `veld ide worktree new`. One marked with an hourglass is waiting for you — opening it shows the task it was handed (or, with the review turned off in Settings › Git, starts its agent on it); the rest have started already. Drag a row into a group to file it."
                       : undefined
                   }
                 >

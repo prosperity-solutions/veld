@@ -934,17 +934,19 @@ impl SettingKey {
                 "When a coding agent hands you a task as a new worktree (`veld ide worktree new`), \
                  Veld starts its agent at once, in the background, with the prompt as the agent \
                  wrote it — open the worktree to find it already working. It still waits for \
-                 you when the worktree was cut from the agent's own commits, when the agent \
-                 pane's command differs from your main checkout's, or when the agent never \
-                 shows the prompt. Off: it waits in Waiting for you until you open \
+                 you in some cases: the worktree was cut from the agent's own commits, the \
+                 agent pane's command differs from your main checkout's, the agent named \
+                 cannot start, the last few terminal slots are all that is free, or the agent \
+                 never shows the prompt. Off: it waits in Waiting for you until you open \
                  it. Until you set this, a review switch you saved on keeps it off.",
                 Git,
             ),
             Self::WorktreeReviewHandoffs => toggle(
                 "Review prompts handed off by agents",
-                "Only while Start handed-off agents right away is off. Opening a handed-off \
-                 worktree shows the agent's prompt first, to edit, start, or move to the trash. \
-                 Off: opening it starts the agent with the prompt as the agent wrote it.",
+                "Whenever a handed-off agent waits for you to open its worktree — always while \
+                 Start handed-off agents right away is off. Opening it shows the agent's prompt \
+                 first, to edit, start, or move to the trash. Off: opening it starts the agent \
+                 with the prompt as the agent wrote it.",
                 Git,
             ),
             Self::GitCreateFrom => Spec {

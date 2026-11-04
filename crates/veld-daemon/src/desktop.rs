@@ -2773,10 +2773,10 @@ struct HandoffView {
     session_id: String,
     /// The declared pane to run, or `""` for the user's usual agent.
     pane: String,
-    /// The daemon already launched it (`worktree.autostartHandoffs`): the window
-    /// attaches to the running session instead of reviewing or typing the prompt.
-    /// In `POST /api/handoffs`' own answer, that the daemon has taken the start on
-    /// — it is spawning as the caller reads this.
+    /// The daemon took the start on (`worktree.autostartHandoffs`) — launching or
+    /// running — so the rail shows no hourglass. Whether the window can attach yet
+    /// is `GET …/handoff`'s answer (`started` there means running; `409 starting`
+    /// while launching). In `POST /api/handoffs`' own answer, it is launching.
     started: bool,
 }
 
@@ -5399,7 +5399,7 @@ async fn create_handoff(
 
     let source_path = source.path.clone();
     // The project's main checkout, not the caller's: an agent can edit its own.
-    let caller_path = source.repo_root.clone();
+    let main_checkout = source.repo_root.clone();
     let create = CreateWorktreeBody {
         repo_root: source.repo_root.clone(),
         branch: body.branch.clone(),
@@ -5432,7 +5432,7 @@ async fn create_handoff(
     // collides with. Spawned, the create finishes whoever is still listening.
     tokio::spawn(async move {
         let _hidden = hidden;
-        record_handoff(create, prompt, agent, into_section, caller_path).await
+        record_handoff(create, prompt, agent, into_section, main_checkout).await
     })
     .await
     .map_err(|e| {
@@ -5481,13 +5481,13 @@ fn handoff_autostart_pane(panes: &[PaneView], wanted: &str) -> Option<String> {
 /// declares the same way is one the human already runs; any difference — or a
 /// config either side cannot read — leaves the start to a window, where opening
 /// the worktree is the gate.
-fn same_pane_in(caller: &FsPath, new: &FsPath, id: &str) -> bool {
+fn same_pane_in(main_checkout: &FsPath, new: &FsPath, id: &str) -> bool {
     let pane = |root: &FsPath| {
         let path = veld_core::config::root_config_in(root)?;
         let config = veld_core::config::parse_config(&path).ok()?;
         config.ide_section().pane(id).cloned()
     };
-    match (pane(caller), pane(new)) {
+    match (pane(main_checkout), pane(new)) {
         (Some(a), Some(b)) => a == b,
         _ => false,
     }
@@ -5500,7 +5500,7 @@ async fn record_handoff(
     prompt: Option<String>,
     agent: String,
     into_section: bool,
-    caller_path: String,
+    main_checkout: String,
 ) -> Result<CreatedWorktreeView, ApiError> {
     let (root, branch) = (create.repo_root.clone(), create.branch.clone());
     // Cut from the calling agent's own HEAD: its commits, which may include a
@@ -5594,7 +5594,7 @@ async fn record_handoff(
             .flatten()
             .filter(|pane| {
                 same_pane_in(
-                    FsPath::new(&caller_path),
+                    FsPath::new(&main_checkout),
                     FsPath::new(&view.worktree.path),
                     pane,
                 )
