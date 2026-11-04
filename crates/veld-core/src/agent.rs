@@ -1382,7 +1382,7 @@ pub fn agent_context(cli: &str) -> String {
          --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
          not for every file you touch. Pin every PR you open (any repo), preview and tracking issue: `{cli} ide link \
          set <url> --kind pr|preview|issue --label <text>`; re-run with `--tone` when it \
-         changes. Not research pages. Veld can also hand work to the human as a new \
+         changes; a preview whose URL changes takes `--id <service>`. Not research pages. Veld can also hand work to the human as a new \
          worktree. Whenever your reply points out something outside the current task that \
          someone would have to fix later (a bug, an outdated or missing doc, a follow-up), \
          finish that reply with one short question asking whether to hand it off as a new \

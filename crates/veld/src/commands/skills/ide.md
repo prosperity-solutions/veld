@@ -228,14 +228,16 @@ veld ide link rm <id-or-url>        # or --all
   keeps its value, and `""` (`--label ""`) resets it. The default id is the URL
   without query, fragment and trailing slash. A preview whose URL changes with
   every deploy gets an id per service (`--id web`, `--id api`), so the next deploy
-  replaces it rather than adding another.
+  replaces it rather than adding another; a new URL under an id starts over, so
+  the last deploy's tone and tooltip do not carry across. Without `--id`, a URL
+  also finds the link it was pinned under with one.
 - **Pull requests: pin every one, always.** Even when the project has its own PR
   badge: the rail shows only pinned pull requests, the badge covers one repository
   at most, and the top bar hides a pinned link the badge already links to.
-- **Otherwise, don't duplicate the top bar.** It already shows the URLs of this
-  worktree's own runs (`set` refuses those) and the project's own badges and
-  buttons. `list` and `set` name both, with what a status badge currently shows
-  and links to.
+- **Otherwise, don't duplicate the top bar.** It already opens this worktree's
+  live runs (`set` refuses any URL on a live run's origin) and shows the
+  project's own top-bar badges and buttons. `list` and `set` name both, with what
+  a status badge currently shows and links to.
 - **Keep it current.** Veld checks nothing against a forge; a link is as current
   as its last `set`. A pull request's life:
 
@@ -253,8 +255,9 @@ veld ide link set "$PR" --tone success --icon git-merge           # merged
   branch are dimmed.
 
 Exit status: `0` done; `1` failed (the daemon is not running, or did not answer);
-`2` not a usable link (bad URL, kind, tone, icon or id, a label too long, a URL
-of the worktree's own run, or the worktree is full); `3` not inside a worktree Veld knows; `4` `rm`: no such link.
+`2` not a usable link (bad URL, kind, tone, icon or id, a label too long, a
+control or invisible character, a URL on a live run's origin, or the worktree is
+full); `3` not inside a worktree Veld knows; `4` `rm`: no such link.
 
 ## Handing a task to the human in a new worktree (`veld ide worktree new`)
 

@@ -65,6 +65,8 @@ export function kindGlyph(kind: LinkKind): PaneIcon {
 /** A link set on another branch than the worktree is on now describes work that
  *  may no longer be here. A link with no recorded branch is never stale. */
 export function isStale(link: { branch: string }, currentBranch: string): boolean {
+  // A detached HEAD (a rebase in progress) is not another branch's work.
+  if (currentBranch === "(detached)" || currentBranch === "") return false;
   return link.branch !== "" && link.branch !== currentBranch;
 }
 
@@ -82,12 +84,6 @@ export function groupLabel(kind: LinkKind, count: number): string {
   return `${count} ${PLURAL[kind]}`;
 }
 
-/**
- * Lay links out for the bar. Slots are per kind and independent of the total: a
- * kind with one link is a pill of its own, a kind with several is one group pill.
- * Within a kind the incoming order is kept (the daemon sends creation order). Past
- * `MAX_SLOTS` the first two stay and the rest fold into a single overflow slot.
- */
 /**
  * A URL as `veld ide link` files it: scheme and host lowercased, the query,
  * fragment and trailing slash dropped (`normalize_link_url` in Rust). Two URLs that
@@ -120,6 +116,12 @@ export function withoutBadged(
   return links.filter((l) => !badgeHrefs.some((h) => sameLink(l.url, h)));
 }
 
+/**
+ * Lay links out for the bar. Slots are per kind and independent of the total: a
+ * kind with one link is a pill of its own, a kind with several is one group pill.
+ * Within a kind the incoming order is kept (the daemon sends creation order). Past
+ * `MAX_SLOTS` the first two stay and the rest fold into a single overflow slot.
+ */
 export function arrangeLinks(links: readonly WorktreeLink[]): Slot[] {
   const byKind = new Map<LinkKind, NormalLink[]>();
   for (const raw of links) {

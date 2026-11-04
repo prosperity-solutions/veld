@@ -310,3 +310,26 @@ pub(super) async fn open_target(
     })
     .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::origin;
+
+    #[test]
+    fn an_origin_is_scheme_host_and_port_whatever_the_path_or_case() {
+        assert_eq!(
+            origin("https://App.Example.com:8443/x/y?q#f"),
+            "https://app.example.com:8443"
+        );
+        assert_eq!(origin("https://app.example.com"), "https://app.example.com");
+        assert_eq!(
+            origin("https://app.example.com/"),
+            "https://app.example.com"
+        );
+        assert_ne!(
+            origin("https://app.example.com:1"),
+            origin("https://app.example.com:2")
+        );
+        assert_ne!(origin("http://a.dev"), origin("https://a.dev"));
+    }
+}

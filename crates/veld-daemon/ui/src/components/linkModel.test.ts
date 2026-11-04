@@ -51,6 +51,12 @@ describe("normalizeLink", () => {
   });
 });
 
+describe("isStale while detached", () => {
+  it("does not read a link as stale while HEAD is detached", () => {
+    expect(isStale({ branch: "feat/x" }, "(detached)")).toBe(false);
+  });
+});
+
 describe("isStale", () => {
   it("is stale only when a recorded branch differs", () => {
     expect(isStale({ branch: "a" }, "b")).toBe(true);

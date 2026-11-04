@@ -65,10 +65,11 @@ mod session_links;
 // route can ask whether file serving is up before promising a pane.
 pub(crate) mod files;
 
-/// The file pane's text reads, its grants outside the worktree, and `veld ide open`.
+/// The links agents pin to a worktree (`veld ide link`).
 #[path = "links.rs"]
 mod links;
 
+/// The file pane's text reads, its grants outside the worktree, and `veld ide open`.
 #[path = "file_pane.rs"]
 mod file_pane;
 

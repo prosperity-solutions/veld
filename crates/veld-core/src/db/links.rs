@@ -12,6 +12,8 @@
 //! - **A `set` merges.** A field the caller leaves out keeps its stored value, so
 //!   marking a pull request merged (`--tone success`) does not reset the label it
 //!   was given when it was opened. An empty string resets a field to its default.
+//!   A new URL under the same id is a new page (the next deploy of a preview), so
+//!   there what the caller leaves out starts over instead.
 //! - **Defaults are stored as empty and resolved on read.** An empty `label` is
 //!   the URL-derived one and an empty `icon` is the kind's glyph (resolved by the
 //!   UI), so a link whose URL changes under the same id does not keep a label
@@ -109,6 +111,9 @@ impl std::fmt::Display for LinkRejected {
 #[derive(Debug, Clone)]
 struct CheckedLink {
     id: String,
+    /// Whether the caller named the id. Without one, a link already filed under
+    /// another id is still found by its URL, as `rm <url>` finds it.
+    explicit_id: bool,
     url: String,
     kind: Option<String>,
     label: Option<String>,
@@ -182,7 +187,20 @@ fn check(input: LinkInput) -> Result<CheckedLink, LinkRejected> {
             "the tooltip is longer than {MAX_LINK_TOOLTIP_CHARS} characters"
         )));
     }
-    let id = match trimmed(input.id).filter(|i| !i.is_empty()) {
+    for (field, value) in [
+        ("url", Some(url.as_str())),
+        ("label", label.as_deref()),
+        ("tooltip", tooltip.as_deref()),
+    ] {
+        if value.is_some_and(has_hidden_chars) {
+            return Err(LinkRejected(format!(
+                "the {field} holds a control or invisible character — plain text only"
+            )));
+        }
+    }
+    let explicit = trimmed(input.id).filter(|i| !i.is_empty());
+    let explicit_id = explicit.is_some();
+    let id = match explicit {
         Some(id) => {
             check_link_id(&id)?;
             id
@@ -191,6 +209,7 @@ fn check(input: LinkInput) -> Result<CheckedLink, LinkRejected> {
     };
     Ok(CheckedLink {
         id,
+        explicit_id,
         url,
         kind,
         label,
@@ -198,6 +217,20 @@ fn check(input: LinkInput) -> Result<CheckedLink, LinkRejected> {
         tone,
         tooltip,
     })
+}
+
+/// Whether `text` holds a character a reader cannot see or a terminal acts on:
+/// C0/C1 controls (an escape sequence printed by `veld ide link list`) and the
+/// bidi and zero-width set the IDE refuses in news copy.
+fn has_hidden_chars(text: &str) -> bool {
+    text.chars()
+        .any(|c| c.is_control() || crate::ide::INVISIBLE_COPY_CHARS.contains(&c))
+}
+
+/// The branch to record for a link set now: the worktree's, unless its HEAD is
+/// detached (a rebase in progress), which says nothing about whose work it is.
+fn branch_to_record(current: &str) -> &str {
+    if current == "(detached)" { "" } else { current }
 }
 
 /// An explicit id: short, and spelled so it survives a shell unquoted.
@@ -324,19 +357,67 @@ impl Db {
         else {
             return Ok(LinkSet::Missing);
         };
-        let exists = tx
+        let current = branch_to_record(&branch).to_owned();
+        let by_id = tx
             .query_row(
-                "SELECT 1 FROM worktree_links WHERE worktree_id = ?1 AND link_id = ?2",
+                "SELECT link_id, url, branch FROM worktree_links
+                 WHERE worktree_id = ?1 AND link_id = ?2",
                 params![worktree_id, link.id],
-                |_| Ok(()),
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                },
             )
-            .optional()?
-            .is_some();
+            .optional()?;
+        let existing = match by_id {
+            Some(row) => Some(row),
+            None if !link.explicit_id => {
+                let mut stmt = tx.prepare(
+                    "SELECT link_id, url, branch FROM worktree_links WHERE worktree_id = ?1
+                     ORDER BY created_at, rowid",
+                )?;
+                let rows = stmt
+                    .query_map(params![worktree_id], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                rows.into_iter()
+                    .find(|(_, url, _)| normalize_link_url(url) == link.id)
+            }
+            None => None,
+        };
+        let exists = existing.is_some();
+        let id = existing
+            .as_ref()
+            .map_or_else(|| link.id.clone(), |(id, _, _)| id.clone());
         let now = now_str();
-        if exists {
-            // `COALESCE(?, column)`: a field the caller did not pass keeps what is
-            // stored. `created_at` is never touched, so an update does not move
-            // the link in the top bar's order.
+        if let Some((_, stored_url, stored_branch)) = existing {
+            let moved = normalize_link_url(&stored_url) != normalize_link_url(&link.url);
+            // A new URL under the same id is a new deploy, not the same page: what
+            // the caller did not pass starts over rather than carrying the last
+            // one's tone, tooltip or label. Otherwise `COALESCE(?, column)` keeps
+            // what is stored. The branch is the one the link was first set on —
+            // re-toning a pull request from another branch does not adopt it — and
+            // `created_at` is never touched, so the top bar's order holds.
+            let keep = |v: &Option<String>, default: &str| {
+                if moved {
+                    Some(v.clone().unwrap_or_else(|| default.to_owned()))
+                } else {
+                    v.clone()
+                }
+            };
+            let branch = if moved || stored_branch.is_empty() {
+                current.clone()
+            } else {
+                stored_branch
+            };
             tx.execute(
                 "UPDATE worktree_links SET
                     url = ?3,
@@ -350,13 +431,13 @@ impl Db {
                  WHERE worktree_id = ?1 AND link_id = ?2",
                 params![
                     worktree_id,
-                    link.id,
+                    id,
                     link.url,
                     link.kind,
-                    link.label,
-                    link.icon,
-                    link.tone,
-                    link.tooltip,
+                    keep(&link.label, ""),
+                    keep(&link.icon, ""),
+                    keep(&link.tone, "neutral"),
+                    keep(&link.tooltip, ""),
                     branch,
                     now
                 ],
@@ -384,7 +465,7 @@ impl Db {
                     link.icon.as_deref().unwrap_or(""),
                     link.tone.as_deref().unwrap_or("neutral"),
                     link.tooltip.as_deref().unwrap_or(""),
-                    branch,
+                    current,
                     now
                 ],
             )?;
@@ -394,7 +475,7 @@ impl Db {
                 "SELECT {LINK_COLUMNS} FROM worktree_links
                  WHERE worktree_id = ?1 AND link_id = ?2"
             ),
-            params![worktree_id, link.id],
+            params![worktree_id, id],
             |r| read_link(r, 0),
         )?;
         tx.commit()?;
@@ -775,5 +856,130 @@ mod tests {
                 .unwrap(),
             LinkSet::Missing
         );
+    }
+
+    fn worktree_on(db: &Db, wt: i64, branch: &str) {
+        db.lock()
+            .execute(
+                "UPDATE worktrees SET branch = ?2 WHERE id = ?1",
+                params![wt, branch],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_new_url_under_the_same_id_starts_over() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        let web = |u: &str| LinkInput {
+            kind: Some("preview".into()),
+            id: Some("web".into()),
+            ..url(u)
+        };
+        set(
+            &db,
+            wt,
+            LinkInput {
+                tone: Some("danger".into()),
+                tooltip: Some("build failed".into()),
+                label: Some("Web #1".into()),
+                ..web("https://web-1.example.com")
+            },
+        );
+        let next = set(&db, wt, web("https://web-2.example.com"));
+        assert_eq!(next.tone, "neutral");
+        assert_eq!(next.tooltip, "");
+        assert_eq!(next.label, "web-2.example.com");
+        assert_eq!(next.kind, "preview");
+    }
+
+    #[test]
+    fn a_link_keeps_the_branch_it_was_set_on_and_never_records_a_detached_head() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        let pr = "https://git.example.com/a/b/pull/1";
+        set(
+            &db,
+            wt,
+            LinkInput {
+                kind: Some("pr".into()),
+                ..url(pr)
+            },
+        );
+        worktree_on(&db, wt, "(detached)");
+        assert_eq!(
+            set(
+                &db,
+                wt,
+                LinkInput {
+                    tone: Some("info".into()),
+                    ..url(pr)
+                }
+            )
+            .branch,
+            "feat/x"
+        );
+        worktree_on(&db, wt, "other");
+        assert_eq!(
+            set(
+                &db,
+                wt,
+                LinkInput {
+                    tone: Some("success".into()),
+                    ..url(pr)
+                }
+            )
+            .branch,
+            "feat/x",
+            "re-toning from another branch does not adopt the link"
+        );
+        worktree_on(&db, wt, "(detached)");
+        assert_eq!(set(&db, wt, url("https://new.example.com")).branch, "");
+    }
+
+    #[test]
+    fn a_url_finds_the_link_pinned_under_an_explicit_id() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        let pr = "https://git.example.com/a/b/pull/1";
+        set(
+            &db,
+            wt,
+            LinkInput {
+                id: Some("api-pr".into()),
+                kind: Some("pr".into()),
+                ..url(pr)
+            },
+        );
+        let again = set(
+            &db,
+            wt,
+            LinkInput {
+                tone: Some("success".into()),
+                ..url(&format!("{pr}/"))
+            },
+        );
+        assert_eq!(again.id, "api-pr");
+        assert_eq!(db.worktree_links(wt).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn control_and_invisible_characters_are_refused() {
+        let (_d, db) = test_db();
+        let wt = worktree(&db);
+        for input in [
+            LinkInput {
+                label: Some("a\u{1b}]52;c;x\u{7}".into()),
+                ..url("https://x.dev")
+            },
+            LinkInput {
+                tooltip: Some("evil\u{202e}txt".into()),
+                ..url("https://x.dev")
+            },
+            url("https://x.dev/\u{1b}[2J"),
+        ] {
+            let err = db.set_worktree_link(wt, input).unwrap_err();
+            assert!(err.0.contains("plain text"), "{err}");
+        }
     }
 }

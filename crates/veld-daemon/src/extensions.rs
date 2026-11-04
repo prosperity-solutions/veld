@@ -2358,6 +2358,45 @@ mod tests {
         assert!(text.ends_with('…'));
     }
 
+    #[tokio::test]
+    async fn last_shown_reads_an_ok_value_and_never_waits_on_a_run() {
+        let wt = "/tmp/last-shown-test";
+        let view = |state: &'static str, text: &str| StatusView {
+            id: "pr".to_owned(),
+            state,
+            text: Some(text.to_owned()),
+            icon: None,
+            display: "text",
+            tone: "neutral",
+            tooltip: None,
+            href: Some("https://x.dev/pull/1".to_owned()),
+            open_in: "system",
+            actions: Vec::new(),
+            refresh_seconds: 60,
+            age_seconds: 0,
+        };
+        assert_eq!(last_shown(wt, "pr"), None, "never ran");
+
+        let ok = cell(wt, wt, "pr");
+        *ok.lock().await = Some((Instant::now(), view("ok", "PR #1")));
+        assert_eq!(
+            last_shown(wt, "pr"),
+            Some(("PR #1".to_owned(), Some("https://x.dev/pull/1".to_owned())))
+        );
+
+        let held = ok.lock().await;
+        assert_eq!(
+            last_shown(wt, "pr"),
+            None,
+            "a run in flight is not waited on"
+        );
+        drop(held);
+
+        let failed = cell(wt, wt, "ci");
+        *failed.lock().await = Some((Instant::now(), view("failed", "boom")));
+        assert_eq!(last_shown(wt, "ci"), None, "only an ok value counts");
+    }
+
     #[test]
     fn clipping_counts_characters_not_bytes() {
         // A byte slice would panic on a multi-byte boundary, and emoji in a badge

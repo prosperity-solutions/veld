@@ -11,8 +11,9 @@
 //! - `0` — done.
 //! - `1` — failed: the daemon is not running or did not answer.
 //! - `2` — not a usable link: a bad URL, kind, tone, icon or id, a label that is
-//!   too long, a URL of the worktree's own run (the top bar already opens those),
-//!   or the worktree already carries the maximum number of links.
+//!   too long, a control or invisible character, a URL on the origin of one of
+//!   the worktree's live runs (the top bar already opens those), or the worktree
+//!   already carries the maximum number of links.
 //! - `3` — not inside a worktree Veld knows.
 //! - `4` — `rm`: the worktree has no such link.
 
@@ -39,9 +40,10 @@ pub enum LinkCommand {
     /// Re-run it when the state changes, e.g. once a pull request is merged:
     /// `veld ide link set <url> --tone success --icon git-merge`.
     ///
-    /// Don't pin what the top bar already shows: the URLs of this worktree's own
-    /// runs are refused, and the answer (like `list`'s) names the project's own
-    /// top-bar entries — a pull-request badge, say — so you can tell a duplicate.
+    /// Don't pin what the top bar already shows: a URL on the origin of one of this
+    /// worktree's live runs is refused, and the answer (like `list`'s) names the
+    /// project's own top-bar entries with what a status badge shows now. Pin your
+    /// pull requests regardless: the rail shows only pinned ones.
     ///
     /// Exit status: 0 set, 1 failed, 2 not a usable link (or one the top bar
     /// already shows, or the worktree is full), 3 not inside a worktree Veld knows.
@@ -55,7 +57,8 @@ pub enum LinkCommand {
     /// worktree Veld knows.
     List {
         /// Print `{"worktree": {id, path, branch}, "links": [..], "also_in_top_bar":
-        /// {"project_entries": [{id, label, type}], "run_urls": [..]}}` on stdout.
+        /// {"project_entries": [{id, label, type, shown: {text, href} | null}],
+        /// "run_urls": [..]}}` on stdout.
         #[arg(long)]
         json: bool,
 
@@ -282,14 +285,29 @@ fn report(path: &str, body: &serde_json::Value) {
 fn also_shown_lines(also: &serde_json::Value) -> Vec<String> {
     let mut parts = Vec::new();
     let mut badge = false;
+    // A badge's text is a project command's output, often fetched from the
+    // network; it reaches the agent's terminal here, so it is printed as plain text.
+    let plain = |v: &serde_json::Value| -> String {
+        v.as_str()
+            .unwrap_or_default()
+            .chars()
+            .filter(|c| !c.is_control())
+            .collect()
+    };
     for e in also["project_entries"].as_array().into_iter().flatten() {
-        let label = e["label"].as_str().unwrap_or_default();
+        let label = plain(&e["label"]);
         let kind = e["type"].as_str().unwrap_or("entry");
         badge |= kind == "status";
         parts.push(
             match (e["shown"]["text"].as_str(), e["shown"]["href"].as_str()) {
-                (Some(text), Some(href)) => format!("{kind} \"{label}\" = \"{text}\" {href}"),
-                (Some(text), None) => format!("{kind} \"{label}\" = \"{text}\""),
+                (Some(_), Some(_)) => format!(
+                    "{kind} \"{label}\" = \"{}\" {}",
+                    plain(&e["shown"]["text"]),
+                    plain(&e["shown"]["href"])
+                ),
+                (Some(_), None) => {
+                    format!("{kind} \"{label}\" = \"{}\"", plain(&e["shown"]["text"]))
+                }
                 _ => format!("{kind} \"{label}\""),
             },
         );

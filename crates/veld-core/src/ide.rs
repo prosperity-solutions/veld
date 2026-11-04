@@ -2723,7 +2723,7 @@ fn today_anywhere() -> String {
 ///   removes it.
 ///
 /// C0/C1 controls (`char::is_control`) are refused by the same check, one range up.
-const INVISIBLE_COPY_CHARS: &[char] = &[
+pub(crate) const INVISIBLE_COPY_CHARS: &[char] = &[
     '\u{00ad}', '\u{180e}', '\u{200b}', '\u{200c}', '\u{200d}', '\u{200e}', '\u{200f}', '\u{202a}',
     '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}', '\u{2060}', '\u{2066}', '\u{2067}', '\u{2068}',
     '\u{2069}', '\u{feff}',
