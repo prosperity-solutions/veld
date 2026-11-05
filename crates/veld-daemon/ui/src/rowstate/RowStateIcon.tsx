@@ -1,11 +1,10 @@
 import { IconArrowUp, IconPencil, IconUnlink } from "@tabler/icons-react";
 
 import type { WorktreeGitSignals } from "../api";
-import type { GitRowState } from "../gitstate/gitState";
-import { ICONS as ACTIVITY_ICONS, activityLines } from "../inbox/InboxIcon";
-import type { RowSummary } from "../inbox/inbox";
+import { type GitRowState, rowGitState } from "../gitstate/gitState";
+import { ICONS as ACTIVITY_ICONS } from "../inbox/InboxIcon";
 import { RailGlyphTooltip } from "../shared/RailGlyphTooltip";
-import { rowGlyph, rowTooltip } from "./rowState";
+import type { RowBadge } from "./rowState";
 
 /**
  * The git half of the glyph vocabulary, hand-picked by the maintainer against
@@ -35,10 +34,10 @@ import { rowGlyph, rowTooltip } from "./rowState";
  * whose whole value is confidence. Real pull-request state holds a PR number and
  * belongs to an `ide.extensions` badge, which can say it properly.
  *
- * Three shapes this row has no room for, and why: no triangle (`wt-alert` is node
- * health, and the activity vocabulary's `failed` is the outline twin of it), no
- * filled circle (the worktree marker dot is at the row's other end), and no
- * media-control shape (the run control is one slot away).
+ * Three shapes this glyph has no room for, and why: no triangle (the run control
+ * shows one for node health, and the badge's `failed` is its outline twin), no
+ * filled circle (the worktree marker dot and its badge), and no media-control
+ * shape (the run control is one slot away).
  */
 const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
   dirty: IconPencil,
@@ -47,51 +46,55 @@ const GIT_ICONS: Record<GitRowState, typeof IconPencil> = {
 };
 
 /**
- * A worktree's state in the rail: one glyph for activity *or* git, never both.
+ * The badge on a rail row's marker: the worktree's terminals.
  *
- * See [`rowGlyph`] for which wins and why. Two properties this shares with the
- * activity-only glyph it replaced, both load-bearing:
+ * Today's activity icon in today's colour (and with today's pulse on the two
+ * states that ask for you), or a plain dot for a shell that is alive with
+ * nothing to report. Drawn on the marker's corner rather than beside it: a
+ * second circle beside a dot-face marker reads as one group with it, which is
+ * why the rail's old run-status dot was removed.
  *
- * **Not a count.** `↑3` versus `↑7` changes nothing about what you do — you push
- * either way — so the row's scarce width goes on *which* state it is and the
- * numbers live in the tooltip.
+ * **Not a count**, for the reason the activity glyph never was one: nobody acts
+ * differently on three unseen events than on five. The numbers are in the
+ * tooltip the caller hangs on the marker.
+ */
+export function TerminalBadge(props: { badge: RowBadge | null }): React.JSX.Element | null {
+  const { badge } = props;
+  if (badge === null) return null;
+  if (badge.kind === "idle") return <span className="wt-badge idle" aria-hidden="true" />;
+  const Icon = ACTIVITY_ICONS[badge.state];
+  return (
+    <span className={`wt-badge act ${badge.state}`} aria-hidden="true">
+      <Icon size={11} stroke={2.3} />
+    </span>
+  );
+}
+
+/**
+ * Whether the checkout is holding something: uncommitted changes, a detached
+ * HEAD or unpushed commits. One glyph, worst first — see [`rowGitState`].
  *
  * **It does not swallow the click.** A `<span>`, not a `<button>`: a click
- * anywhere on a row selects the worktree, and this is part of a row. Nothing here
- * is pressable, because none of the actions these states imply (read the pane,
- * commit, push, trash the checkout) is a one-click decision — they live in the
- * row's ⋯ menu and in the pane itself.
- *
- * The class name still comes from the vocabulary that won, so `.wt-inbox` keeps
- * its four colours and pulses and `.wt-git` keeps its two. One element, two style
- * families, because the *meaning* is what the colour tracks.
+ * anywhere on a row selects the worktree, and none of the actions these states
+ * imply (commit, push, trash the checkout) is a one-click decision.
  */
-export function RowStateIcon(props: {
-  summary: RowSummary;
+export function GitStateIcon(props: {
   git: WorktreeGitSignals | undefined;
-  label: string;
-  /** On a detached HEAD — read from the worktree's branch, not from `git`. */
   detached: boolean;
+  /** Called only when there is a glyph to put it on. */
+  tooltip: () => string;
 }): React.JSX.Element | null {
-  const glyph = rowGlyph(props.summary, props.git, props.detached);
-  if (glyph === null) return null;
-  const Icon = glyph.kind === "activity" ? ACTIVITY_ICONS[glyph.state] : GIT_ICONS[glyph.state];
-  const className = glyph.kind === "activity" ? "wt-inbox" : "wt-git";
+  const state = rowGitState(props.git, props.detached);
+  if (state === null) return null;
+  const Icon = GIT_ICONS[state];
   return (
-    <RailGlyphTooltip
-      label={rowTooltip(
-        props.label,
-        activityLines(props.summary),
-        props.git,
-        props.detached,
-      )}
-    >
+    <RailGlyphTooltip label={props.tooltip()}>
       <span
-        className={`${className} ${glyph.state}`}
+        className={`wt-git ${state}`}
         // Decorative for the screen reader: the row's `aria-description` carries
-        // both halves of this in words, after the alias, so folding either into
-        // the accessible name would announce it ahead of the worktree it belongs
-        // to — the same reason the away icon is hidden.
+        // this in words, after the alias, so folding it into the accessible name
+        // would announce it ahead of the worktree it belongs to — the same reason
+        // the away icon is hidden.
         aria-hidden="true"
       >
         <Icon size={12} />

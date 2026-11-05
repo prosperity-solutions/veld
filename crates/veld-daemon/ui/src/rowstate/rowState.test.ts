@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { WorktreeGitSignals } from "../api";
 import type { RowState, RowSummary } from "../inbox/inbox";
-import { rowDescription, rowGlyph, rowTooltip } from "./rowState";
+import { rowBadge, rowDescription, rowTooltip } from "./rowState";
 
 function signals(over: Partial<WorktreeGitSignals> = {}): WorktreeGitSignals {
   return {
@@ -26,59 +26,28 @@ function summary(state: RowState | null, entries = 0, running = 0): RowSummary {
   };
 }
 
-describe("rowGlyph", () => {
-  it("shows nothing when neither half has anything", () => {
-    expect(rowGlyph(summary(null), undefined)).toBeNull();
-    // Clean and fully pushed is not a state either — see `rowGitState`.
-    expect(rowGlyph(summary(null), signals())).toBeNull();
+describe("rowBadge", () => {
+  it("shows nothing with no shell and no activity", () => {
+    expect(rowBadge(summary(null), 0)).toBeNull();
   });
 
-  it("shows git state when there is no activity", () => {
-    expect(rowGlyph(summary(null), signals({ dirty: true }))).toEqual({
-      kind: "git",
-      state: "dirty",
-    });
+  it("is the idle dot for a shell with nothing to report", () => {
+    expect(rowBadge(summary(null), 2)).toEqual({ kind: "idle" });
   });
 
-  it("shows activity when there is no git state", () => {
-    expect(rowGlyph(summary("attention", 1), signals())).toEqual({
-      kind: "activity",
-      state: "attention",
-    });
-  });
-
-  /**
-   * **The reason these share a slot.** While an agent is running the tree is
-   * *expected* to be dirty, so a pencil beside a spinner reports something the
-   * spinner already implies.
-   */
-  it("lets a working agent outrank uncommitted changes", () => {
-    expect(rowGlyph(summary("working", 0, 2), signals({ dirty: true }))).toEqual({
-      kind: "activity",
-      state: "working",
-    });
-  });
-
-  it("lets every activity state outrank every git state", () => {
-    const states: RowState[] = ["attention", "opened", "failed", "finished", "working"];
-    const gits: WorktreeGitSignals[] = [signals({ dirty: true }), signals({ ahead: 4 })];
-    for (const state of states) {
-      for (const git of gits) {
-        expect(rowGlyph(summary(state, 1), git)).toEqual({ kind: "activity", state });
-      }
+  it("carries the activity state over a merely running shell", () => {
+    expect(rowBadge(summary("working", 0, 1), 1)).toEqual({ kind: "activity", state: "working" });
+    for (const state of ["attention", "failed", "finished", "opened"] as RowState[]) {
+      expect(rowBadge(summary(state, 1), 3)).toEqual({ kind: "activity", state });
     }
   });
 
   /**
-   * `working` is opt-in (Settings → the rail's activity glyph). With it off the
-   * inbox reports no state, so the git glyph correctly takes the slot back rather
-   * than the row going blank.
+   * Unread news outlives the shell that produced it: a command that finished in
+   * a pane since closed is still worth the badge.
    */
-  it("falls back to git state when the inbox reports nothing", () => {
-    expect(rowGlyph(summary(null), signals({ ahead: 2 }))).toEqual({
-      kind: "git",
-      state: "unpushed",
-    });
+  it("shows activity even when no shell is left running", () => {
+    expect(rowBadge(summary("finished", 1), 0)).toEqual({ kind: "activity", state: "finished" });
   });
 });
 
@@ -93,7 +62,7 @@ describe("rowTooltip", () => {
    * slot a presentation choice rather than a loss of information — a spinning row
    * still tells you it has unpushed commits.
    */
-  it("carries both halves even though only one glyph renders", () => {
+  it("carries activity and git in one tooltip", () => {
     expect(
       rowTooltip("api", ["2 unseen", "pane 0 finished"], signals({ ahead: 3 })),
     ).toBe("api — 2 unseen\npane 0 finished\n3 commits not pushed to origin/feat-x");
@@ -130,5 +99,14 @@ describe("rowDescription", () => {
   it("announces whichever half exists on its own", () => {
     expect(rowDescription("working", signals())).toBe("working");
     expect(rowDescription(undefined, signals({ dirty: true }))).toBe("uncommitted changes");
+  });
+
+  it("ends with the live-terminal clause, which can stand alone", () => {
+    expect(rowDescription("working", signals({ ahead: 2 }), false, "2 terminals running")).toBe(
+      "working. 2 commits not pushed. 2 terminals running",
+    );
+    expect(rowDescription(undefined, undefined, false, "1 terminal running")).toBe(
+      "1 terminal running",
+    );
   });
 });

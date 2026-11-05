@@ -2873,6 +2873,13 @@ struct WorktreeView {
     /// were first set. Omitted when there are none, which is almost every row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     links: Vec<veld_core::db::WorktreeLink>,
+    /// How many terminals have a shell still running here, which the rail shows
+    /// as a badge on the row's marker. Omitted at zero.
+    ///
+    /// Counted from this daemon's session registry, so a shell another daemon
+    /// holds (`release_session`) is not included.
+    #[serde(skip_serializing_if = "is_zero")]
+    live_terminals: usize,
     /// The interpreted part of the checkout's `ide` config section.
     ///
     /// **Always present, with arrays that may be empty.** Omitting it when empty
@@ -3468,8 +3475,13 @@ fn worktree_view_with(
         machine_vars,
         git,
         links: Vec::new(),
+        live_terminals: 0,
         ide,
     }
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Pick `RepoView.news` out of every checkout's own `ide.news`, per
@@ -3597,9 +3609,11 @@ async fn repo_view(
     repo: RepoRecord,
     available: bool,
     git: Option<RepoGitStatus>,
+    live_terminals: &std::collections::HashMap<i64, usize>,
 ) -> Result<RepoView, ApiError> {
     let db = db.clone();
-    crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git)).await
+    let live = live_terminals.clone();
+    crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git, live)).await
 }
 
 fn repo_view_blocking(
@@ -3607,6 +3621,7 @@ fn repo_view_blocking(
     repo: RepoRecord,
     available: bool,
     git: Option<RepoGitStatus>,
+    live_terminals: std::collections::HashMap<i64, usize>,
 ) -> Result<RepoView, ApiError> {
     let mut declared = DeclaredConfigs::new();
     // One read for the whole repo rather than one per row: this runs on every
@@ -3628,6 +3643,7 @@ fn repo_view_blocking(
         .unwrap_or_default();
     for view in &mut worktrees {
         view.links = links.remove(&view.worktree.id).unwrap_or_default();
+        view.live_terminals = live_terminals.get(&view.worktree.id).copied().unwrap_or(0);
     }
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
@@ -4169,11 +4185,13 @@ fn request_own_shutdown() {
 async fn list_repos() -> Result<Json<RepoList>, ApiError> {
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
+    // Once per request, not per repo: one pass over the session registry.
+    let live = super::pty::live_terminal_counts().await;
     for repo in db.list_repos().map_err(db_err)? {
         let available = FsPath::new(&repo.root).is_dir();
         // `None`: this GET must not spawn git, so the top bar's git status
         // arrives on the next CSRF-gated `refresh_repos` poll.
-        repos.push(repo_view(&db, repo, available, None).await?);
+        repos.push(repo_view(&db, repo, available, None, &live).await?);
     }
     Ok(Json(RepoList { repos }))
 }
@@ -4203,6 +4221,8 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
     let mut repos = Vec::new();
     let mut availability = HashMap::new();
     let mut sweep_targets = Vec::new();
+    // Once per request, not per repo: one pass over the session registry.
+    let live = super::pty::live_terminal_counts().await;
     for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
         // Taken first, before any git runs: a change that lands while the
@@ -4295,7 +4315,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
                 .map(|wt| (wt.id, wt.path.clone())),
         );
         let git = repo_git_status_cached(&db, &root, &fingerprint).await;
-        repos.push(repo_view(&db, repo, available, Some(git)).await?);
+        repos.push(repo_view(&db, repo, available, Some(git), &live).await?);
     }
     // After the loop, and after the response is built: the `dirty` half costs a
     // `git status` per checkout, so it fills the cache for the *next* poll rather
@@ -4420,7 +4440,16 @@ async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>,
             )
         })?;
     let git = repo_git_status(&db, &repo_root).await;
-    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
+    Ok(Json(
+        repo_view(
+            &db,
+            repo,
+            true,
+            Some(git),
+            &super::pty::live_terminal_counts().await,
+        )
+        .await?,
+    ))
 }
 
 /// Discard the repo root's uncommitted changes so [`update_main`] can
@@ -4518,7 +4547,16 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
         .map_err(db_err)?
         .ok_or_else(|| db_err("repo vanished after import"))?;
     let git = repo_git_status(&db, FsPath::new(&repo.root)).await;
-    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
+    Ok(Json(
+        repo_view(
+            &db,
+            repo,
+            true,
+            Some(git),
+            &super::pty::live_terminal_counts().await,
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -7097,6 +7135,18 @@ mod tests {
         }
     }
 
+    /// The rail reads an absent `live_terminals` as zero, so the field is left out
+    /// at zero (almost every row) and present otherwise.
+    #[test]
+    fn live_terminals_is_omitted_at_zero() {
+        let mut view = wt_view(1, false, Vec::new());
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("live_terminals").is_none());
+        view.live_terminals = 2;
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["live_terminals"], 2);
+    }
+
     fn wt_view(id: i64, is_main: bool, news: Vec<veld_core::ide::NewsItem>) -> WorktreeView {
         WorktreeView {
             worktree: wt_record(id, is_main),
@@ -7108,6 +7158,7 @@ mod tests {
             machine_vars: None,
             git: None,
             links: Vec::new(),
+            live_terminals: 0,
             ide: IdeView {
                 news,
                 ..Default::default()

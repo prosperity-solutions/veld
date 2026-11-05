@@ -300,10 +300,35 @@ export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
  */
 export function runStatus(run: RunInfo | null): WorktreeStatus {
   if (!run) return "stopped";
-  if (run.status === "running") return "running";
-  if (run.status === "failed") return "failed";
+  if (run.status === "running") {
+    // The daemon has no run-level "recovering": the health monitor marks the
+    // *node* — counting `consecutive_failures` while its liveness probe fails,
+    // `unhealthy` once that reaches the threshold and restarts remain, `failed`
+    // once they are exhausted (or `max_recoveries` is 0) — and the run stays
+    // `running` throughout. Read from the nodes, or a dead service in a running
+    // run renders as a healthy ■.
+    if (run.nodes.some((n) => n.status === "failed")) return "failed";
+    if (run.nodes.some((n) => n.status === "unhealthy" || (n.consecutive_failures ?? 0) > 0)) {
+      return "recovering";
+    }
+    return "running";
+  }
+  if (run.status === "failed" || run.status === "crashed") return "failed";
   if (run.status === "recovering") return "recovering";
   return "partial";
+}
+
+/**
+ * A run's status in words, for the surfaces that print it beside its dot. The
+ * daemon still calls a run `running` while a node in it fails, and the dot now
+ * says otherwise, so the text has to say why.
+ */
+export function runStatusLabel(run: RunInfo): string {
+  if (run.status !== "running") return run.status;
+  const s = runStatus(run);
+  if (s === "failed") return "running — a node failed";
+  if (s === "recovering") return "running — a node is failing its liveness probe";
+  return run.status;
 }
 
 /**
@@ -394,7 +419,9 @@ export function spinnerAction(
  * action is in flight — stopping a failed run has always been offered — and that
  * is intended: the alert reports the run's state and the spinner reports your
  * action on it. Both halves are pinned in `model.test.ts`, the second one
- * precisely because the first reads as forbidding it.
+ * precisely because the first reads as forbidding it. They coexist in *state*;
+ * the rail row's run control has one face, and shows the loader until your
+ * action lands, then the alert (`runSlot` in App.tsx).
  */
 export function needsAttention(status: WorktreeStatus): boolean {
   return status === "failed" || status === "recovering";
@@ -404,10 +431,10 @@ export function needsAttention(status: WorktreeStatus): boolean {
  * The status a worktree's attention affordance describes, or `null` when it has
  * nothing to flag.
  *
- * Two questions folded into one answer, because the rail row asked them
- * separately (`needsAttention(status) || needsAttention(worst)`, then
- * `needsAttention(status) ? status : worst`) and the folded section header has to
- * ask exactly the same pair. Two copies of that reduction would be two chances
+ * Three questions folded into one answer — the picked run, the worst live run,
+ * and whether the newest run here failed or crashed ([`lastRunFailed`]) — because
+ * the rail row asks them and the folded section header has to ask exactly the
+ * same ones. Two copies of that reduction would be two chances
  * for a header to disagree with the row it is standing in for — the one thing a
  * summary must never do.
  *
@@ -420,7 +447,27 @@ export function attentionStatus(runs: RunInfo[]): WorktreeStatus | null {
   const status = worktreeStatus(runs);
   if (needsAttention(status)) return status;
   const worst = worstStatus(liveRuns(runs));
-  return needsAttention(worst) ? worst : null;
+  if (needsAttention(worst)) return worst;
+  return lastRunFailed(runs) ? "failed" : null;
+}
+
+/**
+ * Whether the most recent thing started here ended in failure: the newest run
+ * across this directory's environments is over, and `failed` (it never came up)
+ * or `crashed` (it died unasked).
+ *
+ * Neither is live, so neither reaches [`activeRun`], and a run that failed to
+ * start used to leave its row looking exactly like one never started. Scoped to
+ * the newest run rather than to any environment's latest so it clears the moment
+ * anything is started here again — an old crash under another name, from last
+ * week, is not what the row should be saying.
+ */
+export function lastRunFailed(runs: RunInfo[]): boolean {
+  const newest = runs.reduce<RunInfo | null>(
+    (best, r) => (best === null || r.created_at > best.created_at ? r : best),
+    null,
+  );
+  return newest !== null && !newest.live && (newest.status === "failed" || newest.status === "crashed");
 }
 
 /**

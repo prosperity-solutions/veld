@@ -31,6 +31,46 @@ import { dispatchRestartPane } from "../panes/restartRequests";
 import { dispatchRevealPane } from "../panes/revealRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
+/**
+ * Seeds are numbered, and one older than a seed that has already been applied is
+ * dropped: two quick reconnects must not land out of order. A newer seed that
+ * *fails* does not block an older one that succeeded.
+ */
+let seedGeneration = 0;
+let appliedGeneration = 0;
+
+/** File the daemon's record of each live agent into the inbox — see `inbox.seed`. */
+async function seedAgents(): Promise<void> {
+  const generation = ++seedGeneration;
+  const mark = inbox.agentMark();
+  let overview: Awaited<ReturnType<typeof api.agentOverview>>;
+  try {
+    overview = await api.agentOverview();
+  } catch {
+    // An older daemon without the endpoint, or a blip: the live relay still works.
+    return;
+  }
+  if (generation < appliedGeneration) return;
+  appliedGeneration = generation;
+  const agents = overview.agents ?? [];
+  const startedAt = Date.parse(overview.started_at ?? "");
+  inbox.seed(
+    agents
+      .filter((a) => typeof a.session_id === "string" && typeof a.worktree_id === "number")
+      .map((a) => ({
+        sessionId: a.session_id,
+        worktreeId: a.worktree_id,
+        state: a.state as AgentState,
+        held: a.held === true,
+        // Unknown is not "long ago": a wait with no time is never taken as already read.
+        since: Number.isFinite(Date.parse(a.since ?? "")) ? Date.parse(a.since ?? "") : null,
+      })),
+    Date.now(),
+    mark,
+    Number.isFinite(startedAt) ? startedAt : null,
+  );
+}
+
 /** What kind of client this is, which decides whether it can be raised. */
 export type ClientKind = "electron" | "browser";
 
@@ -355,6 +395,11 @@ class Channel {
         // restart leaving two clients each believing they own a worktree.
         this.ready = true;
         const waiting = this.waiting.splice(0);
+        // Agent states are relayed, not queued: whatever an agent reported while this
+        // page was not connected is read back once per (re)connection. A live report
+        // that arrives while the read is in flight is newer than it, and the seed
+        // leaves that session alone (`inbox.agentMark`).
+        if (this.relayInboxEvents) void seedAgents();
         h.onReady(same);
         for (const resolve of waiting) resolve();
         return;

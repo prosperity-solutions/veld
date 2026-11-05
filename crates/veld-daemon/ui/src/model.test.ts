@@ -177,6 +177,7 @@ describe("activeRun / worktreeStatus", () => {
       "stopping",
       "stopped",
       "failed",
+      "crashed",
     ];
     for (const status of all) {
       const r = run("a", status, true);
@@ -224,6 +225,7 @@ describe("activeRun / worktreeStatus", () => {
       "stopping",
       "stopped",
       "failed",
+      "crashed",
     ];
     for (const status of all) {
       const s = worktreeStatus([run("a", status, true)]);
@@ -495,10 +497,45 @@ describe("attentionStatus", () => {
     );
   });
 
-  /** History is not attention. A failed run that is no longer live is the record
-   *  of something that already ended; the row it sits on has nothing to open. */
-  it("ignores a failed run that is only history", () => {
-    expect(attentionStatus([run("api", "running"), run("web", "failed")])).toBeNull();
+  /** History is not attention once something newer has started here: the failed
+   *  run is the record of something already superseded. */
+  it("ignores a failed run that a newer run has superseded", () => {
+    expect(
+      attentionStatus([
+        run("api", "running", true, "2026-01-02T00:00:00Z"),
+        run("web", "failed", false, "2026-01-01T00:00:00Z"),
+      ]),
+    ).toBeNull();
+  });
+
+  /** A run that never came up, or died unasked, is not live and so never reached
+   *  `activeRun`: the row looked exactly like one never started. */
+  it("reports the newest run when it failed or crashed", () => {
+    expect(attentionStatus([run("web", "failed", false)])).toBe("failed");
+    expect(attentionStatus([run("web", "crashed", false)])).toBe("failed");
+    expect(
+      attentionStatus([
+        run("api", "stopped", false, "2026-01-01T00:00:00Z"),
+        run("web", "crashed", false, "2026-01-02T00:00:00Z"),
+      ]),
+    ).toBe("failed");
+  });
+
+  /** The daemon has no run-level "recovering": the monitor marks the node, and the
+   *  run stays `running`. */
+  it("reads a running run's node health", () => {
+    const withNode = (status: string): RunInfo => ({
+      ...run("api", "running"),
+      nodes: [{ name: "svc", variant: "dev", status }],
+    });
+    expect(attentionStatus([withNode("healthy")])).toBeNull();
+    expect(attentionStatus([withNode("unhealthy")])).toBe("recovering");
+    expect(
+      attentionStatus([
+        { ...run("api", "running"), nodes: [{ name: "svc", variant: "dev", status: "healthy", consecutive_failures: 2 }] },
+      ]),
+    ).toBe("recovering");
+    expect(attentionStatus([withNode("failed")])).toBe("failed");
   });
 });
 

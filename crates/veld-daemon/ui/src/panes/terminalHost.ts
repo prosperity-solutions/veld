@@ -204,6 +204,11 @@ interface Session {
   replayWrites: number;
   /** Whether `replay_end` has arrived. */
   replayEnded: boolean;
+  /** Set when this attach resumed a live shell, until the replay ends and the
+   *  daemon has been asked whether a command is running in it. */
+  resumed: boolean;
+  /** OSC 133 marks seen live — a busy answer that raced one is stale. */
+  marks: number;
   listeners: Set<() => void>;
 }
 
@@ -834,6 +839,8 @@ function ensure(
     replaying: false,
     replayWrites: 0,
     replayEnded: false,
+    resumed: false,
+    marks: 0,
     listeners: new Set(),
   };
   sessions.set(id, s);
@@ -969,7 +976,10 @@ function ensure(
   term.parser.registerOscHandler(133, (data) => {
     if (!s.replaying) {
       const signal = parseOsc133(data);
-      if (signal) inbox.report(id, s.worktreeId, signal);
+      if (signal) {
+        s.marks++;
+        inbox.report(id, s.worktreeId, signal);
+      }
     }
     return true;
   });
@@ -1257,6 +1267,7 @@ async function connect(
       return;
     }
     ticket = minted.ticket;
+    s.resumed = minted.resumed;
     // A restart reuses this xterm, and a program that was killed never turned its
     // modes off. Left on, a dead agent's bracketed paste opens the prompt gate
     // before the new process exists: the window claims the launch prompt ahead of
@@ -1775,7 +1786,37 @@ function handleControl(s: Session, raw: string): void {
 
 /** Lift the input gate once the replay has been received *and* parsed. */
 function endReplayIfDone(s: Session): void {
-  if (s.replayEnded && s.replayWrites === 0) s.replaying = false;
+  if (!(s.replayEnded && s.replayWrites === 0)) return;
+  const wasReplaying = s.replaying;
+  s.replaying = false;
+  if (wasReplaying && s.resumed) {
+    s.resumed = false;
+    void restoreRunning(s);
+  }
+}
+
+/**
+ * Whether a command was already running in a shell this page has just resumed.
+ *
+ * The inbox learns a command started from its OSC 133 `C` mark, and marks in the
+ * replayed scrollback are deliberately ignored — so after a reload, or in a window
+ * opened later, a shell mid-command showed no spinner until its *next* command.
+ * The daemon can answer for the shell's foreground job. Asked once per resume,
+ * after the replay, and only acted on if no live mark arrived meanwhile: a `C` or
+ * `D` in that window means the answer describes a moment that has passed.
+ */
+async function restoreRunning(s: Session): Promise<void> {
+  const before = s.marks;
+  let busy = false;
+  try {
+    busy = (await api.ptyBusy(s.id)).busy;
+  } catch {
+    return;
+  }
+  // A pane closed while the question was out has already been forgotten by the
+  // inbox; answering for it would leave a spinner nothing ever clears.
+  if (sessions.get(s.id) !== s) return;
+  if (busy && s.marks === before) inbox.restoreRunning(s.id, s.worktreeId);
 }
 
 /**
