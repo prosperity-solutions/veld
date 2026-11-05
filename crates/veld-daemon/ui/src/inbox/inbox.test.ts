@@ -1914,6 +1914,69 @@ describe("a finished agent, once seen", () => {
     expect(after.unseen("cc")).toBeNull();
   });
 
+  /** A killed agent sends no `done`; the shell's `D` closing its command is the news. */
+  it("ends when a shell pane's agent command ends without a goodbye", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("idle"), NOW + 2);
+    box.read("cc");
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 137 }, NOW + 3);
+    expect(seen(box)).toBe(0);
+    expect(box.next(new Set([WT]))).toBeNull();
+  });
+
+  it("ends when the agent quit while this window was not listening", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    const after = createInbox();
+    after.restore(JSON.parse(JSON.stringify(box.snapshot())));
+    // The daemon started before the finish, so it would list the agent if it were there.
+    after.seed([], NOW + 10, after.agentMark(), NOW - 5000);
+    expect(seen(after)).toBe(0);
+
+    // A daemon that restarted after the finish has no record of anyone yet: absence
+    // proves nothing, so the tick stays.
+    const restarted = createInbox();
+    restarted.restore(JSON.parse(JSON.stringify(box.snapshot())));
+    restarted.seed([], NOW + 10, restarted.agentMark(), NOW + 5);
+    expect(seen(restarted)).toBe(1);
+  });
+
+  /**
+   * In a shell pane the agent is a command: quitting it is followed by the shell's own
+   * marks, and the shell's exit much later is its own event, not the agent's.
+   */
+  it("still files the shell's own exit long after an agent quit in it", () => {
+    const box = createInbox();
+    box.report("sh", WT, agent("ready"), NOW);
+    box.report("sh", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("sh", WT, agent("done"), NOW + 2);
+    box.report("sh", WT, { type: "osc133", mark: "D", exit: 0 }, NOW + 3);
+    for (const s of command(0)) box.report("sh", WT, s, NOW + 4);
+    box.read("sh");
+    box.report("sh", WT, { type: "exit", code: 0 }, NOW + 5);
+    expect(box.unseen("sh")?.detail).toBe("Process ended");
+  });
+
+  /** Where Next goes depends on the watched pane, so watching another must re-render. */
+  it("tells the rail when the watched pane changes, even with nothing to read", () => {
+    const box = createInbox();
+    box.report("a", WT, agent("idle"), NOW);
+    box.report("b", WT, agent("idle"), NOW + 1);
+    box.setWatching("a");
+    box.setWatching("b");
+    let renders = 0;
+    box.subscribe(() => {
+      renders += 1;
+    });
+    box.setWatching("a");
+    expect(renders).toBe(1);
+    box.setWatching("a");
+    expect(renders, "unchanged, no render").toBe(1);
+  });
+
   it("drops a stored finish that is not an agent's", () => {
     const after = createInbox();
     after.restore({

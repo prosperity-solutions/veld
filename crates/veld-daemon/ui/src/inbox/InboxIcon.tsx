@@ -159,13 +159,18 @@ export function InboxIcon(props: {
 export function PaneActivityIcon(props: {
   state: RowState;
   detail: string | null;
+  /** A finished agent already seen: the same glyph, muted. */
+  seen?: boolean;
 }): React.JSX.Element {
   const Icon = ICONS[props.state];
   return (
     <RailGlyphTooltip
       label={props.detail ?? HEADLINE[props.state]}
     >
-      <span className={`pane-tab-activity ${props.state}`} aria-hidden="true">
+      <span
+        className={`pane-tab-activity ${props.state}${props.seen ? " seen" : ""}`}
+        aria-hidden="true"
+      >
         <Icon size={11} />
       </span>
     </RailGlyphTooltip>

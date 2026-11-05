@@ -413,8 +413,11 @@ class WorktreeInbox {
 
   /** Which pane the user is looking at. Reads it, if it had anything unseen. */
   setWatching(sessionId: string | null): void {
+    const changed = this.watching !== sessionId;
     this.watching = sessionId;
-    if (sessionId !== null) this.read(sessionId);
+    // A read notifies; a pane with nothing unread does not, yet where Next goes
+    // depends on which pane is watched (`nextFinished`, a held question here).
+    if ((sessionId === null || !this.read(sessionId)) && changed) this.notify();
   }
 
   /** A session's worktree, so an event can be filed before any signal arrives. */
@@ -541,6 +544,19 @@ class WorktreeInbox {
       const listed = new Set(agents.map((a) => a.sessionId));
       let stopped = false;
       for (const [id, session] of this.sessions) {
+        // A finished agent that quit unheard is gone from the overview too. Its finish
+        // (browser clock) is the proof the daemon knew it, the way `agentAt` is below —
+        // a restored session has no `agentAt`.
+        if (
+          session.finished &&
+          !listed.has(id) &&
+          session.liveSeq <= mark &&
+          daemonStartedAt !== null &&
+          session.finished.at >= daemonStartedAt
+        ) {
+          session.finished = null;
+          stopped = true;
+        }
         if (
           session.agentWorking &&
           !listed.has(id) &&
@@ -657,6 +673,8 @@ class WorktreeInbox {
       case "osc133":
         if (signal.mark === "C") {
           session.ranCommand = true;
+          // The shell is running something else, so a later exit is no longer the agent's.
+          session.agentEnded = false;
           // A `C` this window saw, not a restored one.
           session.restoredCommand = false;
           if (session.agentSource !== null) session.agentCommand = true;
@@ -691,6 +709,9 @@ class WorktreeInbox {
           session.agentWorking = false;
           // Nobody is left to answer a held question, or to say it was answered.
           session.held = false;
+          // Nor to be finished: a killed agent sends no `done`, and its pane is a shell now.
+          session.finished = null;
+          session.agentEnded = false;
           return undefined;
         }
         // And separately: an unread "needs you" from a hook is never buried by a command
@@ -899,7 +920,9 @@ class WorktreeInbox {
             // filed. A shell command's verdict in the same pane is not the agent's to
             // take.
             session.finished = null;
-            session.agentEnded = true;
+            // Only where the agent is the pane's own process: in a shell pane the `D`
+            // closing its command follows instead, and the shell's exit is a later event.
+            session.agentEnded = !session.agentCommand;
             return session.unseen?.producer === "agent" && session.unseen.kind !== "opened"
               ? null
               : undefined;
@@ -1154,8 +1177,10 @@ class WorktreeInbox {
    * badge counts.
    *
    * The same set {@link nextUnread} picks from, so the badge and the button can
-   * never disagree about whether there is anything to go to: the button walks this
-   * list one entry at a time, and the badge counts down as it does. With the
+   * never disagree about whether there is anything unread to go to: the button walks
+   * this list one entry at a time, and the badge counts down as it does. (Once it is
+   * empty the button goes on to the finished agents already seen, which are not news
+   * and not counted here.) With the
    * worktree, because the shell needs it to combine windows. Sorted, so a caller
    * can compare two answers by serialising them.
    */
@@ -1211,6 +1236,12 @@ class WorktreeInbox {
   /** One session's unseen event, or null. For a pane's own tab. */
   unseen(sessionId: string): Unseen | null {
     return this.sessions.get(sessionId)?.unseen ?? null;
+  }
+
+  /** A finished agent already seen in this session, or null. For a pane's own tab. */
+  seenFinished(sessionId: string): Unseen | null {
+    const session = this.sessions.get(sessionId);
+    return session && !session.unseen ? session.finished : null;
   }
 
   /** Whether a session is running something. For a pane's own tab. */

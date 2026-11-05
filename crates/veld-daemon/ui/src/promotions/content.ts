@@ -422,7 +422,7 @@ export const PROMOTIONS: Promotion[] = [
     eyebrow: "New",
     headline: "Go straight to the agent waiting on you",
     body:
-      "Agents running in three projects, and one of them is stuck on a question. Next unread, at the end of the top bar, takes you to it — then to the one after.",
+      "Agents running in three projects, and one of them is stuck on a question. The Next button, at the end of the top bar, takes you to it — then to the one after.",
     glyph: "inbox",
   },
   {

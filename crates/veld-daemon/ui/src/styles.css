@@ -2647,6 +2647,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .pane-tab-activity.finished {
   color: var(--accent);
 }
+.pane-tab-activity.finished.seen {
+  color: color-mix(in srgb, var(--accent) 45%, var(--muted));
+}
 .pane-tab-activity.attention {
   color: var(--warn);
   animation: pulse 1.6s infinite;

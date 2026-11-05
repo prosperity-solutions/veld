@@ -3730,7 +3730,7 @@ function AppInner(props: {
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
           return;
         }
-        // Go to whatever needs you, in any project — the top bar's Next unread
+        // Go to whatever needs you, in any project — the top bar's Next
         // button from the keyboard, through the same single owner (`goNextRef`).
         //
         // Not in the Tab-shaped navigation block a few lines up, deliberately:
@@ -5053,7 +5053,7 @@ function AppInner(props: {
         else if (accelerator === "split") paneHandleRef.current?.splitActiveTab();
         // Guarded like the worktree pair below and for the same reason, matching
         // this chord's own keydown copy: a detached window has no rail, no
-        // selection and no Next unread button, so there is nothing here to move.
+        // selection and no Next button, so there is nothing here to move.
         else if (accelerator === "next-unread") {
           if (!chromeless) goNextRef.current();
         }
@@ -6930,7 +6930,7 @@ function AppInner(props: {
   openPaletteRef.current = openPalette;
 
   /**
-   * Where the Next unread button would take you — the one unread event, anywhere.
+   * Where the Next button would take you — the one unread event anywhere, or once there is none, the next finished agent already seen.
    *
    * **Across every project, which is the whole point of the control.** Until now a
    * worktree's state was only legible from the worktree itself: the rail glyph
@@ -6948,7 +6948,7 @@ function AppInner(props: {
   const unreadScope = allProjectWorktreeIds(repos);
   const nextTarget = inbox.next(unreadScope);
 
-  // The Dock icon's badge: the same unread events Next unread walks, reported to
+  // The Dock icon's badge: the unread events Next walks first, reported to
   // Veld Desktop with the worktrees this window holds, so the shell can combine
   // every window's answer (see `setBadge` in `shell.ts`). Only the worktree inbox
   // is counted — Veld's own news has its own dot on the ⋯ menu, and a badge that
@@ -9180,7 +9180,7 @@ function TopBar(props: {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
-  /** Next unread, search, keep-awake and focus mode — see `TopBarControls`,
+  /** Next, search, keep-awake and focus mode — see `TopBarControls`,
    *  mounted by both modes so the two bars cannot drift in what they offer. */
   controls: React.ReactNode;
   /** Theme, what's new and settings, as one menu at the end of the bar. */
