@@ -652,6 +652,8 @@ function usePersisted(
 const TRASH_ACK_KEY = "veld.trashAcked";
 /** Worktrees whose trash-cleanup summary this machine has already announced. */
 const CLEANED_ACK_KEY = "veld.trashCleanedAcked";
+/** How old a trash cleanup may be and still be announced when its worktree is back. */
+const CLEANED_ANNOUNCE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 function selectionKeys(name: string): [string, string] {
   return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
@@ -6178,7 +6180,16 @@ function AppInner(props: {
    * hint why. Same once-per-machine bookkeeping as the deletion errors above.
    */
   useEffect(() => {
-    const cleaned = worktrees.filter((w) => !w.trashed_at && w.trash_cleaned);
+    // Not a row whose restore is still in flight — the daemon may yet refuse it —
+    // and not an old cleanup a fresh storage context has never acknowledged.
+    const recent = Date.now() - CLEANED_ANNOUNCE_WINDOW_MS;
+    const cleaned = worktrees.filter(
+      (w) =>
+        !w.trashed_at &&
+        w.trash_cleaned &&
+        !restoringRef.current.has(w.id) &&
+        Date.parse(w.trash_cleaned_at ?? "") > recent,
+    );
     if (cleaned.length === 0) return;
     let acked: string[] = [];
     try {

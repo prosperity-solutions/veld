@@ -266,7 +266,15 @@ async fn clean(id: i64) {
     let summary = if Path::new(&wt.path).is_dir() {
         run(&db, &wt, settings, guard.1.clone()).await
     } else {
-        "found nothing to clean — the checkout is no longer on disk".to_owned()
+        Some("found nothing to clean — the checkout is no longer on disk".to_owned())
+    };
+    // `None`: nothing happened that is worth recording, and the next pass should
+    // try again — git failed, or the cleanup was stopped before it removed
+    // anything (a deletion git then refuses leaves the worktree in the trash, and
+    // it is still owed its cleanup).
+    let Some(summary) = summary else {
+        debug!("trash cleanup: {} — nothing recorded", wt.path);
+        return;
     };
     info!("trash cleanup: {} — {summary}", wt.path);
     // Conditional on this trashing: a cleanup cancelled by a restore still
@@ -280,13 +288,14 @@ async fn clean(id: i64) {
     }
 }
 
-/// Run the project's steps, then delete. Returns the summary for the row.
+/// Run the project's steps, then delete. Returns the summary for the row, or
+/// `None` when there is nothing to record (see `clean`).
 async fn run(
     db: &Db,
     wt: &WorktreeRecord,
     settings: TrashCleanup,
     flag: Arc<AtomicBool>,
-) -> String {
+) -> Option<String> {
     let root = PathBuf::from(&wt.path);
     let mut notes: Vec<String> = Vec::new();
 
@@ -297,18 +306,21 @@ async fn run(
     let toplevel = tokio::select! {
         r = tokio::time::timeout(
             LIST_TIMEOUT,
-            super::desktop::git(&root, &["rev-parse", "--show-toplevel"]),
+            super::desktop::git_raw_cancellable(&root, &["rev-parse", "--show-toplevel"]),
         ) => Some(r),
         () = cancelled(&flag) => None,
     };
     match toplevel {
-        None => {
-            return "stopped early — the worktree was restored or deleted".to_owned();
+        Some(Ok(Ok(out))) => {
+            let top = String::from_utf8_lossy(&out);
+            if !same_dir(Path::new(top.trim_end_matches('\n')), &root) {
+                return Some(
+                    "found nothing to clean — git no longer sees a worktree there".to_owned(),
+                );
+            }
         }
-        Some(Ok(Ok(top))) if same_dir(Path::new(&top), &root) => {}
-        Some(_) => {
-            return "found nothing to clean — git no longer sees a worktree there".to_owned();
-        }
+        // Stopped, timed out, or git failed: nothing to record, try next pass.
+        _ => return None,
     }
 
     let project = project_cleanup(db, wt);
@@ -459,9 +471,12 @@ async fn run(
     };
     notes.extend(removed.problems.iter().cloned());
     if flag.load(Ordering::SeqCst) {
+        if removed.paths.is_empty() && removed.problems.is_empty() {
+            return None;
+        }
         notes.push("stopped early — the worktree was restored or deleted".to_owned());
     }
-    summarize(&removed, &notes)
+    Some(summarize(&removed, &notes))
 }
 
 /// The project's patterns as the cleanup applies them: trimmed, without a
@@ -698,6 +713,11 @@ fn delete_untracked(
             continue;
         }
         let scan = scan(&full, &entry.rel, settings, &matches, flag);
+        // A walk the flag cut short has not seen the whole folder — maybe not
+        // the `.git` that would keep it — so nothing in it is decided.
+        if flag.load(Ordering::SeqCst) {
+            break;
+        }
         if scan.nested_repo {
             nested_repos += 1;
             continue;
@@ -707,6 +727,9 @@ fn delete_untracked(
             continue;
         }
         for (rel, bytes) in scan.inside {
+            if flag.load(Ordering::SeqCst) {
+                break;
+            }
             if let Some(p) = safe_join(root, &rel) {
                 remove_one(&p, &rel, bytes, flag, &mut removed);
             }
@@ -822,6 +845,11 @@ fn safe_join(root: &Path, rel: &str) -> Option<PathBuf> {
 }
 
 fn remove_one(path: &Path, rel: &str, bytes: u64, flag: &AtomicBool, removed: &mut Removed) {
+    // Checked here as well as inside, so `Ok(false)` below means "stopped after
+    // it had started", never "not started at all".
+    if flag.load(Ordering::SeqCst) {
+        return;
+    }
     match remove_tree(path, flag) {
         Ok(true) => {
             removed.bytes += bytes;
@@ -844,6 +872,9 @@ fn remove_one(path: &Path, rel: &str, bytes: u64, flag: &AtomicBool, removed: &m
 /// Not `remove_dir_all`, which cannot be interrupted: a restore that lands while a
 /// large `node_modules` is going must stop the deletion, not wait minutes for it.
 fn remove_tree(path: &Path, flag: &AtomicBool) -> std::io::Result<bool> {
+    if flag.load(Ordering::SeqCst) {
+        return Ok(false);
+    }
     let meta = std::fs::symlink_metadata(path)?;
     if !meta.is_dir() {
         std::fs::remove_file(path)?;
@@ -1119,6 +1150,21 @@ mod tests {
             r.join("node_modules").exists(),
             "sizes off: nothing by size"
         );
+    }
+
+    /// Once cancelled, nothing more goes — in particular nothing a cut-short walk
+    /// collected before it could see a nested repository's `.git`.
+    #[tokio::test]
+    async fn a_cancelled_cleanup_deletes_nothing() {
+        let dir = fixture();
+        let r = dir.path();
+        let entries = ignored(r).await;
+        let flag = AtomicBool::new(true);
+        let removed = delete_untracked(r, &entries, &settings(Some(1), Some(1)), &[], &flag);
+        assert!(removed.paths.is_empty(), "{:?}", removed.paths);
+        assert!(r.join("node_modules").exists());
+        assert!(r.join("dump.bin").exists());
+        assert!(r.join("vendor/lib/big.dat").exists());
     }
 
     #[test]
