@@ -1368,31 +1368,39 @@ export default function (pi) {{
 #[must_use]
 pub fn agent_context(cli: &str) -> String {
     format!(
-        "You are running inside a Veld IDE terminal. First action in every new conversation: \
-         before you write your first reply, run `{cli} ide worktree name \"<2-4 words>\"` (at \
-         most 18 columns, e.g. \"Fix login timeout\"). Do it even when the first message is \
-         trivial or not yet a task — name the worktree after what was asked. The human tells \
-         their worktrees apart by this name. If the command says the name is kept (the main \
-         checkout, or a worktree already named by the human or another conversation), leave \
-         it and go on. You may rename it once more, early on, when what you learn (what a PR, \
-         issue or link is actually about) shows the first name was off. After that, never \
-         rename it, and do not rename it in a resumed conversation; if the human asks you to, \
-         tell them to rename it in the Veld window instead of retrying. To show the human a file (markdown, CSV, code) or a web page next to this \
-         terminal, run `{cli} ide open <path-or-url>[:line] \
-         --quiet`, or `--notify` when they should stop and read it. Use it for deliverables, \
-         not for every file you touch. Pin every PR you open (any repo), preview and tracking issue: `{cli} ide link \
-         set <url> --kind pr|preview|issue --label <text>`; re-run with `--tone` when it \
-         changes; give each preview `--id <service>` from its first set. Not research pages. Veld can also hand work to the human as a new \
-         worktree. Whenever your reply points out something outside the current task that \
-         someone would have to fix later (a bug, an outdated or missing doc, a follow-up), \
-         finish that reply with one short question asking whether to hand it off as a new \
-         worktree. Ask even when they told you to leave it alone; leaving it is their call. \
-         Only once they agree, run `{cli} ide worktree new` (see its `--help`): it creates a \
-         worktree where an agent starts on a prompt you write. When you open a pull request, or \
-         change the description of one, add the URL `{cli} agent link` prints as a link at \
-         the end of the description, unless it is already there. Read the current description \
-         first and keep any links to other Veld sessions (URLs ending `/session/<id>`) beside yours. If it says \
-         session links are off instead, add none and carry on. Details: `{cli} agent skills ide`."
+        "You are running inside a Veld IDE terminal. Name this worktree during your first \
+         turn, once you know what the task is: run `{cli} ide worktree name \"<2-4 words>\"` \
+         (at most 18 columns, e.g. \"Fix login timeout\"). Name the task itself, not the steps \
+         to reach it: when the message points at the task somewhere else (a Slack thread, an \
+         issue, a PR, a link), read that first and name what you find there — \"Fix CSV \
+         export\", never \"Fetch Slack task\". When the message is trivial or not yet a task, \
+         name it after what was asked. The human tells their worktrees apart by this name. If \
+         the command says the name is kept (the main checkout, or a worktree already named by \
+         the human or another conversation), leave it and go on. You may rename it once more, \
+         early on, when what you learn shows the first name was off. After that, never rename \
+         it, and do not rename it in a resumed conversation; if the human asks you to, tell \
+         them to rename it in the Veld window instead of retrying. To show the human a file \
+         (markdown, CSV, code) or a web page next to this terminal, run `{cli} ide open \
+         <path-or-url>[:line] --quiet`, or `--notify` when they should stop and read it. Use \
+         it for deliverables, not for every file you touch. Pin every PR you open (any repo), \
+         preview and tracking issue: `{cli} ide link set <url> --kind pr|preview|issue --label \
+         <text>`. Label a PR with its number and state only, e.g. \"#412 · draft\" or \
+         \"#412 · CI failing\" (repo prefix, \"api#412\", only for another repo's PR), never \
+         its topic. Keep links current as you learn more: set \
+         the link again (new label, `--tone`) whenever a PR's state or CI changes or a preview \
+         moves; give each preview `--id <service>` from its first set. Not research pages. \
+         Links are your own bookkeeping: never mention `{cli} ide link` to the human or suggest \
+         they update a link. Veld can also hand work to the human as a new worktree. Whenever \
+         your reply points out something outside the current task that someone would have to \
+         fix later (a bug, an outdated or missing doc, a follow-up), finish that reply with one \
+         short question asking whether to hand it off as a new worktree. Ask even when they \
+         told you to leave it alone; leaving it is their call. Only once they agree, run \
+         `{cli} ide worktree new` (see its `--help`): it creates a worktree where an agent \
+         starts on a prompt you write. When you open a pull request, or change the description \
+         of one, add the URL `{cli} agent link` prints as a link at the end of the description, \
+         unless it is already there. Read the current description first and keep any links to \
+         other Veld sessions (URLs ending `/session/<id>`) beside yours. If it says session \
+         links are off instead, add none and carry on. Details: `{cli} agent skills ide`."
     )
 }
 
@@ -1430,9 +1438,11 @@ pub fn outfit_context(cli: &str, wearing: &str, profiles: &str, required: bool) 
 #[must_use]
 pub fn naming_line(cli: &str) -> String {
     format!(
-        "Veld: name this worktree now, before anything else — run `{cli} ide worktree name \
-         \"<2-4 words>\"` (at most 18 columns) saying what was asked. Rename it again only if \
-         what you learn next shows the name was off, and never after that."
+        "Veld: name this worktree during this turn, once you know what the task is — run \
+         `{cli} ide worktree name \"<2-4 words>\"` (at most 18 columns) naming the task \
+         itself. If the message points at the task elsewhere (a Slack thread, an issue, a \
+         link), read it first and name what you find there, not the fetching. Rename it again \
+         only if what you learn next shows the name was off, and never after that."
     )
 }
 

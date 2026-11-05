@@ -101,8 +101,8 @@ pub struct SetArgs {
     #[arg(long)]
     pub kind: Option<String>,
 
-    /// The text shown, at most 60 characters — e.g. `api#123 Add login` for a pull
-    /// request. Defaults to the URL's host and the end of its path.
+    /// The text shown, at most 60 characters — e.g. `#123 · draft` for a pull
+    /// request (its number and state, not its topic). Defaults to the URL's host and the end of its path.
     #[arg(long)]
     pub label: Option<String>,
 
