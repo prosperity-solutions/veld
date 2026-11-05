@@ -1789,7 +1789,6 @@ describe("a finished agent, once seen", () => {
     const box = createInbox();
     box.setWatching("cc");
     box.report("cc", WT, agent("working"), NOW);
-    box.report("cc", WT, agent("working"), NOW + 1 - 1);
     box.report("cc", WT, agent("idle"), NOW + 1);
     expect(box.unseen("cc")).toBeNull();
     expect(seen(box)).toBe(1);
@@ -2035,6 +2034,33 @@ describe("a finished agent, once seen", () => {
     expect(seen(after)).toBe(1);
     for (const s of command(0)) after.report("cc", WT, s, NOW + 20);
     expect(seen(after)).toBe(0);
+  });
+
+  /** A reused shell pane: Claude, quit, then Codex — Codex's finish is read away as before. */
+  it("forgets that the last agent reported turns when another launches", () => {
+    const box = createInbox();
+    box.report("sh", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report("sh", WT, agent("ready"), NOW + 1);
+    box.report("sh", WT, agent("working"), NOW + 2);
+    box.report("sh", WT, agent("idle"), NOW + 3);
+    box.report("sh", WT, agent("done"), NOW + 4);
+    box.report("sh", WT, { type: "osc133", mark: "D", exit: 0 }, NOW + 5);
+    box.report("sh", WT, { type: "osc133", mark: "C", exit: null }, NOW + 6);
+    box.report("sh", WT, agent("ready"), NOW + 7);
+    box.report("sh", WT, agent("idle"), NOW + 8);
+    box.read("sh");
+    expect(seen(box)).toBe(0);
+  });
+
+  /** `SessionEnd` is fire-and-forget: it can land after the `D` that closed the agent. */
+  it("still files the shell's exit when the agent's goodbye arrives after its D", () => {
+    const box = createInbox();
+    box.report("sh", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box.report("sh", WT, agent("ready"), NOW + 1);
+    box.report("sh", WT, { type: "osc133", mark: "D", exit: 0 }, NOW + 2);
+    box.report("sh", WT, agent("done"), NOW + 3);
+    box.report("sh", WT, { type: "exit", code: 0 }, NOW + 4);
+    expect(box.unseen("sh")?.detail).toBe("Process ended");
   });
 
   it("drops a stored finish that is not an agent's", () => {

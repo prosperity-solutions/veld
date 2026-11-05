@@ -725,6 +725,7 @@ class WorktreeInbox {
           // Nor to be finished: a killed agent sends no `done`, and its pane is a shell now.
           session.finished = null;
           session.agentEnded = false;
+          session.reportsTurns = false;
           return undefined;
         }
         // A command the shell ran on its own: no agent holds this pane, so none is
@@ -778,6 +779,7 @@ class WorktreeInbox {
         session.finished = null;
         const agentEnded = session.agentEnded;
         session.agentEnded = false;
+        session.reportsTurns = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -861,6 +863,9 @@ class WorktreeInbox {
         // already quit — the idle reminder is fire-and-forget. Claiming here would hand
         // the *next* shell command to an agent that is gone, swallowing its result.
         if (signal.state === "settled" && session.agentSource === null) return undefined;
+        // Whether an agent already held this pane before this report: a `done` that
+        // arrives after the `D` closing the agent's command finds it released.
+        const claimed = session.agentSource !== null;
         session.agentSource = signal.source;
         // `settled` is a reminder sent a minute after every turn; while the agent is
         // waiting on its background agents it is not news that the pane went quiet.
@@ -888,7 +893,16 @@ class WorktreeInbox {
           session.finished = null;
         }
         if (signal.state !== "done") session.agentEnded = false;
-        if (signal.state === "working" || signal.state === "delegated") session.reportsTurns = true;
+        // A new launch starts over (a reused pane can run Codex after Claude); a turn
+        // starting, or a question inside one, says this agent reports its turns.
+        if (signal.state === "ready") session.reportsTurns = false;
+        if (
+          signal.state === "working" ||
+          signal.state === "delegated" ||
+          signal.state === "blocked"
+        ) {
+          session.reportsTurns = true;
+        }
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -940,7 +954,8 @@ class WorktreeInbox {
             session.finished = null;
             // Only where the agent is the pane's own process: in a shell pane the `D`
             // closing its command follows instead, and the shell's exit is a later event.
-            session.agentEnded = !session.agentCommand;
+            session.agentEnded = claimed && !session.agentCommand;
+            session.reportsTurns = false;
             return session.unseen?.producer === "agent" && session.unseen.kind !== "opened"
               ? null
               : undefined;
