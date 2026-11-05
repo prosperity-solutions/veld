@@ -282,11 +282,20 @@ describe("coding agents", () => {
     box.report("cc", WT, agent("working"), NOW + 1);
     expect(box.unseen("cc")).toBeNull();
 
-    // But a `finished` the user has not read yet is still true, so `working` leaves it.
+    // An unread "Agent finished" goes too: the agent started its next turn, so it is
+    // no longer finished.
     const box2 = createInbox();
     box2.report("cc", WT, agent("idle"), NOW);
     box2.report("cc", WT, agent("working"), NOW + 1);
-    expect(box2.unseen("cc")?.kind).toBe("finished");
+    expect(box2.unseen("cc")).toBeNull();
+    expect(box2.rowState(WT, false).seen).toBe(0);
+
+    // But a shell command's verdict in the same pane is not the agent's to retract.
+    const box3 = createInbox();
+    box3.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW);
+    box3.report("cc", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 1);
+    box3.report("cc", WT, agent("working"), NOW + 2);
+    expect(box3.unseen("cc")?.kind).toBe("failed");
   });
 
   it("ignores a state it does not understand", () => {
@@ -884,8 +893,8 @@ describe("defects found in review", () => {
     const box = createInbox();
     box.report("p", WT, agent("ready"), NOW);
     box.report("p", WT, agent("done"), NOW + 1);
-    expect(box.unseen("p")?.detail).toBe("Agent session ended");
-    box.read("p");
+    // An agent quitting files nothing: whoever quit it was there.
+    expect(box.unseen("p")).toBeNull();
 
     // The shell speaks for this pane again.
     box.report("p", WT, { type: "osc133", mark: "C", exit: null }, NOW + 2);
@@ -956,7 +965,7 @@ describe("defects found in review", () => {
     box.report("cc", WT, agent("ready"), NOW);
     box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
     box.report("cc", WT, agent("done"), NOW + 2);
-    expect(box.unseen("cc")?.detail).toBe("Agent session ended");
+    expect(box.unseen("cc")).toBeNull();
     // A departed agent is not "working", so the row must not spin while the mark is pending.
     expect(box.isRunning("cc")).toBe(false);
 
@@ -967,8 +976,8 @@ describe("defects found in review", () => {
     // The shell's mark for the `claude` command that just ended — Ctrl-C's variant, which
     // is the one that claimed a failure that never happened.
     box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 3);
-    expect(box.unseen("cc")?.detail).toBe("Agent session ended");
-    expect(events, "and no second banner").toBe(0);
+    expect(box.unseen("cc"), "no failure for the agent's own exit").toBeNull();
+    expect(events, "and no banner").toBe(0);
 
     // …and that same mark is when the pane becomes the shell's again, so an OSC 9 after it
     // is heard. No read required: the hand-off is a fact about which command ended.
@@ -1261,7 +1270,7 @@ describe("a whole project's glyph", () => {
     const box = createInbox();
     box.report("a-old", WT, agent("idle"), NOW);
     box.report("b-new", OTHER_WT, agent("blocked"), NOW + 2000);
-    box.report("a-mid", THIRD_WT, agent("done"), NOW + 1000);
+    box.report("a-mid", THIRD_WT, agent("idle"), NOW + 1000);
     expect(
       box
         .groupState(new Set([WT, OTHER_WT, THIRD_WT]), false)
@@ -1361,9 +1370,10 @@ describe("the next thing that needs you", () => {
   /**
    * The regression, reported against the first cut of this button.
    *
-   * **An agent files two `finished` events per session** — `idle` when a turn ends,
-   * `done` when the session ends — so a pane that has already been read goes unread
-   * again later, correctly. Ordered oldest-first, a third agent finishing therefore
+   * **An agent filed two `finished` events per session** then — `idle` when a turn
+   * ended, `done` when the session ended — so a pane that had already been read went
+   * unread again later. (`done` files nothing now; the ordering still matters for any
+   * pane with news after a read.) Ordered oldest-first, a third agent finishing therefore
    * made the button appear while pressing it opened the *first* agent, whose
    * session-end event was older than the finish that had just arrived. The control
    * had no visible cause any more, which is exactly how a user found it.
@@ -1376,8 +1386,9 @@ describe("the next thing that needs you", () => {
     box.read("a2");
     expect(box.nextUnread(ALL)).toBe(null);
 
-    // `a1`'s session ends — a second, independent event on a pane already read.
-    box.report("a1", WT, agent("done"), NOW + 3000);
+    // `a1`'s agent starts and finishes another turn — new news on a pane already read.
+    box.report("a1", WT, agent("working"), NOW + 2500);
+    box.report("a1", WT, agent("idle"), NOW + 3000);
     // …and then the agent in the other worktree finishes.
     box.report("a3", THIRD_WT, agent("idle"), NOW + 4000);
 
@@ -1461,7 +1472,7 @@ describe("bookkeeping", () => {
 
   it("counts a worktree it has never heard of as empty", () => {
     const box = createInbox();
-    expect(box.rowState(1234, true)).toEqual({ state: null, entries: [], running: 0 });
+    expect(box.rowState(1234, true)).toEqual({ seen: 0, state: null, entries: [], running: 0 });
     expect(box.unseen("nope")).toBeNull();
   });
 });
@@ -1594,6 +1605,17 @@ describe("a held 'waiting for you'", () => {
     expect(box.nextUnread(ALL)?.sessionId).toBe("t2");
     box.setWatching("t2");
     expect(box.nextUnread(ALL)?.sessionId).toBe("t1");
+  });
+
+  /** Nothing else to go to: the button stays on the open question until it is answered. */
+  it("is still 'next' when it is the only thing waiting, even while watched", () => {
+    const ALL = new Set([WT]);
+    const box = createInbox();
+    box.report("t1", WT, held, NOW);
+    box.setWatching("t1");
+    expect(box.nextUnread(ALL)?.sessionId).toBe("t1");
+    box.report("t1", WT, agent("working"), NOW + 1);
+    expect(box.nextUnread(ALL)).toBeNull();
   });
 });
 
@@ -1734,5 +1756,221 @@ describe("seeding from the daemon", () => {
     const mark = box.agentMark();
     box.seed([], NOW + 10, mark, NOW + 5);
     expect(box.isRunning("w")).toBe(true);
+  });
+});
+
+/**
+ * **A finished agent stays finished until something ends it, not until it is seen.**
+ *
+ * Looking at the pane reads the event — the first visit is still what clears it from
+ * Next and the Dock badge — but the agent is still finished afterwards, so the rail
+ * keeps a muted tick. What ends that is the agent's next turn, the agent exiting, the
+ * pane's process ending or restarting, closing the pane, or Mark read.
+ */
+describe("a finished agent, once seen", () => {
+  const seen = (box: ReturnType<typeof createInbox>, wt = WT) => box.rowState(wt, true).seen;
+
+  it("stays finished after it is read, and no longer counts as unread", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    expect(rowState(box, WT)).toBe("finished");
+    expect(seen(box)).toBe(0);
+
+    box.setWatching("cc");
+    expect(box.unseen("cc")).toBeNull();
+    expect(rowState(box, WT)).toBe(null);
+    expect(seen(box)).toBe(1);
+    expect(box.nextUnread(new Set([WT]))).toBeNull();
+    expect(box.unreadSessions(new Set([WT]))).toEqual([]);
+  });
+
+  it("is seen at once when the agent finishes in the pane being watched", () => {
+    const box = createInbox();
+    box.setWatching("cc");
+    box.report("cc", WT, agent("working"), NOW);
+    box.report("cc", WT, agent("idle"), NOW + 1);
+    expect(box.unseen("cc")).toBeNull();
+    expect(seen(box)).toBe(1);
+  });
+
+  it("survives typing into the pane and the idle reminder", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    box.report("cc", WT, agent("settled"), NOW + 60_000);
+    expect(seen(box)).toBe(1);
+  });
+
+  it("ends when the agent starts its next turn", () => {
+    for (const next of ["working", "delegated", "blocked"] as const) {
+      const box = createInbox();
+      box.report("cc", WT, agent("idle"), NOW);
+      box.read("cc");
+      box.report("cc", WT, agent(next), NOW + 1);
+      expect(seen(box), next).toBe(0);
+    }
+  });
+
+  it("ends, with nothing filed, when the agent exits", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, agent("idle"), NOW + 1);
+    box.report("cc", WT, agent("done"), NOW + 2);
+    expect(seen(box)).toBe(0);
+    expect(box.unseen("cc"), "an unread finish goes with the agent").toBeNull();
+  });
+
+  it("takes an unread question with an exiting agent, but not a command's verdict", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("blocked"), NOW);
+    box.report("cc", WT, agent("done"), NOW + 1);
+    expect(box.unseen("cc")).toBeNull();
+
+    const box2 = createInbox();
+    for (const s of command(2)) box2.report("cc", WT, s, NOW);
+    box2.report("cc", WT, agent("done"), NOW + 1);
+    expect(box2.unseen("cc")?.kind).toBe("failed");
+  });
+
+  /**
+   * A config-declared pane *is* the agent: its process ends right after the agent
+   * reports ending. That clean exit is the same event and files nothing; a crash is
+   * still a failure worth a badge.
+   */
+  it("files no 'Process ended' for the pane exit that follows the agent's own", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, agent("done"), NOW + 1);
+    box.report("cc", WT, { type: "exit", code: 0 }, NOW + 2);
+    expect(box.unseen("cc")).toBeNull();
+
+    const crashed = createInbox();
+    crashed.report("cc", WT, agent("ready"), NOW);
+    crashed.report("cc", WT, agent("done"), NOW + 1);
+    crashed.report("cc", WT, { type: "exit", code: 9 }, NOW + 2);
+    expect(crashed.unseen("cc")?.kind).toBe("failed");
+  });
+
+  it("ends when the pane's process ends, restarts, or the pane is closed", () => {
+    const exited = createInbox();
+    exited.report("cc", WT, agent("idle"), NOW);
+    exited.read("cc");
+    exited.report("cc", WT, { type: "exit", code: 0 }, NOW + 1);
+    expect(seen(exited)).toBe(0);
+
+    const restarted = createInbox();
+    restarted.report("cc", WT, agent("idle"), NOW);
+    restarted.restarted("cc");
+    expect(seen(restarted)).toBe(0);
+
+    const closed = createInbox();
+    closed.report("cc", WT, agent("idle"), NOW);
+    closed.read("cc");
+    closed.forget("cc");
+    expect(seen(closed)).toBe(0);
+  });
+
+  it("is dismissed by Mark read, which is offered for it", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    expect(box.hasUnread(WT)).toBe(true);
+    box.markWorktreeRead(WT);
+    expect(seen(box)).toBe(0);
+    expect(box.hasUnread(WT)).toBe(false);
+  });
+
+  it("is only an agent's: a finished shell command is read by looking, as before", () => {
+    const box = createInbox();
+    for (const s of command(0)) box.report("sh", WT, s, NOW);
+    box.read("sh");
+    expect(seen(box)).toBe(0);
+  });
+
+  /** The project selector shows news only; a seen finish is not news. */
+  it("does not light a project's glyph", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    expect(box.groupState(new Set([WT, OTHER_WT]), true).state).toBe(null);
+  });
+
+  it("survives a reload, and a reload's claim does not end it", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    const doc = JSON.parse(JSON.stringify(box.snapshot()));
+
+    const after = createInbox();
+    after.restore(doc);
+    expect(seen(after)).toBe(1);
+    expect(after.unseen("cc")).toBeNull();
+    // The seed claims an idle agent's pane with `ready` after a reload.
+    after.seed(
+      [{ sessionId: "cc", worktreeId: WT, state: "idle", held: false, since: NOW }],
+      NOW + 10,
+    );
+    expect(seen(after)).toBe(1);
+    expect(after.unseen("cc")).toBeNull();
+  });
+
+  it("drops a stored finish that is not an agent's", () => {
+    const after = createInbox();
+    after.restore({
+      v: 1,
+      sessions: {
+        cc: {
+          worktreeId: WT,
+          unseen: null,
+          reportedExit: false,
+          finished: { kind: "failed", producer: "agent", at: NOW, source: "hook", detail: "x" },
+        },
+      },
+    });
+    expect(seen(after)).toBe(0);
+  });
+});
+
+/**
+ * The Next button once nothing is unread: it steps through the agents that finished
+ * and were seen, from the one being watched to the next older, wrapping — so it
+ * stays, and pressing it repeatedly visits each without reading anything.
+ */
+describe("next, once nothing is unread", () => {
+  const ALL_WT = new Set([WT, OTHER_WT]);
+
+  it("prefers unread news, then steps through seen finishes", () => {
+    const box = createInbox();
+    box.report("old", WT, agent("idle"), NOW);
+    box.report("new", OTHER_WT, agent("idle"), NOW + 1000);
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "new" });
+    expect(box.next(ALL_WT)?.seen).toBeUndefined();
+
+    box.setWatching("new");
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "old" });
+    expect(box.next(ALL_WT)?.seen).toBeUndefined();
+    box.setWatching("old");
+
+    // Both seen: newest first, from the watched one on, wrapping.
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "new", seen: true });
+    box.setWatching("new");
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "old", seen: true });
+    box.setWatching(null);
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "new", seen: true });
+  });
+
+  it("stays on a lone finished agent", () => {
+    const box = createInbox();
+    box.report("only", WT, agent("idle"), NOW);
+    box.setWatching("only");
+    expect(box.next(ALL_WT)).toMatchObject({ sessionId: "only", seen: true });
+  });
+
+  it("is gone once nothing is finished", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("idle"), NOW);
+    box.setWatching("cc");
+    box.report("cc", WT, agent("working"), NOW + 1);
+    expect(box.next(ALL_WT)).toBeNull();
   });
 });

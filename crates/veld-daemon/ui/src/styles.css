@@ -362,6 +362,11 @@ body[data-fullscreen="true"] .topbar.electron {
 .topbar-next.finished {
   color: var(--accent);
 }
+/* Stepping through finished agents already seen: standing state, not news — muted
+   the way the rail's seen tick is. */
+.topbar-next.finished.seen {
+  color: color-mix(in srgb, var(--accent) 45%, var(--muted));
+}
 /* `ide.extensions` status badges.
  *
  * **A Button, not a Badge.** These *are* controls — a click opens the pull
@@ -1943,6 +1948,12 @@ body.pointer-dragging * {
 }
 .wt-badge.finished {
   color: var(--accent);
+}
+/* An agent that finished and has been looked at since: still finished, no longer
+   news. The same tick, muted, so it reads as standing state beside the coloured
+   ticks that still want a look. */
+.wt-badge.finished.seen {
+  color: color-mix(in srgb, var(--accent) 45%, var(--muted));
 }
 .wt-badge.working svg {
   animation: spin 1.4s linear infinite;

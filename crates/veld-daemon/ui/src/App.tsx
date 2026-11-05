@@ -68,7 +68,7 @@ import { nextIndex, shortcutHint } from "./shortcuts/registry";
 import { InboxIcon, activityLines, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { GitStateIcon, TerminalBadge } from "./rowstate/RowStateIcon";
-import { rowBadge, rowDescription, rowTooltip } from "./rowstate/rowState";
+import { rowBadge, rowDescription, rowTooltip, seenNote } from "./rowstate/rowState";
 import { RailGlyphTooltip } from "./shared/RailGlyphTooltip";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
@@ -5234,7 +5234,7 @@ function AppInner(props: {
    * window claiming somebody looked at something it cannot see.
    */
   const goNext = () => {
-    const target = inbox.nextUnread(allProjectWorktreeIds(reposRef.current));
+    const target = inbox.next(allProjectWorktreeIds(reposRef.current));
     if (!target) return;
     // **Switch to the IDE, because the destination is a pane and panes only exist
     // there.** Pressing this in Runs mode used to select the worktree, activate
@@ -6946,7 +6946,7 @@ function AppInner(props: {
    * a dependency and it has no version to give one.
    */
   const unreadScope = allProjectWorktreeIds(repos);
-  const nextTarget = inbox.nextUnread(unreadScope);
+  const nextTarget = inbox.next(unreadScope);
 
   // The Dock icon's badge: the same unread events Next unread walks, reported to
   // Veld Desktop with the worktrees this window holds, so the shell can combine
@@ -7013,6 +7013,7 @@ function AppInner(props: {
       next={
         nextTarget && {
           kind: nextTarget.unseen.kind,
+          seen: nextTarget.seen === true,
           // The event's own `detail` rather than the row vocabulary's `HEADLINE`:
           // both say what happened, and only `detail` distinguishes an agent that
           // finished from a command that did — which is the difference between
@@ -11147,9 +11148,12 @@ function Rail(props: {
               const stateTooltip = () =>
                 rowTooltip(
                   worktreeLabel(w),
-                  terminalsNote
-                    ? [...activityLines(inboxSummary), terminalsNote]
-                    : activityLines(inboxSummary),
+                  [
+                    ...activityLines(inboxSummary),
+                    ...[seenNote(inboxSummary.seen), terminalsNote].filter(
+                      (line): line is string => line !== undefined,
+                    ),
+                  ],
                   w.git,
                   isDetached(w),
                 );
@@ -11214,7 +11218,11 @@ function Rail(props: {
                     showsState ? w.git : undefined,
                     // Same gate, same reason: a hidden glyph is not announced.
                     showsState && isDetached(w),
-                    showsState ? terminalsNote : undefined,
+                    showsState
+                      ? [seenNote(inboxSummary.seen), terminalsNote]
+                          .filter((line) => line !== undefined)
+                          .join(". ") || undefined
+                      : undefined,
                   )}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={

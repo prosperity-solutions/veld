@@ -168,9 +168,14 @@ export interface RowSummary {
   entries: { sessionId: string; unseen: Unseen }[];
   /** How many of this worktree's panes are running something. */
   running: number;
+  /**
+   * How many agents here finished and were seen since: no longer news, so not in
+   * `state` or `entries`, but still finished — the rail's muted tick.
+   */
+  seen: number;
 }
 
-const NOTHING: RowSummary = { state: null, entries: [], running: 0 };
+const NOTHING: RowSummary = { state: null, entries: [], running: 0, seen: 0 };
 
 /**
  * One unread event, with everything needed to go and look at it.
@@ -183,6 +188,8 @@ export interface NextTarget {
   worktreeId: number;
   sessionId: string;
   unseen: Unseen;
+  /** A finished agent already seen ({@link WorktreeInbox.nextFinished}), not unread news. */
+  seen?: boolean;
 }
 
 /** Agent states this build acts on. Anything else claims nothing — see `classify`. */
@@ -298,6 +305,23 @@ interface SessionState {
    */
   held: boolean;
   unseen: Unseen | null;
+  /**
+   * The agent's last turn ended and it has not started another: the "agent finished"
+   * event, kept after it is read.
+   *
+   * Reading only makes it *seen* — the rail then shows the tick muted rather than not at
+   * all. A finished agent is still finished after you glance at its pane; what ends that
+   * is the agent's next turn, the agent exiting, the pane closing, a restart, or Mark
+   * read. Only an agent's `idle` sets it: a shell command's verdict is news, read by
+   * looking, with no state behind it.
+   */
+  finished: Unseen | null;
+  /**
+   * The agent reported its session ending (`done`). The pane's own exit, which for a
+   * config-declared pane follows a moment later, is then the same event and files
+   * nothing unless it failed.
+   */
+  agentEnded: boolean;
 }
 
 /**
@@ -414,6 +438,8 @@ class WorktreeInbox {
       delegated: false,
       held: false,
       unseen: null,
+      finished: null,
+      agentEnded: false,
     });
   }
 
@@ -710,6 +736,10 @@ class WorktreeInbox {
         // A held question dies with the agent: the report that would release it never
         // comes, and held it could not be read or marked read at all.
         session.held = false;
+        // Nothing is left to be finished.
+        session.finished = null;
+        const agentEnded = session.agentEnded;
+        session.agentEnded = false;
         // The daemon **replays the exit frame to every new attach** — pinned by
         // `reattaching_after_exit_reports_the_exit`, which asserts a second attach reads
         // the same code again. So this arm sees an already-known death on every page
@@ -718,6 +748,9 @@ class WorktreeInbox {
         // persisted with the events and pruned by `retain`.
         if (session.reportedExit) return undefined;
         session.reportedExit = true;
+        // A config-declared pane whose agent just reported its session ending: the
+        // process leaving is that same event, already handled. A crash still counts.
+        if (agentEnded && signal.code === 0) return undefined;
         // Keyed on `unseen` alone, and **not** on `ranCommand`. That was the bug: a
         // shell dying mid-command (a crash, `exit 3`, an OOM kill) has `ranCommand`
         // true and will never send its `D`, so the exit frame *is* the report — and
@@ -806,6 +839,17 @@ class WorktreeInbox {
           session.agentCommand = true;
         }
         session.restoredCommand = false;
+        // The agent is doing something again, so it is no longer finished. `ready` and
+        // `settled` leave it: the seed claims a pane with `ready` after a reload, and the
+        // idle reminder only restates the turn that already ended.
+        if (
+          signal.state === "working" ||
+          signal.state === "delegated" ||
+          signal.state === "blocked"
+        ) {
+          session.finished = null;
+        }
+        if (signal.state !== "done") session.agentEnded = false;
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -849,27 +893,37 @@ class WorktreeInbox {
             // (see the field): with it false there really is no agent launch outstanding, so
             // any `D` that turns up belongs to another command and has earned its event.
             if (!session.agentCommand) session.agentSource = null;
-            return {
-              kind: "finished",
-              producer: "agent",
-              at: now,
-              source: signal.source,
-              detail: "Agent session ended",
-            };
-          case "idle":
-            return {
+            // An agent that exits is not news: whoever quit it was there, and what it
+            // last said — finished, or waiting on you — stopped being true with it. So
+            // its own unread event goes with the finished state, and nothing new is
+            // filed. A shell command's verdict in the same pane is not the agent's to
+            // take.
+            session.finished = null;
+            session.agentEnded = true;
+            return session.unseen?.producer === "agent" && session.unseen.kind !== "opened"
+              ? null
+              : undefined;
+          case "idle": {
+            const event: Unseen = {
               kind: "finished",
               producer: "agent",
               at: now,
               source: signal.source,
               detail: "Agent finished",
             };
+            session.finished = event;
+            return event;
+          }
           case "working":
-            // A retraction, not an event. The agent has moved on from whatever it was
+            // A retraction, not an event. The agent has moved on: from whatever it was
             // waiting for — answered in another window, auto-approved, timed out — so an
-            // `attention` still sitting there is a lie. Only an attention is retracted:
-            // a `finished` the user has not read yet is still true.
-            return session.unseen?.kind === "attention" ? null : undefined;
+            // `attention` still sitting there is a lie; and from the turn it finished, so
+            // an unread "Agent finished" is no longer true either. A shell command's
+            // verdict in the same pane is still news.
+            return session.unseen?.kind === "attention" ||
+              (session.unseen?.kind === "finished" && session.unseen.producer === "agent")
+              ? null
+              : undefined;
         }
       }
     }
@@ -910,6 +964,8 @@ class WorktreeInbox {
     session.agentCommand = false;
     session.delegated = false;
     session.held = false;
+    session.finished = null;
+    session.agentEnded = false;
     // The event goes too. Restart is reachable from an *inactive* tab's strip, so
     // restarting without having read is an ordinary gesture — and a badge left over from
     // the previous run then asserts a failure the current run has not had, with no fresh
@@ -929,13 +985,21 @@ class WorktreeInbox {
    *
    * It does not, and must not, stop anything that is **running**: `working` is not an
    * event and there is nothing about it to have seen.
+   *
+   * It does dismiss a finished agent outright — seen or not — because it is the one
+   * gesture that says "I am done with this", where looking only says "I have seen it".
    */
   markWorktreeRead(worktreeId: number): void {
     let changed = false;
     for (const session of this.sessions.values()) {
-      if (session.worktreeId === worktreeId && session.unseen && !session.held) {
+      if (session.worktreeId !== worktreeId) continue;
+      if (session.unseen && !session.held) {
         session.unseen = null;
         session.readAt = Date.now();
+        changed = true;
+      }
+      if (session.finished) {
+        session.finished = null;
         changed = true;
       }
     }
@@ -945,7 +1009,8 @@ class WorktreeInbox {
   /** Whether a worktree has anything a user could mark read. */
   hasUnread(worktreeId: number): boolean {
     for (const session of this.sessions.values()) {
-      if (session.worktreeId === worktreeId && session.unseen && !session.held) return true;
+      if (session.worktreeId !== worktreeId) continue;
+      if ((session.unseen && !session.held) || session.finished) return true;
     }
     return false;
   }
@@ -993,8 +1058,9 @@ class WorktreeInbox {
    * **Newest, because the button's appearing and where it sends you are one event.**
    * This shipped oldest-first — a queue-fairness argument, so the pane blocked
    * longest got seen first — and that was wrong in a way a user hit immediately. An
-   * agent files *two* `finished` events per session, `idle` when a turn ends and
-   * `done` when the session ends, so a pane already read goes unread again later.
+   * agent then filed *two* `finished` events per session, `idle` when a turn ended and
+   * `done` when the session ended, so a pane already read went unread again later
+   * (an agent ending files nothing now, but any pane can have news again after a read).
    * With oldest-first, a third agent finishing made the button appear and pressing
    * it opened the *first* agent, whose session-end event was older. The control had
    * no visible cause any more. Precedence can still send you somewhere other than
@@ -1022,24 +1088,65 @@ class WorktreeInbox {
    * a pane goes away.
    *
    * Except for a **held** event, which arriving cannot read: in the pane being watched
-   * it is already in front of the person, so it is passed over, or the gesture would
-   * land on it again and again and never reach the next one.
+   * it is already in front of the person, so it is passed over while there is anything
+   * else to go to, or the gesture would land on it again and again and never reach the
+   * next one. With nothing else, it is the answer — it is still waiting on you.
    */
   nextUnread(worktreeIds: ReadonlySet<number>): NextTarget | null {
     let best: NextTarget | null = null;
     let bestRank = PRECEDENCE.length;
+    let heldHere: NextTarget | null = null;
     for (const [sessionId, session] of this.sessions) {
       const unseen = session.unseen;
       if (!unseen) continue;
-      if (session.held && sessionId === this.watching) continue;
       if (!worktreeIds.has(session.worktreeId)) continue;
+      if (session.held && sessionId === this.watching) {
+        heldHere = { worktreeId: session.worktreeId, sessionId, unseen };
+        continue;
+      }
       const rank = PRECEDENCE.indexOf(unseen.kind);
       if (rank > bestRank) continue;
       if (rank === bestRank && best !== null && unseen.at <= best.unseen.at) continue;
       best = { worktreeId: session.worktreeId, sessionId, unseen };
       bestRank = rank;
     }
-    return best;
+    // The question in front of you is still waiting: with nothing else unread, the
+    // button stays on it until it is answered, rather than vanishing as if it were.
+    return best ?? heldHere;
+  }
+
+  /**
+   * Where the Next button goes: unread news first ({@link nextUnread}), and once
+   * there is none, the finished agents already seen ({@link nextFinished}).
+   */
+  next(worktreeIds: ReadonlySet<number>): NextTarget | null {
+    return this.nextUnread(worktreeIds) ?? this.nextFinished(worktreeIds);
+  }
+
+  /**
+   * The agents that finished and were seen since, one at a time — newest finish
+   * first, and from the one being watched on to the one after it, wrapping round.
+   *
+   * Seen, so arriving reads nothing and cannot empty the list the way it empties
+   * {@link nextUnread}'s. The position is therefore the pane being watched: pressing
+   * again from a finished agent goes to the next older one, and from the oldest back
+   * to the newest. A lone finished agent is its own next, so the button stays while
+   * there is one.
+   */
+  nextFinished(worktreeIds: ReadonlySet<number>): NextTarget | null {
+    const done: NextTarget[] = [];
+    for (const [sessionId, session] of this.sessions) {
+      if (session.unseen || !session.finished) continue;
+      if (!worktreeIds.has(session.worktreeId)) continue;
+      done.push({ worktreeId: session.worktreeId, sessionId, unseen: session.finished, seen: true });
+    }
+    if (done.length === 0) return null;
+    done.sort(
+      (a, b) =>
+        b.unseen.at - a.unseen.at || (a.sessionId < b.sessionId ? -1 : a.sessionId > b.sessionId ? 1 : 0),
+    );
+    const here = done.findIndex((t) => t.sessionId === this.watching);
+    return done[(here + 1) % done.length];
   }
 
   /**
@@ -1075,15 +1182,21 @@ class WorktreeInbox {
   ): RowSummary {
     const entries: { sessionId: string; unseen: Unseen }[] = [];
     let runningPanes = 0;
+    let seen = 0;
     const kinds = new Set<UnseenKind>();
     for (const [sessionId, session] of this.sessions) {
       if (!match(session.worktreeId)) continue;
       if (running(session)) runningPanes += 1;
-      if (!session.unseen) continue;
+      if (!session.unseen) {
+        if (session.finished) seen += 1;
+        continue;
+      }
       entries.push({ sessionId, unseen: session.unseen });
       kinds.add(session.unseen.kind);
     }
-    if (entries.length === 0 && !(showWorking && runningPanes > 0)) return NOTHING;
+    if (entries.length === 0 && !(showWorking && runningPanes > 0)) {
+      return seen === 0 ? NOTHING : { ...NOTHING, running: runningPanes, seen };
+    }
     entries.sort((a, b) => b.unseen.at - a.unseen.at);
     const state =
       PRECEDENCE.find(
@@ -1092,7 +1205,7 @@ class WorktreeInbox {
             ? showWorking && runningPanes > 0
             : kinds.has(candidate as UnseenKind),
       ) ?? null;
-    return { state, entries, running: runningPanes };
+    return { state, entries, running: runningPanes, seen };
   }
 
   /** One session's unseen event, or null. For a pane's own tab. */
@@ -1145,11 +1258,12 @@ class WorktreeInbox {
   snapshot(): PersistedInbox {
     const sessions: PersistedInbox["sessions"] = {};
     for (const [id, session] of this.sessions) {
-      if (session.unseen || session.reportedExit || session.readAt !== null) {
+      if (session.unseen || session.finished || session.reportedExit || session.readAt !== null) {
         sessions[id] = {
           worktreeId: session.worktreeId,
           unseen: session.unseen,
           readAt: session.readAt,
+          ...(session.finished && { finished: session.finished }),
           // Carried even for a session with nothing unread: it is the *read* case that
           // needed it, since the daemon replays the exit frame to the next attach and the
           // event would otherwise come back — with a notification — on every reload.
@@ -1181,6 +1295,10 @@ class WorktreeInbox {
       // replayed exit frame filing the same death again after the reload.
       session.reportedExit = session.reportedExit || entry.reportedExit;
       session.readAt = Math.max(session.readAt ?? 0, entry.readAt ?? 0) || null;
+      if (entry.finished && !session.finished) {
+        session.finished = entry.finished;
+        changed = true;
+      }
       if (entry.unseen !== null) {
         session.unseen = entry.unseen;
         changed = true;
@@ -1233,6 +1351,8 @@ export interface PersistedInbox {
       reportedExit: boolean;
       /** Absent in snapshots written before it existed. */
       readAt?: number | null;
+      /** A finished agent, kept once seen. Absent when there is none, and in older snapshots. */
+      finished?: Unseen;
     }
   >;
 }
@@ -1259,34 +1379,42 @@ function parsePersisted(doc: unknown): PersistedInbox["sessions"] {
     if (typeof entry.worktreeId !== "number") continue;
     const reportedExit = entry.reportedExit === true;
     const readAt = typeof entry.readAt === "number" ? entry.readAt : null;
+    const parsedFinished = parseUnseen(entry.finished);
+    // Only ever an agent's finish; anything else in that slot is not one this build wrote.
+    const finished =
+      parsedFinished?.kind === "finished" && parsedFinished.producer === "agent"
+        ? { finished: parsedFinished }
+        : {};
     // A row with no event but a filed exit is meaningful on its own — it is the whole
     // point of persisting the marker — so it is kept rather than skipped.
     if (unseen === null || unseen === undefined) {
-      if (reportedExit || readAt !== null) {
-        out[id] = { worktreeId: entry.worktreeId, unseen: null, reportedExit, readAt };
+      if (reportedExit || readAt !== null || "finished" in finished) {
+        out[id] = { worktreeId: entry.worktreeId, unseen: null, reportedExit, readAt, ...finished };
       }
       continue;
     }
-    if (typeof unseen !== "object") continue;
-    const u = unseen as Record<string, unknown>;
-    if (!KINDS.includes(u.kind as UnseenKind)) continue;
-    if (!PRODUCERS.includes(u.producer as Producer)) continue;
-    if (!SOURCES.includes(u.source as Source)) continue;
-    if (typeof u.at !== "number" || typeof u.detail !== "string") continue;
-    out[id] = {
-      worktreeId: entry.worktreeId,
-      reportedExit,
-      readAt,
-      unseen: {
-        kind: u.kind as UnseenKind,
-        producer: u.producer as Producer,
-        source: u.source as Source,
-        at: u.at,
-        detail: u.detail,
-      },
-    };
+    const parsed = parseUnseen(unseen);
+    if (parsed === null) continue;
+    out[id] = { worktreeId: entry.worktreeId, reportedExit, readAt, unseen: parsed, ...finished };
   }
   return out;
+}
+
+/** A stored event, or `null` when it does not typecheck. */
+function parseUnseen(raw: unknown): Unseen | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const u = raw as Record<string, unknown>;
+  if (!KINDS.includes(u.kind as UnseenKind)) return null;
+  if (!PRODUCERS.includes(u.producer as Producer)) return null;
+  if (!SOURCES.includes(u.source as Source)) return null;
+  if (typeof u.at !== "number" || typeof u.detail !== "string") return null;
+  return {
+    kind: u.kind as UnseenKind,
+    producer: u.producer as Producer,
+    source: u.source as Source,
+    at: u.at,
+    detail: u.detail,
+  };
 }
 
 export const inbox = new WorktreeInbox();

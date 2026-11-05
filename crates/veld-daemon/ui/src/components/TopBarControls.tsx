@@ -39,10 +39,22 @@ import type { UnseenKind } from "../inbox/inbox";
 import { focusPrefs, hideDisabledActions, showNextUnread } from "../shared/settings";
 import { KeepAwakeButton } from "./KeepAwakeButton";
 
-/** Where the Next unread button would take you, ready to render. */
+/**
+ * The Next button's label: what kind of place it takes you to. An agent waiting on
+ * you is named as such; anything else you have not seen yet is unread; and once
+ * nothing is, the button steps through the agents that finished and were seen.
+ */
+export function nextLabel(next: { kind: UnseenKind; seen: boolean }): string {
+  if (next.seen) return "Next finished";
+  return next.kind === "attention" ? "Next waiting" : "Next unread";
+}
+
+/** Where the Next button would take you, ready to render. */
 export interface NextDestination {
   /** Colours the label, from the same three CSS vars the rail glyph uses. */
   kind: UnseenKind;
+  /** A finished agent already seen, rather than unread news. */
+  seen: boolean;
   /** The whole tooltip line, built by the app — it owns the projects and panes. */
   tooltip: string;
 }
@@ -96,16 +108,16 @@ export function TopBarControls(props: {
           <Button
             size="xs"
             variant="default"
-            className={`topbar-next ${props.next.kind}`}
+            className={`topbar-next ${props.next.kind}${props.next.seen ? " seen" : ""}`}
             // The label says what kind of thing is next without naming which,
             // because the bar has no room for the place. The tooltip's sentence is
             // the accessible name, and it opens with the visible label so that label
             // is still contained in it (WCAG 2.5.3) — a voice-control user saying
             // "click Next unread" still lands.
-            aria-label={`Next unread: ${props.next.tooltip}`}
+            aria-label={`${nextLabel(props.next)}: ${props.next.tooltip}`}
             onClick={props.onNext}
           >
-            Next unread
+            {nextLabel(props.next)}
           </Button>
         </Tooltip>
       )}

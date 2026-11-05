@@ -62,9 +62,13 @@ export function TerminalBadge(props: { badge: RowBadge | null }): React.JSX.Elem
   const { badge } = props;
   if (badge === null) return null;
   if (badge.kind === "idle") return <span className="wt-badge idle" aria-hidden="true" />;
-  const Icon = ACTIVITY_ICONS[badge.state];
+  const state = badge.kind === "seen" ? "finished" : badge.state;
+  const Icon = ACTIVITY_ICONS[state];
   return (
-    <span className={`wt-badge act ${badge.state}`} aria-hidden="true">
+    <span
+      className={`wt-badge act ${state}${badge.kind === "seen" ? " seen" : ""}`}
+      aria-hidden="true"
+    >
       <Icon size={11} stroke={2.3} />
     </span>
   );

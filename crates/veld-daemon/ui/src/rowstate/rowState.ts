@@ -12,15 +12,30 @@ import type { RowState, RowSummary } from "../inbox/inbox";
  * (attention → failed → finished → opened → working), and this neither reorders
  * nor reaches inside it.
  *
+ * `seen` is an agent that finished and has been looked at since: no longer
+ * news, so it loses to any activity, but still finished until its next turn,
+ * its exit, its pane closing or Mark read — the finished tick, muted. It beats
+ * the grey dot, which says less.
+ *
  * `idle` is a shell that is alive with nothing to report — the grey dot.
  * Activity can outlive its shell (a command that finished in a pane since
  * closed is still unread), so it does not require a live terminal.
  */
-export type RowBadge = { kind: "activity"; state: RowState } | { kind: "idle" };
+export type RowBadge =
+  | { kind: "activity"; state: RowState }
+  | { kind: "seen" }
+  | { kind: "idle" };
 
 export function rowBadge(summary: RowSummary, liveTerminals: number): RowBadge | null {
   if (summary.state !== null) return { kind: "activity", state: summary.state };
+  if (summary.seen > 0) return { kind: "seen" };
   return liveTerminals > 0 ? { kind: "idle" } : null;
+}
+
+/** The tooltip and screen-reader line for agents that finished and were seen, or `undefined`. */
+export function seenNote(seen: number): string | undefined {
+  if (seen === 0) return undefined;
+  return seen === 1 ? "Agent finished (seen)" : `${seen} agents finished (seen)`;
 }
 
 /**
