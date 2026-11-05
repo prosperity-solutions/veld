@@ -1,0 +1,15 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "trash-cleanup",
+  "trash_cleanup": {
+    "paths": ["**/.next", ".turbo", "coverage"],
+    "steps": [
+      { "name": "volumes", "argv": ["docker", "compose", "-p", "${veld.worktree}", "down", "-v"] },
+      { "name": "cargo", "shell": "cargo clean" }
+    ]
+  },
+  "nodes": {
+    "task": { "default_variant": "dev", "variants": { "dev": { "type": "command", "argv": ["true"] } } }
+  }
+}

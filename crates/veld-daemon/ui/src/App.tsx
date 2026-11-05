@@ -650,6 +650,10 @@ function usePersisted(
  */
 /** Removal failures this window has already announced. See the effect that uses it. */
 const TRASH_ACK_KEY = "veld.trashAcked";
+/** Worktrees whose trash-cleanup summary this machine has already announced. */
+const CLEANED_ACK_KEY = "veld.trashCleanedAcked";
+/** How old a trash cleanup may be and still be announced when its worktree is back. */
+const CLEANED_ANNOUNCE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
 function selectionKeys(name: string): [string, string] {
   return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
@@ -6168,6 +6172,53 @@ function AppInner(props: {
     }
   }, [worktrees]);
 
+  /**
+   * Say once what the trash cleanup removed from a worktree that is back in the
+   * rail — whichever way it came back: this window's Restore, ⌘K, a session link
+   * opened in the browser, another window. Its files went while it sat in the
+   * trash, so its first run would otherwise fail on missing dependencies with no
+   * hint why. Same once-per-machine bookkeeping as the deletion errors above.
+   */
+  const [restoresSettled, setRestoresSettled] = useState(0);
+  useEffect(() => {
+    // Not a row whose restore is still in flight — the daemon may yet refuse it —
+    // and not an old cleanup a fresh storage context has never acknowledged.
+    const recent = Date.now() - CLEANED_ANNOUNCE_WINDOW_MS;
+    const cleaned = worktrees.filter(
+      (w) =>
+        !w.trashed_at &&
+        w.trash_cleaned &&
+        !restoringRef.current.has(w.id) &&
+        Date.parse(w.trash_cleaned_at ?? "") > recent,
+    );
+    if (cleaned.length === 0) return;
+    let acked: string[] = [];
+    try {
+      acked = JSON.parse(window.localStorage.getItem(CLEANED_ACK_KEY) ?? "[]");
+    } catch {
+      acked = [];
+    }
+    const keys = cleaned.map((w) => `${w.path}\u0000${w.trash_cleaned_at}`);
+    const fresh = cleaned.filter((_, i) => !acked.includes(keys[i]));
+    for (const w of fresh) {
+      notifyDone(
+        `${worktreeLabel(w)}: while it was in the trash, the cleanup ${w.trash_cleaned}`,
+      );
+    }
+    if (fresh.length > 0) {
+      try {
+        // Merged, not replaced: `worktrees` is the selected project's only, and
+        // replacing would forget every other project's and re-announce them on
+        // the next switch. Capped, newest last, so it cannot grow without bound.
+        const merged = [...acked.filter((k) => !keys.includes(k)), ...keys].slice(-500);
+        window.localStorage.setItem(CLEANED_ACK_KEY, JSON.stringify(merged));
+      } catch {
+        // Storage unavailable: the cost is a repeated toast.
+      }
+    }
+      // `restoresSettled` re-runs this once a restore has settled; see `restoreWorktree`.
+  }, [worktrees, restoresSettled]);
+
   const dismissTrashError = async (w: Worktree) => {
     try {
       await api.dismissTrashError(w.id);
@@ -6271,6 +6322,8 @@ function AppInner(props: {
     // did nothing — and invites the next one.
     const write = async () => {
       try {
+        // What the trash cleanup removed is announced by the effect that watches
+        // the list, which covers every way back out of the trash, not just this.
         await api.restoreWorktree(w.id);
         notifyDone(`Restored ${worktreeLabel(w)}`);
         restored = true;
@@ -6300,6 +6353,10 @@ function AppInner(props: {
       );
     } finally {
       restoringRef.current.delete(w.id);
+      // A ref changing renders nothing, and the refreshed list may equal the
+      // optimistic one, so tell the announcer the restore has settled. Only a
+      // restore that happened: a failed one leaves nothing to announce.
+      if (restored) setRestoresSettled((n) => n + 1);
     }
     return restored;
   };
@@ -11101,7 +11158,7 @@ function Rail(props: {
                     deletingRow
                       ? `${worktreeLabel(w)} — being deleted, cannot be restored`
                       : trashed
-                        ? `${worktreeLabel(w)} — in the trash, still on disk`
+                        ? `${worktreeLabel(w)} — in the trash, still on disk${w.trash_cleaned ? ` (cleaned: ${w.trash_cleaned})` : ""}`
                         : discoveredRow
                           ? `${worktreeLabel(w)} — ${w.branch} · made outside Veld; adopt it to use it`
                           : w.handoff && !w.handoff.started

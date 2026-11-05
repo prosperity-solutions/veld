@@ -342,8 +342,9 @@ pub const MAX_SCROLLBACK: i64 = 100_000;
 /// **Zero means "keep until I empty it", and that is the default.** The trash is a
 /// holding area: moving a worktree there deletes nothing, and this is the only thing
 /// that ever deletes one without the user asking again. A default of zero means the
-/// only destructive act veld performs unprompted is one the user opted into by
-/// setting a number.
+/// only checkout veld deletes unprompted is one the user opted into by setting a
+/// number. Freeing a trashed worktree's space is a separate, default-on setting
+/// (`worktree.trashCleanupHours`).
 pub const DEFAULT_TRASH_RETENTION_DAYS: i64 = 0;
 
 /// Shortest retention that is still a grace period. Below a day, "trash" would not
@@ -352,6 +353,27 @@ pub const MIN_TRASH_RETENTION_DAYS: i64 = 1;
 /// Longest retention. Past a year the trash is not a holding area, it is a disk
 /// full of checkouts nobody remembers binning.
 pub const MAX_TRASH_RETENTION_DAYS: i64 = 365;
+
+/// Hours a worktree sits in the trash before its large gitignored files and folders
+/// are deleted, or `0` to never clean.
+///
+/// **On by default, unlike retention above.** The size rule only deletes what git
+/// ignores — the exact set `git worktree remove` would delete anyway without
+/// asking — but that can include ignored data that cannot be regenerated (a local
+/// database file, a hand-built `.venv`) once it is over the size thresholds. A day
+/// leaves a worktree binned by mistake intact through the rest of the working day.
+pub const DEFAULT_TRASH_CLEANUP_HOURS: i64 = 24;
+/// Longest cooldown: a year, the same ceiling as retention.
+pub const MAX_TRASH_CLEANUP_HOURS: i64 = 8_760;
+
+/// A gitignored folder at least this many megabytes is deleted by the trash
+/// cleanup. `0` deletes no folder by size.
+pub const DEFAULT_TRASH_CLEANUP_MIN_FOLDER_MB: i64 = 100;
+/// A gitignored file at least this many megabytes is deleted by the trash
+/// cleanup. `0` deletes no file by size.
+pub const DEFAULT_TRASH_CLEANUP_MIN_FILE_MB: i64 = 10;
+/// Ceiling for both size thresholds: a terabyte.
+pub const MAX_TRASH_CLEANUP_SIZE_MB: i64 = 1_048_576;
 
 /// Days of ended runs the history views show, or `0` for "show all".
 ///
@@ -727,6 +749,9 @@ pub enum SettingKey {
     /// leaves it waiting until a window opens the worktree.
     WorktreeAutostartHandoffs,
     WorktreeTrashRetention,
+    WorktreeTrashCleanupHours,
+    WorktreeTrashCleanupMinFolderMb,
+    WorktreeTrashCleanupMinFileMb,
     RunsHistoryDays,
     LogsTimeZone,
     BrowserQuickSwitchResponsive,
@@ -793,6 +818,9 @@ impl SettingKey {
         Self::ExtensionsSource,
         Self::WorktreeMarkerStyle,
         Self::WorktreeTrashRetention,
+        Self::WorktreeTrashCleanupHours,
+        Self::WorktreeTrashCleanupMinFolderMb,
+        Self::WorktreeTrashCleanupMinFileMb,
         Self::RunsHistoryDays,
         Self::LogsTimeZone,
         Self::UiHideDisabledActions,
@@ -941,6 +969,9 @@ impl SettingKey {
             Self::WorktreeReviewHandoffs => "worktree.reviewHandoffs",
             Self::WorktreeAutostartHandoffs => "worktree.autostartHandoffs",
             Self::WorktreeTrashRetention => "worktree.trashRetentionDays",
+            Self::WorktreeTrashCleanupHours => "worktree.trashCleanupHours",
+            Self::WorktreeTrashCleanupMinFolderMb => "worktree.trashCleanupMinFolderMB",
+            Self::WorktreeTrashCleanupMinFileMb => "worktree.trashCleanupMinFileMB",
             Self::RunsHistoryDays => "runs.historyDays",
             Self::LogsTimeZone => "logs.timeZone",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
@@ -1028,6 +1059,9 @@ impl SettingKey {
             "worktree.reviewHandoffs" => Self::WorktreeReviewHandoffs,
             "worktree.autostartHandoffs" => Self::WorktreeAutostartHandoffs,
             "worktree.trashRetentionDays" => Self::WorktreeTrashRetention,
+            "worktree.trashCleanupHours" => Self::WorktreeTrashCleanupHours,
+            "worktree.trashCleanupMinFolderMB" => Self::WorktreeTrashCleanupMinFolderMb,
+            "worktree.trashCleanupMinFileMB" => Self::WorktreeTrashCleanupMinFileMb,
             "runs.historyDays" => Self::RunsHistoryDays,
             "logs.timeZone" => Self::LogsTimeZone,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
@@ -1147,6 +1181,14 @@ impl SettingKey {
             // range, because this is the one numeric setting whose off state is not a
             // small value — clamping it up to `MIN` would arm a timer that deletes
             // checkouts for a user who was trying to turn it off.
+            // Zero is "off" for all three, and the bottom of each range rather than
+            // a value clamped up from.
+            Self::WorktreeTrashCleanupHours => {
+                Value::from(clamp_i64(value, 0, MAX_TRASH_CLEANUP_HOURS).ok_or_else(bad)?)
+            }
+            Self::WorktreeTrashCleanupMinFolderMb | Self::WorktreeTrashCleanupMinFileMb => {
+                Value::from(clamp_i64(value, 0, MAX_TRASH_CLEANUP_SIZE_MB).ok_or_else(bad)?)
+            }
             Self::WorktreeTrashRetention => {
                 let n = clamp_i64(value, 0, MAX_TRASH_RETENTION_DAYS).ok_or_else(bad)?;
                 Value::from(if n == 0 {
@@ -2085,6 +2127,20 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::WorktreeTrashRetention,
             Value::from(DEFAULT_TRASH_RETENTION_DAYS),
         ),
+        // On: the size rule deletes only what git ignores, which a deletion would take anyway;
+        // ignored data that cannot be regenerated goes too once over the size.
+        (
+            SettingKey::WorktreeTrashCleanupHours,
+            Value::from(DEFAULT_TRASH_CLEANUP_HOURS),
+        ),
+        (
+            SettingKey::WorktreeTrashCleanupMinFolderMb,
+            Value::from(DEFAULT_TRASH_CLEANUP_MIN_FOLDER_MB),
+        ),
+        (
+            SettingKey::WorktreeTrashCleanupMinFileMb,
+            Value::from(DEFAULT_TRASH_CLEANUP_MIN_FILE_MB),
+        ),
         // Three days — see the constant. The view reports how many it hid, so a
         // default that hides something cannot be mistaken for a run having vanished.
         (
@@ -2587,8 +2643,9 @@ impl Db {
     /// Whether the daemon may evaluate a project's `ide.extensions` status badges
     /// automatically.
     ///
-    /// The one machine-global off switch for the only thing veld runs from a repo's
-    /// config with no user action. Off leaves the declarations visible and the
+    /// The one machine-global off switch for the things veld runs from a repo's
+    /// config with no user action — status badges, pane session listings, and the
+    /// trash cleanup's `trash_cleanup.steps`. Off leaves the declarations visible and the
     /// buttons clickable — a click is the user asking — and stops only the
     /// unattended, repeated half. It exists because that half is the part a
     /// consent prompt would have gated, and a prompt was rejected: bound to the
@@ -2959,6 +3016,54 @@ impl Db {
         let days = days.clamp(MIN_TRASH_RETENTION_DAYS, MAX_TRASH_RETENTION_DAYS);
         Some(std::time::Duration::from_secs(days as u64 * 86_400))
     }
+
+    /// The trash cleanup's settings, or `None` when it is off.
+    ///
+    /// Clamped like the other values the daemon acts on, so a stored value from a
+    /// build with a wider range cannot reach the cleanup unchecked.
+    pub fn trash_cleanup(&self) -> Option<TrashCleanup> {
+        let int = |key: SettingKey, default: i64, max: i64| {
+            self.setting(&key)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(default)
+                .clamp(0, max)
+        };
+        let hours = int(
+            SettingKey::WorktreeTrashCleanupHours,
+            DEFAULT_TRASH_CLEANUP_HOURS,
+            MAX_TRASH_CLEANUP_HOURS,
+        );
+        if hours == 0 {
+            return None;
+        }
+        let mb = |n: i64| (n > 0).then(|| n as u64 * 1024 * 1024);
+        Some(TrashCleanup {
+            after: std::time::Duration::from_secs(hours as u64 * 3_600),
+            min_folder_bytes: mb(int(
+                SettingKey::WorktreeTrashCleanupMinFolderMb,
+                DEFAULT_TRASH_CLEANUP_MIN_FOLDER_MB,
+                MAX_TRASH_CLEANUP_SIZE_MB,
+            )),
+            min_file_bytes: mb(int(
+                SettingKey::WorktreeTrashCleanupMinFileMb,
+                DEFAULT_TRASH_CLEANUP_MIN_FILE_MB,
+                MAX_TRASH_CLEANUP_SIZE_MB,
+            )),
+        })
+    }
+}
+
+/// What the trash cleanup deletes, and when. See [`Db::trash_cleanup`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrashCleanup {
+    /// How long a worktree must have been in the trash.
+    pub after: std::time::Duration,
+    /// Gitignored folders at least this large are deleted; `None` deletes none by size.
+    pub min_folder_bytes: Option<u64>,
+    /// Gitignored files at least this large are deleted; `None` deletes none by size.
+    pub min_file_bytes: Option<u64>,
 }
 
 #[cfg(test)]
@@ -3706,6 +3811,45 @@ mod tests {
             )
             .unwrap();
         assert_eq!(db.max_sessions(), MAX_MAX_SESSIONS as usize);
+    }
+
+    #[test]
+    fn trash_cleanup_ships_on_and_zero_turns_each_part_off() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.trash_cleanup(),
+            Some(TrashCleanup {
+                after: std::time::Duration::from_secs(24 * 3_600),
+                min_folder_bytes: Some(100 * 1024 * 1024),
+                min_file_bytes: Some(10 * 1024 * 1024),
+            }),
+            "on by default, at a day, 100 MB folders and 10 MB files"
+        );
+
+        db.patch_settings(&patch(&[
+            ("worktree.trashCleanupMinFolderMB", Value::from(0)),
+            ("worktree.trashCleanupMinFileMB", Value::from(0)),
+        ]))
+        .unwrap();
+        let tc = db.trash_cleanup().unwrap();
+        assert_eq!(tc.min_folder_bytes, None, "0 deletes no folder by size");
+        assert_eq!(tc.min_file_bytes, None, "0 deletes no file by size");
+
+        // The off switch is the bottom of the range, never clamped up into a
+        // cleanup the user tried to turn off.
+        db.patch_settings(&patch(&[("worktree.trashCleanupHours", Value::from(0))]))
+            .unwrap();
+        assert_eq!(db.trash_cleanup(), None);
+
+        db.patch_settings(&patch(&[(
+            "worktree.trashCleanupHours",
+            Value::from(MAX_TRASH_CLEANUP_HOURS + 1),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.trash_cleanup().unwrap().after,
+            std::time::Duration::from_secs(MAX_TRASH_CLEANUP_HOURS as u64 * 3_600)
+        );
     }
 
     #[test]

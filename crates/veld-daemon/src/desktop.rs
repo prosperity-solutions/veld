@@ -6659,6 +6659,9 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
             "this worktree is already being deleted",
         ));
     }
+    // A cleanup the restore just cancelled may already have deleted something;
+    // give it a moment to record what, so the response can say so.
+    super::trash_cleanup::wait_stopped(id).await;
     let wt = db
         .get_worktree(id)
         .map_err(db_err)?
@@ -7087,6 +7090,8 @@ mod tests {
             sort_position: None,
             trashed_at: String::new(),
             trash_error: String::new(),
+            trash_cleaned_at: String::new(),
+            trash_cleaned: String::new(),
             adopted: true,
             named_by: String::new(),
         }

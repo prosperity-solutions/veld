@@ -743,6 +743,7 @@ mod tests {
             teardown: None,
             vars: None,
             hooks: None,
+            trash_cleanup: None,
             ide: None,
             loaded_from_multiple_files: false,
             deferred_findings: Vec::new(),

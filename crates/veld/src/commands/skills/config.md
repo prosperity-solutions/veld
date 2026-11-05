@@ -537,6 +537,32 @@ shell env vars. No node-scoped vars (`${veld.port}`, `${veld.url}`,
 from `veld orchestrator stop` after the run row is gone. `veld orchestrator lint` reports these as
 `builtin-not-in-scope`.
 
+## `trash_cleanup`
+
+Project additions to Veld's trash cleanup. After `worktree.trashCleanupHours`
+(user setting, default 24, `0` = off) a trashed worktree's **gitignored** folders
+≥ `worktree.trashCleanupMinFolderMB` (100) and files ≥
+`worktree.trashCleanupMinFileMB` (10) are deleted. This key adds to that:
+
+```json
+"trash_cleanup": {
+  "paths": ["**/.next", ".turbo"],
+  "steps": [{ "name": "volumes", "argv": ["docker", "compose", "-p", "${veld.worktree}", "down", "-v"] }]
+}
+```
+
+- `paths`: globs (`*`, `**`, `?`; case-insensitive; no `/` = name at any depth;
+  a match covers everything under it), deleted whatever their size. They reach
+  any **untracked** path, gitignored or not — for output nobody put in
+  `.gitignore` — but never a tracked file. Max 64, no leading `/`, no `..`.
+- `steps`: setup-step shape, run first in the trashed worktree, 5 min each;
+  skipped when `extensions.autoRefresh` is off; at most 16;
+  failures are noted, not fatal. Variables: `${veld.root}`, `worktree`, `branch`,
+  `branch_raw` (argv only), `project`, `username` — no `run`.
+- Never touched: a folder containing `.git`, anything through a symlink.
+- Read from the main checkout's config (`extensions.source`), root file only.
+  Lint rule: `trash-cleanup`.
+
 ## Node Types
 
 A node's `type` describes its **lifecycle only** — runs to completion, or stays

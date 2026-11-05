@@ -111,11 +111,12 @@ use super::settings::{
     MAX_BELL_VOLUME, MAX_DETACH_GRACE_MINUTES, MAX_FONT_SIZE, MAX_KEEP_AWAKE_MINUTES,
     MAX_MAX_SESSIONS, MAX_RECONNECT_BACKOFF_SECONDS, MAX_RECONNECT_FIRST_DELAY_SECONDS,
     MAX_RECONNECT_TRIES, MAX_RUN_HISTORY_DAYS, MAX_SCROLLBACK, MAX_SHARE_TTL_MINUTES,
-    MAX_TRASH_RETENTION_DAYS, MAX_TRASHED_GRACE_MINUTES, MIN_BACKUP_INTERVAL_MINUTES,
-    MIN_BACKUP_KEEP, MIN_BACKUP_KEEP_DAILY, MIN_BELL_VOLUME, MIN_DETACH_GRACE_MINUTES,
-    MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES, MIN_MAX_SESSIONS, MIN_RECONNECT_BACKOFF_SECONDS,
-    MIN_RECONNECT_FIRST_DELAY_SECONDS, MIN_RECONNECT_TRIES, MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK,
-    MIN_SHARE_TTL_MINUTES, SettingKey, defaults,
+    MAX_TRASH_CLEANUP_HOURS, MAX_TRASH_CLEANUP_SIZE_MB, MAX_TRASH_RETENTION_DAYS,
+    MAX_TRASHED_GRACE_MINUTES, MIN_BACKUP_INTERVAL_MINUTES, MIN_BACKUP_KEEP, MIN_BACKUP_KEEP_DAILY,
+    MIN_BELL_VOLUME, MIN_DETACH_GRACE_MINUTES, MIN_FONT_SIZE, MIN_KEEP_AWAKE_MINUTES,
+    MIN_MAX_SESSIONS, MIN_RECONNECT_BACKOFF_SECONDS, MIN_RECONNECT_FIRST_DELAY_SECONDS,
+    MIN_RECONNECT_TRIES, MIN_RUN_HISTORY_DAYS, MIN_SCROLLBACK, MIN_SHARE_TTL_MINUTES, SettingKey,
+    defaults,
 };
 
 /// Which part of the product a setting is about.
@@ -624,11 +625,13 @@ impl SettingKey {
                  request's state, a deploy tag — each backed by a command Veld runs in that \
                  worktree and re-runs on the interval the project asked for. It can also give a \
                  pane a command that lists earlier sessions of the tool it runs, so the pane \
-                 chooser can offer you one to resume. Those are the only things Veld runs from a \
-                 repo's configuration without you clicking the thing they are about, so they \
-                 have a switch. Turning it off leaves the project's buttons and menus working (a \
-                 click is you asking) and stops the unattended half: badges render nothing, and \
-                 panes offer no earlier sessions. Veld bounds these commands either way: no \
+                 chooser can offer you one to resume, and steps that run when the trash \
+                 cleanup frees a trashed worktree's space. Those are the only things Veld runs \
+                 from a repo's configuration without you clicking the thing they are about, so \
+                 they have a switch. Turning it off leaves the project's buttons and menus \
+                 working (a click is you asking) and stops the unattended half: badges render \
+                 nothing, panes offer no earlier sessions, and the trash cleanup skips the \
+                 project's steps (it still deletes by size and by the project's paths). Veld bounds these commands either way: no \
                  terminal is attached, so a tool that would ask for credentials fails instead of \
                  waiting; there is a hard timeout and an output limit; a cap on how many a project \
                  may declare, and a floor on how often the same one is re-run; and every command \
@@ -643,7 +646,8 @@ impl SettingKey {
                        ide.extensions still sees them. This worktree: the checked-out worktree's \
                        own veld.json decides, so you can test a new or edited declaration before \
                        merging it. Either way commands still run in the worktree you're looking \
-                       at, using its own branch and root.",
+                       at, using its own branch and root. The same choice decides whose \
+                       trash_cleanup a trashed worktree's cleanup runs.",
                 group: General,
                 section: None,
                 shape: ValueShape::Text,
@@ -684,6 +688,61 @@ impl SettingKey {
                     step: Some(7),
                     unit: Some("days"),
                     empty_means: Some("keep"),
+                },
+                requires: None,
+            },
+            Self::WorktreeTrashCleanupHours => Spec {
+                title: "Free the space of trashed worktrees after",
+                help: "Hours a worktree sits in the trash before Veld deletes its large \
+                       gitignored files and folders — dependencies, build output, caches — \
+                       using the two sizes below. By size, only what git ignores is touched — \
+                       what deleting the worktree would remove anyway — so restoring one \
+                       afterwards usually means a reinstall; but ignored data you cannot \
+                       regenerate, like a local database file, goes too once it is that large. \
+                       A project can name more to delete in its veld.json, including untracked \
+                       files git does not ignore, and commands to run first. Tracked files are \
+                       never deleted. 0 never cleans.",
+                group: General,
+                section: None,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: 0,
+                    max: MAX_TRASH_CLEANUP_HOURS,
+                    step: Some(1),
+                    unit: Some("hours"),
+                    empty_means: Some("never"),
+                },
+                requires: None,
+            },
+            Self::WorktreeTrashCleanupMinFolderMb => Spec {
+                title: "Delete gitignored folders from",
+                help: "A gitignored folder in a trashed worktree at least this large is \
+                       deleted when the cleanup runs. 0 deletes no folder by size.",
+                group: General,
+                section: None,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: 0,
+                    max: MAX_TRASH_CLEANUP_SIZE_MB,
+                    step: Some(50),
+                    unit: Some("MB"),
+                    empty_means: Some("none"),
+                },
+                requires: None,
+            },
+            Self::WorktreeTrashCleanupMinFileMb => Spec {
+                title: "Delete gitignored files from",
+                help: "A gitignored file in a trashed worktree at least this large is deleted \
+                       when the cleanup runs, wherever it sits. 0 deletes no file by size.",
+                group: General,
+                section: None,
+                shape: ValueShape::Int,
+                choices: Choices::Range {
+                    min: 0,
+                    max: MAX_TRASH_CLEANUP_SIZE_MB,
+                    step: Some(5),
+                    unit: Some("MB"),
+                    empty_means: Some("none"),
                 },
                 requires: None,
             },

@@ -411,6 +411,15 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<serde_json::Value>,
 
+    /// What the trash cleanup deletes in this project's trashed worktrees beyond
+    /// the size-based default, and the commands it runs first.
+    ///
+    /// Stored raw and read through [`Self::trash_cleanup_section`], for the reason
+    /// `ide` is: a typed field would turn a typo here into a load failure, and the
+    /// loader runs on `veld orchestrator stop` (F0.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trash_cleanup: Option<serde_json::Value>,
+
     /// Per-project settings for veld's own IDE surfaces — Veld Desktop and the
     /// `/ide` view.
     ///
@@ -1555,6 +1564,43 @@ pub struct SetupStep {
     )]
     pub failure_message: Option<String>,
 }
+
+/// `trash_cleanup`: what Veld's trash cleanup does in this project, on top of
+/// deleting gitignored files and folders over the user's size thresholds.
+///
+/// The cleanup runs once each time a worktree is moved to the trash, after the
+/// user's `worktree.trashCleanupHours`. `steps` run first, in the trashed worktree,
+/// then `paths` select untracked entries to delete whatever their size.
+///
+/// **`paths` reach any untracked path, ignored or not** — they are the project's
+/// list of what is always safe to throw away, including output nobody put in
+/// `.gitignore` — and **never a tracked file**: they filter what
+/// `git ls-files --others` reports, so nothing they delete can make the checkout
+/// look modified. A pattern selects a path or anything under it, as a
+/// `.gitignore` line does.
+///
+/// Read from the main checkout's config by default (`extensions.source`), like
+/// every other command Veld runs without a click, and never merged across files: a
+/// single list has no per-entry owner.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrashCleanupConfig {
+    /// Glob patterns in the `files.viewPatterns` grammar (`*`, `**`, `?`;
+    /// case-insensitive; a pattern without `/` matches the name at any depth),
+    /// selecting a path or anything under it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Commands run in the trashed worktree before anything is deleted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<SetupStep>,
+}
+
+/// Most `trash_cleanup.paths` entries a config may declare.
+pub const MAX_TRASH_CLEANUP_PATHS: usize = 64;
+/// Longest single `trash_cleanup.paths` pattern, in bytes.
+pub const MAX_TRASH_CLEANUP_PATH_LEN: usize = 256;
+/// Most `trash_cleanup.steps` a config may declare.
+pub const MAX_TRASH_CLEANUP_STEPS: usize = 16;
 
 pub(crate) fn default_url_template() -> String {
     "{service}.{run}.{project}.localhost".to_owned()
@@ -2950,6 +2996,15 @@ pub fn resolve_variant(
 }
 
 impl VeldConfig {
+    /// The typed `trash_cleanup` section — empty when absent — or why it does not
+    /// parse. Never consulted by the loader; see [`Self::trash_cleanup`].
+    pub fn trash_cleanup_section(&self) -> Result<TrashCleanupConfig, String> {
+        match &self.trash_cleanup {
+            None => Ok(TrashCleanupConfig::default()),
+            Some(v) => serde_json::from_value(v.clone()).map_err(|e| e.to_string()),
+        }
+    }
+
     /// The interpreted part of the `ide` namespace.
     ///
     /// Derived on demand rather than stored: [`Self::ide`] holds the raw value and
@@ -3168,6 +3223,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "teardown",
     "nodes",
     "hooks",
+    "trash_cleanup",
     "ide",
 ];
 
@@ -3269,6 +3325,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_preset_keys(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
     check_share_ttls(config, &mut findings);
+    check_trash_cleanup(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld orchestrator lint --json` output
@@ -3282,6 +3339,109 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
         ))
     });
     findings
+}
+
+/// `trash_cleanup`: patterns that can match something, and steps that run.
+///
+/// Errors rather than warnings, because the cleanup runs unattended hours after a
+/// worktree was binned: a step that cannot resolve fails with nobody watching, and
+/// a pattern that can never match is a cleanup the author believes is happening.
+fn check_trash_cleanup(config: &VeldConfig, out: &mut Vec<Finding>) {
+    if config.trash_cleanup.is_none() {
+        return;
+    }
+    let error = |location: String, message: String| Finding {
+        severity: Severity::Error,
+        location,
+        message,
+        rule: "trash-cleanup".to_owned(),
+    };
+    let tc = match config.trash_cleanup_section() {
+        Ok(tc) => tc,
+        Err(message) => {
+            out.push(error("trash_cleanup".to_owned(), message));
+            return;
+        }
+    };
+    if tc.paths.len() > MAX_TRASH_CLEANUP_PATHS {
+        out.push(error(
+            "trash_cleanup.paths".to_owned(),
+            format!(
+                "{} patterns; only the first {MAX_TRASH_CLEANUP_PATHS} are used",
+                tc.paths.len()
+            ),
+        ));
+    }
+    for (i, p) in tc.paths.iter().enumerate() {
+        let location = format!("trash_cleanup.paths[{i}]");
+        let trimmed = p.trim();
+        let problem = if trimmed.is_empty() {
+            Some("an empty pattern matches nothing".to_owned())
+        } else if trimmed.len() > MAX_TRASH_CLEANUP_PATH_LEN {
+            Some(format!("longer than {MAX_TRASH_CLEANUP_PATH_LEN} bytes"))
+        } else if trimmed.starts_with('~') {
+            Some("`~` is not expanded — patterns are relative to the worktree root".to_owned())
+        } else if trimmed.starts_with('/') {
+            Some(
+                "patterns are relative to the worktree root — drop the leading `/` \
+                 (`dist/**`, not `/dist/**`)"
+                    .to_owned(),
+            )
+        } else if trimmed.split('/').any(|seg| seg == "..") {
+            Some("`..` would leave the worktree; patterns only select inside it".to_owned())
+        } else if trimmed.trim_matches(|c| c == '*' || c == '/').is_empty() {
+            out.push(Finding {
+                severity: Severity::Warning,
+                location: location.clone(),
+                message: format!(
+                    "`{trimmed}` selects every untracked file in the worktree — uncommitted \
+                     new files included. Name what is safe to throw away instead"
+                ),
+                rule: "trash-cleanup".to_owned(),
+            });
+            None
+        } else if trimmed.ends_with('/') {
+            Some(format!(
+                "drop the trailing `/` — `{}` already matches the folder",
+                trimmed.trim_end_matches('/')
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = problem {
+            out.push(error(location, message));
+        }
+    }
+    if tc.steps.len() > MAX_TRASH_CLEANUP_STEPS {
+        out.push(error(
+            "trash_cleanup.steps".to_owned(),
+            format!(
+                "{} steps; only the first {MAX_TRASH_CLEANUP_STEPS} are run",
+                tc.steps.len()
+            ),
+        ));
+    }
+    for (i, step) in tc.steps.iter().enumerate() {
+        let location = format!("trash_cleanup.steps[{i}] ({})", step.name);
+        match step.cmd.count_set() {
+            0 => out.push(error(
+                location,
+                "has nothing to run — give it `argv` or `shell`".to_owned(),
+            )),
+            1 => {
+                if let Some(spec) = step.cmd.spec()
+                    && let Some(message) =
+                        crate::ide::worktree_command_problem(&spec, "trash cleanup")
+                {
+                    out.push(error(location, message));
+                }
+            }
+            _ => out.push(error(
+                location,
+                "sets both `argv` and `shell` — keep one".to_owned(),
+            )),
+        }
+    }
 }
 
 /// F8: `hooks` is reserved — parsed, stored, and **not executed** by this
@@ -6981,6 +7141,66 @@ mod tests {
     fn findings_for(json: &str) -> Vec<Finding> {
         let cfg: VeldConfig = serde_json::from_str(json).expect("fixture parses");
         validate(&cfg)
+    }
+
+    fn trash_cleanup_findings(section: serde_json::Value) -> Vec<Finding> {
+        let json = serde_json::json!({
+            "schemaVersion": "3", "name": "t", "nodes": {},
+            "trash_cleanup": section,
+        });
+        findings_for(&json.to_string())
+            .into_iter()
+            .filter(|f| f.rule == "trash-cleanup")
+            .collect()
+    }
+
+    #[test]
+    fn a_well_formed_trash_cleanup_lints_clean() {
+        let f = trash_cleanup_findings(serde_json::json!({
+            "paths": ["**/.next", ".turbo"],
+            "steps": [{ "name": "v", "argv": ["docker", "compose", "-p", "${veld.worktree}", "down"] }],
+        }));
+        assert!(f.is_empty(), "{f:?}");
+    }
+
+    /// A malformed section is a finding, never a load failure: the loader runs on
+    /// `veld orchestrator stop`.
+    #[test]
+    fn a_malformed_trash_cleanup_is_reported_not_fatal() {
+        let f = trash_cleanup_findings(serde_json::json!({ "paths": ["**"] }));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(
+            f[0].severity,
+            Severity::Warning,
+            "a catch-all is legal, and warned"
+        );
+
+        let f = trash_cleanup_findings(serde_json::json!({ "pathz": [] }));
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert!(f[0].message.contains("pathz"), "{f:?}");
+
+        let f = trash_cleanup_findings(serde_json::json!({
+            "paths": ["/dist", "../x", "", "build/"],
+            "steps": [
+                { "name": "none" },
+                { "name": "run", "shell": "echo ${veld.run}" },
+                { "name": "raw", "shell": "echo ${veld.branch_raw}" },
+            ],
+        }));
+        let at: Vec<&str> = f.iter().map(|f| f.location.as_str()).collect();
+        assert_eq!(
+            at,
+            [
+                "trash_cleanup.paths[0]",
+                "trash_cleanup.paths[1]",
+                "trash_cleanup.paths[2]",
+                "trash_cleanup.paths[3]",
+                "trash_cleanup.steps[0] (none)",
+                "trash_cleanup.steps[1] (run)",
+                "trash_cleanup.steps[2] (raw)",
+            ],
+            "{f:?}"
+        );
     }
 
     /// **error** — a value marked `secret` interpolated into `argv` or `shell`.
