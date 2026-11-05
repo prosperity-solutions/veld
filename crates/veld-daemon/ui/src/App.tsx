@@ -11114,8 +11114,8 @@ function Rail(props: {
               // hand-off hourglass included — and is wide-only unless it rides the
               // marker (the badge) or joins the collapsed row's single right-hand slot
               // (the `:is()` list under `.wt-row.slim` in styles.css, and the choice
-              // below). The folded
-              // header's `ownRows` applies the same rule to what it summarises.
+              // below). The folded header's `ownRows` applies the same rule to what
+              // it summarises.
               const showsState = !trashed && !away;
               // Which face the run control shows. A loader for an action this
               // window fired outranks the alert, so a click is acknowledged
@@ -11138,7 +11138,7 @@ function Rail(props: {
               const runCountNote =
                 liveAll.length > 1
                   ? ` — ${liveAll.length} runs live here: ${liveAll
-                      .map((r) => `${r.name} (${r.status})`)
+                      .map((r) => `${r.name} (${runStatusLabel(r)})`)
                       .join(", ")}`
                   : "";
               // Built only by a glyph that is actually shown, not for every row on
@@ -11228,7 +11228,7 @@ function Rail(props: {
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
-                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
+                            ? `${worktreeLabel(w)} — ${w.branch} (${awayNote(holder)})`
                             : `${worktreeLabel(w)} — ${w.branch}${stateNote}${terminalsNote ? ` · ${terminalsNote}` : ""}`
                   }
                   /* What `rowTargetAt` counts as a slot. Valueless: the index is

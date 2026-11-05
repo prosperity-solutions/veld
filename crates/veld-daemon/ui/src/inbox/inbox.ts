@@ -257,13 +257,21 @@ interface SessionState {
    */
   reportedExit: boolean;
   /**
-   * When this session's news was last read (ms), or `null`. Persisted, so a `blocked`
-   * already read is not filed again by [`WorktreeInbox.seed`] after a reload — the
-   * daemon still reports the agent as waiting, but that is not news to this window.
+   * When any of this session's news was last read (ms), or `null` — a read of any
+   * kind counts: the user was looking at the pane. Persisted, so a `blocked` already
+   * read is not filed again by [`WorktreeInbox.seed`] after a reload — the daemon
+   * still reports the agent as waiting, but that is not news to this window.
    */
   readAt: number | null;
   /** [`WorktreeInbox.agentMark`] at this session's last relayed agent report. */
   liveSeq: number;
+  /**
+   * When this window last heard of the agent's state (ms): a relayed report's time,
+   * or the daemon's `since` for a seeded one. 0 if never. Lets the seed tell "the
+   * daemon forgot this agent because it quit" from "the daemon restarted and has not
+   * heard from it yet" — its agent record is in memory only.
+   */
+  agentAt: number;
   /**
    * `ranCommand` was set by [`WorktreeInbox.restoreRunning`] — the daemon said the shell
    * is busy — not by a `C` this window saw. Such a command may well be an agent that has
@@ -399,6 +407,7 @@ class WorktreeInbox {
       reportedExit: false,
       readAt: null,
       liveSeq: 0,
+      agentAt: 0,
       restoredCommand: false,
       delegated: false,
       held: false,
@@ -422,8 +431,11 @@ class WorktreeInbox {
    * in this window's storage). An idle agent this window last saw working files
    * "finished" — its turn ended while the window was not listening; any other idle
    * agent only claims the pane, since the daemon knows it is idle, not whether its
-   * last turn was seen. No banner is raised: this window is learning late, not
-   * hearing something new.
+   * last turn was seen. `done` and states this build does not know file nothing.
+   * Afterwards, an agent this window shows working that the overview no longer lists
+   * stops working — it quit unheard — unless it reported since the request or the
+   * daemon restarted since this window last heard of it. No banner is raised: this
+   * window is learning late, not hearing something new.
    */
   seed(
     agents: {
@@ -437,6 +449,12 @@ class WorktreeInbox {
     now: number = Date.now(),
     /** [`agentMark`] when the overview was requested; sessions reported since are skipped. */
     mark: number = Number.POSITIVE_INFINITY,
+    /**
+     * When the daemon that answered started (ms), or `null` if unknown. Its agent
+     * record is in memory, so only an agent last heard of since then can be absent
+     * from the overview because it quit.
+     */
+    daemonStartedAt: number | null = null,
   ): void {
     this.seeding = true;
     try {
@@ -481,14 +499,25 @@ class WorktreeInbox {
         if (state !== null) {
           this.report(a.sessionId, a.worktreeId, { type: "agent", state, held: a.held, source: "hook" }, now);
         }
+        const session = this.sessions.get(a.sessionId);
+        if (session && a.since !== null) session.agentAt = Math.max(session.agentAt, a.since);
       }
       // An agent that quit while this window was not listening is gone from the
       // overview (`done` removes it), so nothing above corrects a spinner this window
-      // still shows for it. Unless it reported since the overview was requested.
+      // still shows for it. Not if it reported since the overview was requested, and
+      // not if the daemon restarted after this window last heard of it: a restarted
+      // daemon re-adopts the shells but starts with no agent record, so absence there
+      // means "not heard from yet", not "gone".
       const listed = new Set(agents.map((a) => a.sessionId));
       let stopped = false;
       for (const [id, session] of this.sessions) {
-        if (session.agentWorking && !listed.has(id) && session.liveSeq <= mark) {
+        if (
+          session.agentWorking &&
+          !listed.has(id) &&
+          session.liveSeq <= mark &&
+          daemonStartedAt !== null &&
+          session.agentAt >= daemonStartedAt
+        ) {
           session.agentWorking = false;
           session.delegated = false;
           stopped = true;
@@ -538,7 +567,10 @@ class WorktreeInbox {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.worktreeId = worktreeId;
-    if (signal.type === "agent" && !this.seeding) session.liveSeq = ++this.liveSeq;
+    if (signal.type === "agent" && !this.seeding) {
+      session.liveSeq = ++this.liveSeq;
+      session.agentAt = now;
+    }
 
     const before = session.unseen;
     const wasRunning = running(session);
@@ -556,7 +588,10 @@ class WorktreeInbox {
       if (seenNow) session.readAt = now;
     } else if (wasHeld && !session.held && sessionId === this.watching) {
       // Released while being watched (an interrupted question, say): it has been seen.
-      if (session.unseen?.kind === "attention") session.unseen = null;
+      if (session.unseen?.kind === "attention") {
+        session.unseen = null;
+        session.readAt = now;
+      }
     }
     if (session.unseen !== before) {
       this.notify();
@@ -592,6 +627,8 @@ class WorktreeInbox {
       case "osc133":
         if (signal.mark === "C") {
           session.ranCommand = true;
+          // Observed, not restored: a stale restore must not let an agent claim it.
+          session.restoredCommand = false;
           if (session.agentSource !== null) session.agentCommand = true;
           // The mirror of the `ready` rule below, and it is not redundant: the inbox sees
           // signals in the order **xterm delivers** them, not the order the bytes arrived.

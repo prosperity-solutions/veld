@@ -1723,7 +1723,16 @@ describe("seeding from the daemon", () => {
     const box = createInbox();
     box.report("w", WT, agent("working"), NOW);
     const mark = box.agentMark();
-    box.seed([], NOW + 1, mark);
+    box.seed([], NOW + 1, mark, NOW - 1);
     expect(box.isRunning("w")).toBe(false);
+  });
+
+  /** A restarted daemon has no agent record yet; the shells and agents survived it. */
+  it("keeps the spinner when the daemon restarted since the agent last reported", () => {
+    const box = createInbox();
+    box.report("w", WT, agent("working"), NOW);
+    const mark = box.agentMark();
+    box.seed([], NOW + 10, mark, NOW + 5);
+    expect(box.isRunning("w")).toBe(true);
   });
 });

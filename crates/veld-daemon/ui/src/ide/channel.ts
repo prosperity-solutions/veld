@@ -31,21 +31,29 @@ import { dispatchRestartPane } from "../panes/restartRequests";
 import { dispatchRevealPane } from "../panes/revealRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
-/** Only the newest seed is applied: two quick reconnects must not land out of order. */
+/**
+ * Seeds are numbered, and one older than a seed that has already been applied is
+ * dropped: two quick reconnects must not land out of order. A newer seed that
+ * *fails* does not block an older one that succeeded.
+ */
 let seedGeneration = 0;
+let appliedGeneration = 0;
 
 /** File the daemon's record of each live agent into the inbox — see `inbox.seed`. */
 async function seedAgents(): Promise<void> {
   const generation = ++seedGeneration;
   const mark = inbox.agentMark();
-  let agents: Awaited<ReturnType<typeof api.agentOverview>>["agents"];
+  let overview: Awaited<ReturnType<typeof api.agentOverview>>;
   try {
-    agents = (await api.agentOverview()).agents ?? [];
+    overview = await api.agentOverview();
   } catch {
     // An older daemon without the endpoint, or a blip: the live relay still works.
     return;
   }
-  if (generation !== seedGeneration) return;
+  if (generation < appliedGeneration) return;
+  appliedGeneration = generation;
+  const agents = overview.agents ?? [];
+  const startedAt = Date.parse(overview.started_at ?? "");
   inbox.seed(
     agents
       .filter((a) => typeof a.session_id === "string" && typeof a.worktree_id === "number")
@@ -59,6 +67,7 @@ async function seedAgents(): Promise<void> {
       })),
     Date.now(),
     mark,
+    Number.isFinite(startedAt) ? startedAt : null,
   );
 }
 

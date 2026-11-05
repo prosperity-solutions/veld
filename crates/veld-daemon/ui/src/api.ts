@@ -1789,6 +1789,8 @@ export const api = {
   /** Each live terminal's agent, at its latest reported state. */
   agentOverview: () =>
     request<{
+      /** When the answering daemon started (RFC 3339). */
+      started_at?: string;
       agents: {
         session_id: string;
         worktree_id: number;
