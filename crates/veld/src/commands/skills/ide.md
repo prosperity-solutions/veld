@@ -164,8 +164,8 @@ human may already have open:
 ## Naming the worktree you are in (`veld ide worktree name`)
 
 The rail lists every worktree by its title, and that title is how the human
-tells four agents apart. **Name yours early** — as soon as you know what the task
-is, usually in your first reply:
+tells four agents apart. **Name yours in your first turn** — once you know what
+the task is, not necessarily before your first tool call:
 
 ```sh
 veld ide worktree name "Fix login timeout"
@@ -175,6 +175,10 @@ veld ide worktree name "Review PR 412" --json   # {"id", "path", "name", "previo
 - A few words in sentence case saying what the work is, at most 18 columns (a
   wide character such as 漢 or an emoji counts as two). Not the branch name, not
   a sentence. A blank or longer title is refused with exit `2`.
+- **Name the task, not the steps to reach it.** When the message points at the
+  task somewhere else — "pick up the task from Slack", an issue, a PR, a link —
+  read it first and name what you found: "Fix CSV export", never "Fetch Slack
+  task".
 - **Rename it at most once more, and only early**: when what you learn next —
   what a PR, issue or link is actually about — shows the first name was off.
   After that, leave it alone; a title that keeps changing is no landmark.
@@ -208,7 +212,7 @@ kept (the main checkout, or already named).
 The human keeps coming back to a few pages while your work is open. Pin them:
 
 ```sh
-veld ide link set https://github.com/acme/api/pull/412 --kind pr --label "api#412 Add login"
+veld ide link set https://github.com/acme/api/pull/412 --kind pr --label "#412 · draft"
 veld ide link set https://web-412.preview.acme.dev --kind preview --id web --label "Web preview"
 veld ide link set https://api-412.preview.acme.dev --kind preview --id api --label "API preview"
 veld ide link list [--json]
@@ -231,6 +235,10 @@ veld ide link rm <id-or-url>        # or --all
   replaces it rather than adding another; a new URL under an id starts over, so
   the last deploy's tone and tooltip do not carry across. Without `--id`, a URL
   also finds the link it was pinned under with one.
+- **Label a pull request with its number and state, not its topic**:
+  `#412 · draft`, `#412 · CI failing`, `api#412 · merged` (repository prefix
+  when it is not this worktree's). The title is one click away; the state is
+  what the human glances at.
 - **Pull requests: pin every one, always.** Even when the project has its own PR
   badge: the rail shows only pinned pull requests, the badge covers one repository
   at most, and the top bar hides a pinned link the badge already links to.
@@ -238,15 +246,20 @@ veld ide link rm <id-or-url>        # or --all
   live runs (`set` refuses any URL on a live run's origin) and shows the
   project's own top-bar badges and buttons. `list` and `set` name both, with what
   a status badge currently shows and links to.
-- **Keep it current.** Veld checks nothing against a forge; a link is as current
-  as its last `set`. A pull request's life:
+- **Keep it current, as you learn things.** Veld checks nothing against a forge;
+  a link is as current as its last `set`. Set it again the moment its state
+  changes — opened, marked ready, CI red or green, review, merged, a preview
+  redeployed — not once at the end. A pull request's life:
 
 ```sh
-veld ide link set "$PR" --kind pr --tone info                      # opened
-veld ide link set "$PR" --tone danger --tooltip "CI: 2 checks failing"
-veld ide link set "$PR" --tone success --icon git-merge           # merged
+veld ide link set "$PR" --kind pr --label "#412 · draft"                   # opened
+veld ide link set "$PR" --label "#412 · CI failing" --tone danger --tooltip "2 checks failing"
+veld ide link set "$PR" --label "#412 · merged" --tone success --icon git-merge
 ```
 
+- **It is your bookkeeping, not the human's.** Never tell them about `veld ide
+  link`, show them the command, or suggest they update a link — just keep it
+  right.
 - A worktree holds at most 20 links. The worktree is your terminal's
   (`$VELD_PTY_SESSION`), then your working directory.
 - The window shows them in the top bar grouped by kind (one link of a kind is a
