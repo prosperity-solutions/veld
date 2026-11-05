@@ -1789,7 +1789,14 @@ export const api = {
   /** Each live terminal's agent, at its latest reported state. */
   agentOverview: () =>
     request<{
-      agents: { session_id: string; worktree_id: number; state: string; held?: boolean }[];
+      agents: {
+        session_id: string;
+        worktree_id: number;
+        state: string;
+        held?: boolean;
+        /** When `state`/`held` last changed (RFC 3339). */
+        since?: string;
+      }[];
     }>("/api/engine/overview"),
   /** Pure read (no reconciliation) — kept for consumers that must not
    *  trigger git; the app itself polls refreshRepos. */

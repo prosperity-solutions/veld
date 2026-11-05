@@ -81,13 +81,14 @@ export function TerminalBadge(props: { badge: RowBadge | null }): React.JSX.Elem
 export function GitStateIcon(props: {
   git: WorktreeGitSignals | undefined;
   detached: boolean;
-  tooltip: string;
+  /** Called only when there is a glyph to put it on. */
+  tooltip: () => string;
 }): React.JSX.Element | null {
   const state = rowGitState(props.git, props.detached);
   if (state === null) return null;
   const Icon = GIT_ICONS[state];
   return (
-    <RailGlyphTooltip label={props.tooltip}>
+    <RailGlyphTooltip label={props.tooltip()}>
       <span
         className={`wt-git ${state}`}
         // Decorative for the screen reader: the row's `aria-description` carries

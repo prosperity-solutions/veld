@@ -3231,15 +3231,6 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     view
 }
 
-/// [`worktree_view`] for a handler whose answer replaces the rail row, which
-/// would otherwise drop the live-terminal badge until the next poll.
-async fn rail_row_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
-    let id = wt.id;
-    let mut view = worktree_view(db, wt);
-    view.live_terminals = super::pty::live_terminals_in(id).await;
-    view
-}
-
 /// What the project contributes to a worktree's top bar — its badges, buttons
 /// and menus, as `{id, label, type}`, and for a status badge what it showed when
 /// it last ran (`shown: {text, href}`, or `null` when it has not run). `veld ide
@@ -3618,9 +3609,10 @@ async fn repo_view(
     repo: RepoRecord,
     available: bool,
     git: Option<RepoGitStatus>,
+    live_terminals: &std::collections::HashMap<i64, usize>,
 ) -> Result<RepoView, ApiError> {
     let db = db.clone();
-    let live = super::pty::live_terminal_counts().await;
+    let live = live_terminals.clone();
     crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git, live)).await
 }
 
@@ -4193,11 +4185,13 @@ fn request_own_shutdown() {
 async fn list_repos() -> Result<Json<RepoList>, ApiError> {
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
+    // Once per request, not per repo: one pass over the session registry.
+    let live = super::pty::live_terminal_counts().await;
     for repo in db.list_repos().map_err(db_err)? {
         let available = FsPath::new(&repo.root).is_dir();
         // `None`: this GET must not spawn git, so the top bar's git status
         // arrives on the next CSRF-gated `refresh_repos` poll.
-        repos.push(repo_view(&db, repo, available, None).await?);
+        repos.push(repo_view(&db, repo, available, None, &live).await?);
     }
     Ok(Json(RepoList { repos }))
 }
@@ -4227,6 +4221,8 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
     let mut repos = Vec::new();
     let mut availability = HashMap::new();
     let mut sweep_targets = Vec::new();
+    // Once per request, not per repo: one pass over the session registry.
+    let live = super::pty::live_terminal_counts().await;
     for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
         // Taken first, before any git runs: a change that lands while the
@@ -4319,7 +4315,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
                 .map(|wt| (wt.id, wt.path.clone())),
         );
         let git = repo_git_status_cached(&db, &root, &fingerprint).await;
-        repos.push(repo_view(&db, repo, available, Some(git)).await?);
+        repos.push(repo_view(&db, repo, available, Some(git), &live).await?);
     }
     // After the loop, and after the response is built: the `dirty` half costs a
     // `git status` per checkout, so it fills the cache for the *next* poll rather
@@ -4444,7 +4440,16 @@ async fn update_main(Json(body): Json<UpdateMainBody>) -> Result<Json<RepoView>,
             )
         })?;
     let git = repo_git_status(&db, &repo_root).await;
-    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
+    Ok(Json(
+        repo_view(
+            &db,
+            repo,
+            true,
+            Some(git),
+            &super::pty::live_terminal_counts().await,
+        )
+        .await?,
+    ))
 }
 
 /// Discard the repo root's uncommitted changes so [`update_main`] can
@@ -4542,7 +4547,16 @@ async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, Api
         .map_err(db_err)?
         .ok_or_else(|| db_err("repo vanished after import"))?;
     let git = repo_git_status(&db, FsPath::new(&repo.root)).await;
-    Ok(Json(repo_view(&db, repo, true, Some(git)).await?))
+    Ok(Json(
+        repo_view(
+            &db,
+            repo,
+            true,
+            Some(git),
+            &super::pty::live_terminal_counts().await,
+        )
+        .await?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -6487,7 +6501,7 @@ async fn patch_worktree(
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-    Ok(Json(rail_row_view(&db, wt).await))
+    Ok(Json(worktree_view(&db, wt)))
 }
 
 #[derive(Deserialize)]
@@ -6690,7 +6704,7 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree already removed"))?;
-    Ok(Json(rail_row_view(&db, wt).await))
+    Ok(Json(worktree_view(&db, wt)))
 }
 
 /// Move a worktree the discovery poll found on its own — one made outside Veld —
@@ -7119,6 +7133,18 @@ mod tests {
             adopted: true,
             named_by: String::new(),
         }
+    }
+
+    /// The rail reads an absent `live_terminals` as zero, so the field is left out
+    /// at zero (almost every row) and present otherwise.
+    #[test]
+    fn live_terminals_is_omitted_at_zero() {
+        let mut view = wt_view(1, false, Vec::new());
+        let json = serde_json::to_value(&view).unwrap();
+        assert!(json.get("live_terminals").is_none());
+        view.live_terminals = 2;
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["live_terminals"], 2);
     }
 
     fn wt_view(id: i64, is_main: bool, news: Vec<veld_core::ide::NewsItem>) -> WorktreeView {

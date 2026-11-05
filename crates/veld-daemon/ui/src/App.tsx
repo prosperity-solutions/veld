@@ -10587,8 +10587,12 @@ function Rail(props: {
     // shares `attentionStatus` with the row's own alert, and `groupState` is what
     // the project squares already aggregate with. A header that stands in for
     // rows must not be able to disagree with them.
+    // Rows another window holds show no state (see `showsState` on the row), so
+    // they are left out of both reductions below — or a folded header would
+    // report an alert that no row carries once it is unfolded.
+    const ownRows = group.worktrees.filter((w) => !props.elsewhere.has(w.id));
     const hiddenAlert = folded
-      ? sectionAttention(props.envs, group.worktrees)
+      ? sectionAttention(props.envs, ownRows)
       : null;
     // The one thing a row says in red, and the only one it says with no glyph of
     // its own: a permanent delete that failed leaves the row behind with git's
@@ -10627,7 +10631,7 @@ function Rail(props: {
           // disk, so news about one offers nothing to do. In the trash section
           // that is every row, which is the intent — a folded trash reports a
           // count and nothing else.
-          new Set(group.worktrees.filter((w) => !w.trashed_at).map((w) => w.id)),
+          new Set(ownRows.filter((w) => !w.trashed_at).map((w) => w.id)),
           props.showWorking,
         )
       : null;
@@ -11130,14 +11134,17 @@ function Rail(props: {
                       .map((r) => `${r.name} (${r.status})`)
                       .join(", ")}`
                   : "";
-              const stateTooltip = rowTooltip(
-                worktreeLabel(w),
-                terminalsNote
-                  ? [...activityLines(inboxSummary), terminalsNote]
-                  : activityLines(inboxSummary),
-                w.git,
-                isDetached(w),
-              );
+              // Built only by a glyph that is actually shown, not for every row on
+              // every render.
+              const stateTooltip = () =>
+                rowTooltip(
+                  worktreeLabel(w),
+                  terminalsNote
+                    ? [...activityLines(inboxSummary), terminalsNote]
+                    : activityLines(inboxSummary),
+                  w.git,
+                  isDetached(w),
+                );
               /* Whether this row can be picked up. Named rather than written
                  inline on `draggable`, because the grabbing cursor is drawn
                  from the same answer and the two must not disagree: a row that
@@ -11282,7 +11289,7 @@ function Rail(props: {
                     return badge === null ? (
                       mark
                     ) : (
-                      <RailGlyphTooltip label={stateTooltip}>{mark}</RailGlyphTooltip>
+                      <RailGlyphTooltip label={stateTooltip()}>{mark}</RailGlyphTooltip>
                     );
                   })()}
                   {/* The name the user typed, verbatim — spaces, capitals and all.
@@ -11350,7 +11357,7 @@ function Rail(props: {
                       className={`wt-alert ${alertStatus}`}
                       title={`${
                         alertStatus === "recovering"
-                          ? `${worktreeLabel(w)} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
+                          ? `${worktreeLabel(w)} — a node is failing its liveness probe; veld restarts it once the failures reach its threshold. Open node health.`
                           : `${worktreeLabel(w)} — the run failed. Open node health.`
                       }${runCountNote}`}
                       aria-label={`Node health for ${worktreeLabel(w)}`}

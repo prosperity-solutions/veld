@@ -794,16 +794,6 @@ pub(crate) async fn live_terminal_counts() -> HashMap<i64, usize> {
     counts
 }
 
-/// [`live_terminal_counts`] for one worktree.
-pub(crate) async fn live_terminals_in(worktree_id: i64) -> usize {
-    SESSIONS
-        .lock()
-        .await
-        .values()
-        .filter(|s| s.worktree_id == worktree_id && s.exited().is_none())
-        .count()
-}
-
 static SESSIONS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<Session>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 

@@ -842,14 +842,31 @@ describe("surviving a page reload", () => {
     expect(rowState(box, OTHER_WT)).toBe("attention");
   });
 
-  it("snapshots only what is unread", () => {
+  /**
+   * What is unread, and when a read session was read — the marker that stops the seed
+   * from the daemon filing an agent's already-read "waiting" again after a reload.
+   */
+  it("snapshots what is unread, and when each session was last read", () => {
     const box = createInbox();
     for (const signal of command(0)) box.report("read", WT, signal, NOW);
     box.report("unread", WT, agent("blocked"), NOW);
     box.read("read");
     // A pane that is merely running carries no event, so it is not in the snapshot.
     box.report("busy", WT, { type: "osc133", mark: "C", exit: null }, NOW);
-    expect(Object.keys(box.snapshot().sessions)).toEqual(["unread"]);
+    const sessions = box.snapshot().sessions;
+    expect(Object.keys(sessions).sort()).toEqual(["read", "unread"]);
+    expect(sessions.read.unseen).toBeNull();
+    expect(typeof sessions.read.readAt).toBe("number");
+  });
+
+  it("keeps a read waiting read across a reload", () => {
+    const before = createInbox();
+    before.report("b", WT, agent("blocked"), NOW);
+    before.read("b");
+    const after = createInbox();
+    after.restore(JSON.parse(JSON.stringify(before.snapshot())));
+    after.seed([{ sessionId: "b", worktreeId: WT, state: "blocked", held: false, since: NOW }], NOW + 5);
+    expect(after.unseen("b")).toBeNull();
   });
 });
 
@@ -1588,8 +1605,8 @@ describe("seeding from the daemon", () => {
     box.onEvent((e) => events.push(e.unseen.detail));
     box.seed(
       [
-        { sessionId: "w", worktreeId: WT, state: "working", held: false },
-        { sessionId: "b", worktreeId: OTHER_WT, state: "blocked", held: false },
+        { sessionId: "w", worktreeId: WT, state: "working", held: false, since: NOW },
+        { sessionId: "b", worktreeId: OTHER_WT, state: "blocked", held: false, since: NOW },
       ],
       NOW,
     );
@@ -1601,7 +1618,7 @@ describe("seeding from the daemon", () => {
   /** The daemon knows the agent is idle, not whether its last turn was seen. */
   it("does not make up a finished event for an idle agent", () => {
     const box = createInbox();
-    box.seed([{ sessionId: "i", worktreeId: WT, state: "idle", held: false }], NOW);
+    box.seed([{ sessionId: "i", worktreeId: WT, state: "idle", held: false, since: NOW }], NOW);
     expect(box.unseen("i")).toBeNull();
     expect(box.isRunning("i")).toBe(false);
   });
@@ -1611,7 +1628,7 @@ describe("seeding from the daemon", () => {
     const box = createInbox();
     box.report("b", WT, agent("blocked"), NOW);
     box.read("b");
-    box.seed([{ sessionId: "b", worktreeId: WT, state: "blocked", held: false }], NOW + 1);
+    box.seed([{ sessionId: "b", worktreeId: WT, state: "blocked", held: false, since: NOW }], NOW + 1);
     expect(box.unseen("b")).toBeNull();
   });
 
@@ -1619,7 +1636,7 @@ describe("seeding from the daemon", () => {
   it("restores a known session's working spinner", () => {
     const box = createInbox();
     box.report("w", WT, agent("ready"), NOW);
-    box.seed([{ sessionId: "w", worktreeId: WT, state: "working", held: false }], NOW + 1);
+    box.seed([{ sessionId: "w", worktreeId: WT, state: "working", held: false, since: NOW }], NOW + 1);
     expect(box.isRunning("w")).toBe(true);
   });
 
@@ -1638,5 +1655,34 @@ describe("seeding from the daemon", () => {
     box.report("cc", WT, agent("ready"), NOW);
     box.restoreRunning("cc", WT);
     expect(box.isRunning("cc")).toBe(false);
+  });
+
+  /** A relayed report that lands while the overview is in flight is the newer one. */
+  it("leaves a session alone that reported live after the seed began", () => {
+    const box = createInbox();
+    const mark = box.agentMark();
+    box.report("a", WT, agent("blocked"), NOW + 1);
+    box.seed([{ sessionId: "a", worktreeId: WT, state: "working", held: false, since: NOW }], NOW + 2, mark);
+    expect(box.unseen("a")?.kind).toBe("attention");
+  });
+
+  /** It stopped while this window was not listening: its turn ended unseen here. */
+  it("files finished for an agent this window last saw working", () => {
+    const box = createInbox();
+    box.report("w", WT, agent("working"), NOW);
+    box.seed([{ sessionId: "w", worktreeId: WT, state: "idle", held: false, since: NOW + 1 }], NOW + 2);
+    expect(box.isRunning("w")).toBe(false);
+    expect(box.unseen("w")?.kind).toBe("finished");
+  });
+
+  /** Seed first, then the busy answer: the command is linked to the agent either way. */
+  it("links a resumed command to the agent whichever lands first", () => {
+    const box = createInbox();
+    box.seed([{ sessionId: "cc", worktreeId: WT, state: "idle", held: false, since: NOW }], NOW);
+    box.restoreRunning("cc", WT);
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 1);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 2);
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 3);
+    expect(box.unseen("cc")?.kind).toBe("failed");
   });
 });

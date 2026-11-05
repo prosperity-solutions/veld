@@ -1813,6 +1813,9 @@ async function restoreRunning(s: Session): Promise<void> {
   } catch {
     return;
   }
+  // A pane closed while the question was out has already been forgotten by the
+  // inbox; answering for it would leave a spinner nothing ever clears.
+  if (sessions.get(s.id) !== s) return;
   if (busy && s.marks === before) inbox.restoreRunning(s.id, s.worktreeId);
 }
 

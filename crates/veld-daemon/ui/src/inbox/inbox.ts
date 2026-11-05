@@ -257,6 +257,14 @@ interface SessionState {
    */
   reportedExit: boolean;
   /**
+   * When this session's news was last read (ms), or `null`. Persisted, so a `blocked`
+   * already read is not filed again by [`WorktreeInbox.seed`] after a reload — the
+   * daemon still reports the agent as waiting, but that is not news to this window.
+   */
+  readAt: number | null;
+  /** [`WorktreeInbox.agentMark`] at this session's last relayed agent report. */
+  liveSeq: number;
+  /**
    * The agent's last turn ended waiting on its own background agents (`delegated`).
    *
    * Remembered because Claude's idle reminder (`settled`) arrives a minute after *every*
@@ -323,6 +331,17 @@ class WorktreeInbox {
   private eventListeners = new Set<(e: InboxEvent) => void>();
   /** Set while [`seed`] files state, so it raises no banner: it is not news. */
   private seeding = false;
+  /** Counts relayed agent reports, so a seed can tell what arrived after it started. */
+  private liveSeq = 0;
+
+  /**
+   * A position in the stream of relayed agent reports. Taken before fetching the
+   * daemon's overview and handed to [`seed`], which then leaves alone any session
+   * that heard from its agent since — that report is newer than the overview.
+   */
+  agentMark(): number {
+    return this.liveSeq;
+  }
   /**
    * The session the user is actually looking at, or null.
    *
@@ -367,6 +386,8 @@ class WorktreeInbox {
       agentSource: null,
       agentCommand: false,
       reportedExit: false,
+      readAt: null,
+      liveSeq: 0,
       delegated: false,
       held: false,
       unseen: null,
@@ -382,30 +403,52 @@ class WorktreeInbox {
    * you, otherwise showed nothing — on the rail or in Next unread — until that
    * agent's next transition.
    *
-   * `working` and `delegated` are filed for every session: they are a live fact,
-   * and the one thing a reload never restores (unread events survive in this
-   * window's storage; whether something is running deliberately does not).
-   * Everything else only for a session this window has no record of — a `blocked`
-   * it already read must not come back as news. `blocked` files the waiting event;
-   * `idle` claims the pane without one, since the daemon knows the agent is idle,
-   * not whether its last turn was seen, and a "finished" made up here would be news
-   * that did not happen. No banner is raised: nothing new happened, this window
-   * just learned about it late.
+   * Runs on every (re)connect, so it also corrects what a window believed across a
+   * socket blip. `working` and `delegated` are always filed: a live fact, and the
+   * one thing a reload never restores. `blocked` files the waiting event unless it
+   * is already showing or was read after the agent began waiting (`readAt`, kept
+   * in this window's storage). An idle agent this window last saw working files
+   * "finished" — its turn ended while the window was not listening; any other idle
+   * agent only claims the pane, since the daemon knows it is idle, not whether its
+   * last turn was seen. No banner is raised: this window is learning late, not
+   * hearing something new.
    */
   seed(
-    agents: { sessionId: string; worktreeId: number; state: AgentState; held: boolean }[],
+    agents: {
+      sessionId: string;
+      worktreeId: number;
+      state: AgentState;
+      held: boolean;
+      /** When the daemon's state for this agent last changed (ms). */
+      since: number;
+    }[],
     now: number = Date.now(),
+    /** [`agentMark`] when the overview was requested; sessions reported since are skipped. */
+    mark: number = Number.POSITIVE_INFINITY,
   ): void {
     this.seeding = true;
     try {
       for (const a of agents) {
-        const live = a.state === "working" || a.state === "delegated";
-        if (!live && this.sessions.get(a.sessionId)?.agentSource) continue;
-        const state: AgentState =
-          a.state === "working" || a.state === "delegated" || a.state === "blocked"
-            ? a.state
-            : "ready";
-        this.report(a.sessionId, a.worktreeId, { type: "agent", state, held: a.held, source: "hook" }, now);
+        const known = this.sessions.get(a.sessionId);
+        if (known && known.liveSeq > mark) continue;
+        let state: AgentState | null;
+        if (a.state === "working" || a.state === "delegated") {
+          state = a.state;
+        } else if (a.state === "blocked") {
+          // Already showing it, or read since the agent began waiting.
+          const shown = known?.unseen?.kind === "attention";
+          const read = known?.readAt != null && a.since <= known.readAt;
+          state = shown || read ? null : "blocked";
+        } else if (known?.agentWorking) {
+          // This window last saw it working, and it has stopped while the socket was
+          // down: its turn ended unseen here, which is what "finished" means.
+          state = "idle";
+        } else {
+          state = known?.agentSource ? null : "ready";
+        }
+        if (state !== null) {
+          this.report(a.sessionId, a.worktreeId, { type: "agent", state, held: a.held, source: "hook" }, now);
+        }
       }
     } finally {
       this.seeding = false;
@@ -415,15 +458,22 @@ class WorktreeInbox {
   /**
    * A resumed shell turned out to be running a command: the `C` that started it is
    * in the replayed scrollback, which is not filed, so set what it would have set.
-   * Its `D` then files "finished" or "failed" like any other command's. Ignored
-   * while an agent speaks for the pane — an agent's own process is the shell's
-   * foreground job whenever it runs, busy or idle.
+   * Its `D` then files "finished" or "failed" like any other command's. Under an
+   * agent it only links the command to the agent — the agent's own process is the
+   * shell's foreground job whenever it runs, so it says nothing about the spinner.
    */
   restoreRunning(sessionId: string, worktreeId: number): void {
     this.register(sessionId, worktreeId);
     const session = this.sessions.get(sessionId);
-    if (!session || session.agentSource !== null || session.ranCommand) return;
+    if (!session || session.ranCommand) return;
+    // Exactly what the `C` mark would have done, so the seed and this answer converge
+    // whichever lands first: under an agent the command is the agent's, and its `D`
+    // releases the pane rather than filing a result.
     session.ranCommand = true;
+    if (session.agentSource !== null) {
+      session.agentCommand = true;
+      return;
+    }
     this.notify();
   }
 
@@ -442,6 +492,7 @@ class WorktreeInbox {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     session.worktreeId = worktreeId;
+    if (signal.type === "agent" && !this.seeding) session.liveSeq = ++this.liveSeq;
 
     const before = session.unseen;
     const wasRunning = running(session);
@@ -454,7 +505,9 @@ class WorktreeInbox {
       // stays until it is answered wherever the person is looking. Still classified
       // above, because the state machine has to track the `C` even when its `D` will
       // be discarded — otherwise switching to a pane mid-command loses the next event.
-      session.unseen = sessionId === this.watching && !session.held ? null : event;
+      const seenNow = sessionId === this.watching && !session.held;
+      session.unseen = seenNow ? null : event;
+      if (seenNow) session.readAt = now;
     } else if (wasHeld && !session.held && sessionId === this.watching) {
       // Released while being watched (an interrupted question, say): it has been seen.
       if (session.unseen?.kind === "attention") session.unseen = null;
@@ -735,6 +788,7 @@ class WorktreeInbox {
     const session = this.sessions.get(sessionId);
     if (!session?.unseen || session.held) return false;
     session.unseen = null;
+    session.readAt = Date.now();
     this.notify();
     return true;
   }
@@ -788,6 +842,7 @@ class WorktreeInbox {
     for (const session of this.sessions.values()) {
       if (session.worktreeId === worktreeId && session.unseen && !session.held) {
         session.unseen = null;
+        session.readAt = Date.now();
         changed = true;
       }
     }
@@ -997,10 +1052,11 @@ class WorktreeInbox {
   snapshot(): PersistedInbox {
     const sessions: PersistedInbox["sessions"] = {};
     for (const [id, session] of this.sessions) {
-      if (session.unseen || session.reportedExit) {
+      if (session.unseen || session.reportedExit || session.readAt !== null) {
         sessions[id] = {
           worktreeId: session.worktreeId,
           unseen: session.unseen,
+          readAt: session.readAt,
           // Carried even for a session with nothing unread: it is the *read* case that
           // needed it, since the daemon replays the exit frame to the next attach and the
           // event would otherwise come back — with a notification — on every reload.
@@ -1031,6 +1087,7 @@ class WorktreeInbox {
       // Adopted even when there is no event to restore: it is what stops the daemon's
       // replayed exit frame filing the same death again after the reload.
       session.reportedExit = session.reportedExit || entry.reportedExit;
+      session.readAt = Math.max(session.readAt ?? 0, entry.readAt ?? 0) || null;
       if (entry.unseen !== null) {
         session.unseen = entry.unseen;
         changed = true;
@@ -1081,6 +1138,8 @@ export interface PersistedInbox {
       /** `null` for a session kept only to remember that its exit was already filed. */
       unseen: Unseen | null;
       reportedExit: boolean;
+      /** Absent in snapshots written before it existed. */
+      readAt?: number | null;
     }
   >;
 }
@@ -1106,11 +1165,12 @@ function parsePersisted(doc: unknown): PersistedInbox["sessions"] {
     const unseen = entry.unseen;
     if (typeof entry.worktreeId !== "number") continue;
     const reportedExit = entry.reportedExit === true;
+    const readAt = typeof entry.readAt === "number" ? entry.readAt : null;
     // A row with no event but a filed exit is meaningful on its own — it is the whole
     // point of persisting the marker — so it is kept rather than skipped.
     if (unseen === null || unseen === undefined) {
-      if (reportedExit) {
-        out[id] = { worktreeId: entry.worktreeId, unseen: null, reportedExit };
+      if (reportedExit || readAt !== null) {
+        out[id] = { worktreeId: entry.worktreeId, unseen: null, reportedExit, readAt };
       }
       continue;
     }
@@ -1123,6 +1183,7 @@ function parsePersisted(doc: unknown): PersistedInbox["sessions"] {
     out[id] = {
       worktreeId: entry.worktreeId,
       reportedExit,
+      readAt,
       unseen: {
         kind: u.kind as UnseenKind,
         producer: u.producer as Producer,
