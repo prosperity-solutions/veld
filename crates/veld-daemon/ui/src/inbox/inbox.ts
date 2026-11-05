@@ -322,6 +322,8 @@ interface SessionState {
    * nothing unless it failed.
    */
   agentEnded: boolean;
+  /** The agent here has said a turn started (`working`), so it will say the next one does. */
+  reportsTurns: boolean;
 }
 
 /**
@@ -443,6 +445,7 @@ class WorktreeInbox {
       unseen: null,
       finished: null,
       agentEnded: false,
+      reportsTurns: false,
     });
   }
 
@@ -619,6 +622,7 @@ class WorktreeInbox {
     }
 
     const before = session.unseen;
+    const beforeFinished = session.finished;
     const wasRunning = running(session);
     const wasHeld = session.held;
     const event = this.classify(session, signal, now);
@@ -649,9 +653,10 @@ class WorktreeInbox {
         const payload: InboxEvent = { sessionId, worktreeId, unseen: session.unseen };
         if (!this.seeding) for (const fn of this.eventListeners) fn(payload);
       }
-    } else if (wasRunning !== nowRunning) {
+    } else if (wasRunning !== nowRunning || session.finished !== beforeFinished) {
       // "Working" changed without any unseen event changing — a command started, or a
-      // command the user is watching ended. The rail still has to re-render.
+      // command the user is watching ended — or a finished agent stopped being one
+      // (quit, killed). The rail still has to re-render.
       this.notify();
     }
   }
@@ -714,6 +719,10 @@ class WorktreeInbox {
           session.agentEnded = false;
           return undefined;
         }
+        // A command the shell ran on its own: no agent holds this pane, so none is
+        // finished in it — the one way a finish restored after a reload is let go when
+        // the daemon could not say the agent left.
+        if (session.agentSource === null) session.finished = null;
         // And separately: an unread "needs you" from a hook is never buried by a command
         // ending. Narrow on purpose — only `attention`, and only from a hook — because it
         // is a claim about *relative value* rather than about the same event twice: an
@@ -871,6 +880,7 @@ class WorktreeInbox {
           session.finished = null;
         }
         if (signal.state !== "done") session.agentEnded = false;
+        if (signal.state === "working" || signal.state === "delegated") session.reportsTurns = true;
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -934,7 +944,10 @@ class WorktreeInbox {
               source: signal.source,
               detail: "Agent finished",
             };
-            session.finished = event;
+            // Kept past a read only for an agent that says when its next turn starts —
+            // the thing that ends it. Codex never does (`notify` fires at a turn's end
+            // only), so its finish stays the event that looking reads, as before.
+            session.finished = session.reportsTurns ? event : null;
             return event;
           }
           case "working":

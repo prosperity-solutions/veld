@@ -1772,6 +1772,7 @@ describe("a finished agent, once seen", () => {
 
   it("stays finished after it is read, and no longer counts as unread", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     expect(rowState(box, WT)).toBe("finished");
     expect(seen(box)).toBe(0);
@@ -1788,6 +1789,7 @@ describe("a finished agent, once seen", () => {
     const box = createInbox();
     box.setWatching("cc");
     box.report("cc", WT, agent("working"), NOW);
+    box.report("cc", WT, agent("working"), NOW + 1 - 1);
     box.report("cc", WT, agent("idle"), NOW + 1);
     expect(box.unseen("cc")).toBeNull();
     expect(seen(box)).toBe(1);
@@ -1795,6 +1797,7 @@ describe("a finished agent, once seen", () => {
 
   it("survives typing into the pane and the idle reminder", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.read("cc");
     box.report("cc", WT, agent("settled"), NOW + 60_000);
@@ -1804,6 +1807,7 @@ describe("a finished agent, once seen", () => {
   it("ends when the agent starts its next turn", () => {
     for (const next of ["working", "delegated", "blocked"] as const) {
       const box = createInbox();
+      box.report("cc", WT, agent("working"), NOW - 1);
       box.report("cc", WT, agent("idle"), NOW);
       box.read("cc");
       box.report("cc", WT, agent(next), NOW + 1);
@@ -1814,6 +1818,7 @@ describe("a finished agent, once seen", () => {
   it("ends, with nothing filed, when the agent exits", () => {
     const box = createInbox();
     box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, agent("working"), NOW + 1 - 1);
     box.report("cc", WT, agent("idle"), NOW + 1);
     box.report("cc", WT, agent("done"), NOW + 2);
     expect(seen(box)).toBe(0);
@@ -1853,17 +1858,20 @@ describe("a finished agent, once seen", () => {
 
   it("ends when the pane's process ends, restarts, or the pane is closed", () => {
     const exited = createInbox();
+    exited.report("cc", WT, agent("working"), NOW - 1);
     exited.report("cc", WT, agent("idle"), NOW);
     exited.read("cc");
     exited.report("cc", WT, { type: "exit", code: 0 }, NOW + 1);
     expect(seen(exited)).toBe(0);
 
     const restarted = createInbox();
+    restarted.report("cc", WT, agent("working"), NOW - 1);
     restarted.report("cc", WT, agent("idle"), NOW);
     restarted.restarted("cc");
     expect(seen(restarted)).toBe(0);
 
     const closed = createInbox();
+    closed.report("cc", WT, agent("working"), NOW - 1);
     closed.report("cc", WT, agent("idle"), NOW);
     closed.read("cc");
     closed.forget("cc");
@@ -1872,6 +1880,7 @@ describe("a finished agent, once seen", () => {
 
   it("is dismissed by Mark read, which is offered for it", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.read("cc");
     expect(box.hasUnread(WT)).toBe(true);
@@ -1890,6 +1899,7 @@ describe("a finished agent, once seen", () => {
   /** The project selector shows news only; a seen finish is not news. */
   it("does not light a project's glyph", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.read("cc");
     expect(box.groupState(new Set([WT, OTHER_WT]), true).state).toBe(null);
@@ -1897,6 +1907,7 @@ describe("a finished agent, once seen", () => {
 
   it("survives a reload, and a reload's claim does not end it", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.read("cc");
     const doc = JSON.parse(JSON.stringify(box.snapshot()));
@@ -1919,6 +1930,7 @@ describe("a finished agent, once seen", () => {
     const box = createInbox();
     box.report("cc", WT, agent("ready"), NOW);
     box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("working"), NOW + 2 - 1);
     box.report("cc", WT, agent("idle"), NOW + 2);
     box.read("cc");
     box.report("cc", WT, { type: "osc133", mark: "D", exit: 137 }, NOW + 3);
@@ -1928,6 +1940,7 @@ describe("a finished agent, once seen", () => {
 
   it("ends when the agent quit while this window was not listening", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.read("cc");
     const after = createInbox();
@@ -1963,7 +1976,9 @@ describe("a finished agent, once seen", () => {
   /** Where Next goes depends on the watched pane, so watching another must re-render. */
   it("tells the rail when the watched pane changes, even with nothing to read", () => {
     const box = createInbox();
+    box.report("a", WT, agent("working"), NOW - 1);
     box.report("a", WT, agent("idle"), NOW);
+    box.report("b", WT, agent("working"), NOW + 1 - 1);
     box.report("b", WT, agent("idle"), NOW + 1);
     box.setWatching("a");
     box.setWatching("b");
@@ -1975,6 +1990,51 @@ describe("a finished agent, once seen", () => {
     expect(renders).toBe(1);
     box.setWatching("a");
     expect(renders, "unchanged, no render").toBe(1);
+  });
+
+  /**
+   * Codex says when a turn ends and never when one starts, so nothing would ever end a
+   * standing finish there: its finish stays the event that looking reads, as before.
+   */
+  it("is not kept for an agent that never says a turn started", () => {
+    const box = createInbox();
+    box.report("cx", WT, agent("ready"), NOW);
+    box.report("cx", WT, agent("idle"), NOW + 1);
+    expect(rowState(box, WT)).toBe("finished");
+    box.read("cx");
+    expect(seen(box)).toBe(0);
+    expect(box.next(new Set([WT]))).toBeNull();
+  });
+
+  /** The rail re-renders only on a notify, so ending a seen finish must send one. */
+  it("tells the rail when a seen finish ends without an event", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.report("cc", WT, { type: "osc133", mark: "C", exit: null }, NOW + 1);
+    box.report("cc", WT, agent("working"), NOW + 2);
+    box.report("cc", WT, agent("idle"), NOW + 3);
+    box.read("cc");
+    let renders = 0;
+    box.subscribe(() => {
+      renders += 1;
+    });
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 4);
+    expect(seen(box)).toBe(0);
+    expect(renders).toBe(1);
+  });
+
+  /** A restored finish the daemon could not vouch for ends at the shell's next command. */
+  it("lets a restored finish go when the shell runs a command of its own", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
+    box.report("cc", WT, agent("idle"), NOW);
+    box.read("cc");
+    const after = createInbox();
+    after.restore(JSON.parse(JSON.stringify(box.snapshot())));
+    after.seed([], NOW + 10, after.agentMark(), null);
+    expect(seen(after)).toBe(1);
+    for (const s of command(0)) after.report("cc", WT, s, NOW + 20);
+    expect(seen(after)).toBe(0);
   });
 
   it("drops a stored finish that is not an agent's", () => {
@@ -2004,7 +2064,9 @@ describe("next, once nothing is unread", () => {
 
   it("prefers unread news, then steps through seen finishes", () => {
     const box = createInbox();
+    box.report("old", WT, agent("working"), NOW - 1);
     box.report("old", WT, agent("idle"), NOW);
+    box.report("new", OTHER_WT, agent("working"), NOW + 1000 - 1);
     box.report("new", OTHER_WT, agent("idle"), NOW + 1000);
     expect(box.next(ALL_WT)).toMatchObject({ sessionId: "new" });
     expect(box.next(ALL_WT)?.seen).toBeUndefined();
@@ -2024,6 +2086,7 @@ describe("next, once nothing is unread", () => {
 
   it("stays on a lone finished agent", () => {
     const box = createInbox();
+    box.report("only", WT, agent("working"), NOW - 1);
     box.report("only", WT, agent("idle"), NOW);
     box.setWatching("only");
     expect(box.next(ALL_WT)).toMatchObject({ sessionId: "only", seen: true });
@@ -2031,6 +2094,7 @@ describe("next, once nothing is unread", () => {
 
   it("is gone once nothing is finished", () => {
     const box = createInbox();
+    box.report("cc", WT, agent("working"), NOW - 1);
     box.report("cc", WT, agent("idle"), NOW);
     box.setWatching("cc");
     box.report("cc", WT, agent("working"), NOW + 1);
