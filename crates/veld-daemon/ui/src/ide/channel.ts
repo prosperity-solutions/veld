@@ -54,7 +54,8 @@ async function seedAgents(): Promise<void> {
         worktreeId: a.worktree_id,
         state: a.state as AgentState,
         held: a.held === true,
-        since: Date.parse(a.since ?? "") || 0,
+        // Unknown is not "long ago": a wait with no time is never taken as already read.
+        since: Number.isFinite(Date.parse(a.since ?? "")) ? Date.parse(a.since ?? "") : null,
       })),
     Date.now(),
     mark,

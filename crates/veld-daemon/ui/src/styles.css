@@ -1522,12 +1522,9 @@ body.pointer-dragging * {
    the alias gone it *is* the row's name — and each state glyph in a fixed slot
    beside it instead of queued in a flex line.
 
-   A grid rather than the wide row's flex line, because the flex version did not
-   fit. A 64px rail left 48px of row, and a row holding all four of `.wt-away`, the
-   marker, `.wt-alert` and the row-state glyph with a 7px gap between each needed
-   up to ~68px — so it overflowed, and the marker slid off centre by however many
-   neighbours it happened to have that moment. Here the marker's column is fixed
-   and centred whatever else is lit:
+   A grid rather than the wide row's flex line, because a flex line let the marker
+   slide by however many neighbours were lit at that moment. Here the marker's
+   column is fixed whatever else is lit:
 
        [bar][marker+badge][one glyph]
 
@@ -2267,9 +2264,6 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-inbox.working svg {
   animation: spin 1.4s linear infinite;
 }
-/* Collapsed, the glyph still renders — this is the indicator most worth seeing
-   from a narrow rail, which is the whole reason it exists. Its slot is set by the
-   `.wt-row.slim` grid, beside the marker. */
 
 /* Whether this checkout is holding work that is not safe yet: uncommitted
    changes, or commits that have not been pushed. Those two and nothing else —
@@ -2318,8 +2312,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-git.unpushed {
   color: var(--fg);
 }
-/* Collapsed, this still renders in the same slot `.wt-inbox` takes — "which of
-   these can I throw away" is a question people ask with the rail collapsed. */
+/* Collapsed, this still renders in the row's one right-hand slot, unless a run
+   needs attention — "which of these can I throw away" is a question people ask
+   with the rail collapsed. */
 
 /* The row's trailing controls — the run count, the node-health alert, the row-state
    glyph (`.wt-git` or `.wt-inbox`, whichever won the slot), the run control, the

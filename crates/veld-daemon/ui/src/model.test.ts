@@ -177,6 +177,7 @@ describe("activeRun / worktreeStatus", () => {
       "stopping",
       "stopped",
       "failed",
+      "crashed",
     ];
     for (const status of all) {
       const r = run("a", status, true);
@@ -224,6 +225,7 @@ describe("activeRun / worktreeStatus", () => {
       "stopping",
       "stopped",
       "failed",
+      "crashed",
     ];
     for (const status of all) {
       const s = worktreeStatus([run("a", status, true)]);

@@ -98,6 +98,7 @@ import {
   railGroups,
   runSignatureFor,
   runStatus,
+  runStatusLabel,
   runsForWorktree,
   sectionAttention,
   selectorRuns,
@@ -8748,7 +8749,7 @@ function RunSelect(props: {
           // control replaced announced `Run dev: stop…` while an action was in
           // flight, and dropping that left a screen reader with nothing but a
           // spinner on a neighbouring icon button.
-          `Run ${selected.name}: ${props.pending ? `${props.pending}…` : selected.status}`
+          `Run ${selected.name}: ${props.pending ? `${props.pending}…` : runStatusLabel(selected)}`
         : "No run selected",
     origin && !awaiting ? `Started from ${origin}` : null,
     // Neutral about *why* there is no such environment: it may have been removed,
@@ -8790,7 +8791,7 @@ function RunSelect(props: {
               awaiting
                 ? `Run ${awaiting}: starting`
                 : selected
-                  ? `Run ${selected.name}: ${props.pending ?? selected.status}`
+                  ? `Run ${selected.name}: ${props.pending ?? runStatusLabel(selected)}`
                   : "No run selected"
             }
           />
@@ -8834,7 +8835,7 @@ function RunSelect(props: {
                 {r.name === selected?.name ? " ·" : ""}
               </div>
               <div className="run-item-meta">
-                {r.status}
+                {runStatusLabel(r)}
                 {from ? ` · from ${from}` : ""}
               </div>
             </Menu.Item>
@@ -10341,7 +10342,7 @@ function Rail(props: {
     return laneDropTarget(sections, clientY);
   };
   // Suppresses the rail's width transition for the duration of a resize drag. The
-  // transition exists for the collapse/expand toggle, where 236px→66px should
+  // transition exists for the collapse/expand toggle, where 236px→54px should
   // animate; during a drag it re-animates on every pointer move, so the edge
   // visibly lags behind the cursor instead of tracking it.
   const [resizing, setResizing] = useState(false);
@@ -11067,9 +11068,9 @@ function Rail(props: {
               const stateNote = pending
                 ? ` · ${pending}…`
                 : liveAll.length > 1
-                  ? ` · ${liveAll.map((r) => `${r.name}: ${r.status}`).join(", ")}`
+                  ? ` · ${liveAll.map((r) => `${r.name}: ${runStatusLabel(r)}`).join(", ")}`
                   : live
-                    ? ` · ${live.status}`
+                    ? ` · ${runStatusLabel(live)}`
                     : "";
               const trashed = w.trashed_at !== "";
               const liveTerminals = trashed ? 0 : (w.live_terminals ?? 0);
@@ -11109,9 +11110,11 @@ function Rail(props: {
               // A row another window holds shows no state at all — only the away
               // icon — so it is unmistakably not this window's to read. The other
               // window's rail shows its state. A trashed row has none to show.
-              // **Every row-state element is gated on this**, and is wide-only unless
-              // it joins the collapsed row's single right-hand slot (the `:is()` list
-              // under `.wt-row.slim` in styles.css, and the choice below). The folded
+              // **Every row-state element is gated on this** — the hover text and the
+              // hand-off hourglass included — and is wide-only unless it rides the
+              // marker (the badge) or joins the collapsed row's single right-hand slot
+              // (the `:is()` list under `.wt-row.slim` in styles.css, and the choice
+              // below). The folded
               // header's `ownRows` applies the same rule to what it summarises.
               const showsState = !trashed && !away;
               // Which face the run control shows. A loader for an action this
@@ -11225,7 +11228,7 @@ function Rail(props: {
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
-                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote}${terminalsNote ? ` · ${terminalsNote}` : ""} (${awayNote(holder)})`
+                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
                             : `${worktreeLabel(w)} — ${w.branch}${stateNote}${terminalsNote ? ` · ${terminalsNote}` : ""}`
                   }
                   /* What `rowTargetAt` counts as a slot. Valueless: the index is
@@ -11378,7 +11381,7 @@ function Rail(props: {
                   )}
                   {(runSlot === "stop" || runSlot === "busy") && (
                     <Tooltip
-                      label={pending ? `${pending}…` : `Stop ${worktreeLabel(w)}${runCountNote}`}
+                      label={pending ? `${pending}…${runCountNote}` : `Stop ${worktreeLabel(w)}${runCountNote}`}
                     >
                       <button
                         type="button"

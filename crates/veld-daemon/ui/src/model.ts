@@ -313,9 +313,22 @@ export function runStatus(run: RunInfo | null): WorktreeStatus {
     }
     return "running";
   }
-  if (run.status === "failed") return "failed";
+  if (run.status === "failed" || run.status === "crashed") return "failed";
   if (run.status === "recovering") return "recovering";
   return "partial";
+}
+
+/**
+ * A run's status in words, for the surfaces that print it beside its dot. The
+ * daemon still calls a run `running` while a node in it fails, and the dot now
+ * says otherwise, so the text has to say why.
+ */
+export function runStatusLabel(run: RunInfo): string {
+  if (run.status !== "running") return run.status;
+  const s = runStatus(run);
+  if (s === "failed") return "running — a node failed";
+  if (s === "recovering") return "running — a node is failing its liveness probe";
+  return run.status;
 }
 
 /**
@@ -406,7 +419,9 @@ export function spinnerAction(
  * action is in flight — stopping a failed run has always been offered — and that
  * is intended: the alert reports the run's state and the spinner reports your
  * action on it. Both halves are pinned in `model.test.ts`, the second one
- * precisely because the first reads as forbidding it.
+ * precisely because the first reads as forbidding it. They coexist in *state*;
+ * the rail row's run control has one face, and shows the loader until your
+ * action lands, then the alert (`runSlot` in App.tsx).
  */
 export function needsAttention(status: WorktreeStatus): boolean {
   return status === "failed" || status === "recovering";
@@ -416,10 +431,10 @@ export function needsAttention(status: WorktreeStatus): boolean {
  * The status a worktree's attention affordance describes, or `null` when it has
  * nothing to flag.
  *
- * Two questions folded into one answer, because the rail row asked them
- * separately (`needsAttention(status) || needsAttention(worst)`, then
- * `needsAttention(status) ? status : worst`) and the folded section header has to
- * ask exactly the same pair. Two copies of that reduction would be two chances
+ * Three questions folded into one answer — the picked run, the worst live run,
+ * and whether the newest run here failed or crashed ([`lastRunFailed`]) — because
+ * the rail row asks them and the folded section header has to ask exactly the
+ * same ones. Two copies of that reduction would be two chances
  * for a header to disagree with the row it is standing in for — the one thing a
  * summary must never do.
  *

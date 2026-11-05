@@ -431,8 +431,8 @@ class WorktreeInbox {
       worktreeId: number;
       state: AgentState;
       held: boolean;
-      /** When the daemon's state for this agent last changed (ms). */
-      since: number;
+      /** When the daemon's state for this agent last changed (ms), or `null` if unknown. */
+      since: number | null;
     }[],
     now: number = Date.now(),
     /** [`agentMark`] when the overview was requested; sessions reported since are skipped. */
@@ -457,7 +457,7 @@ class WorktreeInbox {
             const shown = known?.unseen?.kind === "attention";
             // `since` is whole seconds; count it read only if the wait surely began
             // before the read, or a wait that started later in that second is lost.
-            const read = known?.readAt != null && a.since + 1000 <= known.readAt;
+            const read = known?.readAt != null && a.since !== null && a.since + 1000 <= known.readAt;
             state = shown || read ? null : "blocked";
             break;
           }
