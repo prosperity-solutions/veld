@@ -41,6 +41,10 @@ import type { RowState, RowSummary } from "./inbox";
  * No filled circles for the small states: at this size a filled circle competes with the
  * worktree marker dot at the other end of the row.
  */
+// A new state needs, beside its glyph here: its colour and motion as `.wt-inbox.<state>`
+// (folded headers), `.wt-badge.<state>` (the rail marker) and `.pane-tab-activity.<state>`
+// (tabs) in styles.css, the reduced-motion block there if it animates, and — for an
+// agent state — its case in `inbox.seed`.
 export const ICONS: Record<RowState, typeof IconCircleCheck> = {
   attention: IconMessageQuestion,
   // An open book: something was put in front of you to read (`veld ide open

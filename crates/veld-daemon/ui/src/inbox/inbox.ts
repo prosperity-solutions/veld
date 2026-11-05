@@ -265,6 +265,13 @@ interface SessionState {
   /** [`WorktreeInbox.agentMark`] at this session's last relayed agent report. */
   liveSeq: number;
   /**
+   * `ranCommand` was set by [`WorktreeInbox.restoreRunning`] — the daemon said the shell
+   * is busy — not by a `C` this window saw. Such a command may well be an agent that has
+   * not reported to this window yet, so the first agent state of *any* kind claims it,
+   * not only `ready`: otherwise quitting that agent filed its `D;130` as a failure.
+   */
+  restoredCommand: boolean;
+  /**
    * The agent's last turn ended waiting on its own background agents (`delegated`).
    *
    * Remembered because Claude's idle reminder (`settled`) arrives a minute after *every*
@@ -329,7 +336,11 @@ class WorktreeInbox {
    * render: a render may run any number of times for one event, and a banner may not.
    */
   private eventListeners = new Set<(e: InboxEvent) => void>();
-  /** Set while [`seed`] files state, so it raises no banner: it is not news. */
+  /**
+   * Set while [`seed`] files state. Nothing it files is news — the window is learning
+   * late — so every side effect of filing (today the event listeners: banners, sound)
+   * must check it.
+   */
   private seeding = false;
   /** Counts relayed agent reports, so a seed can tell what arrived after it started. */
   private liveSeq = 0;
@@ -388,6 +399,7 @@ class WorktreeInbox {
       reportedExit: false,
       readAt: null,
       liveSeq: 0,
+      restoredCommand: false,
       delegated: false,
       held: false,
       unseen: null,
@@ -431,25 +443,58 @@ class WorktreeInbox {
       for (const a of agents) {
         const known = this.sessions.get(a.sessionId);
         if (known && known.liveSeq > mark) continue;
+        // The live path's rule: a state this build does not know is dropped, never
+        // mapped to a claim — claiming for one is what once muted a pane for good.
+        if (!KNOWN_AGENT_STATES.includes(a.state)) continue;
         let state: AgentState | null;
-        if (a.state === "working" || a.state === "delegated") {
-          state = a.state;
-        } else if (a.state === "blocked") {
-          // Already showing it, or read since the agent began waiting.
-          const shown = known?.unseen?.kind === "attention";
-          const read = known?.readAt != null && a.since <= known.readAt;
-          state = shown || read ? null : "blocked";
-        } else if (known?.agentWorking) {
-          // This window last saw it working, and it has stopped while the socket was
-          // down: its turn ended unseen here, which is what "finished" means.
-          state = "idle";
-        } else {
-          state = known?.agentSource ? null : "ready";
+        switch (a.state) {
+          case "working":
+          case "delegated":
+            state = a.state;
+            break;
+          case "blocked": {
+            // Already showing it, or read since the agent began waiting.
+            const shown = known?.unseen?.kind === "attention";
+            // `since` is whole seconds; count it read only if the wait surely began
+            // before the read, or a wait that started later in that second is lost.
+            const read = known?.readAt != null && a.since + 1000 <= known.readAt;
+            state = shown || read ? null : "blocked";
+            break;
+          }
+          case "ready":
+          case "idle":
+          case "settled":
+            // Last seen working here, and stopped while the socket was down: its turn
+            // ended unseen, which is what "finished" means. Otherwise only claim the pane.
+            state = known?.agentWorking ? "idle" : known?.agentSource ? null : "ready";
+            break;
+          case "done":
+          case "unknown":
+            state = null;
+            break;
+          default: {
+            // A new AgentState must decide here what a late-joining window shows for it.
+            const unhandled: never = a.state;
+            state = unhandled;
+          }
         }
         if (state !== null) {
           this.report(a.sessionId, a.worktreeId, { type: "agent", state, held: a.held, source: "hook" }, now);
         }
       }
+      // An agent that quit while this window was not listening is gone from the
+      // overview (`done` removes it), so nothing above corrects a spinner this window
+      // still shows for it. Unless it reported since the overview was requested.
+      const listed = new Set(agents.map((a) => a.sessionId));
+      let stopped = false;
+      for (const [id, session] of this.sessions) {
+        if (session.agentWorking && !listed.has(id) && session.liveSeq <= mark) {
+          session.agentWorking = false;
+          session.delegated = false;
+          stopped = true;
+        }
+      }
+      if (stopped) this.notify();
     } finally {
       this.seeding = false;
     }
@@ -474,6 +519,7 @@ class WorktreeInbox {
       session.agentCommand = true;
       return;
     }
+    session.restoredCommand = true;
     this.notify();
   }
 
@@ -562,6 +608,7 @@ class WorktreeInbox {
         // `D` — with whatever status was last set — and neither is a command that ran.
         if (!session.ranCommand) return undefined;
         session.ranCommand = false;
+        session.restoredCommand = false;
         // This `D` closes the command an agent was running, so it is not a second event —
         // it is the shell's account of something the agent already reported through a
         // hook, and the agent's is the better one. Dropping it is also the honest moment
@@ -609,6 +656,7 @@ class WorktreeInbox {
         // the shell last told us.
         const midCommand = session.ranCommand;
         session.ranCommand = false;
+        session.restoredCommand = false;
         session.agentWorking = false;
         // And no agent owns this pane any more. Leaving `agentSource` set outlived the
         // agent for the life of the pane and muted two things permanently: the shell's
@@ -713,7 +761,10 @@ class WorktreeInbox {
         // are fire-and-forget, so a late one can arrive after the shell has already started
         // the *next* command, and it then claimed that command's `C` — swallowing its
         // result, its spinner and every OSC 9 until it ended.
-        if (session.ranCommand && signal.state === "ready") session.agentCommand = true;
+        if (session.ranCommand && (signal.state === "ready" || session.restoredCommand)) {
+          session.agentCommand = true;
+        }
+        session.restoredCommand = false;
         switch (signal.state) {
           case "ready":
             // Authority claimed, nothing reported. Setting `agentSource` above is the
@@ -812,6 +863,7 @@ class WorktreeInbox {
     if (!session) return;
     session.reportedExit = false;
     session.ranCommand = false;
+    session.restoredCommand = false;
     session.agentWorking = false;
     session.agentSource = null;
     session.agentCommand = false;

@@ -2343,12 +2343,9 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    end.
 
    **Expanded rows only.** A collapsed row is a ~54px column with no
-   trailing cluster to form: the alert and the row-state glyph are the only two that
-   render there, and they belong beside the marker (see `.wt-row.slim .wt-alert`,
-   `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`) rather than pushed to an
-   edge the row has no width to spare for. `.wt-git` and `.wt-inbox` are two style
-   families on ONE element — never both at once — so listing both here costs
-   nothing and keeps whichever one wins correct. */
+   trailing cluster to form: it has one slot right of the marker, which holds the
+   away icon, the run alert or the git glyph — exactly one, chosen in App.tsx — and
+   the terminal badge rides the marker itself. */
 .wt-row:not(.slim) > .wt-handoff,
 .wt-row:not(.slim) > .wt-alert,
 .wt-row:not(.slim) > .wt-git,

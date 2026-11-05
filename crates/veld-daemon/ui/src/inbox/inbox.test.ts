@@ -1685,4 +1685,45 @@ describe("seeding from the daemon", () => {
     box.report("cc", WT, { type: "osc133", mark: "D", exit: 1 }, NOW + 3);
     expect(box.unseen("cc")?.kind).toBe("failed");
   });
+
+  /** A newer daemon's state this build does not know is dropped, as on the live path. */
+  it("does not claim a pane for an unknown state", () => {
+    const box = createInbox();
+    box.seed([{ sessionId: "n", worktreeId: WT, state: "compacting" as never, held: false, since: NOW }], NOW);
+    for (const signal of command(1)) box.report("n", WT, signal, NOW + 1);
+    expect(box.unseen("n")?.kind).toBe("failed");
+  });
+
+  /** The busy answer first, then a seed that is not `ready`: quitting must not file a failure. */
+  it("does not file the agent's own exit after busy, then a working seed", () => {
+    const box = createInbox();
+    box.restoreRunning("cc", WT);
+    box.seed([{ sessionId: "cc", worktreeId: WT, state: "working", held: false, since: NOW }], NOW);
+    box.report("cc", WT, agent("done"), NOW + 1);
+    box.report("cc", WT, { type: "osc133", mark: "D", exit: 130 }, NOW + 2);
+    expect(box.unseen("cc")?.kind).not.toBe("failed");
+  });
+
+  /** `since` is whole seconds: a wait in the same second as the read is still news. */
+  it("files a wait that began in the same second as the read", () => {
+    const box = createInbox();
+    box.report("b", WT, agent("blocked"), NOW);
+    box.read("b");
+    const readAt = box.snapshot().sessions.b.readAt as number;
+    box.report("b", WT, agent("working"), readAt + 1);
+    box.seed(
+      [{ sessionId: "b", worktreeId: WT, state: "blocked", held: false, since: readAt - (readAt % 1000) }],
+      readAt + 2,
+    );
+    expect(box.unseen("b")?.kind).toBe("attention");
+  });
+
+  /** It quit while the socket was down, and `done` took it out of the overview. */
+  it("stops the spinner of an agent the overview no longer lists", () => {
+    const box = createInbox();
+    box.report("w", WT, agent("working"), NOW);
+    const mark = box.agentMark();
+    box.seed([], NOW + 1, mark);
+    expect(box.isRunning("w")).toBe(false);
+  });
 });

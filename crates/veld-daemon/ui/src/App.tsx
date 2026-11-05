@@ -11109,6 +11109,10 @@ function Rail(props: {
               // A row another window holds shows no state at all — only the away
               // icon — so it is unmistakably not this window's to read. The other
               // window's rail shows its state. A trashed row has none to show.
+              // **Every row-state element is gated on this**, and is wide-only unless
+              // it joins the collapsed row's single right-hand slot (the `:is()` list
+              // under `.wt-row.slim` in styles.css, and the choice below). The folded
+              // header's `ownRows` applies the same rule to what it summarises.
               const showsState = !trashed && !away;
               // Which face the run control shows. A loader for an action this
               // window fired outranks the alert, so a click is acknowledged
