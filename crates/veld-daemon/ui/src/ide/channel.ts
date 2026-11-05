@@ -31,6 +31,27 @@ import { dispatchRestartPane } from "../panes/restartRequests";
 import { dispatchRevealPane } from "../panes/revealRequests";
 import { inbox, type AgentState } from "../inbox/inbox";
 
+/** File the daemon's record of each live agent into the inbox — see `inbox.seed`. */
+async function seedAgents(): Promise<void> {
+  let agents: Awaited<ReturnType<typeof api.agentOverview>>["agents"];
+  try {
+    agents = (await api.agentOverview()).agents ?? [];
+  } catch {
+    // An older daemon without the endpoint, or a blip: the live relay still works.
+    return;
+  }
+  inbox.seed(
+    agents
+      .filter((a) => typeof a.session_id === "string" && typeof a.worktree_id === "number")
+      .map((a) => ({
+        sessionId: a.session_id,
+        worktreeId: a.worktree_id,
+        state: a.state as AgentState,
+        held: a.held === true,
+      })),
+  );
+}
+
 /** What kind of client this is, which decides whether it can be raised. */
 export type ClientKind = "electron" | "browser";
 
@@ -355,6 +376,10 @@ class Channel {
         // restart leaving two clients each believing they own a worktree.
         this.ready = true;
         const waiting = this.waiting.splice(0);
+        // Agent states are relayed, not queued: whatever an agent reported while this
+        // page was not connected is read back once per (re)connection. After the
+        // socket is up, so a live report racing the read only ever lands on top.
+        if (this.relayInboxEvents) void seedAgents();
         h.onReady(same);
         for (const resolve of waiting) resolve();
         return;

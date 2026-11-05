@@ -782,6 +782,28 @@ pub(crate) async fn live_sessions() -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// How many running shells each worktree has in this daemon, for the rail's
+/// live-terminal badge. Worktrees with none are absent.
+pub(crate) async fn live_terminal_counts() -> HashMap<i64, usize> {
+    let mut counts = HashMap::new();
+    for session in SESSIONS.lock().await.values() {
+        if session.exited().is_none() {
+            *counts.entry(session.worktree_id).or_insert(0) += 1;
+        }
+    }
+    counts
+}
+
+/// [`live_terminal_counts`] for one worktree.
+pub(crate) async fn live_terminals_in(worktree_id: i64) -> usize {
+    SESSIONS
+        .lock()
+        .await
+        .values()
+        .filter(|s| s.worktree_id == worktree_id && s.exited().is_none())
+        .count()
+}
+
 static SESSIONS: LazyLock<tokio::sync::Mutex<HashMap<String, Arc<Session>>>> =
     LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 

@@ -1,50 +1,26 @@
 import type { WorktreeGitSignals } from "../api";
-import { type GitRowState, gitDescription, gitTooltipLines, rowGitState } from "../gitstate/gitState";
+import { gitDescription, gitTooltipLines } from "../gitstate/gitState";
 import type { RowState, RowSummary } from "../inbox/inbox";
 
 /**
- * The one glyph a rail row shows, chosen from the two vocabularies that want it.
+ * What the badge on a rail row's marker says about the worktree's terminals.
  *
- * # Why they share a slot instead of sitting side by side
+ * The badge speaks for the terminals and only for them, which is what lets the
+ * row's right side speak for the checkout (git) and the run without the two
+ * competing for one slot. Activity wins over a merely running shell, because it
+ * is news: `summary.state` has already applied the inbox's own precedence
+ * (attention → failed → finished → opened → working), and this neither reorders
+ * nor reaches inside it.
  *
- * Not width — the row had room for both. **While an agent is running, the tree is
- * *expected* to be dirty**, so a pencil beside a spinner reports something the
- * spinner already implies, and the reader has to look at two marks to learn one
- * thing. The same holds for the rest of the activity vocabulary: those states are
- * all news that arrived and has not been read, and news outranks a standing
- * property of the checkout.
- *
- * So activity wins whenever there is any, and git state fills the slot the rest of
- * the time — which is most of the time, since activity is transient and `working`
- * is off by default.
- *
- * # The glyph collapses; the tooltip does not
- *
- * Hovering a spinning row still says it has three unpushed commits, because that
- * is the fact you would otherwise have to go and ask git for. Folding both halves
- * would have produced a quieter row that knows less, which was not the point — see
- * [`rowTooltip`] and [`rowDescription`].
+ * `idle` is a shell that is alive with nothing to report — the grey dot.
+ * Activity can outlive its shell (a command that finished in a pane since
+ * closed is still unread), so it does not require a live terminal.
  */
-export type RowGlyph =
-  | { kind: "activity"; state: RowState }
-  | { kind: "git"; state: GitRowState };
+export type RowBadge = { kind: "activity"; state: RowState } | { kind: "idle" };
 
-/**
- * Which glyph the row renders, or `null` for none.
- *
- * `summary.state` has already applied the inbox's own precedence (attention →
- * failed → finished → working). This deliberately neither reorders nor reaches
- * inside it: that ordering is shipped and was tuned against this row. All this
- * decides is which *vocabulary* speaks.
- */
-export function rowGlyph(
-  summary: RowSummary,
-  git: WorktreeGitSignals | undefined,
-  detached = false,
-): RowGlyph | null {
+export function rowBadge(summary: RowSummary, liveTerminals: number): RowBadge | null {
   if (summary.state !== null) return { kind: "activity", state: summary.state };
-  const state = rowGitState(git, detached);
-  return state === null ? null : { kind: "git", state };
+  return liveTerminals > 0 ? { kind: "idle" } : null;
 }
 
 /**
@@ -74,13 +50,17 @@ export function rowTooltip(
  *
  * Joined with `. ` because a screen reader reads the attribute as one string and
  * two clauses otherwise run together.
+ *
+ * `terminals` is the live-terminal badge's sentence, last because the badge is
+ * a standing property like git state, and less likely to need acting on.
  */
 export function rowDescription(
   activityDescription: string | undefined,
   git: WorktreeGitSignals | undefined,
   detached = false,
+  terminals?: string,
 ): string | undefined {
-  const parts = [activityDescription, gitDescription(git, detached)].filter(
+  const parts = [activityDescription, gitDescription(git, detached), terminals].filter(
     (part): part is string => part !== undefined,
   );
   return parts.length === 0 ? undefined : parts.join(". ");

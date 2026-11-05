@@ -2873,6 +2873,13 @@ struct WorktreeView {
     /// were first set. Omitted when there are none, which is almost every row.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     links: Vec<veld_core::db::WorktreeLink>,
+    /// How many terminals have a shell still running here, which the rail shows
+    /// as a badge on the row's marker. Omitted at zero.
+    ///
+    /// Counted from this daemon's session registry, so a shell another daemon
+    /// holds (`release_session`) is not included.
+    #[serde(skip_serializing_if = "is_zero")]
+    live_terminals: usize,
     /// The interpreted part of the checkout's `ide` config section.
     ///
     /// **Always present, with arrays that may be empty.** Omitting it when empty
@@ -3224,6 +3231,15 @@ fn worktree_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
     view
 }
 
+/// [`worktree_view`] for a handler whose answer replaces the rail row, which
+/// would otherwise drop the live-terminal badge until the next poll.
+async fn rail_row_view(db: &Db, wt: WorktreeRecord) -> WorktreeView {
+    let id = wt.id;
+    let mut view = worktree_view(db, wt);
+    view.live_terminals = super::pty::live_terminals_in(id).await;
+    view
+}
+
 /// What the project contributes to a worktree's top bar — its badges, buttons
 /// and menus, as `{id, label, type}`, and for a status badge what it showed when
 /// it last ran (`shown: {text, href}`, or `null` when it has not run). `veld ide
@@ -3468,8 +3484,13 @@ fn worktree_view_with(
         machine_vars,
         git,
         links: Vec::new(),
+        live_terminals: 0,
         ide,
     }
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Pick `RepoView.news` out of every checkout's own `ide.news`, per
@@ -3599,7 +3620,8 @@ async fn repo_view(
     git: Option<RepoGitStatus>,
 ) -> Result<RepoView, ApiError> {
     let db = db.clone();
-    crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git)).await
+    let live = super::pty::live_terminal_counts().await;
+    crate::offload::blocking(move || repo_view_blocking(&db, repo, available, git, live)).await
 }
 
 fn repo_view_blocking(
@@ -3607,6 +3629,7 @@ fn repo_view_blocking(
     repo: RepoRecord,
     available: bool,
     git: Option<RepoGitStatus>,
+    live_terminals: std::collections::HashMap<i64, usize>,
 ) -> Result<RepoView, ApiError> {
     let mut declared = DeclaredConfigs::new();
     // One read for the whole repo rather than one per row: this runs on every
@@ -3628,6 +3651,7 @@ fn repo_view_blocking(
         .unwrap_or_default();
     for view in &mut worktrees {
         view.links = links.remove(&view.worktree.id).unwrap_or_default();
+        view.live_terminals = live_terminals.get(&view.worktree.id).copied().unwrap_or(0);
     }
     let news = select_news(&mut worktrees, db.news_source());
     let lanes = db.list_lanes(FsPath::new(&repo.root)).map_err(db_err)?;
@@ -6463,7 +6487,7 @@ async fn patch_worktree(
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
-    Ok(Json(worktree_view(&db, wt)))
+    Ok(Json(rail_row_view(&db, wt).await))
 }
 
 #[derive(Deserialize)]
@@ -6666,7 +6690,7 @@ async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, Api
         .get_worktree(id)
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree already removed"))?;
-    Ok(Json(worktree_view(&db, wt)))
+    Ok(Json(rail_row_view(&db, wt).await))
 }
 
 /// Move a worktree the discovery poll found on its own — one made outside Veld —
@@ -7108,6 +7132,7 @@ mod tests {
             machine_vars: None,
             git: None,
             links: Vec::new(),
+            live_terminals: 0,
             ide: IdeView {
                 news,
                 ..Default::default()

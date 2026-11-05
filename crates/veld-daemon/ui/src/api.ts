@@ -11,7 +11,9 @@ export type RunStatus =
   | "recovering"
   | "stopping"
   | "stopped"
-  | "failed";
+  | "failed"
+  /** The run's processes died without anyone asking them to. Never live. */
+  | "crashed";
 
 export interface ActionInfo {
   name: string;
@@ -434,6 +436,11 @@ export interface Worktree {
   branch: string;
   /** Links agents pinned here. Absent when there are none. */
   links?: WorktreeLink[];
+  /**
+   * How many terminals here have a shell still running. Absent at zero. The
+   * rail badges the marker of a row that has any.
+   */
+  live_terminals?: number;
   /**
    * The identifier: `[A-Za-z0-9._-]`, unique among the repo's checkouts, and the
    * default run name — which is why it is bounded, since the run name reaches a
@@ -1779,6 +1786,11 @@ export interface RestoreDbResult {
 
 export const api = {
   environments: () => request<EnvironmentList>("/api/environments"),
+  /** Each live terminal's agent, at its latest reported state. */
+  agentOverview: () =>
+    request<{
+      agents: { session_id: string; worktree_id: number; state: string; held?: boolean }[];
+    }>("/api/engine/overview"),
   /** Pure read (no reconciliation) — kept for consumers that must not
    *  trigger git; the app itself polls refreshRepos. */
   repos: () => request<RepoList>("/api/repos"),

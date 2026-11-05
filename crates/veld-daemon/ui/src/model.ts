@@ -300,7 +300,19 @@ export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
  */
 export function runStatus(run: RunInfo | null): WorktreeStatus {
   if (!run) return "stopped";
-  if (run.status === "running") return "running";
+  if (run.status === "running") {
+    // The daemon has no run-level "recovering": the health monitor marks the
+    // *node* — counting `consecutive_failures` while its liveness probe fails,
+    // `unhealthy` once that reaches the threshold and restarts remain, `failed`
+    // once they are exhausted (or `max_recoveries` is 0) — and the run stays
+    // `running` throughout. Read from the nodes, or a dead service in a running
+    // run renders as a healthy ■.
+    if (run.nodes.some((n) => n.status === "failed")) return "failed";
+    if (run.nodes.some((n) => n.status === "unhealthy" || (n.consecutive_failures ?? 0) > 0)) {
+      return "recovering";
+    }
+    return "running";
+  }
   if (run.status === "failed") return "failed";
   if (run.status === "recovering") return "recovering";
   return "partial";
@@ -420,7 +432,27 @@ export function attentionStatus(runs: RunInfo[]): WorktreeStatus | null {
   const status = worktreeStatus(runs);
   if (needsAttention(status)) return status;
   const worst = worstStatus(liveRuns(runs));
-  return needsAttention(worst) ? worst : null;
+  if (needsAttention(worst)) return worst;
+  return lastRunFailed(runs) ? "failed" : null;
+}
+
+/**
+ * Whether the most recent thing started here ended in failure: the newest run
+ * across this directory's environments is over, and `failed` (it never came up)
+ * or `crashed` (it died unasked).
+ *
+ * Neither is live, so neither reaches [`activeRun`], and a run that failed to
+ * start used to leave its row looking exactly like one never started. Scoped to
+ * the newest run rather than to any environment's latest so it clears the moment
+ * anything is started here again — an old crash under another name, from last
+ * week, is not what the row should be saying.
+ */
+export function lastRunFailed(runs: RunInfo[]): boolean {
+  const newest = runs.reduce<RunInfo | null>(
+    (best, r) => (best === null || r.created_at > best.created_at ? r : best),
+    null,
+  );
+  return newest !== null && !newest.live && (newest.status === "failed" || newest.status === "crashed");
 }
 
 /**

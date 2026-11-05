@@ -65,10 +65,11 @@ import { WhatsNewDialog } from "./promotions/WhatsNew";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { ShortcutsDialog } from "./shortcuts/ShortcutsDialog";
 import { nextIndex, shortcutHint } from "./shortcuts/registry";
-import { InboxIcon, inboxDescription } from "./inbox/InboxIcon";
+import { InboxIcon, activityLines, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
-import { RowStateIcon } from "./rowstate/RowStateIcon";
-import { rowDescription } from "./rowstate/rowState";
+import { GitStateIcon, TerminalBadge } from "./rowstate/RowStateIcon";
+import { rowBadge, rowDescription, rowTooltip } from "./rowstate/rowState";
+import { RailGlyphTooltip } from "./shared/RailGlyphTooltip";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
 import { TopBarControls } from "./components/TopBarControls";
@@ -9571,7 +9572,7 @@ function actionColor(label: PendingAction): string {
 /**
  * Rail width bounds, in px.
  *
- * The minimum is well clear of the collapsed rail's ~66px on purpose: the
+ * The minimum is well clear of the collapsed rail's ~54px on purpose: the
  * collapsed rail is a **mode** (it hides the alias, the branch and the inline run
  * control), not a narrow width, so dragging must never slide into it. Crossing
  * that line by drag would silently drop three columns without saying so, and the
@@ -10842,7 +10843,11 @@ function Rail(props: {
                     margin the count used to hold. Zero is rendered too: an empty
                     folded section still has to say that it is empty. */}
                 {folded && (
-                  <span className="lane-count">({group.worktrees.length})</span>
+                  <span className="lane-count">
+                    {/* Bare in the collapsed rail, where the parentheses cost the
+                        width the header's glyphs need. */}
+                    {props.wide ? `(${group.worktrees.length})` : group.worktrees.length}
+                  </span>
                 )}
                 {/* What the hidden rows would have said, in the vocabulary they
                     would have said it in — the same filled triangle and the same
@@ -11063,6 +11068,11 @@ function Rail(props: {
                     ? ` · ${live.status}`
                     : "";
               const trashed = w.trashed_at !== "";
+              const liveTerminals = trashed ? 0 : (w.live_terminals ?? 0);
+              const terminalsNote =
+                liveTerminals === 0
+                  ? undefined
+                  : `${liveTerminals} terminal${liveTerminals === 1 ? "" : "s"} running`;
               // Terminal removal — distinct from recoverable trash: rendered in the
               // Deleting lane, not revertible, actively coming off the disk.
               const deletingRow = group.key === DELETING_LANE;
@@ -11070,7 +11080,7 @@ function Rail(props: {
               // nothing that acts on it as if it were: no run control, no menu
               // of edits, and no selecting it into the workspace.
               const discoveredRow = group.key === DISCOVERED_LANE;
-              // Inline controls are wide-only — a ~66px collapsed row has no space
+              // Inline controls are wide-only — a ~54px collapsed row has no space
               // for them. Right-click reaches the same actions in either mode.
               // A worktree on its way out gets none: it cannot be started, and a
               // run control on it would be a button that only ever fails.
@@ -11092,6 +11102,42 @@ function Rail(props: {
               // icon: the summary is needed twice (the glyph and the row's
               // `aria-description`), and a rail holds every worktree of a monorepo.
               const inboxSummary = inbox.rowState(w.id, props.showWorking);
+              // A row another window holds shows no state at all — only the away
+              // icon — so it is unmistakably not this window's to read. The other
+              // window's rail shows its state. A trashed row has none to show.
+              const showsState = !trashed && !away;
+              // Which face the run control shows. A loader for an action this
+              // window fired outranks the alert, so a click is acknowledged
+              // where it was made.
+              const runSlot: "busy" | "alert" | "stop" | null = !showsState
+                ? null
+                : showRunControl && spinner !== null
+                  ? "busy"
+                  : alertStatus !== null && !discoveredRow
+                    ? "alert"
+                    : showRunControl
+                      ? "stop"
+                      : null;
+              const runCount =
+                props.wide && liveAll.length > 1 ? (
+                  <span className={`wt-run-n${needsAttention(worst) ? " alert" : ""}`} aria-hidden>
+                    {liveAll.length}
+                  </span>
+                ) : null;
+              const runCountNote =
+                liveAll.length > 1
+                  ? ` — ${liveAll.length} runs live here: ${liveAll
+                      .map((r) => `${r.name} (${r.status})`)
+                      .join(", ")}`
+                  : "";
+              const stateTooltip = rowTooltip(
+                worktreeLabel(w),
+                terminalsNote
+                  ? [...activityLines(inboxSummary), terminalsNote]
+                  : activityLines(inboxSummary),
+                w.git,
+                isDetached(w),
+              );
               /* Whether this row can be picked up. Named rather than written
                  inline on `draggable`, because the grabbing cursor is drawn
                  from the same answer and the two must not disagree: a row that
@@ -11141,17 +11187,19 @@ function Rail(props: {
                      inside it would be announced ahead of the alias it describes —
                      the same reason the away icon is `aria-hidden`. */
                   aria-description={rowDescription(
-                    inboxDescription(inboxSummary),
-                    // **Gated on `trashed`, exactly as the glyph is.** The daemon
+                    // Gated on `showsState`, as the badge is: a row another window
+                    // holds shows no state, so it announces none either.
+                    showsState ? inboxDescription(inboxSummary) : undefined,
+                    // **Gated exactly as the glyph is.** The daemon
                     // sends `git` for a trashed row too — `refresh_upstreams` walks
                     // every row — so passing it here announced "3 commits not
                     // pushed" to a screen reader about a checkout whose glyph is
                     // deliberately hidden, i.e. a state no sighted reader could see
                     // and nobody can act on from a trash row.
-                    trashed ? undefined : w.git,
-                    // Same gate, same reason: a trashed row's glyph is hidden, so
-                    // its state is not announced either.
-                    !trashed && isDetached(w),
+                    showsState ? w.git : undefined,
+                    // Same gate, same reason: a hidden glyph is not announced.
+                    showsState && isDetached(w),
+                    showsState ? terminalsNote : undefined,
                   )}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
@@ -11166,8 +11214,8 @@ function Rail(props: {
                           : w.trash_error
                           ? `${worktreeLabel(w)} — could not be deleted: ${w.trash_error}`
                           : away
-                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote} (${awayNote(holder)})`
-                            : `${worktreeLabel(w)} — ${w.branch}${stateNote}`
+                            ? `${worktreeLabel(w)} — ${w.branch}${stateNote}${terminalsNote ? ` · ${terminalsNote}` : ""} (${awayNote(holder)})`
+                            : `${worktreeLabel(w)} — ${w.branch}${stateNote}${terminalsNote ? ` · ${terminalsNote}` : ""}`
                   }
                   /* What `rowTargetAt` counts as a slot. Valueless: the index is
                      the element's position among its section's rows, which the
@@ -11202,10 +11250,10 @@ function Rail(props: {
                   }}
                   onContextMenu={(e) => props.onMenu(e, w)}
                 >
-                  {/* Leads the row, and rendered in the collapsed rail too — which
-                      is exactly where a greyed row alone would be too subtle to
-                      read. It used to sit beside the run-status dot; with that dot
-                      gone this is the row's first glyph. */}
+                  {/* Leads the wide row, and takes the collapsed row's one right-hand
+                      slot — where a greyed row alone would be too subtle to read.
+                      A row another window holds shows nothing else: no badge, run or
+                      git state (see `showsState`). */}
                   {away && (
                     <IconExternalLink
                       size={11}
@@ -11219,7 +11267,24 @@ function Rail(props: {
                       aria-hidden
                     />
                   )}
-                  <WorktreeMark settings={props.settings} worktree={w} />
+                  {/* The wrapper carries the terminal badge: it has to overhang the
+                      marker's corner, and the pixel face clips its own overflow.
+                      The tooltip only when there is a badge to explain — on a bare
+                      marker it would repeat the row's own title. */}
+                  {(() => {
+                    const badge = showsState ? rowBadge(inboxSummary, liveTerminals) : null;
+                    const mark = (
+                      <span className="wt-mark">
+                        <WorktreeMark settings={props.settings} worktree={w} />
+                        <TerminalBadge badge={badge} />
+                      </span>
+                    );
+                    return badge === null ? (
+                      mark
+                    ) : (
+                      <RailGlyphTooltip label={stateTooltip}>{mark}</RailGlyphTooltip>
+                    );
+                  })()}
                   {/* The name the user typed, verbatim — spaces, capitals and all.
                       The slug they never chose is still one line down, because the
                       branch is derived from the same input and usually *is* it. */}
@@ -11248,71 +11313,6 @@ function Rail(props: {
                   {props.wide && w.trash_error && (
                     <span className="wt-branch">{w.trash_error}</span>
                   )}
-                  {/* Beside the run control, and not on the marker. The marker is
-                      the row's identity — #204 made its *colour* the identifier —
-                      so tinting it for a failure overwrites the one channel that
-                      answers "which worktree is this", which is the collision this
-                      change exists to remove. An icon of its own is also what makes
-                      the state reachable rather than merely reported: it opens the
-                      nodes view. Rendered in the collapsed rail too, where the run
-                      control cannot go, so the signal that asks to be acted on
-                      survives the mode.
-
-                      After the alias, not before it: the row is a `role=button`
-                      whose accessible name comes from its content, and a nested
-                      control's `aria-label` is folded into that name — placed
-                      first, it would announce "Node health for chk" ahead of the
-                      alias. Same reason the away icon beside the alias is
-                      `aria-hidden`. */}
-                  {/* More than one live run in one directory: the count is
-                      rendered, not implied. The rail's dot and control can only
-                      speak for one of them, so a row that showed nothing here left
-                      the second environment with no representation anywhere in the
-                      rail — which is how an agent-started run stayed invisible
-                      until it broke something. */}
-                  {props.wide && !trashed && liveAll.length > 1 && (
-                    <span
-                      className={`run-count${needsAttention(worst) ? " alert" : ""}`}
-                      title={`${liveAll.length} runs live here: ${liveAll
-                        .map((r) => `${r.name} (${r.status})`)
-                        .join(", ")}`}
-                    >
-                      {liveAll.length}
-                    </span>
-                  )}
-                  {!trashed && alertStatus !== null && (
-                    <button
-                      type="button"
-                      className={`wt-alert ${alertStatus}`}
-                      title={
-                        alertStatus === "recovering"
-                          ? `${worktreeLabel(w)} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
-                          : `${worktreeLabel(w)} — the run failed. Open node health.`
-                      }
-                      aria-label={`Node health for ${worktreeLabel(w)}`}
-                      onClick={(e) => {
-                        // The row selects on click; without this the affordance
-                        // would fire the row's plain selection as well.
-                        e.stopPropagation();
-                        void props.onDiagnose(w);
-                      }}
-                    >
-                      <IconAlertTriangleFilled size={11} />
-                    </button>
-                  )}
-                  {/* **One glyph for both vocabularies**, not two side by side — see
-                      `rowstate/rowState.ts` for why. Activity wins whenever there is
-                      any, because while an agent is running the tree is *expected* to
-                      be dirty and a pencil beside a spinner says nothing the spinner
-                      did not. The tooltip still carries both halves.
-
-                      AFTER the node-health alert: that one is about a *run* failing
-                      its probe and is clickable, this one is about you and the
-                      checkout, and is not. Rendered in the slim rail too, which the
-                      run control is not: it is the indicator whose whole purpose is
-                      to be seen while you are looking somewhere else. Trashed rows
-                      are excluded — their panes are gone, and a state nobody can act
-                      on is noise beside restore and delete. */}
                   {/* An agent waiting to be started here — `veld ide worktree new`
                       left it, and opening the row is what starts it. On the row
                       rather than the section, because a hand-off filed straight
@@ -11322,21 +11322,53 @@ function Rail(props: {
                       the row stays only until a window attaches. Wide-only: the
                       collapsed row's grid has no slot for it, and its hover text
                       carries the same note there. */}
-                  {props.wide && !trashed && w.handoff && !w.handoff.started && (
+                  {props.wide && showsState && w.handoff && !w.handoff.started && (
                     <span className="wt-handoff" aria-hidden title={handoffNote(w, worktreeReviewHandoffs(props.settings ?? {}))}>
                       <IconHourglassEmpty size={12} />
                     </span>
                   )}
-                  {!trashed && (
-                    <RowStateIcon
-                      summary={inboxSummary}
-                      git={w.git}
-                      label={worktreeLabel(w)}
-                      detached={isDetached(w)}
-                    />
+                  {/* The checkout's own state. Collapsed, the row has one slot on
+                      the right and a run needing attention takes it — the git
+                      state is still in this glyph's tooltip and the row's. */}
+                  {showsState && (props.wide || runSlot !== "alert") && (
+                    <GitStateIcon git={w.git} detached={isDetached(w)} tooltip={stateTooltip} />
                   )}
-                  {showRunControl && (
-                    <Tooltip label={pending ? `${pending}…` : `Stop ${worktreeLabel(w)}`}>
+                  {/* **One control for the run**, carrying its health: the stop
+                      square while it is healthy, the filled triangle when a run
+                      failed or a node is being restarted (opening node health, as
+                      the separate alert used to), the loader while an action this
+                      window fired is landing. Stop stays in the row's menu and in
+                      node health, so a failing run is never unstoppable. With more
+                      than one live run the count sits on the control's corner, amber
+                      when one of them needs attention.
+
+                      Collapsed, only the triangle renders — the rail has no room for
+                      a stop button there, as before. */}
+                  {runSlot === "alert" && alertStatus !== null && (
+                    <button
+                      type="button"
+                      className={`wt-alert ${alertStatus}`}
+                      title={`${
+                        alertStatus === "recovering"
+                          ? `${worktreeLabel(w)} — veld is restarting a node that keeps failing its liveness probe. Open node health.`
+                          : `${worktreeLabel(w)} — the run failed. Open node health.`
+                      }${runCountNote}`}
+                      aria-label={`Node health for ${worktreeLabel(w)}`}
+                      onClick={(e) => {
+                        // The row selects on click; without this the affordance
+                        // would fire the row's plain selection as well.
+                        e.stopPropagation();
+                        void props.onDiagnose(w);
+                      }}
+                    >
+                      <IconAlertTriangleFilled size={11} />
+                      {props.wide && runCount}
+                    </button>
+                  )}
+                  {(runSlot === "stop" || runSlot === "busy") && (
+                    <Tooltip
+                      label={pending ? `${pending}…` : `Stop ${worktreeLabel(w)}${runCountNote}`}
+                    >
                       <button
                         type="button"
                         className="wt-run"
@@ -11357,13 +11389,12 @@ function Rail(props: {
                       >
                         {spinner ? (
                           // The spinner carries the action's colour, so a row that
-                          // is stopping reads as stopping and not as starting. That
-                          // held only for locally-fired actions before `spinner`
-                          // took the observed transition into account too.
+                          // is stopping reads as stopping and not as starting.
                           <Loader size={10} color={actionColor(spinner)} />
                         ) : (
                           <IconPlayerStopFilled size={10} />
                         )}
+                        {runCount}
                       </button>
                     </Tooltip>
                   )}

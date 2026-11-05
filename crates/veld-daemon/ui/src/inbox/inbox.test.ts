@@ -1579,3 +1579,64 @@ describe("a held 'waiting for you'", () => {
     expect(box.nextUnread(ALL)?.sessionId).toBe("t1");
   });
 });
+
+describe("seeding from the daemon", () => {
+  /** A window opened after the agent reported misses the relayed event. */
+  it("files the states that are true now, and raises no banner", () => {
+    const box = createInbox();
+    const events: string[] = [];
+    box.onEvent((e) => events.push(e.unseen.detail));
+    box.seed(
+      [
+        { sessionId: "w", worktreeId: WT, state: "working", held: false },
+        { sessionId: "b", worktreeId: OTHER_WT, state: "blocked", held: false },
+      ],
+      NOW,
+    );
+    expect(box.isRunning("w")).toBe(true);
+    expect(box.unseen("b")?.kind).toBe("attention");
+    expect(events).toEqual([]);
+  });
+
+  /** The daemon knows the agent is idle, not whether its last turn was seen. */
+  it("does not make up a finished event for an idle agent", () => {
+    const box = createInbox();
+    box.seed([{ sessionId: "i", worktreeId: WT, state: "idle", held: false }], NOW);
+    expect(box.unseen("i")).toBeNull();
+    expect(box.isRunning("i")).toBe(false);
+  });
+
+  /** What this window already knows — restored from its own storage — stands. */
+  it("leaves a session this window has heard from alone", () => {
+    const box = createInbox();
+    box.report("b", WT, agent("blocked"), NOW);
+    box.read("b");
+    box.seed([{ sessionId: "b", worktreeId: WT, state: "blocked", held: false }], NOW + 1);
+    expect(box.unseen("b")).toBeNull();
+  });
+
+  /** Restored from storage after a reload: the record is there, the spinner is not. */
+  it("restores a known session's working spinner", () => {
+    const box = createInbox();
+    box.report("w", WT, agent("ready"), NOW);
+    box.seed([{ sessionId: "w", worktreeId: WT, state: "working", held: false }], NOW + 1);
+    expect(box.isRunning("w")).toBe(true);
+  });
+
+  /** A resumed shell mid-command: its `C` is in the replay, which is not filed. */
+  it("restores a resumed shell's running command, and lets its D report", () => {
+    const box = createInbox();
+    box.restoreRunning("sh", WT);
+    expect(box.isRunning("sh")).toBe(true);
+    box.report("sh", WT, { type: "osc133", mark: "D", exit: 1 }, NOW);
+    expect(box.isRunning("sh")).toBe(false);
+    expect(box.unseen("sh")?.kind).toBe("failed");
+  });
+
+  it("leaves a pane an agent speaks for alone", () => {
+    const box = createInbox();
+    box.report("cc", WT, agent("ready"), NOW);
+    box.restoreRunning("cc", WT);
+    expect(box.isRunning("cc")).toBe(false);
+  });
+});

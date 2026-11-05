@@ -726,6 +726,9 @@ body[data-fullscreen="true"] .topbar.electron {
      changing either end cannot leave the grid overflowing or the marker off
      centre. */
   --rail-pad-x: 8px;
+  /* Only the selection bar lives left of the marker; everything that reports
+     on a row is on its right. */
+  --slim-lead: 3px;
   --slim-side: 15px;
   --slim-mark: 12px;
   --slim-gap: 4px;
@@ -749,17 +752,17 @@ body[data-fullscreen="true"] .topbar.electron {
 /* Live resize: no transition.
  *
  * `.rail`'s `transition: width 0.15s` is for the collapse/expand toggle, where
- * 236px → 66px should animate. During a drag it re-animates on every pointer move,
+ * 236px → 54px should animate. During a drag it re-animates on every pointer move,
  * so the edge chases the cursor 150ms behind and the drag feels like it is lagging.
  * The class is only present while the pointer is down. */
 .rail.resizing {
   transition: none;
 }
-/* ~66px, derived: the collapsed row's marker is its only name, and it
+/* ~54px, derived: the collapsed row's marker is its only name, and it
    needs a gap to its neighbours — see `.wt-row.slim` for how the width is spent. */
 .rail:not(.wide) {
   width: calc(
-    2 * var(--rail-pad-x) + 2 * var(--slim-side) + var(--slim-mark) + 2 * var(--slim-gap)
+    2 * var(--rail-pad-x) + var(--slim-lead) + var(--slim-side) + var(--slim-mark) + 2 * var(--slim-gap)
   );
 }
 /* No scrollbar in the collapsed rail. Chromium's classic scrollbar (9px, see the
@@ -957,7 +960,7 @@ button.lane-empty {
  *
  * Shorter than a row on purpose (20px against `.wt-row`'s 28px): a count of
  * things you cannot see should not weigh as much as a thing you can. It carries
- * its own `cursor` because it renders in the collapsed rail too, at ~66px, where
+ * its own `cursor` because it renders in the collapsed rail too, at ~54px, where
  * "+23" is the entire visible affordance and nothing around it says it is
  * clickable. */
 .trash-more {
@@ -1526,11 +1529,10 @@ body.pointer-dragging * {
    neighbours it happened to have that moment. Here the marker's column is fixed
    and centred whatever else is lit:
 
-       [away][marker][alert]
-       [    ][      ][state]
+       [bar][marker+badge][one glyph]
 
-   A lone glyph on the right takes both rows (`:has` below), so a row with only a
-   pencil does not look top-heavy.
+   The badge rides the marker, and the right column holds exactly one glyph (see
+   the rule below), so nothing here can crowd.
 
    **No padding, and no box for the selection.** A collapsed row fills its slot
    edge to edge, and a selected one paints no background or outline: at this width
@@ -1539,15 +1541,14 @@ body.pointer-dragging * {
    marker. Hover still tints the whole row, as it does in the wide rail.
 
    The budget, from the `--slim-*` variables on `.rail` (which also compute the
-   rail's width): 56px of row after `.rail-list`'s 8px a side, all of it grid —
-   15 + 4 + 12 + 4 + 15. The side columns are wider than any glyph
-   so the left one can hold the state bar (end) and `.wt-away` (start) at once
-   without overlap, and every side item hugs the marker's edge, so bar → marker
+   rail's width): 38px of row after `.rail-list`'s 8px a side, all of it grid —
+   3 + 4 + 12 + 4 + 15: the bar, the marker, the one glyph. The right column is wider than any glyph, and every
+   side item hugs the marker's edge, so bar → marker
    and marker → glyph are both exactly the 4px gap. Two 12px rows sit inside the
    wide row's own 28px `min-height`, so rows do not move when the rail expands. */
 .wt-row.slim {
   display: grid;
-  grid-template-columns: var(--slim-side) var(--slim-mark) var(--slim-side);
+  grid-template-columns: var(--slim-lead) var(--slim-mark) var(--slim-side);
   grid-template-rows: 12px 12px;
   column-gap: var(--slim-gap);
   row-gap: 0;
@@ -1569,11 +1570,7 @@ body.pointer-dragging * {
    edge it sat 20px from the marker it belongs to — further than any other glyph
    on the row — so it read as the rail's decoration rather than the row's state.
    As a grid item in the left column, end-aligned, it is exactly one column gap
-   from the marker: the same 4px the state glyphs sit at on the other side.
-
-   It shares that column with `.wt-away`, which sits at the column's other end:
-   the bar is not only the selection — `.deleting` and `.failed-remove` paint it
-   too, on rows another window can be holding — so the two can be lit together. */
+   from the marker: the same 4px the state glyphs sit at on the other side. */
 .wt-row.slim::before {
   position: static;
   grid-column: 1;
@@ -1583,27 +1580,17 @@ body.pointer-dragging * {
   height: 16px;
   border-radius: 2px;
 }
-.wt-row.slim > .wt-away {
-  grid-column: 1;
+/* One slot on the right, and only one thing ever in it: the away icon on a
+   row another window holds (which then shows no state at all), else a run
+   needing attention, else the git glyph. Never two stacked — a 12px column with
+   two glyphs and a badged marker beside it was the crowding this replaced. */
+.wt-row.slim > :is(.wt-away, .wt-alert, .wt-git) {
+  grid-column: 3;
   grid-row: 1 / span 2;
   justify-self: start;
 }
-.wt-row.slim > :is(.wt-emoji, .wt-dot, .wt-pixels) {
+.wt-row.slim > .wt-mark {
   grid-column: 2;
-  grid-row: 1 / span 2;
-}
-.wt-row.slim > .wt-alert {
-  grid-column: 3;
-  grid-row: 1;
-  justify-self: start;
-}
-.wt-row.slim > :is(.wt-inbox, .wt-git) {
-  grid-column: 3;
-  grid-row: 2;
-  justify-self: start;
-}
-.wt-row.slim:not(:has(> .wt-alert)) > :is(.wt-inbox, .wt-git),
-.wt-row.slim:not(:has(> :is(.wt-inbox, .wt-git))) > .wt-alert {
   grid-row: 1 / span 2;
 }
 /* The marker keeps the wide rail's size — the collapsed rail is the same list in
@@ -1615,10 +1602,12 @@ body.pointer-dragging * {
    fold — only the name, the ＋ and the ⋮ stay behind. */
 .rail:not(.wide) .lane-head {
   justify-content: center;
-  gap: 3px;
+  gap: 2px 3px;
   padding: 2px 0 3px;
-  /* ~50px of content box: a count, a triangle and an activity glyph have to fit
-     or be clipped, never spill past the rail edge. */
+  /* ~38px of content box. A folded header can hold the disclosure, a count, a
+     triangle and an activity glyph — ~50px — so the glyphs wrap onto a second
+     line rather than being clipped at the rail's edge. */
+  flex-wrap: wrap;
   min-width: 0;
   overflow: hidden;
 }
@@ -1732,11 +1721,9 @@ body.pointer-dragging * {
 
 /* Shown in another window. Dimmed, not disabled: the row still does something
    — it takes you to the window that has it — and a disabled-looking row would
-   say the opposite. Only the identity columns dim; `.wt-alert` keeps its full
-   colour, because whether a run has failed is true wherever it is being shown
-   from, and it is the one thing on the row you would want to chase into the other
-   window. (The run-status dot used to hold that exemption, by being absent from
-   this list; the exemption outlived it.) */
+   say the opposite. The row shows no state at all — no badge, run or git glyph —
+   so it is unmistakably not this window's to read; the window that holds it shows
+   that state. */
 .wt-row.away .wt-alias,
 .wt-row.away .wt-branch,
 .wt-row.away .wt-emoji {
@@ -1890,6 +1877,78 @@ body.pointer-dragging * {
 .wt-row.away .wt-dot,
 .wt-row.away .wt-pixels {
   opacity: 0.45;
+}
+
+/* The row's marker, and the anchor for the live-terminal badge on its corner. */
+.wt-mark {
+  flex: none;
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+/* The terminal badge on the marker's corner: what the worktree's terminals are
+   doing (`rowstate/RowStateIcon.tsx`). On the marker rather than beside it: a
+   second circle next to a dot-face marker reads as one group with it, which is
+   why the rail's old run-status dot was removed. Its ring is cut in the row's own
+   background, so it follows hover and selection. */
+.wt-badge {
+  --ring: var(--panel2);
+  position: absolute;
+  pointer-events: none;
+}
+.wt-row:hover .wt-badge {
+  --ring: var(--panel);
+}
+.wt-row.active .wt-badge {
+  --ring: var(--elev);
+}
+.wt-row.slim.active .wt-badge {
+  --ring: var(--panel2);
+}
+.wt-row.slim.active:hover .wt-badge {
+  --ring: var(--panel);
+}
+/* A shell that is alive with nothing to report. Neutral rather than the accent,
+   which already means "selected" in the rail. */
+.wt-badge.idle {
+  right: -3px;
+  bottom: -3px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 80%, transparent);
+  box-shadow: 0 0 0 1.5px var(--ring);
+}
+/* An activity glyph, on a disc of the row's background so it stays legible over
+   any marker face. Colours and motion are the activity vocabulary's own — the
+   same as `.wt-inbox` on a folded section header. */
+.wt-badge.act {
+  right: -6.5px;
+  bottom: -6.5px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--ring);
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+.wt-badge.attention {
+  color: var(--warn);
+  animation: pulse 1.6s infinite;
+}
+.wt-badge.failed {
+  color: var(--danger);
+  animation: pulse 1.6s infinite;
+}
+.wt-badge.opened {
+  color: var(--info);
+}
+.wt-badge.finished {
+  color: var(--accent);
+}
+.wt-badge.working svg {
+  animation: spin 1.4s linear infinite;
 }
 
 /* The pixel face: a 3×3 pattern in the worktree's colour (`PixelMark`). 12px in
@@ -2084,6 +2143,39 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
 .wt-run:hover {
   background: var(--elev);
 }
+/* How many runs are live here, when more than one: on the run control's corner
+   rather than a mark of its own, because it is a fact about the run. Amber when
+   one of them needs attention. */
+.wt-run,
+.wt-alert {
+  position: relative;
+}
+.wt-run-n {
+  position: absolute;
+  top: -4px;
+  right: -5px;
+  min-width: 10px;
+  height: 10px;
+  padding: 0 2px;
+  border-radius: 5px;
+  background: var(--panel2);
+  box-shadow: 0 0 0 1px var(--border2);
+  color: var(--muted);
+  font: 700 8px/10px system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
+.wt-row:hover .wt-run-n {
+  background: var(--panel);
+}
+.wt-row.active .wt-run-n {
+  background: var(--elev);
+}
+.wt-run-n.alert {
+  color: var(--warn);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--warn) 55%, transparent);
+}
 .wt-run:disabled {
   cursor: default;
   background: none;
@@ -2185,14 +2277,10 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    here always means the checkout has something, which is what keeps the column
    scannable.
 
-   **This and `.wt-inbox` are the same slot, never two glyphs.** One element, and
-   `rowstate/rowState.ts` picks which class it carries: activity wins whenever
-   there is any, because while an agent is running the tree is EXPECTED to be
-   dirty and a pencil beside a spinner reports what the spinner already implies.
-   The tooltip still carries both halves, so this is a presentation choice and not
-   a loss of information.
+   Terminal activity is on the marker's badge, so this glyph has the right side to
+   itself and a busy worktree still says it has uncommitted work.
 
-   One glyph and not a count, for the same reason `.wt-inbox` is: the row has space
+   One glyph and not a count, for the same reason the badge is: the row has space
    for a kind, and the numbers are in the tooltip. Not a button either — the click
    falls through and selects the worktree, because none of the actions this state
    implies (commit, push, trash the checkout) is a one-click decision. */
@@ -2254,28 +2342,24 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
    nothing held the slack at all and the ⋮ sat wherever the alias happened to
    end.
 
-   **Expanded rows only.** A collapsed row is a ~66px centred column with no
+   **Expanded rows only.** A collapsed row is a ~54px column with no
    trailing cluster to form: the alert and the row-state glyph are the only two that
    render there, and they belong beside the marker (see `.wt-row.slim .wt-alert`,
    `.wt-row.slim .wt-git` and `.wt-row.slim .wt-inbox`) rather than pushed to an
    edge the row has no width to spare for. `.wt-git` and `.wt-inbox` are two style
    families on ONE element — never both at once — so listing both here costs
    nothing and keeps whichever one wins correct. */
-.wt-row:not(.slim) > .run-count,
 .wt-row:not(.slim) > .wt-handoff,
 .wt-row:not(.slim) > .wt-alert,
 .wt-row:not(.slim) > .wt-git,
-.wt-row:not(.slim) > .wt-inbox,
 .wt-row:not(.slim) > .wt-run,
 .wt-row:not(.slim) > .wt-edit,
 .wt-row:not(.slim) > .wt-deleting-spinner {
   margin-left: auto;
 }
-.wt-row:not(.slim) > .run-count ~ *,
 .wt-row:not(.slim) > .wt-handoff ~ *,
 .wt-row:not(.slim) > .wt-alert ~ *,
 .wt-row:not(.slim) > .wt-git ~ *,
-.wt-row:not(.slim) > .wt-inbox ~ *,
 .wt-row:not(.slim) > .wt-run ~ *,
 .wt-row:not(.slim) > .wt-edit ~ * {
   margin-left: 0;
@@ -4290,11 +4374,14 @@ body[data-theme="light"] .swatch-cell > .swatch-dot {
   .wt-alert.recovering,
   .wt-inbox.attention,
   .wt-inbox.failed,
+  .wt-badge.attention,
+  .wt-badge.failed,
   .pane-tab-activity.attention,
   .pane-tab-activity.failed {
     animation: none;
   }
   .wt-inbox.working svg,
+  .wt-badge.working svg,
   .pane-tab-activity.working svg {
     animation-duration: 4s;
   }

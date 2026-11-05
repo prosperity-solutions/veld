@@ -321,6 +321,8 @@ class WorktreeInbox {
    * render: a render may run any number of times for one event, and a banner may not.
    */
   private eventListeners = new Set<(e: InboxEvent) => void>();
+  /** Set while [`seed`] files state, so it raises no banner: it is not news. */
+  private seeding = false;
   /**
    * The session the user is actually looking at, or null.
    *
@@ -372,6 +374,60 @@ class WorktreeInbox {
   }
 
   /**
+   * Fill in agents this window has not heard from, from the daemon's record of
+   * each live session's latest state (`GET /api/engine/overview`).
+   *
+   * Agent states reach a window as relayed hook events, which are not queued: a
+   * window opened after an agent started working, or after it began waiting for
+   * you, otherwise showed nothing — on the rail or in Next unread — until that
+   * agent's next transition.
+   *
+   * `working` and `delegated` are filed for every session: they are a live fact,
+   * and the one thing a reload never restores (unread events survive in this
+   * window's storage; whether something is running deliberately does not).
+   * Everything else only for a session this window has no record of — a `blocked`
+   * it already read must not come back as news. `blocked` files the waiting event;
+   * `idle` claims the pane without one, since the daemon knows the agent is idle,
+   * not whether its last turn was seen, and a "finished" made up here would be news
+   * that did not happen. No banner is raised: nothing new happened, this window
+   * just learned about it late.
+   */
+  seed(
+    agents: { sessionId: string; worktreeId: number; state: AgentState; held: boolean }[],
+    now: number = Date.now(),
+  ): void {
+    this.seeding = true;
+    try {
+      for (const a of agents) {
+        const live = a.state === "working" || a.state === "delegated";
+        if (!live && this.sessions.get(a.sessionId)?.agentSource) continue;
+        const state: AgentState =
+          a.state === "working" || a.state === "delegated" || a.state === "blocked"
+            ? a.state
+            : "ready";
+        this.report(a.sessionId, a.worktreeId, { type: "agent", state, held: a.held, source: "hook" }, now);
+      }
+    } finally {
+      this.seeding = false;
+    }
+  }
+
+  /**
+   * A resumed shell turned out to be running a command: the `C` that started it is
+   * in the replayed scrollback, which is not filed, so set what it would have set.
+   * Its `D` then files "finished" or "failed" like any other command's. Ignored
+   * while an agent speaks for the pane — an agent's own process is the shell's
+   * foreground job whenever it runs, busy or idle.
+   */
+  restoreRunning(sessionId: string, worktreeId: number): void {
+    this.register(sessionId, worktreeId);
+    const session = this.sessions.get(sessionId);
+    if (!session || session.agentSource !== null || session.ranCommand) return;
+    session.ranCommand = true;
+    this.notify();
+  }
+
+  /**
    * File a signal.
    *
    * `now` is injected so the tests are not time-dependent.
@@ -411,7 +467,7 @@ class WorktreeInbox {
       // in front of the person already and raises nothing.
       if (session.unseen !== null && session.unseen === event && sessionId !== this.watching) {
         const payload: InboxEvent = { sessionId, worktreeId, unseen: session.unseen };
-        for (const fn of this.eventListeners) fn(payload);
+        if (!this.seeding) for (const fn of this.eventListeners) fn(payload);
       }
     } else if (wasRunning !== nowRunning) {
       // "Working" changed without any unseen event changing — a command started, or a
