@@ -6179,6 +6179,7 @@ function AppInner(props: {
    * trash, so its first run would otherwise fail on missing dependencies with no
    * hint why. Same once-per-machine bookkeeping as the deletion errors above.
    */
+  const [restoresSettled, setRestoresSettled] = useState(0);
   useEffect(() => {
     // Not a row whose restore is still in flight — the daemon may yet refuse it —
     // and not an old cleanup a fresh storage context has never acknowledged.
@@ -6215,7 +6216,8 @@ function AppInner(props: {
         // Storage unavailable: the cost is a repeated toast.
       }
     }
-  }, [worktrees]);
+      // `restoresSettled` re-runs this once a restore has settled; see `restoreWorktree`.
+  }, [worktrees, restoresSettled]);
 
   const dismissTrashError = async (w: Worktree) => {
     try {
@@ -6351,6 +6353,9 @@ function AppInner(props: {
       );
     } finally {
       restoringRef.current.delete(w.id);
+      // A ref changing renders nothing, and the refreshed list may equal the
+      // optimistic one, so tell the announcer the restore has settled.
+      setRestoresSettled((n) => n + 1);
     }
     return restored;
   };

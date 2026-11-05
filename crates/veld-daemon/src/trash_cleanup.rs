@@ -298,6 +298,9 @@ async fn run(
 ) -> Option<String> {
     let root = PathBuf::from(&wt.path);
     let mut notes: Vec<String> = Vec::new();
+    // Steps have effects of their own (`docker compose down -v`), so a cleanup
+    // that ran one is worth recording even if it then deleted nothing.
+    let mut steps_ran = false;
 
     // A checkout whose `.git` went missing sits inside whatever repository
     // encloses it, and git would answer with *that* repository's ignore rules.
@@ -375,6 +378,7 @@ async fn run(
                     ));
                     continue;
                 }
+                steps_ran = true;
                 let running = super::extensions::spawn_command(
                     &spec,
                     &wt.path,
@@ -471,7 +475,7 @@ async fn run(
     };
     notes.extend(removed.problems.iter().cloned());
     if flag.load(Ordering::SeqCst) {
-        if removed.paths.is_empty() && removed.problems.is_empty() {
+        if !steps_ran && removed.paths.is_empty() && removed.problems.is_empty() {
             return None;
         }
         notes.push("stopped early — the worktree was restored or deleted".to_owned());
@@ -735,7 +739,7 @@ fn delete_untracked(
             }
         }
     }
-    if nested_repos > 0 {
+    if nested_repos > 0 && !flag.load(Ordering::SeqCst) {
         removed.problems.push(format!(
             "kept {nested_repos} folder(s) holding a git repository"
         ));
