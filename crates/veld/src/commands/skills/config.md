@@ -556,6 +556,7 @@ Project additions to Veld's trash cleanup. After `worktree.trashCleanupHours`
   any **untracked** path, gitignored or not — for output nobody put in
   `.gitignore` — but never a tracked file. Max 64, no leading `/`, no `..`.
 - `steps`: setup-step shape, run first in the trashed worktree, 5 min each;
+  skipped when `extensions.autoRefresh` is off; at most 16;
   failures are noted, not fatal. Variables: `${veld.root}`, `worktree`, `branch`,
   `branch_raw` (argv only), `project`, `username` — no `run`.
 - Never touched: a folder containing `.git`, anything through a symlink.

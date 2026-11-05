@@ -117,7 +117,7 @@ pub struct WorktreeRecord {
     /// pending work forever.
     pub trash_error: String,
     /// When the trash cleanup ran since this worktree was last moved to the trash,
-    /// or `""`. Binning resets it; restoring keeps it, so the rail can say what is
+    /// or `""`. Binning resets it; restoring keeps it, so the IDE can tell the user what is
     /// missing from a worktree that came back.
     #[serde(default)]
     pub trash_cleaned_at: String,
@@ -3773,7 +3773,7 @@ mod tests {
     }
 
     /// The cleanup runs once each time a worktree is binned: binning again makes
-    /// it due again, and restoring keeps the record so the rail can say what is
+    /// it due again, and restoring keeps the record so the IDE can tell the user what is
     /// missing.
     #[test]
     fn the_trash_cleanup_record_lasts_until_the_next_trashing() {

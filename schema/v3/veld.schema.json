@@ -151,6 +151,7 @@
         },
         "steps": {
           "type": "array",
+          "maxItems": 16,
           "description": "Commands run in the trashed worktree before anything is deleted \u2014 `docker compose down -v`, `cargo clean`. Five minutes each; a failure is noted and the cleanup goes on. `${veld.*}` offers what an IDE extension command does: root, worktree, branch, branch_raw (argv only), project, username.",
           "items": {
             "$ref": "#/$defs/lifecycleStep"

@@ -2270,7 +2270,7 @@ fn migrate_v24_worktree_links(conn: &Connection) -> rusqlite::Result<()> {
 ///
 /// `trash_cleaned_at` is what makes the cleanup run once per trashing: binning resets
 /// both columns, so a worktree restored and binned again is cleaned again.
-/// Restoring leaves them, so the rail can tell the user what is missing.
+/// Restoring leaves them, so the IDE can tell the user what is missing.
 /// `trash_cleaned` is a one-line human summary, never parsed.
 fn migrate_v25_worktree_trash_cleanup(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(

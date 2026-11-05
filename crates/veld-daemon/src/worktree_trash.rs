@@ -406,7 +406,7 @@ pub fn try_restore(db: &Db, id: i64) -> Result<bool, veld_core::db::DbError> {
     }
     db.untrash_worktree(id, "")?;
     drop(deleting);
-    // A cleanup in flight stops at its next entry; restoring never waits for it.
+    // A cleanup in flight stops at its next entry; `try_restore` itself never waits for it.
     super::trash_cleanup::cancel(id);
     Ok(true)
 }

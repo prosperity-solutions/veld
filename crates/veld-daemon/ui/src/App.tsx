@@ -6195,7 +6195,11 @@ function AppInner(props: {
     }
     if (fresh.length > 0) {
       try {
-        window.localStorage.setItem(CLEANED_ACK_KEY, JSON.stringify(keys));
+        // Merged, not replaced: `worktrees` is the selected project's only, and
+        // replacing would forget every other project's and re-announce them on
+        // the next switch. Capped, newest last, so it cannot grow without bound.
+        const merged = [...acked.filter((k) => !keys.includes(k)), ...keys].slice(-500);
+        window.localStorage.setItem(CLEANED_ACK_KEY, JSON.stringify(merged));
       } catch {
         // Storage unavailable: the cost is a repeated toast.
       }

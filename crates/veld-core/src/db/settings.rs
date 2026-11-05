@@ -342,8 +342,9 @@ pub const MAX_SCROLLBACK: i64 = 100_000;
 /// **Zero means "keep until I empty it", and that is the default.** The trash is a
 /// holding area: moving a worktree there deletes nothing, and this is the only thing
 /// that ever deletes one without the user asking again. A default of zero means the
-/// only destructive act veld performs unprompted is one the user opted into by
-/// setting a number.
+/// only checkout veld deletes unprompted is one the user opted into by setting a
+/// number. Freeing a trashed worktree's space is a separate, default-on setting
+/// (`worktree.trashCleanupHours`).
 pub const DEFAULT_TRASH_RETENTION_DAYS: i64 = 0;
 
 /// Shortest retention that is still a grace period. Below a day, "trash" would not
@@ -356,10 +357,11 @@ pub const MAX_TRASH_RETENTION_DAYS: i64 = 365;
 /// Hours a worktree sits in the trash before its large gitignored files and folders
 /// are deleted, or `0` to never clean.
 ///
-/// **On by default, unlike retention above.** It only deletes what git ignores — the
-/// exact set `git worktree remove` would delete anyway without asking — so the
-/// worst case is a reinstall after a restore, never lost work. A day leaves a
-/// worktree binned by mistake intact through the rest of the working day.
+/// **On by default, unlike retention above.** The size rule only deletes what git
+/// ignores — the exact set `git worktree remove` would delete anyway without
+/// asking — but that can include ignored data that cannot be regenerated (a local
+/// database file, a hand-built `.venv`) once it is over the size thresholds. A day
+/// leaves a worktree binned by mistake intact through the rest of the working day.
 pub const DEFAULT_TRASH_CLEANUP_HOURS: i64 = 24;
 /// Longest cooldown: a year, the same ceiling as retention.
 pub const MAX_TRASH_CLEANUP_HOURS: i64 = 8_760;
@@ -2125,7 +2127,8 @@ pub fn defaults() -> BTreeMap<String, Value> {
             SettingKey::WorktreeTrashRetention,
             Value::from(DEFAULT_TRASH_RETENTION_DAYS),
         ),
-        // On: it deletes only what git ignores, which a deletion would take anyway.
+        // On: the size rule deletes only what git ignores, which a deletion would take anyway;
+        // ignored data that cannot be regenerated goes too once over the size.
         (
             SettingKey::WorktreeTrashCleanupHours,
             Value::from(DEFAULT_TRASH_CLEANUP_HOURS),

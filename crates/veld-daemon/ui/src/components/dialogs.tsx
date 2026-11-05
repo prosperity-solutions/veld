@@ -3537,7 +3537,7 @@ export function TrashWorktreeDialog(props: {
     <Modal title="Move to trash" onClose={props.onClose}>
       <Stack gap="sm">
         <Text size="sm" c="dimmed">
-          Moves the checkout to the trash. Nothing is deleted yet — it stays on
+          Moves the checkout to the trash. Trashing deletes nothing yet — it stays on
           disk and you can restore it from the rail. It is deleted for good when
           its retention period runs out (Settings → General, off by default) or
           when you delete it from the trash. The branch itself is always kept.
@@ -4017,7 +4017,7 @@ export function TrashLaneWorktreesDialog(props: {
           ) : (
             <>
               <Text size="sm" c="dimmed">
-                Nothing is deleted. Every checkout stays on disk and can be
+                Trashing deletes nothing. Every checkout stays on disk and can be
                 restored from the trash in the rail. They are deleted for good
                 when the retention period runs out (Settings → General, off by
                 default) or when you delete them from the trash. The branches are

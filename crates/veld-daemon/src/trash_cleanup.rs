@@ -3,12 +3,14 @@
 //! A binned checkout keeps its `node_modules/`, `target/` and caches at full size
 //! for as long as it sits in the bin, which by default is until the user empties
 //! it. After `worktree.trashCleanupHours` this runs the project's
-//! `trash_cleanup.steps`, then deletes:
+//! `trash_cleanup.steps` (skipped when `extensions.autoRefresh` is off), then deletes:
 //!
 //! - **by size, only what git ignores** — files and folders over the user's
 //!   thresholds (`worktree.trashCleanupMinFolderMB` / `worktree.trashCleanupMinFileMB`).
 //!   That is exactly what an un-forced `git worktree remove` deletes without asking,
-//!   so the size rule alone can cost a reinstall after a restore, never work;
+//!   so the size rule can cost a reinstall after a restore, and can also delete
+//!   ignored data that cannot be regenerated (a local database file, a hand-built
+//!   `.venv`) once it is over the size;
 //! - **by name, any untracked path** the project's `trash_cleanup.paths` select,
 //!   ignored or not — the project's own list of what is always safe to throw away,
 //!   including output nobody added to `.gitignore`.
@@ -26,7 +28,7 @@
 //! **Restoring wins.** A restore during a cleanup cancels it ([`cancel`], called
 //! by `worktree_trash::try_restore`): a running step's process group is killed and
 //! the deletion stops at the next entry. What was removed before that is recorded on
-//! the row, and the rail says so when the worktree comes back. Deleting the worktree
+//! the row, and the IDE announces it when the worktree comes back. Deleting the worktree
 //! cancels it the same way, and waits for it to stop ([`cancel_and_wait`]) so that
 //! `git worktree remove` never races this module over the same files.
 //!
@@ -290,14 +292,21 @@ async fn run(
 
     // A checkout whose `.git` went missing sits inside whatever repository
     // encloses it, and git would answer with *that* repository's ignore rules.
-    match tokio::time::timeout(
-        LIST_TIMEOUT,
-        super::desktop::git(&root, &["rev-parse", "--show-toplevel"]),
-    )
-    .await
-    {
-        Ok(Ok(top)) if same_dir(Path::new(&top), &root) => {}
-        _ => {
+    // Raced against the flag, like every other wait here: a deletion waiting on
+    // this cleanup must not wait out a hung git.
+    let toplevel = tokio::select! {
+        r = tokio::time::timeout(
+            LIST_TIMEOUT,
+            super::desktop::git(&root, &["rev-parse", "--show-toplevel"]),
+        ) => Some(r),
+        () = cancelled(&flag) => None,
+    };
+    match toplevel {
+        None => {
+            return "stopped early — the worktree was restored or deleted".to_owned();
+        }
+        Some(Ok(Ok(top))) if same_dir(Path::new(&top), &root) => {}
+        Some(_) => {
             return "found nothing to clean — git no longer sees a worktree there".to_owned();
         }
     }
@@ -467,6 +476,7 @@ fn runtime_patterns(paths: &[String]) -> Vec<String> {
             !p.is_empty()
                 && p.len() <= veld_core::config::MAX_TRASH_CLEANUP_PATH_LEN
                 && !p.starts_with('/')
+                && !p.starts_with('~')
                 && !p.split('/').any(|seg| seg == "..")
         })
         .collect()
@@ -704,13 +714,13 @@ fn delete_untracked(
     }
     if nested_repos > 0 {
         removed.problems.push(format!(
-            "kept {nested_repos} ignored folder(s) holding a git repository"
+            "kept {nested_repos} folder(s) holding a git repository"
         ));
     }
     removed
 }
 
-/// What walking an ignored folder found.
+/// What walking an untracked folder found.
 struct Scan {
     bytes: u64,
     nested_repo: bool,
@@ -719,7 +729,7 @@ struct Scan {
     inside: Vec<(String, u64)>,
 }
 
-/// Size an ignored folder without following links, noting a nested repository
+/// Size an untracked folder without following links, noting a nested repository
 /// and the entries inside it that qualify by themselves.
 fn scan(
     dir: &Path,
@@ -852,7 +862,7 @@ fn remove_tree(path: &Path, flag: &AtomicBool) -> std::io::Result<bool> {
     Ok(true)
 }
 
-/// The one-line summary stored on the row and shown in the rail.
+/// The one-line summary stored on the row and shown in the IDE.
 ///
 /// Written to read after "the cleanup …", which is how the restore notice uses it.
 ///
@@ -863,7 +873,7 @@ fn summarize(removed: &Removed, notes: &[String]) -> String {
         return String::new();
     }
     let mut out = if removed.paths.is_empty() {
-        "found nothing large enough to free".to_owned()
+        "removed nothing".to_owned()
     } else {
         let mut by_size = removed.paths.clone();
         by_size.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
@@ -1180,14 +1190,15 @@ mod tests {
             "../up".into(),
             "".into(),
             "x".repeat(veld_core::config::MAX_TRASH_CLEANUP_PATH_LEN + 1),
+            "~/x".into(),
         ];
         paths.extend((0..100).map(|i| format!("p{i}")));
         let got = runtime_patterns(&paths);
         assert_eq!(got[0], "dist");
         assert_eq!(
             got.len(),
-            1 + veld_core::config::MAX_TRASH_CLEANUP_PATHS - 5,
-            "only the first 64 are read, and the four invalid ones dropped"
+            1 + veld_core::config::MAX_TRASH_CLEANUP_PATHS - 6,
+            "only the first 64 are read, and the five invalid ones dropped"
         );
     }
 
@@ -1231,7 +1242,7 @@ mod tests {
         assert_eq!(summarize(&Removed::default(), &[]), "", "quiet when idle");
         assert_eq!(
             summarize(&Removed::default(), &["step \"x\" exited 1".into()]),
-            "found nothing large enough to free; step \"x\" exited 1"
+            "removed nothing; step \"x\" exited 1"
         );
     }
 }

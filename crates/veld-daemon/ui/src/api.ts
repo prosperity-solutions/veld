@@ -509,7 +509,7 @@ export interface Worktree {
   trash_error: string;
   /**
    * When the trash cleanup ran since this checkout was last moved to the trash
-   * (kept after a restore, so the rail can say what is missing), or `""`.
+   * (kept after a restore, so the IDE can tell the user what is missing), or `""`.
    * Binning resets it. Optional only so an older daemon reads as "never cleaned".
    */
   trash_cleaned_at?: string;

@@ -3377,9 +3377,11 @@ fn check_trash_cleanup(config: &VeldConfig, out: &mut Vec<Finding>) {
         let trimmed = p.trim();
         let problem = if trimmed.is_empty() {
             Some("an empty pattern matches nothing".to_owned())
-        } else if p.len() > MAX_TRASH_CLEANUP_PATH_LEN {
+        } else if trimmed.len() > MAX_TRASH_CLEANUP_PATH_LEN {
             Some(format!("longer than {MAX_TRASH_CLEANUP_PATH_LEN} bytes"))
-        } else if trimmed.starts_with('/') || trimmed.starts_with('~') {
+        } else if trimmed.starts_with('~') {
+            Some("`~` is not expanded — patterns are relative to the worktree root".to_owned())
+        } else if trimmed.starts_with('/') {
             Some(
                 "patterns are relative to the worktree root — drop the leading `/` \
                  (`dist/**`, not `/dist/**`)"
