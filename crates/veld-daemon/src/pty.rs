@@ -6399,6 +6399,35 @@ mod tests {
     /// build one.
     const TEST_SHELL: &str = "/bin/bash";
 
+    /// The environment a test session's shell runs with: the shim env a real
+    /// session gets, plus an empty `HOME` and no history file.
+    ///
+    /// These shells are interactive, so without this bash saves every line a test
+    /// types into the developer's real `~/.bash_history` when the session ends.
+    /// `HISTFILE` alone is not enough, because a login shell sources the real
+    /// `~/.bash_profile`, and a startup file that sets `HISTFILE` would win; with
+    /// `HOME` pointed elsewhere there is no such file to read.
+    ///
+    /// Not the session's cwd: with `HOME` equal to its starting directory, bash
+    /// reports `$PWD` through macOS's `/var` symlink instead of the resolved path
+    /// that `spawns_in_the_ticket_directory` expects. One shared directory, so a
+    /// run leaves nothing new behind.
+    fn test_shim_env(session: &str) -> BTreeMap<String, String> {
+        let home = std::env::temp_dir().join("veld-test-shell-home");
+        let _ = std::fs::create_dir_all(&home);
+        let mut env = shims::session_env(
+            session,
+            TEST_SHELL,
+            shims::SessionOptions {
+                bash_handoff: false,
+                ..shims::SessionOptions::all_on()
+            },
+        );
+        env.insert("HOME".to_owned(), home.display().to_string());
+        env.insert("HISTFILE".to_owned(), "/dev/null".to_owned());
+        env
+    }
+
     use super::*;
 
     /// Only a linked worktree nobody has named is nudged: not the main checkout,
@@ -7415,14 +7444,7 @@ mod tests {
                 pane: None,
                 shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env(
-                    id,
-                    TEST_SHELL,
-                    shims::SessionOptions {
-                        bash_handoff: false,
-                        ..shims::SessionOptions::all_on()
-                    },
-                ),
+                shim_env: test_shim_env(id),
                 agent_handoff: false,
                 expires_at: Instant::now() + ttl,
             },
@@ -7449,14 +7471,7 @@ mod tests {
                 pane: None,
                 shell: TEST_SHELL.to_owned(),
                 shell_flags: Vec::new(),
-                shim_env: shims::session_env(
-                    "s2",
-                    TEST_SHELL,
-                    shims::SessionOptions {
-                        bash_handoff: false,
-                        ..shims::SessionOptions::all_on()
-                    },
-                ),
+                shim_env: test_shim_env("s2"),
                 agent_handoff: false,
                 expires_at: Instant::now() - Duration::from_secs(1),
             },
@@ -7845,14 +7860,7 @@ mod tests {
                     pane: None,
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(
-                        session,
-                        TEST_SHELL,
-                        shims::SessionOptions {
-                            bash_handoff: false,
-                            ..shims::SessionOptions::all_on()
-                        },
-                    ),
+                    shim_env: test_shim_env(session),
                     agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
@@ -7886,14 +7894,7 @@ mod tests {
                     }),
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(
-                        session,
-                        TEST_SHELL,
-                        shims::SessionOptions {
-                            bash_handoff: false,
-                            ..shims::SessionOptions::all_on()
-                        },
-                    ),
+                    shim_env: test_shim_env(session),
                     agent_handoff: false,
                     expires_at: Instant::now() + TICKET_TTL,
                 },
@@ -8501,14 +8502,7 @@ mod tests {
                     pane: None,
                     shell: TEST_SHELL.to_owned(),
                     shell_flags: Vec::new(),
-                    shim_env: shims::session_env(
-                        &stale_session,
-                        TEST_SHELL,
-                        shims::SessionOptions {
-                            bash_handoff: false,
-                            ..shims::SessionOptions::all_on()
-                        },
-                    ),
+                    shim_env: test_shim_env(&stale_session),
                     agent_handoff: false,
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },

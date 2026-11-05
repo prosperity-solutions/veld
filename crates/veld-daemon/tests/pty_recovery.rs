@@ -89,6 +89,14 @@ impl Instance {
         self.dir.path().join("p")
     }
 
+    /// The daemon's `HOME`, and so its shells'. Never the developer's: the shells
+    /// here are interactive and would save every line the test types into the
+    /// real shell history, and a login shell reads the real startup files, where a
+    /// `HISTFILE` set in the environment can be overridden.
+    fn home(&self) -> PathBuf {
+        self.dir.path().join("home")
+    }
+
     fn base(&self) -> String {
         format!("http://127.0.0.1:{}", self.port)
     }
@@ -96,7 +104,14 @@ impl Instance {
     /// Start a daemon against this instance's state. Returns the child so the
     /// test can kill it.
     fn start_daemon(&self) -> Child {
+        std::fs::create_dir_all(self.home()).expect("create test home");
         Command::new(env!("CARGO_BIN_EXE_veld-daemon"))
+            .env("HOME", self.home())
+            .env("HISTFILE", "/dev/null")
+            // bash, as `pty.rs`'s own tests use: it needs no startup file to behave,
+            // where a zsh with an empty `HOME` can start its first-run wizard and
+            // swallow the typed input.
+            .env("SHELL", "/bin/bash")
             .env("VELD_DB_PATH", self.db_path())
             .env("VELD_DAEMON_SOCK", self.dir.path().join("daemon.sock"))
             .env("VELD_DAEMON_PORT", self.port.to_string())
@@ -190,7 +205,7 @@ fn assert_state_is_confined(instance: &Instance) {
              confinement half of this check needs `cargo build -p veld`"
         );
     }
-    let home_shims = dirs::home_dir().unwrap().join(".veld");
+    let home_shims = instance.home().join(".veld");
     for entry in std::fs::read_dir(&home_shims)
         .into_iter()
         .flatten()
@@ -199,7 +214,7 @@ fn assert_state_is_confined(instance: &Instance) {
         let name = entry.file_name().to_string_lossy().into_owned();
         assert!(
             !name.starts_with("shim-"),
-            "a test wrote {name} into the real {}",
+            "a test wrote {name} into {} instead of VELD_PTY_DIR",
             home_shims.display()
         );
     }
