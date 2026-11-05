@@ -14,7 +14,7 @@ import type { RowState, RowSummary } from "../inbox/inbox";
  *
  * `seen` is an agent that finished and has been looked at since: no longer
  * news, so it loses to any activity, but still finished until its next turn,
- * its exit, its pane closing or Mark read — the finished tick, muted. It beats
+ * its exit, its pane closing or Mark read, among others (`SessionState.finished`) — the finished tick, muted. It beats
  * the grey dot, which says less.
  *
  * `idle` is a shell that is alive with nothing to report — the grey dot.

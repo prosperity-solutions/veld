@@ -1,5 +1,5 @@
 /**
- * The controls at the end of the top bar: Next unread, search, keep-awake, focus
+ * The controls at the end of the top bar: Next, search, keep-awake, focus
  * mode.
  *
  * **One component, mounted by every mode**, which is the whole point. These four
@@ -20,7 +20,7 @@
  * read the same document the rest of the app already holds, and a second
  * `useSettings` here would be another fetch and another focus listener for it.
  *
- * The order is deliberate: Next unread first, then search, then keep-awake, then focus
+ * The order is deliberate: Next first, then search, then keep-awake, then focus
  * mode, then whatever the caller puts after (the ⋯ menu, always last, because
  * everything Veld-level lives inside it). It leads because it is the only one
  * of the four that is *ever urgent* — the other three are reached when you decide
@@ -74,8 +74,8 @@ export function TopBarControls(props: {
    */
   onSearch: () => void;
   /**
-   * Where Next unread would take you, or `null` when nothing anywhere has anything
-   * unread. Computed across *every* project, which is the point of the control.
+   * Where Next would take you, or `null` when nothing anywhere is unread or an agent
+   * still finished. Computed across *every* project, which is the point of the control.
    */
   next: NextDestination | null;
   /** Go there — select the worktree in whatever project it is in, and focus its
@@ -87,7 +87,7 @@ export function TopBarControls(props: {
   return (
     <>
       {/* **There is no idle state to render, so there is no disabled state.**
-          With nothing unread there is nowhere to go, and a greyed "Next unread"
+          With nothing unread and no agent finished there is nowhere to go, and a greyed "Next"
           would be a permanent fixture in the densest row of the app saying only
           that it has nothing to say. That is why this does not consult
           `ui.hideDisabledActions` like its neighbours do: that setting picks
@@ -113,7 +113,7 @@ export function TopBarControls(props: {
             // because the bar has no room for the place. The tooltip's sentence is
             // the accessible name, and it opens with the visible label so that label
             // is still contained in it (WCAG 2.5.3) — a voice-control user saying
-            // "click Next unread" still lands.
+            // "click Next waiting" — whichever label it shows — still lands.
             aria-label={`${nextLabel(props.next)}: ${props.next.tooltip}`}
             onClick={props.onNext}
           >

@@ -796,13 +796,13 @@ export function hideDisabledActions(doc: SettingsDoc): boolean {
 }
 
 /**
- * Whether the top bar carries the Next unread button. **Defaults on.**
+ * Whether the top bar carries the Next button. **Defaults on.**
  *
  * Deliberately *not* folded into [`hideDisabledActions`], which is the sibling it
  * most resembles and answers a different question. That one is "hide an
  * inapplicable control, or grey it out" — a choice about a control that exists
  * either way. This button has no inapplicable state to render: with nothing
- * unread there is nowhere to go, and a greyed word saying so is a permanent
+ * unread and no agent finished there is nowhere to go, and a greyed word saying so is a permanent
  * fixture in the densest row of the app earning nothing. So it is simply absent
  * when idle, for everybody, and this key is the separate question of whether
  * somebody wants it at all.

@@ -30,6 +30,9 @@
  * in separate fields for that reason, and {@link WorktreeInbox.rowState} is what
  * collapses both into the one glyph a rail row has room for.
  *
+ * An agent's finish is both: the event is read by looking, and `finished` keeps it as
+ * a state — the agent is still done — until its next turn or its exit ends it.
+ *
  * # Why this lives in the browser, and what that costs
  *
  * The OSC 133 parser is xterm, so command events exist only while a window is showing
@@ -311,9 +314,12 @@ interface SessionState {
    *
    * Reading only makes it *seen* — the rail then shows the tick muted rather than not at
    * all. A finished agent is still finished after you glance at its pane; what ends that
-   * is the agent's next turn, the agent exiting, the pane closing, a restart, or Mark
-   * read. Only an agent's `idle` sets it: a shell command's verdict is news, read by
-   * looking, with no state behind it.
+   * is the agent's next turn (`working`, `delegated`, `blocked`), the agent exiting
+   * (`done`, or the `D` closing its command), the shell running a command of its own in
+   * a pane no agent holds, the pane's process ending, a restart, closing the pane, Mark
+   * read, or the seed finding the agent gone. Only an agent's `idle` sets it, and only
+   * for an agent that reports its turns (`reportsTurns`): a shell command's verdict is
+   * news, read by looking, with no state behind it.
    */
   finished: Unseen | null;
   /**
@@ -455,7 +461,7 @@ class WorktreeInbox {
    *
    * Agent states reach a window as relayed hook events, which are not queued: a
    * window opened after an agent started working, or after it began waiting for
-   * you, otherwise showed nothing — on the rail or in Next unread — until that
+   * you, otherwise showed nothing — on the rail or in the Next button — until that
    * agent's next transition.
    *
    * Runs on every (re)connect, so it also corrects what a window believed across a
@@ -468,7 +474,9 @@ class WorktreeInbox {
    * last turn was seen. `done` and states this build does not know file nothing.
    * Afterwards, an agent this window shows working that the overview no longer lists
    * stops working — it quit unheard — unless it reported since the request or the
-   * daemon restarted since this window last heard of it. No banner is raised: this
+   * daemon restarted since this window last heard of it; and a finished agent it no
+   * longer lists stops being finished, unless the daemon restarted after that finish
+   * (`finished.at`, since a restored session has no `agentAt`). No banner is raised: this
    * window is learning late, not hearing something new.
    */
   seed(
@@ -1002,6 +1010,7 @@ class WorktreeInbox {
     session.held = false;
     session.finished = null;
     session.agentEnded = false;
+    session.reportsTurns = false;
     // The event goes too. Restart is reachable from an *inactive* tab's strip, so
     // restarting without having read is an ordinary gesture — and a badge left over from
     // the previous run then asserts a failure the current run has not had, with no fresh

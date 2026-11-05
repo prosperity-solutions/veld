@@ -5224,7 +5224,9 @@ function AppInner(props: {
    * (`inbox.setWatching`, via the effect above), so pressing this repeatedly walks
    * the queue down by emptying it rather than by remembering a position — which is
    * also what makes it correct when the queue changes underneath you, when a pane
-   * is closed, or when a second window reads something first.
+   * is closed, or when a second window reads something first. The one exception is
+   * Next finished, once nothing is unread: a finished agent already seen has nothing
+   * to read, so its position is the pane being watched (`inbox.nextFinished`).
    *
    * The one case it cannot empty is a worktree held by *another* window: the claim
    * is refused, that window is raised, and this window's store — the inbox is
@@ -6941,7 +6943,7 @@ function AppInner(props: {
    *
    * Recomputed on every render rather than memoised: `useInbox()` above already
    * re-renders this component whenever the store changes, which is exactly when
-   * this answer can change, and `nextUnread` is one pass over the sessions of the
+   * this answer can change, and `inbox.next` is two passes over the sessions of the
    * panes this window knows about. A `useMemo` would need the store's mutation as
    * a dependency and it has no version to give one.
    */
