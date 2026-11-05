@@ -798,11 +798,13 @@ impl SettingKey {
                 General,
             ),
             Self::UiShowNextUnread => toggle(
-                "Show the Next unread button",
+                "Show the Next button",
                 "A button at the end of the top bar that takes you to the worktree and pane \
                  where a coding agent is waiting for you, or where something finished or \
                  failed — in any project, not only the one on screen — and then to the one \
-                 after it. It is shown only while something is actually unread, so turning \
+                 after it. Its label says which it is going to: Next waiting or Next unread, \
+                 and once nothing is unread, Next finished, which steps through the finished agents \
+                 already seen. It is shown only while something is unread or an agent is finished, so turning \
                  this off is for someone who would rather reach the same places from the \
                  rail. ⌘⇧J does the same thing from the keyboard and keeps working with \
                  this off.",
@@ -869,8 +871,9 @@ impl SettingKey {
                 title: "Dock icon badge",
                 help: "While something is unread — a coding agent waiting for you, or something \
                        that finished or failed, in any project — Veld Desktop marks its Dock \
-                       icon. These are the same events the Next unread button takes you to, so \
-                       the badge clears as you walk them. A number says how many; a dot only \
+                       icon. These are the unread events the Next button takes you to, so \
+                       the badge clears as you walk them (finished agents you have already seen \
+                       are not counted). A number says how many; a dot only \
                        says there are some; Nothing leaves the icon alone. Veld's own news is \
                        never counted. Only the desktop app on macOS shows this.",
                 group: General,

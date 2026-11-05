@@ -1811,6 +1811,7 @@ function DockView(props: {
             canMove={dock.tabs.length > 1}
             canDetach={props.onDetach !== undefined}
             activity={paneActivity(tab.id, props.showWorking)}
+            activitySeen={paneActivity(tab.id, props.showWorking) === null && inbox.seenFinished(tab.id) !== null}
             activityDetail={inbox.unseen(tab.id)?.detail ?? null}
             onDragStartTab={beginTabDragEverywhere}
             onDragOverTab={(after) => {
@@ -2926,6 +2927,11 @@ function TabButton(props: {
   activity: RowState | null;
   /** What happened, for the glyph's tooltip. Absent for `working`, which has no event. */
   activityDetail: string | null;
+  /**
+   * The pane's agent finished and that was seen: no `activity`, but the finished
+   * glyph muted — the tab half of the rail's seen tick, so it says which pane.
+   */
+  activitySeen: boolean;
   onDragStartTab: () => void;
   onDragOverTab: (after: boolean) => void;
   onDropTab: (e: React.DragEvent, after: boolean) => void;
@@ -3009,7 +3015,11 @@ function TabButton(props: {
         aria-description={
           [
             props.session === null ? null : `${props.session} session`,
-            props.activity === null ? null : HEADLINE[props.activity],
+            props.activity !== null
+              ? HEADLINE[props.activity]
+              : props.activitySeen
+                ? "finished (seen)"
+                : null,
           ]
             .filter(Boolean)
             .join(", ") || undefined
@@ -3060,6 +3070,9 @@ function TabButton(props: {
           the label button's `aria-description`. */}
       {props.activity !== null && (
         <PaneActivityIcon state={props.activity} detail={props.activityDetail} />
+      )}
+      {props.activity === null && props.activitySeen && (
+        <PaneActivityIcon state="finished" detail="Agent finished (seen)" seen />
       )}
       <button
         type="button"

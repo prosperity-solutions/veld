@@ -2301,7 +2301,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // does not check for releases.
         (SettingKey::DesktopUpdateFrequency, Value::from("balanced")),
         // `count` — the Dock icon says how many things are waiting for you, the
-        // same events the Next unread button walks. `dot` keeps the signal and
+        // same unread events the Next button walks. `dot` keeps the signal and
         // drops the number; `off` leaves the icon alone. Read by the Electron shell
         // on macOS only — a browser tab has no Dock.
         (SettingKey::DesktopDockBadge, Value::from("count")),

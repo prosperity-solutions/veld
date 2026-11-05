@@ -1,5 +1,5 @@
 /**
- * The controls at the end of the top bar: Next unread, search, keep-awake, focus
+ * The controls at the end of the top bar: Next, search, keep-awake, focus
  * mode.
  *
  * **One component, mounted by every mode**, which is the whole point. These four
@@ -20,7 +20,7 @@
  * read the same document the rest of the app already holds, and a second
  * `useSettings` here would be another fetch and another focus listener for it.
  *
- * The order is deliberate: Next unread first, then search, then keep-awake, then focus
+ * The order is deliberate: Next first, then search, then keep-awake, then focus
  * mode, then whatever the caller puts after (the ⋯ menu, always last, because
  * everything Veld-level lives inside it). It leads because it is the only one
  * of the four that is *ever urgent* — the other three are reached when you decide
@@ -39,10 +39,22 @@ import type { UnseenKind } from "../inbox/inbox";
 import { focusPrefs, hideDisabledActions, showNextUnread } from "../shared/settings";
 import { KeepAwakeButton } from "./KeepAwakeButton";
 
-/** Where the Next unread button would take you, ready to render. */
+/**
+ * The Next button's label: what kind of place it takes you to. An agent waiting on
+ * you is named as such; anything else you have not seen yet is unread; and once
+ * nothing is, the button steps through the agents that finished and were seen.
+ */
+export function nextLabel(next: { kind: UnseenKind; seen: boolean }): string {
+  if (next.seen) return "Next finished";
+  return next.kind === "attention" ? "Next waiting" : "Next unread";
+}
+
+/** Where the Next button would take you, ready to render. */
 export interface NextDestination {
   /** Colours the label, from the same three CSS vars the rail glyph uses. */
   kind: UnseenKind;
+  /** A finished agent already seen, rather than unread news. */
+  seen: boolean;
   /** The whole tooltip line, built by the app — it owns the projects and panes. */
   tooltip: string;
 }
@@ -62,8 +74,8 @@ export function TopBarControls(props: {
    */
   onSearch: () => void;
   /**
-   * Where Next unread would take you, or `null` when nothing anywhere has anything
-   * unread. Computed across *every* project, which is the point of the control.
+   * Where Next would take you, or `null` when nothing anywhere is unread or an agent
+   * still finished. Computed across *every* project, which is the point of the control.
    */
   next: NextDestination | null;
   /** Go there — select the worktree in whatever project it is in, and focus its
@@ -75,7 +87,7 @@ export function TopBarControls(props: {
   return (
     <>
       {/* **There is no idle state to render, so there is no disabled state.**
-          With nothing unread there is nowhere to go, and a greyed "Next unread"
+          With nothing unread and no agent finished there is nowhere to go, and a greyed "Next"
           would be a permanent fixture in the densest row of the app saying only
           that it has nothing to say. That is why this does not consult
           `ui.hideDisabledActions` like its neighbours do: that setting picks
@@ -96,16 +108,16 @@ export function TopBarControls(props: {
           <Button
             size="xs"
             variant="default"
-            className={`topbar-next ${props.next.kind}`}
+            className={`topbar-next ${props.next.kind}${props.next.seen ? " seen" : ""}`}
             // The label says what kind of thing is next without naming which,
             // because the bar has no room for the place. The tooltip's sentence is
             // the accessible name, and it opens with the visible label so that label
             // is still contained in it (WCAG 2.5.3) — a voice-control user saying
-            // "click Next unread" still lands.
-            aria-label={`Next unread: ${props.next.tooltip}`}
+            // "click Next waiting" — whichever label it shows — still lands.
+            aria-label={`${nextLabel(props.next)}: ${props.next.tooltip}`}
             onClick={props.onNext}
           >
-            Next unread
+            {nextLabel(props.next)}
           </Button>
         </Tooltip>
       )}

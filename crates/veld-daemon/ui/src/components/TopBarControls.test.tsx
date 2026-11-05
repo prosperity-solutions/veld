@@ -5,7 +5,7 @@ import { render } from "../shared/testRender";
 import { TopBarControls } from "./TopBarControls";
 
 /**
- * The Next unread button's states.
+ * The Next button's states.
  *
  * Only this control is covered here: search and focus mode are a click through to a
  * handler the app owns, and keep-awake owns the machine's state and answers for
@@ -29,22 +29,41 @@ const controls = (props: Partial<Parameters<typeof TopBarControls>[0]> = {}) => 
 
 const WAITING = {
   kind: "attention" as const,
+  seen: false,
   tooltip: "veld · next-button · claude — Waiting for you (⌘⇧J)",
 };
 
 const nextButton = () =>
-  screen.getByRole("button", { name: /Next unread/ }) as HTMLButtonElement;
+  screen.getByRole("button", { name: /^Next / }) as HTMLButtonElement;
 
-describe("the Next unread button", () => {
+describe("the Next button", () => {
   it("offers the place it would take you as its accessible name", () => {
     // The label names the kind of thing without naming which — and it still has
     // to be *contained* in the accessible name, so a voice-control user saying
-    // "click Next unread" lands on it (WCAG 2.5.3).
+    // "click Next waiting" lands on it (WCAG 2.5.3).
     render(controls({ next: WAITING }));
     expect(nextButton().getAttribute("aria-label")).toBe(
-      `Next unread: ${WAITING.tooltip}`,
+      `Next waiting: ${WAITING.tooltip}`,
     );
-    expect(nextButton().textContent).toBe("Next unread");
+    expect(nextButton().textContent).toBe("Next waiting");
+  });
+
+  /** The word names where it is going, so you know before you press it. */
+  it("labels itself by what it would take you to", () => {
+    const cases = [
+      [{ kind: "attention", seen: false }, "Next waiting"],
+      [{ kind: "failed", seen: false }, "Next unread"],
+      [{ kind: "finished", seen: false }, "Next unread"],
+      [{ kind: "opened", seen: false }, "Next unread"],
+      [{ kind: "finished", seen: true }, "Next finished"],
+    ] as const;
+    for (const [next, label] of cases) {
+      const { unmount } = render(
+        controls({ next: { ...next, tooltip: "somewhere — something" } }),
+      );
+      expect(nextButton().textContent).toBe(label);
+      unmount();
+    }
   });
 
   it("fires the app's handler when pressed", () => {
@@ -59,7 +78,7 @@ describe("the Next unread button", () => {
   it("colours the word by what is waiting", () => {
     for (const kind of ["attention", "failed", "finished"] as const) {
       const { unmount } = render(
-        controls({ next: { kind, tooltip: "somewhere — something" } }),
+        controls({ next: { kind, seen: false, tooltip: "somewhere — something" } }),
       );
       expect(nextButton().className).toContain(kind);
       unmount();
@@ -71,19 +90,19 @@ describe("the Next unread button", () => {
    *  would be a permanent fixture saying only that it has nothing to say. */
   it("is not there at all when nothing is waiting", () => {
     render(controls({ next: null }));
-    expect(screen.queryByRole("button", { name: /Next unread/ })).toBe(null);
+    expect(screen.queryByRole("button", { name: /^Next / })).toBe(null);
   });
 
   /** And it stays gone with the setting off, which is the only other way it can
    *  be absent — never greyed, in either case. */
   it("is not there when nothing is waiting and the setting is off too", () => {
     render(controls({ next: null, settings: { "ui.showNextUnread": false } }));
-    expect(screen.queryByRole("button", { name: /Next unread/ })).toBe(null);
+    expect(screen.queryByRole("button", { name: /^Next / })).toBe(null);
   });
 
   it("goes away under ui.showNextUnread even with something waiting", () => {
     render(controls({ next: WAITING, settings: { "ui.showNextUnread": false } }));
-    expect(screen.queryByRole("button", { name: /Next unread/ })).toBe(null);
+    expect(screen.queryByRole("button", { name: /^Next / })).toBe(null);
   });
 
   /** Defaults on, so an empty settings document still shows it. The same rule

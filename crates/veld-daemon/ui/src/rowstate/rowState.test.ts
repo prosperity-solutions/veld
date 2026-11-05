@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { WorktreeGitSignals } from "../api";
 import type { RowState, RowSummary } from "../inbox/inbox";
-import { rowBadge, rowDescription, rowTooltip } from "./rowState";
+import { rowBadge, rowDescription, rowTooltip, seenNote } from "./rowState";
 
 function signals(over: Partial<WorktreeGitSignals> = {}): WorktreeGitSignals {
   return {
@@ -15,7 +15,7 @@ function signals(over: Partial<WorktreeGitSignals> = {}): WorktreeGitSignals {
   };
 }
 
-function summary(state: RowState | null, entries = 0, running = 0): RowSummary {
+function summary(state: RowState | null, entries = 0, running = 0, seen = 0): RowSummary {
   return {
     state,
     entries: Array.from({ length: entries }, (_, i) => ({
@@ -23,6 +23,7 @@ function summary(state: RowState | null, entries = 0, running = 0): RowSummary {
       unseen: { detail: `pane ${i} finished` } as RowSummary["entries"][number]["unseen"],
     })),
     running,
+    seen,
   };
 }
 
@@ -48,6 +49,28 @@ describe("rowBadge", () => {
    */
   it("shows activity even when no shell is left running", () => {
     expect(rowBadge(summary("finished", 1), 0)).toEqual({ kind: "activity", state: "finished" });
+  });
+
+  /**
+   * A finished agent that was looked at is still finished: the muted tick, over the
+   * grey dot it says more than, and under any activity, which is news.
+   */
+  it("shows a seen finish between activity and the idle dot", () => {
+    expect(rowBadge(summary(null, 0, 0, 1), 2)).toEqual({ kind: "seen" });
+    expect(rowBadge(summary(null, 0, 0, 1), 0)).toEqual({ kind: "seen" });
+    expect(rowBadge(summary("working", 0, 1, 1), 1)).toEqual({ kind: "activity", state: "working" });
+    expect(rowBadge(summary("finished", 1, 0, 1), 1)).toEqual({
+      kind: "activity",
+      state: "finished",
+    });
+  });
+});
+
+describe("seenNote", () => {
+  it("names seen finishes, and nothing without any", () => {
+    expect(seenNote(0)).toBeUndefined();
+    expect(seenNote(1)).toBe("Agent finished (seen)");
+    expect(seenNote(3)).toBe("3 agents finished (seen)");
   });
 });
 

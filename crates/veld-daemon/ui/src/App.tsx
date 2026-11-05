@@ -68,7 +68,7 @@ import { nextIndex, shortcutHint } from "./shortcuts/registry";
 import { InboxIcon, activityLines, inboxDescription } from "./inbox/InboxIcon";
 import { inbox, notifyKey } from "./inbox/inbox";
 import { GitStateIcon, TerminalBadge } from "./rowstate/RowStateIcon";
-import { rowBadge, rowDescription, rowTooltip } from "./rowstate/rowState";
+import { rowBadge, rowDescription, rowTooltip, seenNote } from "./rowstate/rowState";
 import { RailGlyphTooltip } from "./shared/RailGlyphTooltip";
 import { useInbox } from "./inbox/useInbox";
 import { useSettings } from "./shared/useSettings";
@@ -3730,7 +3730,7 @@ function AppInner(props: {
           saveSettingsRef.current({ "focus.enabled": !focusPrefsRef.current.enabled });
           return;
         }
-        // Go to whatever needs you, in any project — the top bar's Next unread
+        // Go to whatever needs you, in any project — the top bar's Next
         // button from the keyboard, through the same single owner (`goNextRef`).
         //
         // Not in the Tab-shaped navigation block a few lines up, deliberately:
@@ -5053,7 +5053,7 @@ function AppInner(props: {
         else if (accelerator === "split") paneHandleRef.current?.splitActiveTab();
         // Guarded like the worktree pair below and for the same reason, matching
         // this chord's own keydown copy: a detached window has no rail, no
-        // selection and no Next unread button, so there is nothing here to move.
+        // selection and no Next button, so there is nothing here to move.
         else if (accelerator === "next-unread") {
           if (!chromeless) goNextRef.current();
         }
@@ -5224,7 +5224,9 @@ function AppInner(props: {
    * (`inbox.setWatching`, via the effect above), so pressing this repeatedly walks
    * the queue down by emptying it rather than by remembering a position — which is
    * also what makes it correct when the queue changes underneath you, when a pane
-   * is closed, or when a second window reads something first.
+   * is closed, or when a second window reads something first. The one exception is
+   * Next finished, once nothing is unread: a finished agent already seen has nothing
+   * to read, so its position is the pane being watched (`inbox.nextFinished`).
    *
    * The one case it cannot empty is a worktree held by *another* window: the claim
    * is refused, that window is raised, and this window's store — the inbox is
@@ -5234,7 +5236,7 @@ function AppInner(props: {
    * window claiming somebody looked at something it cannot see.
    */
   const goNext = () => {
-    const target = inbox.nextUnread(allProjectWorktreeIds(reposRef.current));
+    const target = inbox.next(allProjectWorktreeIds(reposRef.current));
     if (!target) return;
     // **Switch to the IDE, because the destination is a pane and panes only exist
     // there.** Pressing this in Runs mode used to select the worktree, activate
@@ -6930,7 +6932,7 @@ function AppInner(props: {
   openPaletteRef.current = openPalette;
 
   /**
-   * Where the Next unread button would take you — the one unread event, anywhere.
+   * Where the Next button would take you — the one unread event anywhere, or once there is none, the next finished agent already seen.
    *
    * **Across every project, which is the whole point of the control.** Until now a
    * worktree's state was only legible from the worktree itself: the rail glyph
@@ -6941,14 +6943,14 @@ function AppInner(props: {
    *
    * Recomputed on every render rather than memoised: `useInbox()` above already
    * re-renders this component whenever the store changes, which is exactly when
-   * this answer can change, and `nextUnread` is one pass over the sessions of the
+   * this answer can change, and `inbox.next` is two passes over the sessions of the
    * panes this window knows about. A `useMemo` would need the store's mutation as
    * a dependency and it has no version to give one.
    */
   const unreadScope = allProjectWorktreeIds(repos);
-  const nextTarget = inbox.nextUnread(unreadScope);
+  const nextTarget = inbox.next(unreadScope);
 
-  // The Dock icon's badge: the same unread events Next unread walks, reported to
+  // The Dock icon's badge: the unread events Next walks first, reported to
   // Veld Desktop with the worktrees this window holds, so the shell can combine
   // every window's answer (see `setBadge` in `shell.ts`). Only the worktree inbox
   // is counted — Veld's own news has its own dot on the ⋯ menu, and a badge that
@@ -7013,6 +7015,7 @@ function AppInner(props: {
       next={
         nextTarget && {
           kind: nextTarget.unseen.kind,
+          seen: nextTarget.seen === true,
           // The event's own `detail` rather than the row vocabulary's `HEADLINE`:
           // both say what happened, and only `detail` distinguishes an agent that
           // finished from a command that did — which is the difference between
@@ -9179,7 +9182,7 @@ function TopBar(props: {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
-  /** Next unread, search, keep-awake and focus mode — see `TopBarControls`,
+  /** Next, search, keep-awake and focus mode — see `TopBarControls`,
    *  mounted by both modes so the two bars cannot drift in what they offer. */
   controls: React.ReactNode;
   /** Theme, what's new and settings, as one menu at the end of the bar. */
@@ -11147,9 +11150,12 @@ function Rail(props: {
               const stateTooltip = () =>
                 rowTooltip(
                   worktreeLabel(w),
-                  terminalsNote
-                    ? [...activityLines(inboxSummary), terminalsNote]
-                    : activityLines(inboxSummary),
+                  [
+                    ...activityLines(inboxSummary),
+                    ...[seenNote(inboxSummary.seen), terminalsNote].filter(
+                      (line): line is string => line !== undefined,
+                    ),
+                  ],
                   w.git,
                   isDetached(w),
                 );
@@ -11214,7 +11220,11 @@ function Rail(props: {
                     showsState ? w.git : undefined,
                     // Same gate, same reason: a hidden glyph is not announced.
                     showsState && isDetached(w),
-                    showsState ? terminalsNote : undefined,
+                    showsState
+                      ? [seenNote(inboxSummary.seen), terminalsNote]
+                          .filter((line) => line !== undefined)
+                          .join(". ") || undefined
+                      : undefined,
                   )}
                   className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}${trashed ? " trashed" : ""}${deletingRow ? " deleting" : ""}${w.trash_error ? " failed-remove" : ""}${dragPath === w.path ? " dragging" : ""}${rowDraggable ? " draggable" : ""}`}
                   title={
