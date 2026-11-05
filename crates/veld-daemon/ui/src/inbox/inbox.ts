@@ -266,8 +266,10 @@ interface SessionState {
   /** [`WorktreeInbox.agentMark`] at this session's last relayed agent report. */
   liveSeq: number;
   /**
-   * When this window last heard of the agent's state (ms): a relayed report's time,
-   * or the daemon's `since` for a seeded one. 0 if never. Lets the seed tell "the
+   * When this window last heard of the agent's state (ms): a relayed report's time
+   * (browser clock), or the daemon's `since` for a seeded one (daemon clock, whole
+   * seconds). The overview is served to this machine only, so the two clocks are
+   * one. 0 if never. Lets the seed tell "the
    * daemon forgot this agent because it quit" from "the daemon restarted and has not
    * heard from it yet" — its agent record is in memory only.
    */
@@ -450,9 +452,11 @@ class WorktreeInbox {
     /** [`agentMark`] when the overview was requested; sessions reported since are skipped. */
     mark: number = Number.POSITIVE_INFINITY,
     /**
-     * When the daemon that answered started (ms), or `null` if unknown. Its agent
-     * record is in memory, so only an agent last heard of since then can be absent
-     * from the overview because it quit.
+     * When the daemon that answered started (ms, whole seconds), or `null` if
+     * unknown. Its agent record is in memory, so only an agent last heard of since
+     * then can be absent from the overview because it quit. `null` — an older daemon,
+     * or a caller that does not know — disables that sweep: without it, absence
+     * cannot be read safely.
      */
     daemonStartedAt: number | null = null,
   ): void {
@@ -627,7 +631,7 @@ class WorktreeInbox {
       case "osc133":
         if (signal.mark === "C") {
           session.ranCommand = true;
-          // Observed, not restored: a stale restore must not let an agent claim it.
+          // A `C` this window saw, not a restored one.
           session.restoredCommand = false;
           if (session.agentSource !== null) session.agentCommand = true;
           // The mirror of the `ready` rule below, and it is not redundant: the inbox sees

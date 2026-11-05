@@ -11057,7 +11057,8 @@ function Rail(props: {
               // — which is the state the deleted dot spent a grey circle on.
               //
               // This is where run state lives for the **collapsed** rail, whose
-              // rows have no run control to carry it. In wide mode it is redundant
+              // rows have no run control to carry it — except on a row another
+              // window holds, whose title leaves it out. In wide mode it is redundant
               // with the control, deliberately: a tooltip that says something
               // different depending on the rail's width is the worse surprise.
               //
