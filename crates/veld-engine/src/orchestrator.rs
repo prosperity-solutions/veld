@@ -30,6 +30,23 @@ use tokio::sync::mpsc;
 // Errors
 // ---------------------------------------------------------------------------
 
+/// Why a var or `env` source that resolved before stopped resolving: its
+/// `shell`/`argv`/`file` text is interpolated since this release, and a run
+/// that was started under the old rules — where `${PGUSER}` reached the shell
+/// verbatim and was expanded there — is stopped under the new ones, with
+/// `veld orchestrator start` never having linted the config. There is no
+/// stop-path fallback to the old reading: that would keep two semantics alive.
+/// The author fixes the config and finishes this stop by hand.
+fn upgrade_note(reference: &str) -> String {
+    format!(
+        "`${{{reference}}}` is not a veld reference. A value source's `shell`, `argv` and \
+         `file` text is interpolated since this release, and a run started before the \
+         upgrade is stopped under the new rules. {}. Fix the config (`veld orchestrator \
+         lint` names it), then remove by hand what this was meant to.",
+        veld_core::config::shell_remedy(reference)
+    )
+}
+
 #[derive(Debug, Error)]
 pub enum OrchestratorError {
     #[error(transparent)]
@@ -1110,6 +1127,12 @@ pub struct Orchestrator {
     /// precise "cleans up the wrong thing" failure the teardown path exists to
     /// avoid. The cache is therefore keyed, not just present.
     resolved_vars_run: Option<String>,
+    /// Vars that failed to resolve on the stop path of `resolved_vars_run`, each
+    /// already reported to the user once. `stop` reaches `ensure_stop_vars` up
+    /// to twice for one run (the owed-teardown sweep, then the project
+    /// teardown), and a var that is not in the map is otherwise resolved again
+    /// — its source command re-run and its failure warned about a second time.
+    stop_vars_failed: std::collections::BTreeSet<String>,
     /// Dependency outputs captured at the end of `start` when a terminal node
     /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
     /// exact values the stages produced (no reconstruction drift).
@@ -1181,6 +1204,7 @@ impl Orchestrator {
             terminal_node: None,
             resolved_vars: None,
             resolved_vars_run: None,
+            stop_vars_failed: Default::default(),
             terminal_outputs: None,
             step_observer: None,
             host: None,
@@ -1254,9 +1278,10 @@ impl Orchestrator {
     /// A flag answer lives only in this process. `veld orchestrator stop` runs in a *new* one,
     /// rebuilds the orchestrator, and reads the store — so a var answered only by
     /// `--var` and referenced from `teardown` or `on_stop` is unresolvable at
-    /// stop time. That is not a small loss: one unresolvable var makes
-    /// [`Self::ensure_stop_vars`] warn and skip **every** `${vars.*}` teardown
-    /// step, so a container the teardown exists to remove is left running.
+    /// stop time. That is not a small loss: an unresolvable var makes
+    /// [`Self::ensure_stop_vars`] warn and skip every teardown step and `on_stop`
+    /// hook that uses it, so a container the teardown exists to remove is left
+    /// running.
     ///
     /// Named at start, where the user can still choose `veld orchestrator vars set` instead,
     /// rather than discovered at stop when the environment is already up.
@@ -1393,6 +1418,10 @@ impl Orchestrator {
         run_name: &str,
         origin: Option<veld_core::state::StartOrigin>,
     ) -> Result<RunState, OrchestratorError> {
+        // Whatever failed at the last stop is that run's history, not this one's:
+        // the same run name restarted must not blame a step on a var that only
+        // failed before. (Stop also clears it when the run name changes.)
+        self.stop_vars_failed.clear();
         // Semantic validation runs HERE, not in `parse_config`: a typo must not
         // strand `veld orchestrator stop` against a running environment (its `on_stop` hooks
         // are read from the on-disk config at stop time). `veld orchestrator lint` runs the
@@ -3235,8 +3264,9 @@ impl Orchestrator {
                 // tracing warning. `veld orchestrator start`/`veld orchestrator lint` catch the common cause
                 // (an unknown `${veld.*}` name — see `check_builtin_names`), but
                 // this path stays reachable for a config edited after start.
+                let why = self.blame_failed_stop_var(&e.to_string());
                 self.warn(format!(
-                    "teardown hook for {}:{} was SKIPPED: {e}\n    \
+                    "teardown hook for {}:{} was SKIPPED: {why}\n    \
                      The command was: {}\n    \
                      Anything it was meant to clean up (containers, volumes, \
                      temp state) has been left behind.",
@@ -3274,8 +3304,18 @@ impl Orchestrator {
                 // blind, which is how the wrapper it was meant to clean up
                 // outlives its run. Skip the hook and say so loudly, exactly as
                 // the command-interpolation failure path above does.
+                let upgrade = match &e {
+                    OrchestratorError::Value(value_error) => {
+                        veld_core::config::non_veld_source_reference(value_error)
+                    }
+                    _ => None,
+                };
+                let why = match upgrade {
+                    Some(reference) => format!("{e}\n    {}", upgrade_note(reference)),
+                    None => self.blame_failed_stop_var(&e.to_string()),
+                };
                 self.warn(format!(
-                    "teardown hook for {}:{} was SKIPPED: could not resolve its environment: {e}\n    \
+                    "teardown hook for {}:{} was SKIPPED: could not resolve its environment: {why}\n    \
                      Anything it was meant to clean up (containers, volumes, \
                      temp state) has been left behind.",
                     node_state.node_name, node_state.variant,
@@ -3436,6 +3476,27 @@ impl Orchestrator {
         ctx
     }
 
+    /// Why a teardown step or hook could not interpolate, for its SKIPPED warning.
+    ///
+    /// The resolver's error says "no var named …", which is wrong when the var
+    /// *is* declared and its source failed on this stop — [`Self::ensure_stop_vars`]
+    /// reported that failure already (with [`upgrade_note`] when that is the
+    /// cause), so point at it rather than send the author to check spelling. Any
+    /// other error is passed through unchanged.
+    fn blame_failed_stop_var(&self, resolver_error: &str) -> String {
+        if let Some(n) = self
+            .stop_vars_failed
+            .iter()
+            .find(|n| resolver_error.contains(&format!("${{vars.{n}}}")))
+        {
+            return format!(
+                "its var `${{vars.{n}}}` is declared, but its source failed on this stop \
+                 (see above)"
+            );
+        }
+        resolver_error.to_owned()
+    }
+
     /// Resolve the `${vars.*}` the stop path needs, **into `self.resolved_vars`**.
     ///
     /// Into the field, not a local, because that is the only thing
@@ -3458,13 +3519,16 @@ impl Orchestrator {
         selections: &[graph::NodeSelection],
     ) -> Arc<HashMap<String, String>> {
         // Only reuse a cache that belongs to *this* run — see `resolved_vars_run`.
-        let mut merged: HashMap<String, String> =
-            if self.resolved_vars_run.as_deref() == Some(run_name) {
-                self.resolved_vars.as_deref().cloned().unwrap_or_default()
-            } else {
-                HashMap::new()
-            };
-        let needed = config::vars_for_teardown(&self.config, selections);
+        let same_run = self.resolved_vars_run.as_deref() == Some(run_name);
+        let mut merged: HashMap<String, String> = if same_run {
+            self.resolved_vars.as_deref().cloned().unwrap_or_default()
+        } else {
+            self.stop_vars_failed.clear();
+            HashMap::new()
+        };
+        let mut needed = config::vars_for_teardown(&self.config, selections);
+        // Already tried and reported for this run: do not run the source again.
+        needed.retain(|n| !self.stop_vars_failed.contains(n));
         if !needed.iter().all(|n| merged.contains_key(n)) {
             let ctx = self.vars_context(
                 run_name,
@@ -3476,7 +3540,12 @@ impl Orchestrator {
                     .unwrap_or("default"),
                 &whoami_username(),
             );
-            match veld_core::values::resolve_vars(
+            // Tolerant, per var: one failing source must neither abort the stop
+            // nor blank the vars that did resolve. A fail-fast resolver did the
+            // latter, so every `${vars.*}` teardown step was skipped as "no var
+            // named …" about a var that *is* declared — with the real cause in
+            // the daemon's trace log and nowhere the user looks.
+            let (resolved, failed) = veld_core::values::resolve_vars_tolerant(
                 self.config.vars.as_ref(),
                 &self.var_overrides,
                 Some(&self.project_root),
@@ -3484,17 +3553,31 @@ impl Orchestrator {
                 &needed,
                 &merged,
             )
-            .await
-            {
-                Ok(v) => merged.extend(v),
-                // One failing source blanks the whole map, so the per-step warning
-                // that follows says `no var named …` about a var that *is*
-                // declared. Name the real cause here.
-                Err(e) => tracing::warn!(
+            .await;
+            merged.extend(resolved);
+            for (name, e) in failed {
+                // `${veld.run_id}` is unavailable on a stop with no run row, by
+                // design — say so, or the author goes looking for a broken source.
+                let hint = if run_id.is_none() && e.to_string().contains("veld.run_id") {
+                    "\n    `${veld.run_id}` is not available on this stop: the run has no \
+                     instance to name, exactly as in a project step."
+                        .to_owned()
+                } else if let Some(reference) = veld_core::config::non_veld_source_reference(&e) {
+                    format!("\n    {}", upgrade_note(reference))
+                } else {
+                    String::new()
+                };
+                self.warn(format!(
+                    "could not resolve `${{vars.{name}}}` for teardown: {e}{hint}\n    Every \
+                     teardown step and on_stop hook that uses it will be SKIPPED, and \
+                     anything they were meant to clean up left behind."
+                ));
+                tracing::warn!(
+                    var = name,
                     error = %e,
-                    "could not resolve project vars for teardown — any teardown step \
-                     or on_stop hook using ${{vars.*}} will be skipped"
-                ),
+                    "could not resolve a project var for teardown — dependent steps skipped"
+                );
+                self.stop_vars_failed.insert(name);
             }
         }
         let shared = Arc::new(merged);
@@ -3699,10 +3782,20 @@ impl Orchestrator {
             let resolved_cmd = match step_cmd.interpolate(&ctx) {
                 Ok(cmd) => cmd,
                 Err(e) => {
+                    // User-visible, like an `on_stop` hook that is skipped: a
+                    // teardown step is best-effort by contract, but "best effort"
+                    // that fails silently is how a clone or a container outlives
+                    // its run with nobody told.
+                    let why = self.blame_failed_stop_var(&e.to_string());
+                    self.warn(format!(
+                        "teardown step '{}' was SKIPPED: {why}\n    Anything it was meant to \
+                         clean up has been left behind.",
+                        step.name,
+                    ));
                     tracing::warn!(
                         step = step.name,
                         error = %e,
-                        "teardown step variable resolution failed"
+                        "teardown step variable resolution failed — step skipped"
                     );
                     continue;
                 }
@@ -4384,6 +4477,7 @@ async fn execute_start_server_isolated(
             files,
             &ctx.project_root,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+            var_ctx,
         )
         .await?;
     }
@@ -4873,6 +4967,7 @@ async fn execute_command_isolated(
             files,
             &ctx.project_root,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+            var_ctx,
         )
         .await?;
     }
@@ -5225,13 +5320,14 @@ async fn wait_for_process_exit(pid: u32) {
     }
 }
 
-/// Build the environment map: interpolate inline values, and dereference every
-/// configured source (F7).
+/// Build the environment map: interpolate inline values and source templates,
+/// and dereference every configured source (F7).
 ///
-/// Only an **inline literal** is interpolated. A value fetched from a file, the
-/// environment, or a command is used verbatim — substituting `${…}` inside
-/// fetched content would turn any secret store into an interpolation vector, and
-/// a password that happens to contain `${` would either break or, worse, expand.
+/// Everything the author *wrote* is interpolated — the literal, a source's
+/// `argv` elements, `shell` string and `file` path. What a source **fetches** is
+/// used verbatim: substituting `${…}` inside fetched content would turn any
+/// secret store into an interpolation vector, and a password that happens to
+/// contain `${` would either break or, worse, expand.
 ///
 /// Returns the resolved values plus the keys declared `secret`, so the caller can
 /// mark them sensitive without the values themselves needing a wrapper type.
@@ -5255,17 +5351,17 @@ pub async fn build_env(
     keys.sort();
     for key in keys {
         let value = &map[key];
-        let resolved = match value.as_literal() {
-            Some(tmpl) => veld_core::variables::interpolate(tmpl, ctx)?,
-            None => {
-                veld_core::values::resolve_value(
-                    value,
-                    &format!("{at_prefix}.env.{key}"),
-                    Some(project_root),
-                )
-                .await?
-            }
-        };
+        // The node's context for the literal *and* for a source's templates: an
+        // `argv` element, `shell` string or `file` path is authored config like
+        // the literal is, so `${veld.root}/tool` names the file it looks like it
+        // names. What the source fetches is verbatim — see `resolve_value`.
+        let resolved = veld_core::values::resolve_value(
+            value,
+            &format!("{at_prefix}.env.{key}"),
+            Some(project_root),
+            Some(ctx),
+        )
+        .await?;
         env.insert(key.clone(), resolved);
         if value.secret {
             secret_keys.push(key.clone());
@@ -5865,6 +5961,228 @@ mod tests {
         );
     }
 
+    /// Issue #441, the stop half. A var whose source fails at stop — a start-time
+    /// tool that is gone, a `${veld.root}` that used to be verbatim — must not
+    /// blank the vars that *do* resolve, and every skip it causes must be said
+    /// to the user, once, by name. Before this, the fail-fast resolver dropped
+    /// the whole map and each teardown step was skipped as "no var named …" in
+    /// the trace log alone.
+    #[tokio::test]
+    async fn a_var_that_fails_at_stop_does_not_blank_the_rest_and_is_reported_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("teardown-ran.txt");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {{
+                    "broken": {{ "shell": "echo boom-from-source 1>&2; exit 3" }},
+                    "marker": {}
+                }},
+                "teardown": [
+                    {{ "name": "needs-broken", "shell": "echo ${{vars.broken}}" }},
+                    {{ "name": "write", "shell": "echo ran > ${{vars.marker}}" }}
+                ],
+                "nodes": {{
+                    "task": {{ "default_variant": "local", "variants": {{
+                        "local": {{ "type": "command", "shell": "true" }}
+                    }}}}
+                }}
+            }}"#,
+            serde_json::to_string(&marker.to_string_lossy()).unwrap()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        orch.set_progress_sender(tx);
+
+        let vars = orch.ensure_stop_vars("dev", None, &[]).await;
+        assert!(
+            vars.contains_key("marker"),
+            "the good var survives: {vars:?}"
+        );
+        assert!(!vars.contains_key("broken"));
+        orch.run_teardown_steps("dev", None).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+            "ran",
+            "the step that needed only the good var must have run"
+        );
+
+        let mut warnings = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let ProgressEvent::Warning { message } = ev {
+                warnings.push(message);
+            }
+        }
+        let var_warnings: Vec<&String> = warnings
+            .iter()
+            .filter(|w| w.starts_with("could not resolve `${vars.broken}`"))
+            .collect();
+        assert_eq!(var_warnings.len(), 1, "{warnings:?}");
+        assert!(
+            var_warnings[0].contains("boom-from-source"),
+            "the source's stderr is the cause: {}",
+            var_warnings[0]
+        );
+        assert!(var_warnings[0].contains("SKIPPED"), "{}", var_warnings[0]);
+        let step_warning = warnings
+            .iter()
+            .find(|w| w.contains("teardown step 'needs-broken' was SKIPPED"))
+            .unwrap_or_else(|| panic!("the skipped step is named: {warnings:?}"));
+        assert!(
+            step_warning.contains("source failed") && !step_warning.contains("no var named"),
+            "the step's skip must blame the failed source, not a missing declaration: {step_warning}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.contains("'write'")),
+            "the step that ran is not reported as skipped: {warnings:?}"
+        );
+
+        // `stop` resolves vars twice — once for the node hooks, once for the
+        // project steps. The second pass must not run the broken source again
+        // or repeat the warning.
+        orch.ensure_stop_vars("dev", None, &[]).await;
+        let mut again = 0;
+        while let Ok(ev) = rx.try_recv() {
+            if let ProgressEvent::Warning { message } = ev
+                && message.starts_with("could not resolve `${vars.broken}`")
+            {
+                again += 1;
+            }
+        }
+        assert_eq!(
+            again, 0,
+            "a failed var is reported once per run, not once per pass"
+        );
+    }
+
+    /// A run that outlived the upgrade: its var's `shell` has `${PGUSER}`, which
+    /// the old rules passed to `sh` verbatim and the new rules try to resolve.
+    /// The per-var warning carries the upgrade note with the shape-aware remedy
+    /// (unbraced for a name, `$(…)` for an expression), and the step that needs
+    /// the var is blamed on that failure rather than on a missing declaration.
+    #[tokio::test]
+    async fn a_non_veld_reference_in_a_stop_var_gets_the_upgrade_note() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {
+                    "pg": { "shell": "echo ${PGUSER}" },
+                    "expr": { "shell": "echo ${PGUSER:-postgres}" }
+                },
+                "teardown": [
+                    { "name": "drop", "shell": "echo ${vars.pg}" },
+                    { "name": "drop2", "shell": "echo ${vars.expr}" }
+                ],
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": {
+                            "type": "command", "shell": "true",
+                            "env": { "DB": "${vars.pg}" },
+                            "on_stop": { "shell": "true" }
+                        }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(tmp.path(), config);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        orch.set_progress_sender(tx);
+
+        let vars = orch.ensure_stop_vars("dev", None, &[]).await;
+        assert!(vars.is_empty(), "{vars:?}");
+        orch.run_teardown_steps("dev", None).await;
+        orch.run_on_stop_hook(
+            "dev",
+            None,
+            &vars,
+            &HashMap::new(),
+            &NodeState::new("task", "local"),
+        )
+        .await;
+
+        let mut warnings = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            if let ProgressEvent::Warning { message } = ev {
+                warnings.push(message);
+            }
+        }
+        let find = |prefix: &str| {
+            warnings
+                .iter()
+                .find(|w| w.starts_with(prefix))
+                .unwrap_or_else(|| panic!("no warning starting {prefix:?} in {warnings:?}"))
+        };
+        let pg = find("could not resolve `${vars.pg}`");
+        assert!(pg.contains("interpolated since this release"), "{pg}");
+        assert!(pg.contains("write `$PGUSER` without the braces"), "{pg}");
+        let expr = find("could not resolve `${vars.expr}`");
+        assert!(expr.contains("interpolated since this release"), "{expr}");
+        assert!(expr.contains("is a shell expression"), "{expr}");
+        assert!(!expr.contains("$PGUSER:-postgres`"), "{expr}");
+        let blamed = "its var `${vars.pg}` is declared, but its source failed on this stop";
+        let step = find("teardown step 'drop' was SKIPPED");
+        assert!(step.contains(blamed), "{step}");
+        // The hook's env has `${vars.pg}`: the failed var is blamed, not the
+        // upgrade note (its reference is in the `vars.` namespace) and not the
+        // resolver's "no var named".
+        let hook =
+            find("teardown hook for task:local was SKIPPED: could not resolve its environment");
+        assert!(hook.contains(blamed), "{hook}");
+        assert!(!hook.contains("no var named"), "{hook}");
+        assert!(!hook.contains("interpolated since this release"), "{hook}");
+    }
+
+    /// Issue #441 end to end on the stop path: `${veld.root}` inside a var's
+    /// `argv` is interpolated before the source runs, so the value a teardown
+    /// step sees is the path, not the template.
+    #[tokio::test]
+    async fn a_var_source_argv_with_veld_root_reaches_a_teardown_step_resolved() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("teardown-ran.txt");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {{
+                    "agent": {{ "argv": ["printf", "%s", "${{veld.root}}/packages/agent.mts"] }},
+                    "marker": {}
+                }},
+                "teardown": [
+                    {{ "name": "write", "shell": "echo ${{vars.agent}} > ${{vars.marker}}" }}
+                ],
+                "nodes": {{
+                    "task": {{ "default_variant": "local", "variants": {{
+                        "local": {{ "type": "command", "shell": "true" }}
+                    }}}}
+                }}
+            }}"#,
+            serde_json::to_string(&marker.to_string_lossy()).unwrap()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config);
+        orch.ensure_stop_vars("dev", None, &[]).await;
+        orch.run_teardown_steps("dev", None).await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+            format!("{}/packages/agent.mts", project_root.display()),
+            "`${{veld.root}}` in the var's argv must be the project root by the time the source runs"
+        );
+    }
+
     /// **The pre-flight must see the whole plan, not the selections.**
     ///
     /// A var reached only through a transitive dependency is the exact case the
@@ -6067,6 +6385,7 @@ mod tests {
             terminal_node: None,
             resolved_vars: None,
             resolved_vars_run: None,
+            stop_vars_failed: Default::default(),
             terminal_outputs: Some(HashMap::new()),
             step_observer: None,
             host: None,

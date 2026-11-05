@@ -190,6 +190,17 @@ fn read_env(name: &str) -> Option<String> {
 /// Resolve one value. `at` labels the location for error messages (e.g.
 /// `nodes.api.variants.dev.env.DATABASE_URL`) and never contains the value.
 ///
+/// `ctx` decides what `${…}` means in the **authored** text. With `Some`, every
+/// template the author wrote is interpolated before it is used — the literal
+/// itself, each `argv` element, the `shell` string, the `file` path (the set
+/// [`SecretSource::map_templates`] owns; an `env` *name* is not one) — so
+/// `${veld.root}/tool.mts` in an argv names the file it looks like it names.
+/// What a source *fetches* is never interpolated: a `${…}` inside a secret
+/// store's output, a file's contents or a command's stdout is data, and
+/// substituting into it would make the store an interpolation vector. With
+/// `None`, the authored text is used verbatim too; that is the override path,
+/// where a human typed the value on this machine rather than authoring config.
+///
 /// Trailing whitespace is trimmed from every fetched form, because a file or a
 /// CLI almost always ends its output with a newline and a token with a trailing
 /// `\n` fails in ways that are miserable to debug. An inline literal is trimmed
@@ -198,8 +209,24 @@ pub async fn resolve_value(
     value: &ConfigValue,
     at: &str,
     project_root: Option<&std::path::Path>,
+    ctx: Option<&crate::variables::VariableContext>,
 ) -> Result<String, ValueError> {
-    match &value.source {
+    let interpolated;
+    let source = match ctx {
+        Some(ctx) => {
+            interpolated =
+                value
+                    .source
+                    .interpolate(ctx)
+                    .map_err(|source| ValueError::Interpolation {
+                        at: at.to_owned(),
+                        source,
+                    })?;
+            &interpolated
+        }
+        None => &value.source,
+    };
+    match source {
         SecretSource::Literal(v) => Ok(v.clone()),
         SecretSource::Env(var) => read_env(var).ok_or_else(|| ValueError::MissingEnv {
             at: at.to_owned(),
@@ -287,10 +314,18 @@ async fn run_source_command(spec: &CommandSpec, at: &str) -> Result<String, Valu
 /// declared mode (default `0600`) **before** the content is written, so a secret is
 /// never briefly world-readable — creating then chmod-ing would leave exactly that
 /// window.
+///
+/// A literal `value` is written **verbatim**: a delivered file is content (a
+/// compose `.env`, a script, an nginx template), and its `${…}` belongs to
+/// whatever reads it. A source's own text — `argv`, `shell`, the `file` path —
+/// is config and is interpolated like an `env` source; what it fetches is not.
+/// [`crate::config::FileDelivery::templates`] is the one list of which strings
+/// are templates, so lint sees exactly what runs here.
 pub async fn deliver_files(
     files: &HashMap<String, crate::config::FileDelivery>,
     project_root: &std::path::Path,
     at_prefix: &str,
+    ctx: &crate::variables::VariableContext,
 ) -> Result<Vec<std::path::PathBuf>, ValueError> {
     use std::os::unix::fs::OpenOptionsExt;
 
@@ -301,7 +336,9 @@ pub async fn deliver_files(
     for rel in paths {
         let delivery = &files[rel];
         let at = format!("{at_prefix}.files.{rel}");
-        let content = resolve_value(&delivery.value, &at, Some(project_root)).await?;
+        // `None` leaves a literal verbatim; a source's spec gets the node's context.
+        let ctx = delivery.interpolates().then_some(ctx);
+        let content = resolve_value(&delivery.value, &at, Some(project_root), ctx).await?;
         let mode = delivery
             .parsed_mode()
             .expect("the mode was validated at parse time");
@@ -516,6 +553,9 @@ pub fn unanswered_machine_vars(
     out
 }
 
+/// Resolve every var in `needed` that `already` does not have. Fails on the
+/// first var that cannot be resolved — the start path, where one unresolvable
+/// var aborts the run before anything is spawned.
 pub async fn resolve_vars(
     vars: Option<&HashMap<String, VarDecl>>,
     overrides: &VarOverrides,
@@ -525,94 +565,154 @@ pub async fn resolve_vars(
     already: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, ValueError> {
     let mut out = HashMap::new();
-    let Some(vars) = vars else {
-        return Ok(out);
-    };
-    // Sorted so a failure is deterministic: with two broken sources the same one
-    // is always the one reported.
-    let mut names: Vec<&String> = vars
-        .keys()
-        .filter(|n| needed.contains(n.as_str()) && !already.contains_key(n.as_str()))
-        .collect();
-    names.sort();
-    for name in names {
-        let decl = &vars[name];
-        let at = format!("vars.{name}");
-        let machine = decl.machine();
-
-        // **Only a var that is still declared `machine` may be overridden.**
-        // Rows outlive declarations: drop the `machine` block and hard-code
-        // `"runtime": "docker"`, and every machine that had answered would
-        // otherwise keep resolving its stale answer forever — with no `choices`
-        // check (there is no declaration to check against) and no way to see it,
-        // since `veld orchestrator vars list` lists only machine vars. The config is the
-        // authority on what is overridable; the database only remembers answers.
-        let applicable = machine.and_then(|_| overrides.get(name.as_str()));
-
-        // An override replaces the declaration's own value. It is used
-        // **verbatim** — never interpolated — even when it is a literal, which
-        // is where it differs from a config literal below. An override is data a
-        // human typed on this machine rather than authored config, so a value
-        // containing `${` must arrive intact instead of breaking or expanding;
-        // that is the same rule a *fetched* value already follows.
-        let resolved = if let Some(over) = applicable {
-            match over.as_literal() {
-                Some(literal) => literal.to_owned(),
-                None => resolve_value(over, &at, project_root).await?,
-            }
-        } else {
-            let Some(value) = decl.config_value() else {
-                let m = machine.expect("only a machine var can lack a value");
-                return Err(ValueError::MachineVarUnanswered {
-                    at,
-                    how: if m.secret {
-                        format!(
-                            "veld orchestrator vars set {name} --env NAME   (or --file PATH, or \
-                             --shell 'op read …')\n    `{name}` is declared secret, so veld \
-                             stores where to read it rather than the value itself"
-                        )
-                    } else {
-                        format!("veld orchestrator vars set {name} <value>")
-                    },
-                    name: name.clone(),
-                    choices: match &m.choices {
-                        Some(c) if !c.is_empty() => format!("\n    one of: {}", c.join(", ")),
-                        _ => String::new(),
-                    },
-                });
-            };
-            match value.as_literal() {
-                Some(literal) => crate::variables::interpolate(literal, ctx)
-                    .map_err(|source| ValueError::Interpolation { at, source })?,
-                None => resolve_value(value, &at, project_root).await?,
-            }
-        };
-
-        // Choices are enforced on the *effective* value, whichever layer it came
-        // from: an override stored while `choices` said one thing outlives the
-        // commit that changed them, and a `default` can be edited into an illegal
-        // value just as easily.
-        if let Some(choices) = machine.and_then(|m| m.choices.as_ref())
-            && !choices.is_empty()
-            && !choices.contains(&resolved)
-        {
-            return Err(ValueError::MachineVarNotAChoice {
-                at: format!("vars.{name}"),
-                name: name.clone(),
-                choices: choices.join(", "),
-                // `applicable`, not a fresh lookup: a row that was skipped for
-                // not being declared `machine` did not produce this value, and
-                // blaming it would send the reader to `veld orchestrator vars set` for a
-                // value that came out of the config file.
-                source_label: match applicable {
-                    Some(_) => "this machine's override".to_owned(),
-                    None => "the config default".to_owned(),
-                },
-            });
-        }
+    for name in vars_to_resolve(vars, needed, already) {
+        let resolved = resolve_one_var(
+            &vars.expect("names come from it")[name],
+            name,
+            overrides,
+            project_root,
+            ctx,
+        )
+        .await?;
         out.insert(name.clone(), resolved);
     }
     Ok(out)
+}
+
+/// [`resolve_vars`] for the stop path: every var that resolves is returned, and
+/// every one that does not is returned as its error, by var, so the caller can
+/// say *which* var failed and run the teardown that does not depend on it.
+///
+/// A failing source must not abort a stop — teardown running matters more than
+/// every step interpolating — and it must not blank the vars that *did* resolve
+/// either, which is what a fail-fast resolver does: with one broken source,
+/// every `${vars.*}` step was skipped as "no var named …" about a var that is
+/// declared and resolvable.
+pub async fn resolve_vars_tolerant(
+    vars: Option<&HashMap<String, VarDecl>>,
+    overrides: &VarOverrides,
+    project_root: Option<&std::path::Path>,
+    ctx: &crate::variables::VariableContext,
+    needed: &BTreeSet<String>,
+    already: &HashMap<String, String>,
+) -> (HashMap<String, String>, Vec<(String, ValueError)>) {
+    let mut out = HashMap::new();
+    let mut failed = Vec::new();
+    for name in vars_to_resolve(vars, needed, already) {
+        match resolve_one_var(
+            &vars.expect("names come from it")[name],
+            name,
+            overrides,
+            project_root,
+            ctx,
+        )
+        .await
+        {
+            Ok(resolved) => {
+                out.insert(name.clone(), resolved);
+            }
+            Err(e) => failed.push((name.clone(), e)),
+        }
+    }
+    (out, failed)
+}
+
+/// The declared vars still to resolve, sorted so a failure is deterministic:
+/// with two broken sources the same one is always the one reported (first).
+fn vars_to_resolve<'a>(
+    vars: Option<&'a HashMap<String, VarDecl>>,
+    needed: &BTreeSet<String>,
+    already: &HashMap<String, String>,
+) -> Vec<&'a String> {
+    let mut names: Vec<&String> = vars
+        .into_iter()
+        .flat_map(|v| v.keys())
+        .filter(|n| needed.contains(n.as_str()) && !already.contains_key(n.as_str()))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Resolve one declared var to its effective value.
+async fn resolve_one_var(
+    decl: &VarDecl,
+    name: &str,
+    overrides: &VarOverrides,
+    project_root: Option<&std::path::Path>,
+    ctx: &crate::variables::VariableContext,
+) -> Result<String, ValueError> {
+    let at = format!("vars.{name}");
+    let machine = decl.machine();
+
+    // **Only a var that is still declared `machine` may be overridden.**
+    // Rows outlive declarations: drop the `machine` block and hard-code
+    // `"runtime": "docker"`, and every machine that had answered would
+    // otherwise keep resolving its stale answer forever — with no `choices`
+    // check (there is no declaration to check against) and no way to see it,
+    // since `veld orchestrator vars list` lists only machine vars. The config is the
+    // authority on what is overridable; the database only remembers answers.
+    let applicable = machine.and_then(|_| overrides.get(name));
+
+    let resolved = if let Some(over) = applicable {
+        // An override replaces the declaration's own value. It is used
+        // **verbatim** — never interpolated, neither a literal nor a source's
+        // argv/shell/path — which is where it differs from a config value below.
+        // An override is data a human typed on this machine rather than
+        // authored config, so a value containing `${` must arrive intact
+        // instead of breaking or expanding; that is the same rule a *fetched*
+        // value already follows. Hence `None` for the context.
+        resolve_value(over, &at, project_root, None).await?
+    } else {
+        let Some(value) = decl.config_value() else {
+            let m = machine.expect("only a machine var can lack a value");
+            return Err(ValueError::MachineVarUnanswered {
+                at,
+                how: if m.secret {
+                    format!(
+                        "veld orchestrator vars set {name} --env NAME   (or --file PATH, or \
+                         --shell 'op read …')\n    `{name}` is declared secret, so veld \
+                         stores where to read it rather than the value itself"
+                    )
+                } else {
+                    format!("veld orchestrator vars set {name} <value>")
+                },
+                name: name.to_owned(),
+                choices: match &m.choices {
+                    Some(c) if !c.is_empty() => format!("\n    one of: {}", c.join(", ")),
+                    _ => String::new(),
+                },
+            });
+        };
+        // Authored config: the literal *and* a source's templates interpolate
+        // against the run-scoped built-ins, so `${veld.root}/tool` in an argv
+        // names the file it looks like it names. What the source fetches stays
+        // verbatim — see `resolve_value`.
+        resolve_value(value, &at, project_root, Some(ctx)).await?
+    };
+
+    // Choices are enforced on the *effective* value, whichever layer it came
+    // from: an override stored while `choices` said one thing outlives the
+    // commit that changed them, and a `default` can be edited into an illegal
+    // value just as easily.
+    if let Some(choices) = machine.and_then(|m| m.choices.as_ref())
+        && !choices.is_empty()
+        && !choices.contains(&resolved)
+    {
+        return Err(ValueError::MachineVarNotAChoice {
+            at,
+            name: name.to_owned(),
+            choices: choices.join(", "),
+            // `applicable`, not a fresh lookup: a row that was skipped for
+            // not being declared `machine` did not produce this value, and
+            // blaming it would send the reader to `veld orchestrator vars set` for a
+            // value that came out of the config file.
+            source_label: match applicable {
+                Some(_) => "this machine's override".to_owned(),
+                None => "the config default".to_owned(),
+            },
+        });
+    }
+    Ok(resolved)
 }
 
 #[cfg(test)]
@@ -629,9 +729,9 @@ mod tests {
         let env = std::collections::BTreeMap::from([("ONLY_HERE".to_owned(), "x".to_owned())]);
         let (hit, miss) = with_caller_env(env, async {
             (
-                resolve_value(&source("ONLY_HERE"), "t", None).await,
+                resolve_value(&source("ONLY_HERE"), "t", None, None).await,
                 // HOME is set in this process, but not in the caller's map.
-                resolve_value(&source("HOME"), "t", None).await,
+                resolve_value(&source("HOME"), "t", None, None).await,
             )
         })
         .await;
@@ -653,14 +753,16 @@ mod tests {
     #[tokio::test]
     async fn literal_and_object_literal_resolve() {
         assert_eq!(
-            resolve_value(&cv(r#""plain""#), "at", None).await.unwrap(),
+            resolve_value(&cv(r#""plain""#), "at", None, None)
+                .await
+                .unwrap(),
             "plain"
         );
         // The object form exists so an inline literal can carry `secret: true`.
         let secret = cv(r#"{ "value": "devpassword", "secret": true }"#);
         assert!(secret.secret);
         assert_eq!(
-            resolve_value(&secret, "at", None).await.unwrap(),
+            resolve_value(&secret, "at", None, None).await.unwrap(),
             "devpassword"
         );
     }
@@ -672,6 +774,7 @@ mod tests {
         let err = resolve_value(
             &cv(r#"{ "env": "VELD_TEST_DEFINITELY_UNSET_VAR" }"#),
             "nodes.api.variants.dev.env.DATABASE_URL",
+            None,
             None,
         )
         .await
@@ -696,11 +799,14 @@ mod tests {
             r#"{{ "file": {}, "secret": true }}"#,
             serde_json::to_string(&path.to_string_lossy()).unwrap()
         ));
-        assert_eq!(resolve_value(&value, "at", None).await.unwrap(), "s3cret");
+        assert_eq!(
+            resolve_value(&value, "at", None, None).await.unwrap(),
+            "s3cret"
+        );
 
         let missing = cv(r#"{ "file": "/definitely/not/here" }"#);
         assert!(matches!(
-            resolve_value(&missing, "at", None).await,
+            resolve_value(&missing, "at", None, None).await,
             Err(ValueError::FileUnreadable { .. })
         ));
     }
@@ -708,15 +814,25 @@ mod tests {
     #[tokio::test]
     async fn command_sources_resolve_in_both_forms() {
         assert_eq!(
-            resolve_value(&cv(r#"{ "shell": "printf 'from-shell\n'" }"#), "at", None)
-                .await
-                .unwrap(),
+            resolve_value(
+                &cv(r#"{ "shell": "printf 'from-shell\n'" }"#),
+                "at",
+                None,
+                None
+            )
+            .await
+            .unwrap(),
             "from-shell"
         );
         assert_eq!(
-            resolve_value(&cv(r#"{ "argv": ["printf", "from-argv"] }"#), "at", None)
-                .await
-                .unwrap(),
+            resolve_value(
+                &cv(r#"{ "argv": ["printf", "from-argv"] }"#),
+                "at",
+                None,
+                None
+            )
+            .await
+            .unwrap(),
             "from-argv"
         );
     }
@@ -726,6 +842,7 @@ mod tests {
         let err = resolve_value(
             &cv(r#"{ "shell": "echo nope 1>&2; exit 3" }"#),
             "nodes.db.variants.dev.env.PASSWORD",
+            None,
             None,
         )
         .await
@@ -770,7 +887,7 @@ mod tests {
     async fn source_command_with_no_stdin_does_not_hang() {
         // stdin is /dev/null, so `cat` sees EOF immediately instead of waiting
         // for input that would never come under a daemon.
-        let out = resolve_value(&cv(r#"{ "argv": ["cat"] }"#), "at", None)
+        let out = resolve_value(&cv(r#"{ "argv": ["cat"] }"#), "at", None, None)
             .await
             .expect("a helper reading stdin must not hang");
         assert_eq!(out, "");
@@ -796,9 +913,14 @@ mod tests {
             ),
         ]);
 
-        let written = deliver_files(&files, dir.path(), "nodes.a.variants.dev")
-            .await
-            .expect("files are delivered");
+        let written = deliver_files(
+            &files,
+            dir.path(),
+            "nodes.a.variants.dev",
+            &crate::variables::VariableContext::new(),
+        )
+        .await
+        .expect("files are delivered");
         assert_eq!(written.len(), 2);
 
         let token = dir.path().join(".secrets/token");
@@ -815,6 +937,48 @@ mod tests {
             std::fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
             0o644,
             "an explicit mode is honoured"
+        );
+    }
+
+    /// A delivered file's *source* is config and interpolates against the node's
+    /// context; its literal is content and is written as-is, and so is whatever
+    /// a source fetches. (A `.env` or a script full of `${…}` for its own reader
+    /// must survive delivery untouched.)
+    #[tokio::test]
+    async fn deliver_files_interpolates_source_text_and_not_literal_or_fetched_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        ctx.set_builtin("root", dir.path().to_string_lossy().into_owned());
+        std::fs::write(dir.path().join("src.pem"), "pem-${veld.run}\n").unwrap();
+        let files: HashMap<String, crate::config::FileDelivery> = HashMap::from([
+            (
+                "literal.conf".to_owned(),
+                serde_json::from_str(r#"{ "value": "run=${veld.run}" }"#).unwrap(),
+            ),
+            (
+                "from-argv.txt".to_owned(),
+                serde_json::from_str(r#"{ "argv": ["printf", "%s", "${veld.run}-out"] }"#).unwrap(),
+            ),
+            (
+                "copied.pem".to_owned(),
+                serde_json::from_str(r#"{ "file": "${veld.root}/src.pem" }"#).unwrap(),
+            ),
+        ]);
+        deliver_files(&files, dir.path(), "nodes.a.variants.dev", &ctx)
+            .await
+            .expect("files are delivered");
+        let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap();
+        assert_eq!(
+            read("literal.conf"),
+            "run=${veld.run}",
+            "a literal is content, written verbatim"
+        );
+        assert_eq!(read("from-argv.txt"), "demo-out");
+        assert_eq!(
+            read("copied.pem"),
+            "pem-${veld.run}",
+            "fetched content is verbatim"
         );
     }
 
@@ -871,12 +1035,19 @@ mod tests {
                 vd(r#""https://web.${veld.run}.example.test""#),
             ),
             ("branchy".to_owned(), vd(r#""${veld.branch}-cache""#)),
-            // A *fetched* value is used verbatim: substituting inside content
-            // that came out of a secret store would make the store an
-            // interpolation vector.
+            // A source's *authored* text is interpolated like a literal: the
+            // shell string here is config, and `${veld.run}` in it means the run.
+            (
+                "spec".to_owned(),
+                vd(r#"{ "shell": "printf '${veld.run}'" }"#),
+            ),
+            // What a source *fetches* is used verbatim: substituting inside
+            // content that came out of a secret store would make the store an
+            // interpolation vector. The spec contains no `${` — the command
+            // *prints* one.
             (
                 "fetched".to_owned(),
-                vd(r#"{ "shell": "printf '${veld.run}'" }"#),
+                vd(r#"{ "shell": "printf '$%s' '{veld.run}'" }"#),
             ),
         ]);
         let needed = vars.keys().cloned().collect();
@@ -889,11 +1060,151 @@ mod tests {
             &HashMap::new(),
         )
         .await
-        .expect("all three resolve");
+        .expect("all four resolve");
 
         assert_eq!(out["run_url"], "https://web.demo.example.test");
         assert_eq!(out["branchy"], "main-cache");
+        assert_eq!(
+            out["spec"], "demo",
+            "a source's shell string is interpolated"
+        );
         assert_eq!(out["fetched"], "${veld.run}", "a fetched value is verbatim");
+    }
+
+    /// Issue #441: `${veld.root}` in a var's `argv` reached the command as the
+    /// literal text, so `node ${veld.root}/agent.mts` failed with "Cannot find
+    /// module". Each element is interpolated on its own — the element count is
+    /// fixed before any value is substituted, so a value with a space stays one
+    /// argument.
+    #[tokio::test]
+    async fn var_source_argv_interpolates_run_scoped_builtins_per_element() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("root", "/repo with space".to_owned());
+        ctx.set_builtin("run", "demo".to_owned());
+        let vars: HashMap<String, VarDecl> = HashMap::from([(
+            "tool".to_owned(),
+            vd(
+                r#"{ "argv": ["printf", "%s|%s|%s", "${veld.root}/agent.mts", "${veld.run}", "plain"] }"#,
+            ),
+        )]);
+        let out = resolve_vars(
+            Some(&vars),
+            &VarOverrides::new(),
+            None,
+            &ctx,
+            &vars.keys().cloned().collect(),
+            &HashMap::new(),
+        )
+        .await
+        .expect("resolves");
+        assert_eq!(out["tool"], "/repo with space/agent.mts|demo|plain");
+    }
+
+    /// A `file` source's path is authored text too, so `${veld.root}/…` reads
+    /// the file it names. Its *contents* are fetched and stay verbatim.
+    #[tokio::test]
+    async fn var_source_file_path_interpolates_and_its_contents_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tok"), "left-${veld.run}-alone\n").unwrap();
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("root", dir.path().to_string_lossy().into_owned());
+        ctx.set_builtin("run", "demo".to_owned());
+        let out = resolve_value(
+            &cv(r#"{ "file": "${veld.root}/tok" }"#),
+            "vars.tok",
+            None,
+            Some(&ctx),
+        )
+        .await
+        .expect("the interpolated path is read");
+        assert_eq!(out, "left-${veld.run}-alone");
+    }
+
+    /// An `env` source's *name* is not a template: the CLI forwards the values of
+    /// exactly the names it finds in the config, so an interpolated name would
+    /// look up a variable nobody forwarded. The lookup is for the literal text,
+    /// and the error names it — lint (`env-name-not-interpolated`) catches it
+    /// before a run does.
+    #[tokio::test]
+    async fn an_env_source_name_is_read_verbatim() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        let err = resolve_value(
+            &cv(r#"{ "env": "${veld.run}_VELD_TEST_UNSET" }"#),
+            "vars.t",
+            None,
+            Some(&ctx),
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ValueError::MissingEnv { var, .. } => assert_eq!(var, "${veld.run}_VELD_TEST_UNSET"),
+            other => panic!("expected MissingEnv, got {other:?}"),
+        }
+    }
+
+    /// A source template that cannot be interpolated fails *before* anything is
+    /// spawned, as the var's own error — not as the command's "no such file".
+    #[tokio::test]
+    async fn var_source_with_an_out_of_scope_builtin_errors_before_spawning() {
+        let vars: HashMap<String, VarDecl> = HashMap::from([(
+            "tool".to_owned(),
+            vd(r#"{ "argv": ["sh", "-c", "echo ran > /dev/stderr; exit 9", "${veld.port}"] }"#),
+        )]);
+        let err = resolve_vars(
+            Some(&vars),
+            &VarOverrides::new(),
+            None,
+            &crate::variables::VariableContext::new(),
+            &vars.keys().cloned().collect(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ValueError::Interpolation { .. }), "{msg}");
+        assert!(msg.contains("vars.tool"), "{msg}");
+        assert!(msg.contains("veld.port"), "{msg}");
+    }
+
+    /// The stop path's resolver: one broken source neither aborts nor blanks the
+    /// vars that resolve, and the failure is reported by name so the user can be
+    /// told *which* var the skipped teardown needed.
+    #[tokio::test]
+    async fn resolve_vars_tolerant_keeps_what_resolves_and_names_what_does_not() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        let vars: HashMap<String, VarDecl> = HashMap::from([
+            ("fine".to_owned(), vd(r#""app-${veld.run}""#)),
+            (
+                "broken".to_owned(),
+                vd(r#"{ "shell": "echo nope 1>&2; exit 3" }"#),
+            ),
+            (
+                "also_fine".to_owned(),
+                vd(r#"{ "argv": ["printf", "${veld.run}"] }"#),
+            ),
+            ("not_needed".to_owned(), vd(r#"{ "shell": "exit 1" }"#)),
+        ]);
+        let needed: BTreeSet<String> = ["fine", "broken", "also_fine"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+        let (out, failed) = resolve_vars_tolerant(
+            Some(&vars),
+            &VarOverrides::new(),
+            None,
+            &ctx,
+            &needed,
+            &HashMap::new(),
+        )
+        .await;
+        assert_eq!(out["fine"], "app-demo");
+        assert_eq!(out["also_fine"], "demo");
+        assert!(!out.contains_key("broken"));
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, "broken");
+        assert!(failed[0].1.to_string().contains("nope"), "{}", failed[0].1);
     }
 
     /// A var literal naming something a var cannot see fails the start with a
@@ -1070,6 +1381,49 @@ mod tests {
         assert_eq!(
             out["from_machine"], "m-${veld.run}",
             "an override is verbatim — it is a typed value, not config"
+        );
+    }
+
+    /// An override *source* is verbatim like an override literal: the human
+    /// typed `veld orchestrator vars set x --shell 'printf ${veld.run}'` on this
+    /// machine, and that text is theirs, not config to interpolate. The same
+    /// source declared in the config *is* interpolated.
+    #[tokio::test]
+    async fn an_override_source_is_used_verbatim() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        let vars: HashMap<String, VarDecl> = HashMap::from([
+            (
+                "from_config".to_owned(),
+                vd(r#"{ "machine": { "default": { "shell": "printf 'c-${veld.run}'" } } }"#),
+            ),
+            (
+                "from_machine".to_owned(),
+                vd(r#"{ "machine": { "default": "unused" } }"#),
+            ),
+        ]);
+        let overrides: VarOverrides = [(
+            "from_machine".to_owned(),
+            cv(r#"{ "shell": "printf 'm-${veld.run}'" }"#),
+        )]
+        .into();
+        let out = resolve_vars(
+            Some(&vars),
+            &overrides,
+            None,
+            &ctx,
+            &vars.keys().cloned().collect(),
+            &HashMap::new(),
+        )
+        .await
+        .expect("both resolve");
+        assert_eq!(
+            out["from_config"], "c-demo",
+            "a config source is interpolated"
+        );
+        assert_eq!(
+            out["from_machine"], "m-${veld.run}",
+            "an override source is verbatim, even its shell string"
         );
     }
 

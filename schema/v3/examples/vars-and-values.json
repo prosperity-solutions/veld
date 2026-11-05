@@ -7,7 +7,8 @@
     "health_path": "/healthz",
     "cache_bucket": "cache-${veld.project}-${veld.branch}",
     "db_password": { "value": "devpassword", "secret": true },
-    "db_url": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+    "db_url": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true },
+    "agent_key": { "argv": ["node", "${veld.root}/tools/read-key.mjs", "dev"], "secret": true }
   },
   "env": {
     "REGION": "eu-central-1",
