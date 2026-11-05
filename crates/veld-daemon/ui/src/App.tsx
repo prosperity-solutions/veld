@@ -6354,8 +6354,9 @@ function AppInner(props: {
     } finally {
       restoringRef.current.delete(w.id);
       // A ref changing renders nothing, and the refreshed list may equal the
-      // optimistic one, so tell the announcer the restore has settled.
-      setRestoresSettled((n) => n + 1);
+      // optimistic one, so tell the announcer the restore has settled. Only a
+      // restore that happened: a failed one leaves nothing to announce.
+      if (restored) setRestoresSettled((n) => n + 1);
     }
     return restored;
   };

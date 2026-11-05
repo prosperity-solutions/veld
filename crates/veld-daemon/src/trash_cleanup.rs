@@ -269,9 +269,9 @@ async fn clean(id: i64) {
         Some("found nothing to clean — the checkout is no longer on disk".to_owned())
     };
     // `None`: nothing happened that is worth recording, and the next pass should
-    // try again — git failed, or the cleanup was stopped before it removed
-    // anything (a deletion git then refuses leaves the worktree in the trash, and
-    // it is still owed its cleanup).
+    // try again — git failed, or the cleanup was stopped before it did anything
+    // (by a restore, which needs no report, or by a deletion: one git refuses
+    // brings the worktree back out of the trash, and binning it again starts over).
     let Some(summary) = summary else {
         debug!("trash cleanup: {} — nothing recorded", wt.path);
         return;
@@ -377,6 +377,9 @@ async fn run(
                         step.name
                     ));
                     continue;
+                }
+                if flag.load(Ordering::SeqCst) {
+                    break;
                 }
                 steps_ran = true;
                 let running = super::extensions::spawn_command(
