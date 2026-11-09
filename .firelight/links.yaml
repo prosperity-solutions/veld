@@ -1,0 +1,83 @@
+format: 1
+links:
+  - id: website
+    label: Veld website
+    url: https://veld.oss.life.li
+    note: install, features, quick start
+    icon: globe
+    at: { island: start }
+    order: 10
+  - id: source
+    label: Veld source
+    url: https://github.com/prosperity-solutions/veld
+    note: code, README, issues
+    icon: git
+    at: { island: start }
+    order: 20
+  - id: releases
+    label: Veld releases
+    url: https://github.com/prosperity-solutions/veld/releases
+    note: binaries, Veld Desktop .dmg/.AppImage, checksums
+    icon: package
+    at: { island: start }
+    order: 30
+    entry: veld-ide
+  - id: install-script
+    label: Install script
+    url: https://veld.oss.life.li/get
+    note: curl -fsSL https://veld.oss.life.li/get | bash
+    icon: terminal
+    at: { island: start }
+    order: 40
+  - id: config-reference
+    label: veld.json reference
+    url: https://github.com/prosperity-solutions/veld/blob/main/docs/configuration.md
+    note: every field of veld.json
+    icon: file
+    at: { island: start }
+    order: 50
+    entry: veld-json
+  - id: json-schema
+    label: veld.json schema (v3)
+    url: https://veld.oss.life.li/schema/v3/veld.schema.json
+    note: for "$schema" in your editor
+    icon: code
+    at: { island: start }
+    order: 60
+    entry: veld-json
+  - id: migrating-to-v3
+    label: Migrating to schemaVersion 3
+    url: https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md
+    icon: refresh
+    at: { island: start }
+    order: 70
+    entry: veld-json
+  - id: scenarios
+    label: Config scenarios
+    url: https://github.com/prosperity-solutions/veld/blob/main/docs/scenarios.md
+    note: worked veld.json examples
+    icon: book
+    at: { island: start }
+    order: 80
+  - id: gateway-guide
+    label: Gateway operator guide
+    url: https://github.com/prosperity-solutions/veld/blob/main/docs/gateway.md
+    note: self-host veld-gateway for public web shares
+    icon: server
+    at: { island: start }
+    order: 90
+    entry: sharing
+  - id: llms-full
+    label: llms-full.txt
+    url: https://veld.oss.life.li/llms-full.txt
+    note: the docs in one file, for LLMs
+    icon: file
+    at: { island: start }
+    order: 100
+  - id: contributing
+    label: Contributing
+    url: https://github.com/prosperity-solutions/veld/blob/main/CONTRIBUTING.md
+    note: agentic contributions only, via the ship workflow
+    icon: users
+    at: { island: start }
+    order: 110
