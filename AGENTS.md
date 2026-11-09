@@ -22,7 +22,7 @@ Do not try to satisfy that CI gate without running the workflow. It is not a for
 
 ## Firelight docs
 
-Keep `.firelight/` true in the same PR as the change; run `firelight check .` and `firelight preview --check .`. If a Firelight MCP server is connected, search it first. Details: the `firelight` skill.
+The Firelight MCP server is the team's shared knowledge of all our repos. Maintainers keep it connected; outside contributors can skip it. Search it first (`search`) for discovery questions: environments, links, how-tos, cross-repo rules. Keep `.firelight/` true in the same PR as the change; run `firelight check .` and `firelight preview --check .`. When a Firelight answer is stale or missing, fix it in the owning repo's `.firelight/`. Details: the `firelight-team` skill (this team's rules) and the `firelight` skill (format and writing).
 
 ## Workspace Structure
 
@@ -134,7 +134,7 @@ and GitHub tree). Claude Code ignores the field, so `/ship` still loads here.
 Verify with `npx skills add . --list` from the repo root: only the `skills/`
 entries may appear.
 
-The second contributor skill is `firelight` (`.agents/skills/firelight/SKILL.md`, symlinked from `.claude/skills/firelight`): it keeps `.firelight/`, this repo's docs for a [Firelight](https://firelight.oss.life.li) hub, true in the same PR. It is not a product skill, so it does not go in `skills/`.
+Two more contributor skills cover `.firelight/`, this repo's docs for a [Firelight](https://firelight.oss.life.li) hub: `firelight-team` (`.agents/skills/firelight-team/SKILL.md`, symlinked from `.claude/skills/firelight-team`) keeps them true in the same PR, and `firelight` (`.agents/skills/firelight/SKILL.md`, symlinked from `.claude/skills/firelight`) is the official Firelight skill for the format and writing rules. `firelight skills install --project` writes the second one and overwrites edits, so re-add `metadata.internal: true` after a reinstall. Neither is a product skill, so neither goes in `skills/`.
 
 ## PR Workflow
 
@@ -171,7 +171,7 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `docs/macos-signing.md` | **macOS Developer ID signing.** The runbook for the certificate, the notary key and the `release` environment that holds them, plus the identifier table. Touch it whenever `scripts/release/macos-*.sh`, `apple-signing-setup.sh`, the signing steps in `release.yml`, a signing identifier, or the mac block of `desktop/electron-builder.yml` changes. **Never change a signing identifier**: macOS keys TCC grants and Login Items on it, so a rename resets every user's permissions |
 | `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
 | `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
-| `.firelight/**` | **Firelight docs.** Fix every concept or guide the change makes wrong, and add a golden question for anything new. Then run `firelight check .` and `firelight preview --check .` (the `firelight` skill) |
+| `.firelight/**` | **Firelight docs.** Fix every concept or guide the change makes wrong, and add a golden question for anything new. Then run `firelight check .` and `firelight preview --check .` (the `firelight-team` skill) |
 
 **Always ask "does the website need to change?"** For every user-visible feature, weigh whether it's worth surfacing on the marketing site — the site should stay an accurate, current picture of what veld can do, not drift behind the CLI. If it fits, update `website/index.html` (and `llms-full.txt`); if it deliberately doesn't, say so.
 
