@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0 # `firelight covers` compares with the base commit
           persist-credentials: false
-      - uses: prosperity-solutions/firelight/action@a221629a99629f62f123265b990ab8dd93116287 # v0.8.0
+      - uses: prosperity-solutions/firelight/action@a3dd3fc623bd715d7d18a6479294d6079be99f53 # v0.9.1
         with:
-          version: v0.8.0
+          version: v0.9.1
           embedder: candle # golden questions use meaning search (the model is cached)
