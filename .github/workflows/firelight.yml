@@ -1,0 +1,33 @@
+name: firelight
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read # checkout; nothing in this workflow writes to the repository
+
+concurrency:
+  # Per PR, or per commit on main: a merge must not cancel the previous merge's run.
+  group: firelight-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  docs:
+    name: Firelight docs
+    # CI does not run on draft PRs (AGENTS.md); ready_for_review starts it.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # `firelight covers` compares with the base commit
+          persist-credentials: false
+      - uses: prosperity-solutions/firelight/action@a3dd3fc623bd715d7d18a6479294d6079be99f53 # v0.9.1
+        with:
+          version: v0.9.1
+          embedder: candle # golden questions use meaning search (the model is cached)

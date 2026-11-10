@@ -1,0 +1,10 @@
+format: 1
+id: veld
+name: Veld
+summary: Local dev environment orchestrator. One veld.json starts every service in order, with health checks and stable HTTPS URLs, plus an IDE for worktrees and agents.
+owner: Veld maintainers (Peter, lead maintainer)
+spaces: [open-source]
+relations:
+  - repo: outfit
+    when: outfit changes the JSON of `status`, `ls`, `init` or `use --here`, its exit codes, or how profiles are picked per worktree
+    then: Check veld's outfit integration in `crates/veld-daemon/src/outfit.rs`, `ide.outfit` in `crates/veld-core/src/ide.rs`, and `veld ide worktree new --outfit`

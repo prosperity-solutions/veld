@@ -1,0 +1,41 @@
+format: 1
+questions:
+  - query: how do I install veld
+    expect: [install-veld]
+  - query: what is veld.json
+    expect: [veld-json]
+  - query: how do I start a preset
+    expect: [start-a-preset]
+  - query: difference between environment and run
+    expect: [environments-and-runs]
+  - query: why did my veld run fail
+    expect: [debug-a-run]
+  - query: ERR_CERT_DATE_INVALID on a veld url
+    expect: [fix-certificates-and-urls]
+  - query: get rid of the 18443 port in urls
+    expect: [urls-and-https, fix-certificates-and-urls]
+  - query: share my local environment with a colleague
+    expect: [share-an-environment]
+  - query: update veld to the latest version
+    expect: [update-veld]
+  - query: install the veld desktop app
+    expect: [veld-ide]
+  - query: what happened to veld feedback
+    expect: [veld-ide]
+  - query: my config uses schemaVersion 2
+    expect: [migrate-to-v3]
+  - query: hand off a task to a new worktree with an outfit profile
+    expect: [hand-off-to-a-worktree]
+  - query: what does veld-helper do
+    expect: [architecture]
+  - query: teach claude code to use veld
+    expect: [add-agent-skills]
+  - query: how do I spin up my dev environment on my machine
+    expect: [first-environment]
+    needs: meaning
+  - query: the browser says my local site is not secure
+    expect: [fix-certificates-and-urls]
+    needs: meaning
+  - query: let someone outside the team open my dev server from the internet
+    expect: [sharing, share-an-environment]
+    needs: meaning
