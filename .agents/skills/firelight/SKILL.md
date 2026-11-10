@@ -23,8 +23,8 @@ they always match its version:
 | the MCP tools | `firelight skills mcp` |
 | running a server | `firelight skills config` |
 
-No binary? Install it (`curl -fsSL https://firelight.oss.life.li/install.sh | sh`),
-or read the MCP resource `firelight://format` if a Firelight server is
+No binary? Follow the install steps on https://firelight.oss.life.li (verify the
+release checksum), or read the MCP resource `firelight://format` if a Firelight server is
 connected.
 
 ## The rules that matter most
