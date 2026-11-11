@@ -1,7 +1,0 @@
-format: 1
-spaces:
-  - id: open-source
-    title: Open source
-    summary: Tools we build in the open.
-    icon: code
-    order: 90
