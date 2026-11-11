@@ -196,13 +196,15 @@ jobs:
   website:
     permissions:
       contents: read
-    name: Website Docker Build
+    name: Website Build
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Build website container
-        run: docker build -t veld-website website/
+      # The same script the Pages deploy (pages.yml) runs; it fails on a
+      # missing route, so a broken site is caught here rather than live.
+      - name: Build the GitHub Pages site
+        run: website/build.sh "$RUNNER_TEMP/site"
 
   schema:
     permissions:

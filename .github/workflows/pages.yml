@@ -1,0 +1,57 @@
+name: Website
+
+# Deploys veld.oss.life.li to GitHub Pages. website/build.sh assembles the site
+# from website/, install.sh (served as /get) and schema/ (served as /schema/),
+# so a change to any of them is live once it reaches main — the same promise
+# the old nginx redirects to raw.githubusercontent.com/.../main made.
+#
+# Needs, once, in the repo settings: Pages → Source "GitHub Actions", and the
+# custom domain veld.oss.life.li. The `github-pages` environment that creates
+# only accepts deploys from main.
+on:
+  push:
+    branches: [main]
+    paths:
+      - website/**
+      - install.sh
+      - schema/**
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions: {}
+
+# One deploy at a time, and never cancel one half-way: the newest queued run
+# wins, the one in flight finishes.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Build
+        run: website/build.sh "$RUNNER_TEMP/site"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/site
+          # /.well-known/llms.txt
+          include-hidden-files: true
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

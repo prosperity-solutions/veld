@@ -114,8 +114,8 @@ pub async fn install(
             None => format!("{e}"),
         }),
         // The script is fetched from veld.oss.life.li, not from this checkout,
-        // and `/get` 302s to `raw.githubusercontent.com/.../main/install.sh`
-        // (website/nginx.conf) — so it tracks **main**, not the release, and
+        // and `/get` is main's install.sh, republished to GitHub Pages on every
+        // merge that touches it (website/build.sh) — so it tracks **main**, not the release, and
         // `--version` pins the release *assets* while the program that installs
         // them is whatever was merged. That is worth knowing in both directions:
         // an installer fix reaches every already-installed CLI the moment it

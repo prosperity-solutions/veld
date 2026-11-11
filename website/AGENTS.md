@@ -1,7 +1,7 @@
 # Agents Guide — veld website
 
 This directory contains the veld marketing website: **one static HTML page**
-served via nginx in Docker. It used to be three pages (experience / humans /
+served by GitHub Pages. It used to be three pages (experience / humans /
 agents); those were removed in favor of a single, boring, self-explanatory
 landing page that's easy to maintain. Let the tool speak for itself.
 
@@ -37,7 +37,7 @@ The website has **two audiences** — humans (`index.html`) and LLMs
 - `long_running` outputs are objects; `command` outputs are arrays.
 - The domain is `veld.oss.life.li`, not `veld.dev`.
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`.
-- The install URL is `https://veld.oss.life.li/get` (nginx redirects to GitHub).
+- The install URL is `https://veld.oss.life.li/get` (`build.sh` publishes `install.sh` there).
 
 ## Visual identity
 
@@ -74,18 +74,18 @@ only — the copy button copies `data-copy` when present, else the block's full
 
 **CSP note:** the page is self-contained (no external requests) but uses inline
 `<style>` and inline `<script>` for the theme toggle + copy buttons, so it needs
-`'unsafe-inline'` (or nonces/hashes) under a strict CSP. nginx sets no CSP header
-today; don't add a `default-src 'self'` without allowing inline, or the theme and
-copy buttons break.
+`'unsafe-inline'` (or nonces/hashes) under a strict CSP. GitHub Pages cannot set
+response headers, so any CSP would be a `<meta>` tag; don't add a
+`default-src 'self'` without allowing inline, or the theme and copy buttons break.
 
 ## Convention files
 
 - **`llms.txt`** — index; served at `/llms.txt`, discoverable via
   `/.well-known/llms.txt` (301 redirect).
 - **`llms-full.txt`** — full inlined content.
-- Both served as `text/markdown` with `Cache-Control: public, max-age=3600`.
-- The `/` route sends `Link` response headers pointing to both files for agent
-  discovery.
+- GitHub Pages serves both as `text/plain` (it cannot set headers). Agents find
+  them through the `<link rel="alternate" type="text/markdown">` tags in
+  `index.html`'s `<head>`.
 
 ## File structure
 
@@ -102,9 +102,8 @@ website/
 ├── fonts/             # Self-hosted JetBrains Mono (woff2)
 ├── llms.txt           # LLM index
 ├── llms-full.txt      # LLM full content
-├── nginx.conf         # nginx config (routes, headers, redirects)
 ├── robots.txt         # Crawler directives
-├── Dockerfile         # nginx:alpine container
+├── build.sh           # Assembles + checks the Pages site (CI and deploy run it)
 └── AGENTS.md          # This file
 ```
 
@@ -120,14 +119,24 @@ This gives an HTTPS URL like `https://website.dev.veld.localhost`.
 
 ## Production serving
 
-Static files served by `nginx:alpine`:
+GitHub Pages, deployed by `.github/workflows/pages.yml` on every push to `main`
+that touches `website/`, `install.sh` or `schema/` (or by hand: Actions →
+Website → Run workflow). Pages serves files only — no redirects, headers or
+rewrites — so `website/build.sh` turns every route into a file:
 
-- `/` → `index.html` (with `Link` headers for llms discovery)
-- `/humans` and `/agents` → 301 redirect to `/` (retired pages)
-- `/get` → 302 redirect to the GitHub install script
-- `/schema/` → rewrite redirect to GitHub raw schema files
-- `/llms.txt` and `/llms-full.txt` served as `text/markdown`
-- `/.well-known/llms.txt` → 301 redirect to `/llms.txt`
-- `/robots.txt` → crawler directives
-- `/health` → 200 OK (container health check)
-- All other paths → fallback to `index.html`
+| Route | File in the built site | Source |
+|-------|------------------------|--------|
+| `/` | `index.html` | `website/index.html` |
+| any unknown path | `404.html` (the page, status 404) | `website/index.html` |
+| `/get` | `get` | `install.sh` at the deployed commit |
+| `/schema/…` | `schema/…` | `schema/` at the deployed commit |
+| `/llms.txt`, `/llms-full.txt` | same names | `website/` |
+| `/.well-known/llms.txt` | copy of `llms.txt` | `website/llms.txt` |
+| `/humans`, `/agents` | `humans/index.html`, `agents/index.html` — a meta refresh to `/` | generated |
+
+The custom domain `veld.oss.life.li` is set in the repo's Pages settings; the
+`CNAME` file `build.sh` writes is informational for a workflow deploy.
+
+To see the exact production tree locally: `website/build.sh /tmp/veld-site`.
+`build.sh` fails on a missing route, and CI's `Website Build` job runs it on
+every PR.
