@@ -2545,7 +2545,7 @@ Used by [anstream 0.6.21](https://github.com/rust-cli/anstyle.git), [anstyle-par
 
 ## Apache License 2.0
 
-Used by [hickory-net 0.26.1](https://github.com/hickory-dns/hickory-dns), [hickory-proto 0.26.1](https://github.com/hickory-dns/hickory-dns), [hickory-resolver 0.26.1](https://github.com/hickory-dns/hickory-dns).
+Used by [hickory-net 0.26.3](https://github.com/hickory-dns/hickory-dns), [hickory-proto 0.26.3](https://github.com/hickory-dns/hickory-dns), [hickory-resolver 0.26.3](https://github.com/hickory-dns/hickory-dns).
 
 ```
                                  Apache License

@@ -2550,8 +2550,9 @@ async fn download_install_script(
 /// process's.
 ///
 /// **What authenticates the script it runs: TLS, and nothing else.** There is no
-/// checksum, no signature, and no pinned commit on `veld.oss.life.li/get`, whose
-/// 302 is followed to whatever host it names — while the script this fetches does
+/// checksum, no signature, and no pinned commit on `veld.oss.life.li/get` (main's
+/// install.sh, published by GitHub Pages; any redirect is followed to whatever host
+/// it names) — while the script this fetches does
 /// verify every release asset it goes on to download against `checksums.txt`. That
 /// asymmetry predates this function's current shape and is not narrowed by
 /// `looks_like_install_script`, which is a corruption check, not an authenticity

@@ -196,13 +196,15 @@ jobs:
   website:
     permissions:
       contents: read
-    name: Website Docker Build
+    name: Website Build
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Build website container
-        run: docker build -t veld-website website/
+      # The same script the Pages deploy (pages.yml) runs; it fails on a
+      # missing route, so a broken site is caught here rather than live.
+      - name: Build the GitHub Pages site
+        run: website/build.sh "$RUNNER_TEMP/site"
 
   schema:
     permissions:
@@ -1225,8 +1227,20 @@ jobs:
       # it *skips* when zsh is missing — so without this the runner image silently
       # decides whether the feature has any CI protection. The test also fails hard on
       # a skip when $CI is set, so a future image change cannot quietly re-open this.
+      #
+      # Homebrew is the fallback because apt has a single point of failure: on
+      # 2026-11-11 the runners could not resolve *.ubuntu.com for over an hour and
+      # this step failed every run. The image ships Homebrew (off PATH), whose
+      # bottles come from ghcr.io. The tests look for zsh at fixed paths, so the
+      # brew binary is linked to /usr/bin/zsh.
       - name: Install zsh
-        run: sudo apt-get update && sudo apt-get install -y zsh
+        run: |
+          if sudo apt-get update && sudo apt-get install -y zsh; then exit 0; fi
+          echo "::warning::apt could not install zsh; falling back to Homebrew"
+          BREW=/home/linuxbrew/.linuxbrew/bin/brew
+          "$BREW" install zsh
+          sudo ln -sf "$("$BREW" --prefix)/bin/zsh" /usr/bin/zsh
+          /usr/bin/zsh --version
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
