@@ -790,6 +790,16 @@ function ensure(
     // columns — see DEFAULT_SCROLLBACK in veld-core's settings module.
     scrollback: p.scrollback,
     theme: xtermTheme(),
+    // OSC 8 hyperlinks — what Claude Code and other agents print for a PR or
+    // docs link — take the same path as a plain URL. Without a handler xterm
+    // falls back to its own `confirm()` and an empty `window.open()`, which the
+    // desktop shell turns into nothing, and the link never reaches the daemon's
+    // exempt list. Leaving `allowNonHttpProtocols` unset keeps them http(s)-only.
+    linkHandler: {
+      activate: (event, uri) => {
+        void activateLink(id, uri, event);
+      },
+    },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
