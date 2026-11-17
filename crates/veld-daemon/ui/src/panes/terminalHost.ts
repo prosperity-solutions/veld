@@ -16,6 +16,7 @@
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { continuesPath, findFilePaths } from "./filePaths";
+import { LinkRefreshAddon, isLinkRefreshProbe } from "./linkRefresh";
 import { hardWrappedBlockAt, rangesOf } from "./linkRanges";
 import { type ILink, type ILinkProvider, Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
@@ -1511,7 +1512,15 @@ function filePathLinkProvider(
             // Ours draws the whole path, the hovered piece included; xterm's on
             // top of it would double the line on that one piece.
             decorations: { pointerCursor: true, underline: pieces.length < 2 },
-            hover: pieces.length < 2 ? undefined : () => siblingUnderline.show(term, key, pieces),
+            // Not for `LinkRefreshAddon`'s probe of a neighbouring row: that would
+            // underline a path the pointer is not on, and keep it underlined while
+            // the row under the pointer redraws.
+            hover:
+              pieces.length < 2
+                ? undefined
+                : (event) => {
+                    if (!isLinkRefreshProbe(event)) siblingUnderline.show(term, key, pieces);
+                  },
             leave: pieces.length < 2 ? undefined : () => siblingUnderline.hide(term, key),
             activate: (event) => {
               // xterm fires this from **mouseup** (`Linkifier._handleMouseUp`), and the
@@ -2064,6 +2073,9 @@ export function mountTerminal(
     // Now that the container is in the document, xterm can measure the font.
     s.term.open(s.container);
     s.opened = true;
+    // Needs the element `open` creates. A workaround for xterm.js#4323; when it
+    // can go is in `linkRefresh.ts`.
+    s.term.loadAddon(new LinkRefreshAddon());
   }
 
   if (created) {
